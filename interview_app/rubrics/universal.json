@@ -2,7 +2,7 @@
   "rubrics": [
     {
       "node_id": "core.discovery",
-      "category": "Requirement & Certainty",
+      "category": "Requirements & Problem Framing",
       "priority": 0,
       "phase": "early",
       "prerequisites": [],
@@ -10,7 +10,7 @@
     },
     {
       "node_id": "core.math_rigor",
-      "category": "Engineering Rigor",
+      "category": "Capacity Planning & Math",
       "priority": 1,
       "phase": "early",
       "prerequisites": [],
@@ -18,15 +18,17 @@
     },
     {
       "node_id": "core.tradeoffs",
-      "category": "Engineering Rigor",
+      "category": "Trade-off Analysis",
       "priority": 2,
       "phase": "mid",
-      "prerequisites": ["core.discovery"],
+      "prerequisites": [
+        "core.discovery"
+      ],
       "eval_rule": "当候选人提出核心技术组件时，检查是否主动对比了至少两种方案（Pros/Cons）并给出选择依据。直接抛出单一方案而无横向对比，记为负面信号并追问。"
     },
     {
       "node_id": "core.communication",
-      "category": "Soft Skills",
+      "category": "Communication & Clarity",
       "priority": 99,
       "phase": "any",
       "prerequisites": [],
@@ -34,7 +36,7 @@
     },
     {
       "node_id": "core.factual_correctness",
-      "category": "Technical Depth & Accuracy",
+      "category": "Technical Accuracy",
       "priority": 0,
       "phase": "any",
       "prerequisites": [],

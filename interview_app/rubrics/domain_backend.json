@@ -2,39 +2,48 @@
   "rubrics": [
     {
       "node_id": "backend.logical_consistency",
-      "category": "Architecture Proposal",
+      "category": "Architecture & Logical Consistency",
       "priority": 0,
       "phase": "mid",
-      "prerequisites": ["core.discovery"],
+      "prerequisites": [
+        "core.discovery"
+      ],
       "eval_rule": "不干涉候选人选择的具体技术栈。仅评估逻辑自洽性：选用的技术特性是否与确立的 CUJ 和 Metrics 矛盾？系统设计是否有明显的盲点（如引入强一致性组件却追求极低延迟）？"
     },
     {
       "node_id": "backend.nfr_resilience",
-      "category": "Non-Functional Requirements",
+      "category": "Resilience & Non-Functional Design",
       "priority": 2,
       "phase": "mid",
-      "prerequisites": ["core.discovery"],
+      "prerequisites": [
+        "core.discovery"
+      ],
       "eval_rule": "评估候选人对扩展性、弹性、可靠性和成本的权衡。是否考虑了灾备、降级、限流？方案是否能在极端条件下生存？"
     },
     {
       "node_id": "backend.component_depth",
-      "category": "Technical Depth",
+      "category": "Component Deep Dive",
       "priority": 3,
       "phase": "late",
-      "prerequisites": ["backend.logical_consistency"],
+      "prerequisites": [
+        "backend.logical_consistency"
+      ],
       "eval_rule": "深挖候选人对核心组件（Redis, Kafka, MySQL, OS 内核层）底层原理的掌握程度：存储引擎、网络模型、内存分配、共识算法或复制协议。只停留在名词堆砌或 API 调用层面则记为 NEEDS_PROBING。"
     },
     {
       "node_id": "backend.stress_testing",
-      "category": "Boundary Probing",
+      "category": "Extreme Scenario & Stress Testing",
       "priority": 3,
       "phase": "late",
-      "prerequisites": ["backend.logical_consistency", "core.math_rigor"],
+      "prerequisites": [
+        "backend.logical_consistency",
+        "core.math_rigor"
+      ],
       "eval_rule": "通过极端条件假设（流量突增 100 倍、核心机房断网），寻找候选人的知识边界和应急思考能力。评估其是在盲目猜测，还是能依据底层原理推演应对方案。"
     },
     {
       "node_id": "backend.data_structures",
-      "category": "Computer Science Fundamentals",
+      "category": "Data Structures & Algorithms",
       "priority": 0,
       "phase": "any",
       "prerequisites": [],
