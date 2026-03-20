@@ -16,6 +16,7 @@
     { "id": "design.logical_consistency" },
     { "id": "design.tradeoffs_and_rationale" },
     { "id": "design.ilities_and_tradeoffs" },
+    { "id": "knowledge.factual_correctness" },
     { "id": "execution.stress_testing" },
     { "id": "communication.clarity" }
   ]
