@@ -1,9 +1,9 @@
-"""UBE Core Engine — 冷酷无情的状态机调度器，无 UI，无业务知识。"""
+"""UBE Core Engine — stateless state-machine dispatcher, no UI, no business knowledge."""
 
 from typing import Callable, List, Optional
 from .types import Blackboard, Patch, IEvaluator, IActor, DirectiveExtractor, TerminationChecker
 
-# 事件类型
+# Event types
 EVENT_EVALUATING_START = "EVALUATING_START"
 EVENT_EVALUATING_DONE = "EVALUATING_DONE"
 EVENT_ACTING_START = "ACTING_START"
@@ -11,21 +11,21 @@ EVENT_ACTING_DONE = "ACTING_DONE"
 EVENT_TURN_COMPLETE = "TURN_COMPLETE"
 EVENT_SESSION_END = "SESSION_END"
 
-# 回调签名: (event: str, board: Blackboard, extra: dict) -> None
+# Callback signature: (event, board, extra_dict) -> None
 EventCallback = Callable[[str, Blackboard, dict], None]
 
 
 class AgentEngine:
-    """通用黑板引擎 — 控制反转，事件驱动。
+    """Universal Blackboard Engine — inversion of control, event-driven.
 
-    引擎不知道黑板里有什么业务数据，不知道 Evaluator 在评估什么，
-    不知道 Actor 在说什么。它只负责：
-    1. 把用户输入追加到 history
-    2. 依次调用所有 Evaluator，收集 Patch
-    3. 调用业务层的 merge_patch 合并补丁
-    4. 调用业务层的 DirectiveExtractor 提取指令
-    5. 把指令喂给 Actor 生成回复
-    6. 在每个阶段触发事件回调
+    The engine knows nothing about business data. It only:
+    1. Appends user input to history
+    2. Calls Evaluators to collect Patches
+    3. Merges patches via business-layer merge_patch
+    4. Checks termination via TerminationChecker
+    5. Extracts directive via DirectiveExtractor
+    6. Feeds directive to Actor for reply
+    7. Emits events at each stage
     """
 
     def __init__(
@@ -48,7 +48,7 @@ class AgentEngine:
         self.on_event(event, board, extra)
 
     def generate_greeting(self, board: Blackboard) -> str:
-        """生成开场白：提取指令 → Actor 发声 → 追加到 history。"""
+        """Generate opening: extract directive -> Actor speaks -> append to history."""
         directive = self.directive_extractor.extract(board)
         self._emit(EVENT_ACTING_START, board, directive=directive)
 
@@ -63,32 +63,31 @@ class AgentEngine:
         return reply
 
     def push_input(self, board: Blackboard, user_input: str) -> tuple[str, bool]:
-        """处理一轮用户输入，返回 (Actor 回复, 是否应终止)。
+        """Process one turn of user input. Returns (reply, terminated).
 
-        完整流程：追加输入 → Evaluator 评估 → 合并补丁 → 终态检测 → 提取指令 → Actor 回复。
+        Flow: append input -> evaluate -> merge patches -> check termination -> extract directive -> act.
         """
         board.history.append({"role": "user", "content": user_input})
 
-        # 阶段 A：Evaluator 评估
+        # Phase A: Evaluate
         self._emit(EVENT_EVALUATING_START, board)
         patches: list[Patch] = []
         for ev in self.evaluators:
             patch = ev.evaluate(board, user_input)
             patches.append(patch)
 
-        # 合并所有补丁（业务层定义合并逻辑）
         for patch in patches:
             self.merge_patch(board, patch)
 
         self._emit(EVENT_EVALUATING_DONE, board, patches=patches)
 
-        # 阶段 B：终态检测
+        # Phase B: Termination check
         terminated = False
         if self.termination_checker and self.termination_checker.should_terminate(board):
             terminated = True
             self._emit(EVENT_SESSION_END, board)
 
-        # 阶段 C：Actor 发声
+        # Phase C: Actor speaks
         directive = self.directive_extractor.extract(board)
         self._emit(EVENT_ACTING_START, board, directive=directive)
 

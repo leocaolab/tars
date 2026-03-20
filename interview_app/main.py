@@ -53,7 +53,13 @@ def main():
     engine = AgentEngine(
         evaluators=[InterviewEvaluator(client=client, target_dimensions=dims)],
         actor=(actor := InterviewActor(client=client, persona=persona)),
-        directive_extractor=DirectiveRouter(scorer=InterviewScorer(), max_depth_turns=2),
+        directive_extractor=DirectiveRouter(
+            scorer=InterviewScorer(),
+            max_depth_turns=2,
+            all_terminal_message="所有考核维度已评估完毕。用一句话给候选人总结，结束面试。",
+            timeout_message="在当前话题上的深挖已经足够了。请用一句话优雅地收束，然后转移到下一个关键问题。",
+            fallback_message="继续倾听。如果候选人停顿或跑偏，用一句话把他拉回正轨。",
+        ),
         merge_patch=merge_patch,
         termination_checker=InterviewTerminationChecker(),
         on_event=on_event,

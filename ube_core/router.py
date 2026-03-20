@@ -1,32 +1,33 @@
-"""UBE Core Directive Router — 通用的焦点管理 + 优先级路由。
+"""UBE Core Directive Router — generic focus management + priority routing.
 
-框架级组件，实现了 DirectiveExtractor 接口。
-业务层只需要提供 NodeScorer（评分公式），路由、锁定、熔断全由框架处理。
+Framework component implementing the DirectiveExtractor interface.
+Business layer only provides a NodeScorer (scoring formula);
+routing, locking, and timeout are handled by the framework.
 """
 
 from .types import Blackboard, DirectiveExtractor, NodeScorer
 
 
 class DirectiveRouter(DirectiveExtractor):
-    """通用指令路由器 — 带焦点锁定和深度熔断。
+    """Generic directive router with focus lock and depth timeout.
 
-    机制：
-    1. 焦点锁 (Focus Lock): 锁定一个节点连续追问，防止跳来跳去
-    2. 深度熔断 (Depth Timeout): 同一节点最多 max_depth_turns 轮后强制切题
-    3. 优先级路由: 通过业务层的 NodeScorer 评分，选最该问的节点
-    4. 前置依赖: 通过 NodeScorer.get_prerequisites() 阻止跨级追问
+    Mechanisms:
+    1. Focus Lock: locks onto one node for consecutive follow-ups
+    2. Depth Timeout: force-switch after max_depth_turns on same node
+    3. Priority Routing: picks highest-scored node via NodeScorer
+    4. Prerequisite Blocking: via NodeScorer.get_prerequisites()
     """
 
     def __init__(
         self,
         scorer: NodeScorer,
         max_depth_turns: int = 2,
-        all_terminal_message: str = "所有维度已评估完毕。请总结并结束。",
+        all_terminal_message: str = "All dimensions have been evaluated. Wrap up and conclude.",
         timeout_message: str = (
-            "在当前话题上的深挖已经足够了。"
-            "请用一句话优雅地收束，然后转移到下一个关键问题。"
+            "Enough depth on this topic. "
+            "Gracefully close it and move on to the next key question."
         ),
-        fallback_message: str = "继续倾听。如果对方停顿或跑偏，用一句话拉回正轨。",
+        fallback_message: str = "Keep listening. If they stall or go off track, nudge them back.",
     ):
         self._scorer = scorer
         self._max_depth = max_depth_turns
@@ -34,7 +35,7 @@ class DirectiveRouter(DirectiveExtractor):
         self._timeout_msg = timeout_message
         self._fallback_msg = fallback_message
 
-    # --- Focus state management (stored in board.context) ---
+    # --- Focus state (stored in board.context) ---
 
     def _get_focus(self, board: Blackboard) -> tuple[str | None, int]:
         return (
@@ -76,7 +77,7 @@ class DirectiveRouter(DirectiveExtractor):
     # --- Core extract ---
 
     def extract(self, board: Blackboard) -> str:
-        # All terminal → farewell
+        # All terminal
         if all(self._scorer.is_terminal(n) for n in board.state_tree.values()):
             self._set_focus(board, None)
             return self._all_terminal_msg
@@ -87,20 +88,16 @@ class DirectiveRouter(DirectiveExtractor):
         if focused_id and focused_id in board.state_tree:
             node = board.state_tree[focused_id]
 
-            # Natural unlock (terminal)
             if self._scorer.is_terminal(node):
                 self._set_focus(board, None)
 
-            # Depth timeout
             elif turn_count >= self._max_depth:
                 self._set_focus(board, None)
                 return self._timeout_msg
 
-            # Continue probing
             else:
                 probe = self._scorer.get_probe_text(node)
                 if probe:
-                    # Consume probe to prevent repetition
                     if isinstance(node, dict):
                         node["probe_suggestion"] = None
                     self._set_focus(board, focused_id, turn_count + 1)
@@ -108,7 +105,7 @@ class DirectiveRouter(DirectiveExtractor):
                 else:
                     self._set_focus(board, None)
 
-        # === Pick next node ===
+        # === Pick next ===
         next_id = self._pick_next(board)
         if next_id:
             node = board.state_tree[next_id]

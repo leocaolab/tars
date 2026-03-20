@@ -1,4 +1,4 @@
-"""UBE Core — 纯粹的框架契约，零业务知识。"""
+"""UBE Core — pure framework contracts, zero business knowledge."""
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
@@ -6,29 +6,28 @@ from pydantic import BaseModel, Field
 
 
 class Blackboard(BaseModel):
-    """框架的 Single Source of Truth。
+    """The framework's Single Source of Truth.
 
-    框架不关心 state_tree 里面装的是什么，
-    也不关心 context 里面有什么业务属性。
-    它只负责在 Evaluator 和 Actor 之间流转控制权。
+    The framework does not care what is inside state_tree or context.
+    It only manages control flow between Evaluators and Actors.
     """
     session_id: str
-    context: Dict[str, Any] = Field(default_factory=dict, description="业务层的只读上下文")
-    state_tree: Dict[str, Any] = Field(default_factory=dict, description="业务层的可变状态树")
-    history: List[Dict[str, str]] = Field(default_factory=list, description="对话记录")
+    context: Dict[str, Any] = Field(default_factory=dict, description="Business-layer read context")
+    state_tree: Dict[str, Any] = Field(default_factory=dict, description="Business-layer mutable state tree")
+    history: List[Dict[str, str]] = Field(default_factory=list, description="Conversation history")
 
 
 class Patch(BaseModel):
-    """Evaluator 输出的增量补丁 — 框架只知道这是一个字典。"""
+    """Evaluator output — an incremental update dict."""
     updates: Dict[str, Any] = Field(default_factory=dict)
 
 
 class IEvaluator(ABC):
-    """后台评估器接口 — 只读黑板，输出 Patch。"""
+    """Backend evaluator interface — reads board, outputs Patch."""
 
     @abstractmethod
     def evaluate(self, board: Blackboard, user_input: str) -> Patch:
-        """纯函数：黑板 + 用户输入 → 增量补丁"""
+        """Pure function: board + user input -> incremental patch."""
 
     @property
     def name(self) -> str:
@@ -36,51 +35,51 @@ class IEvaluator(ABC):
 
 
 class IActor(ABC):
-    """前台发声器接口 — 接收导演指令，生成回复。"""
+    """Frontend speaker interface — receives directive, generates reply."""
 
     @abstractmethod
     def act(self, directive: str) -> str:
-        """单轮：导演指令 → 回复文本"""
+        """Single-turn: directive -> reply text."""
 
     @abstractmethod
     def act_with_history(self, directive: str, history: list[dict[str, str]]) -> str:
-        """多轮：导演指令 + 对话历史 → 回复文本"""
+        """Multi-turn: directive + chat history -> reply text."""
 
 
 class DirectiveExtractor(ABC):
-    """导演指令提取器接口 — 业务层实现，从黑板中提取一条纯文本指令给 Actor。"""
+    """Directive extractor interface — business layer extracts a plain-text directive from the board."""
 
     @abstractmethod
     def extract(self, board: Blackboard) -> str:
-        """从黑板状态中提取最紧急的一条导演指令。"""
+        """Extract the most urgent directive from the board state."""
 
 
 class TerminationChecker(ABC):
-    """终态检测器接口 — 业务层实现，判断是否应该结束会话。"""
+    """Termination checker interface — decides whether to end the session."""
 
     @abstractmethod
     def should_terminate(self, board: Blackboard) -> bool:
-        """检查黑板状态，返回 True 表示会话应该结束。"""
+        """Return True if the session should end."""
 
 
 class NodeScorer(ABC):
-    """节点评分器接口 — 业务层实现评分公式，框架负责排序和路由。
+    """Node scorer interface — business implements the scoring formula, framework handles routing.
 
-    框架会对所有活跃节点调用 score()，选分数最高的进行追问。
+    The framework calls score() on all active nodes and picks the highest.
     """
 
     @abstractmethod
     def score(self, node_id: str, node: dict, board: Blackboard) -> float:
-        """为一个节点计算优先级分数。分数越高 = 越应该追问。"""
+        """Score a node for priority. Higher = more urgent to probe."""
 
     def get_probe_text(self, node: dict) -> str | None:
-        """从节点中提取追问文本。默认读 probe_suggestion 字段。"""
+        """Extract probe text from a node. Default: reads 'probe_suggestion'."""
         return node.get("probe_suggestion")
 
     def is_terminal(self, node: dict) -> bool:
-        """判断节点是否处于终态。默认 SATISFIED/FATAL_FLAW。"""
+        """Check if a node is in terminal state. Default: SATISFIED or FATAL_FLAW."""
         return node.get("status") in ("SATISFIED", "FATAL_FLAW")
 
     def get_prerequisites(self, node_id: str, board: Blackboard) -> list[str]:
-        """返回前置依赖节点 ID 列表。默认空。"""
+        """Return prerequisite node IDs. Default: empty."""
         return []
