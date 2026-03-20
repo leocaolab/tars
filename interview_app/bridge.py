@@ -1,4 +1,4 @@
-"""业务桥接层 — merge_patch, DirectiveExtractor (含考点锁+深度熔断), TerminationChecker。"""
+"""业务桥接层 — merge_patch, DirectiveExtractor (考点锁+深度熔断+多维评分), TerminationChecker。"""
 
 from ube_core import Blackboard, Patch
 from ube_core.types import DirectiveExtractor, TerminationChecker
@@ -12,28 +12,17 @@ _STATUS_PRIORITY = {
     "SATISFIED": 0,
 }
 
-# 考点静态优先级 — P0 最高，决定深挖顺序
-_NODE_PRIORITY = {
-    "discovery.cujs_and_metrics": 0,       # P0: 需求不清绝不往后走
-    "design.logical_consistency": 1,       # P1: 架构逻辑自洽
-    "design.math_and_probabilistic": 2,    # P2: 容量估算
-    "design.tradeoffs_and_rationale": 3,   # P3: 方案权衡
-    "design.ilities_and_tradeoffs": 4,     # P4: 非功能性
-    "design.component_deep_dive": 5,       # P5: 底层深挖（前置稳了才深挖）
-    "knowledge.factual_correctness": 6,    # P6: 事实核查
-    "execution.stress_testing": 7,         # P7: 极端压力
-    "communication.clarity": 99,           # 最低: 全盘评估，不需要专门发问
-}
-
-# 深度熔断阈值：同一考点最多连续追问 N 轮
+# 深度熔断阈值
 MAX_DEPTH_TURNS = 2
 
-# 终态集合
+# 终态
 _TERMINAL = {"SATISFIED", "FATAL_FLAW"}
+
+# 阶段划分（按轮数）
+_PHASE_THRESHOLDS = {"early": (0, 3), "mid": (3, 7), "late": (7, 999), "any": (0, 999)}
 
 
 def _resolve_node_id(key: str, valid_ids: set[str]) -> str | None:
-    """尝试将 LLM 返回的 key 匹配到合法的 node_id。"""
     if key in valid_ids:
         return key
     key_lower = key.lower().replace("_", ".").replace("-", ".")
@@ -45,7 +34,6 @@ def _resolve_node_id(key: str, valid_ids: set[str]) -> str | None:
 
 
 def merge_patch(board: Blackboard, patch: Patch) -> None:
-    """将 Evaluator 的通用 Patch 解包为面试专属的黑板更新。"""
     ev_patch = patch.updates.get("_evaluator_patch")
     if not ev_patch:
         return
@@ -75,8 +63,11 @@ def merge_patch(board: Blackboard, patch: Patch) -> None:
             board.state_tree[nid]["probe_suggestion"] = suggestion
 
 
+# ==========================================
+# 考点锁 — 存在 board.context 中
+# ==========================================
+
 def _get_focus(board: Blackboard) -> tuple[str | None, int]:
-    """从 context 读取当前考点锁状态。"""
     return (
         board.context.get("_focused_node_id"),
         board.context.get("_focused_turn_count", 0),
@@ -84,38 +75,112 @@ def _get_focus(board: Blackboard) -> tuple[str | None, int]:
 
 
 def _set_focus(board: Blackboard, node_id: str | None, turns: int = 0) -> None:
-    """写入考点锁状态到 context。"""
     board.context["_focused_node_id"] = node_id
     board.context["_focused_turn_count"] = turns
 
 
+def _get_turn_number(board: Blackboard) -> int:
+    """当前轮数 = 对话中 user 消息的数量"""
+    return sum(1 for m in board.history if m.get("role") == "user")
+
+
+def _get_current_phase(board: Blackboard) -> str:
+    turn = _get_turn_number(board)
+    for phase, (lo, hi) in _PHASE_THRESHOLDS.items():
+        if phase == "any":
+            continue
+        if lo <= turn < hi:
+            return phase
+    return "late"
+
+
+def _build_rubric_index(board: Blackboard) -> dict:
+    """从 context.rubric 构建 node_id → {priority, phase, prerequisites} 索引"""
+    index = {}
+    for dim in board.context.get("rubric", []):
+        nid = dim.get("node_id", "")
+        index[nid] = {
+            "priority": dim.get("priority", 50),
+            "phase": dim.get("phase", "any"),
+            "prerequisites": dim.get("prerequisites", []),
+        }
+    return index
+
+
+def _prerequisites_met(node_id: str, rubric_idx: dict, state_tree: dict) -> bool:
+    """检查前置考点是否已离开 INIT（至少被触及过）"""
+    prereqs = rubric_idx.get(node_id, {}).get("prerequisites", [])
+    for prereq_id in prereqs:
+        prereq = state_tree.get(prereq_id)
+        if not prereq:
+            continue
+        status = prereq.get("status", "INIT")
+        if status == "INIT":
+            return False  # 前置考点完全未触及，锁死当前考点
+    return True
+
+
+def _calculate_score(
+    node_id: str,
+    node: dict,
+    rubric_idx: dict,
+    current_phase: str,
+) -> float:
+    """多维动态权重计算。分数越高 = 越应该问。"""
+    meta = rubric_idx.get(node_id, {"priority": 50, "phase": "any"})
+    score = 0.0
+
+    # 维度 1：静态优先级（priority 越低越重要，反转为分数）
+    score += (100 - meta["priority"])
+
+    # 维度 2：状态紧急度
+    status = node.get("status", "INIT")
+    score += _STATUS_PRIORITY.get(status, 0) * 20
+
+    # 维度 3：阶段匹配度
+    node_phase = meta["phase"]
+    if node_phase == "any" or node_phase == current_phase:
+        score += 200
+    elif (  # 相邻阶段也给部分加分
+        (current_phase == "mid" and node_phase == "early")
+        or (current_phase == "late" and node_phase == "mid")
+    ):
+        score += 50
+
+    return score
+
+
 def _pick_next_node(board: Blackboard) -> str | None:
-    """按优先级挑选下一个需要追问的考点。"""
+    """多维评分选择下一个追问考点。"""
+    rubric_idx = _build_rubric_index(board)
+    current_phase = _get_current_phase(board)
+
     candidates = []
     for node_id, node in board.state_tree.items():
         status = node.get("status", "INIT")
         if status in _TERMINAL:
             continue
-        probe = node.get("probe_suggestion")
-        if not probe:
+        if not node.get("probe_suggestion"):
             continue
-        # 组合排序：先按状态紧急度降序，再按考点优先级升序
-        candidates.append((
-            -_STATUS_PRIORITY.get(status, 0),
-            _NODE_PRIORITY.get(node_id, 50),
-            node_id,
-        ))
-    candidates.sort()
-    return candidates[0][2] if candidates else None
+        # 依赖图谱：前置未触及则锁死
+        if not _prerequisites_met(node_id, rubric_idx, board.state_tree):
+            continue
+
+        score = _calculate_score(node_id, node, rubric_idx, current_phase)
+        candidates.append((score, node_id))
+
+    candidates.sort(reverse=True)
+    return candidates[0][1] if candidates else None
 
 
 class InterviewDirectiveExtractor(DirectiveExtractor):
-    """从面试黑板中提取导演指令。
+    """多维动态权重指令提取器。
 
-    核心机制：
-    1. 考点锁 (Topic Lock): 锁定一个考点连续追问，防止跳来跳去
-    2. 深度熔断 (Depth Timeout): 同一考点最多追问 MAX_DEPTH_TURNS 轮后强制切题
-    3. 优先级队列: 按 _NODE_PRIORITY 选择下一个考点
+    机制：
+    1. 考点锁 (Topic Lock): 锁定一个考点连续追问
+    2. 深度熔断 (Depth Timeout): 同一考点最多 MAX_DEPTH_TURNS 轮
+    3. 多维评分: 静态优先级 + 状态紧急度 + 阶段匹配度
+    4. 依赖图谱: 前置考点未触及则锁死后续考点
     """
 
     def extract(self, board: Blackboard) -> str:
@@ -126,41 +191,39 @@ class InterviewDirectiveExtractor(DirectiveExtractor):
 
         focused_id, turn_count = _get_focus(board)
 
-        # === 如果当前有锁定的考点 ===
+        # === 锁定中 ===
         if focused_id and focused_id in board.state_tree:
             node = board.state_tree[focused_id]
             status = node.get("status", "INIT")
 
-            # 考点已到终态 → 自然解锁
+            # 自然解锁（终态）
             if status in _TERMINAL:
                 _set_focus(board, None)
-                # 继续往下选新考点
 
-            # 深度熔断 → 强制切题
+            # 深度熔断
             elif turn_count >= MAX_DEPTH_TURNS:
                 _set_focus(board, None)
                 return (
-                    f"在当前底层话题上的深挖已经足够了。"
-                    f"请用一句话优雅地收束当前话题（如'好的，这块我大概了解你的深度了'），"
-                    f"然后立即将话题转移到系统设计的下一个关键问题。"
+                    "在当前话题上的深挖已经足够了。"
+                    "请用一句话优雅地收束（如'好的，这块我大概了解了'），"
+                    "然后立即转移到系统设计的下一个关键问题。"
                 )
 
-            # 正常深挖 → 继续追问，轮数 +1
+            # 继续深挖
             else:
                 probe = node.get("probe_suggestion")
                 if probe:
-                    node["probe_suggestion"] = None  # 消费
+                    node["probe_suggestion"] = None
                     _set_focus(board, focused_id, turn_count + 1)
                     return probe
                 else:
-                    # 没有新的 probe → 解锁，选下一个
                     _set_focus(board, None)
 
-        # === 选择下一个考点锁定 ===
+        # === 选择下一个考点 ===
         next_id = _pick_next_node(board)
         if next_id:
             probe = board.state_tree[next_id].get("probe_suggestion")
-            board.state_tree[next_id]["probe_suggestion"] = None  # 消费
+            board.state_tree[next_id]["probe_suggestion"] = None
             _set_focus(board, next_id, 1)
             return probe or "继续倾听。如果候选人停顿或跑偏，用一句话把他拉回正轨。"
 
@@ -168,22 +231,16 @@ class InterviewDirectiveExtractor(DirectiveExtractor):
 
 
 class InterviewTerminationChecker(TerminationChecker):
-    """面试终态检测器。"""
 
     def should_terminate(self, board: Blackboard) -> bool:
         nodes = list(board.state_tree.values())
         if not nodes:
             return False
-
         fatal = sum(1 for n in nodes if n.get("status") == "FATAL_FLAW")
         if fatal >= 2:
             return True
-
         pending = sum(
             1 for n in nodes
             if n.get("status") in ("INIT", "GATHERING_SIGNALS", "NEEDS_PROBING")
         )
-        if pending == 0:
-            return True
-
-        return False
+        return pending == 0
