@@ -1,12 +1,3 @@
-from pydantic_settings import BaseSettings
+"""EN config — reuses from interview_app.config."""
 
-
-class Settings(BaseSettings):
-    llm_provider: str = "openai"
-    llm_api_key: str = ""
-    llm_model: str = "gpt-4o"
-
-    model_config = {"env_prefix": "UBE_", "env_file": ".env"}
-
-
-settings = Settings()
+from interview_app.config import settings  # noqa: F401

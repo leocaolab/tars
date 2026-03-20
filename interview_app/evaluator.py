@@ -102,28 +102,11 @@ class InterviewEvaluator(IEvaluator):
             "只返回纯 JSON，不要 markdown 代码块。"
         )
 
-        # 重试最多 3 次
-        last_err = None
-        for attempt in range(3):
-            raw = self._client.chat(system=system_prompt, user=user_prompt)
+        from ube_core.llm import json_retry_parse
+        result = json_retry_parse(self._client, system_prompt, user_prompt, EvaluatorPatch)
+        if result:
+            return Patch(updates={"_evaluator_patch": result.model_dump()})
 
-            text = raw.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-                if text.endswith("```"):
-                    text = text[:-3]
-                text = text.strip()
-
-            start = text.find("{")
-            end = text.rfind("}")
-            if start != -1 and end != -1:
-                text = text[start:end + 1]
-
-            try:
-                patch_data = EvaluatorPatch.model_validate_json(text)
-                return Patch(updates={"_evaluator_patch": patch_data.model_dump()})
-            except Exception as e:
-                last_err = e
-
-        print(f"[Evaluator] JSON 解析失败 (3 次重试): {last_err}", file=sys.stderr)
+        import sys
+        print("[Evaluator] JSON parse failed after retries", file=sys.stderr)
         return Patch(updates={})
