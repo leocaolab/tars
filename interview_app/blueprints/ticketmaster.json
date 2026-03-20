@@ -1,0 +1,21 @@
+{
+  "problem_id": "sys_design_ticketmaster_01",
+  "title": "Design a High-Concurrency Ticketing System (Ticketmaster)",
+  "interview_level": "Staff/Principal",
+  "global_constants": {
+    "inventory_size": "100,000 张热门演唱会门票",
+    "peak_traffic": "10,000,000 (1千万) 用户在 10:00:00 准时疯狂点击购买",
+    "hard_constraint": "绝对的强一致性。容忍系统宕机，但绝对不允许出现任何 1 张票的超卖（Overselling）。"
+  },
+  "rubric_nodes": [
+    {
+      "id": "discovery.cujs_and_metrics",
+      "initial_probe": "告诉候选人今天要设计一个类似 Ticketmaster 的高并发售票系统，然后问他打算怎么开始。不要给任何引导。"
+    },
+    { "id": "design.math_and_probabilistic" },
+    { "id": "design.logical_consistency" },
+    { "id": "design.ilities_and_tradeoffs" },
+    { "id": "execution.stress_testing" },
+    { "id": "communication.clarity" }
+  ]
+}

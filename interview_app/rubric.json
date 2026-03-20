@@ -1,0 +1,35 @@
+{
+  "interview_level": "Staff/Principal",
+  "dimensions": [
+    {
+      "node_id": "discovery.cujs_and_metrics",
+      "category": "Requirement & Certainty",
+      "eval_rule": "评估候选人是否主动消除问题的不确定性。必须清晰定义可验证的 CUJ（关键用户路径），并建立衡量系统成功的端到端 Metrics（如 P99 延迟、可用性 SLA）。若候选人急于画图而忽略这些，记为负面信号（Red Flag）。"
+    },
+    {
+      "node_id": "design.math_and_probabilistic",
+      "category": "Engineering Rigor",
+      "eval_rule": "检查候选人是否用数学和概率论在思考。当他们提出某个架构或数据流时，是否主动给出了基于吞吐量、存储量、带宽或成本的容量估算（Capacity Planning）？估算的逻辑是否符合物理常识？"
+    },
+    {
+      "node_id": "design.logical_consistency",
+      "category": "Architecture Proposal",
+      "eval_rule": "不干涉候选人选择的具体技术栈。仅评估其『逻辑自洽性』。他们选用的技术特性，是否与刚才确立的 CUJ 和 Metrics 矛盾？系统设计是否有明显的盲点（例如：引入了强一致性组件却追求极低延迟）？"
+    },
+    {
+      "node_id": "design.ilities_and_tradeoffs",
+      "category": "Non-Functional Requirements",
+      "eval_rule": "评估候选人对扩展性 (Scale)、弹性 (Resilience)、可靠性 (Reliability) 和成本 (Cost) 的权衡。是否考虑了灾备、降级、限流？方案是否能在极端条件下生存？"
+    },
+    {
+      "node_id": "execution.stress_testing",
+      "category": "Boundary Probing",
+      "eval_rule": "通过极端条件假设（如流量突增 100 倍、核心机房断网），寻找候选人的知识边界和应急思考能力。评估其是在盲目猜测，还是能依据底层原理推演应对方案。"
+    },
+    {
+      "node_id": "communication.clarity",
+      "category": "Soft Skills",
+      "eval_rule": "贯穿全局的评估：候选人思考是否结构化？表达是否清晰？是否能用精炼的语言把复杂的系统权衡讲明白？"
+    }
+  ]
+}

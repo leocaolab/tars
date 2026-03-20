@@ -6,7 +6,7 @@ from .evaluator import EvaluatorAgent
 from .actor import ActorAgent
 from .candidate import CandidateAgent
 
-console = Console()
+console = Console(record=True)
 
 STATUS_STYLE = {
     "INIT": "dim white",
@@ -123,6 +123,27 @@ def _invoke_actor(board: Blackboard, actor: ActorAgent, directive: str) -> str:
     return actor.act(directive)
 
 
+def save_log(board: Blackboard, log_dir: str = "logs") -> str:
+    """将终端输出 + 黑板 JSON 快照保存到日志文件"""
+    from pathlib import Path
+    import time
+
+    path = Path(log_dir)
+    path.mkdir(exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    log_file = path / f"selfplay_{board.session_id}_{ts}.txt"
+    json_file = path / f"blackboard_{board.session_id}_{ts}.json"
+
+    # 终端输出
+    log_file.write_text(console.export_text(), encoding="utf-8")
+    # 黑板 JSON 快照
+    json_file.write_text(board.model_dump_json(indent=2, exclude={"rubric"}), encoding="utf-8")
+
+    console.print(f"\n[dim][ Engine ] 日志已保存 → {log_file}[/]")
+    console.print(f"[dim][ Engine ] 黑板快照 → {json_file}[/]")
+    return str(log_file)
+
+
 def run_loop(
     board: Blackboard,
     evaluator: EvaluatorAgent,
@@ -151,6 +172,7 @@ def run_loop(
         user_input = console.input("[bold green]候选人 (你): [/]")
         if user_input.strip().lower() in ("quit", "exit", "q"):
             console.print("[dim]面试结束。[/]")
+            save_log(board)
             break
         _run_turn(board, evaluator, actor, user_input)
 
@@ -244,3 +266,4 @@ def run_auto(
     console.print("[bold bright_red]  Self-Play Complete[/]")
     console.print(f"[bold]{'='*50}[/]\n")
     render_blackboard(board)
+    save_log(board)
