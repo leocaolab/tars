@@ -170,7 +170,9 @@ def run_selfplay(
     console.print(Panel(
         f"[bold magenta]{ctx.get('topic', '')}[/]  |  Level: [bold]{ctx.get('interview_level', '')}[/]\n"
         f"物理约束: {json.dumps(ctx.get('global_constants', {}), ensure_ascii=False)}\n"
-        f"面试官人设: [bold]{persona_label}[/]  |  对抗轮数: [bold]{max_turns}[/]",
+        f"面试官: [bold]{persona_label}[/]  |  "
+        f"候选人: [bold]{candidate.persona['level']}[/] ({candidate.persona_key})  |  "
+        f"轮数: [bold]{max_turns}[/]",
         title="=== UBE Self-Play Arena ===", border_style="bright_red",
     ))
     render_blackboard(board)

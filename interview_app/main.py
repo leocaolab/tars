@@ -21,11 +21,14 @@ def main():
     auto_mode = "--auto" in sys.argv
     max_turns = 5
     persona = None
+    candidate_persona = None
     for arg in sys.argv:
         if arg.startswith("--turns="):
             max_turns = int(arg.split("=", 1)[1])
         elif arg.startswith("--persona="):
             persona = arg.split("=", 1)[1]
+        elif arg.startswith("--candidate="):
+            candidate_persona = arg.split("=", 1)[1]
 
     # 1. LLM 客户端
     client = create_client(
@@ -57,7 +60,7 @@ def main():
 
     # 6. 启动
     if auto_mode:
-        candidate = CandidateAgent(client=client)
+        candidate = CandidateAgent(client=client, persona=candidate_persona)
         run_selfplay(engine, board, candidate, max_turns=max_turns)
     else:
         run_interactive(engine, board)
