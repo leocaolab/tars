@@ -142,10 +142,14 @@ def run_interactive(engine: AgentEngine, board: Blackboard) -> None:
         user_input = console.input("[bold green]候选人 (你): [/]")
         if user_input.strip().lower() in ("quit", "exit", "q"):
             console.print("[dim]面试结束。[/]")
-            _generate_report(engine, board)
-            save_log(board)
             break
-        engine.push_input(board, user_input)
+        _, terminated = engine.push_input(board, user_input)
+        if terminated:
+            console.print("\n[bold bright_red][ Engine ] 终态检测触发 — 面试自动结束[/]")
+            break
+
+    _generate_report(engine, board)
+    save_log(board)
 
 
 def _get_persona_label(engine: AgentEngine) -> str:
@@ -182,7 +186,10 @@ def run_selfplay(
         answer = candidate.answer(board)
         console.print(Panel(answer, title="[bold green]AI 候选人[/]", border_style="green"))
 
-        engine.push_input(board, answer)
+        _, terminated = engine.push_input(board, answer)
+        if terminated:
+            console.print(f"\n[bold bright_red][ Engine ] 终态检测触发 — 面试在 Round {turn} 提前结束[/]")
+            break
 
     console.print(f"\n[bold]{'='*50}[/]")
     console.print("[bold bright_red]  Self-Play Complete[/]")

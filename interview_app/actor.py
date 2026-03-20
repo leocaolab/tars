@@ -66,5 +66,7 @@ class InterviewActor(IActor):
         return self._client.chat(system=self.meta_prompt, user=f"[导演指令] {directive}")
 
     def act_with_history(self, directive: str, history: list[dict[str, str]]) -> str:
-        messages = history + [{"role": "user", "content": f"[导演指令] {directive}"}]
+        # 滑动窗口：只保留最近 4 轮对话，防止 Token 爆炸和 Lost-in-the-Middle
+        recent = history[-4:] if len(history) > 4 else history
+        messages = recent + [{"role": "user", "content": f"[导演指令] {directive}"}]
         return self._client.chat_multi(system=self.meta_prompt, messages=messages)

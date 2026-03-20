@@ -53,3 +53,11 @@ class DirectiveExtractor(ABC):
     @abstractmethod
     def extract(self, board: Blackboard) -> str:
         """从黑板状态中提取最紧急的一条导演指令。"""
+
+
+class TerminationChecker(ABC):
+    """终态检测器接口 — 业务层实现，判断是否应该结束会话。"""
+
+    @abstractmethod
+    def should_terminate(self, board: Blackboard) -> bool:
+        """检查黑板状态，返回 True 表示会话应该结束。"""

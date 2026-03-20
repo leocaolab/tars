@@ -10,7 +10,7 @@ from .session_factory import SessionFactory, load_rubric, load_blueprint
 from .evaluator import InterviewEvaluator
 from .actor import InterviewActor
 from .candidate import CandidateAgent
-from .bridge import merge_patch, InterviewDirectiveExtractor
+from .bridge import merge_patch, InterviewDirectiveExtractor, InterviewTerminationChecker
 from .cli import on_event, run_interactive, run_selfplay
 from .models import RubricDimension
 
@@ -51,6 +51,7 @@ def main():
         actor=(actor := InterviewActor(client=client, persona=persona)),
         directive_extractor=InterviewDirectiveExtractor(),
         merge_patch=merge_patch,
+        termination_checker=InterviewTerminationChecker(),
         on_event=on_event,
     )
 

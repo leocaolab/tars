@@ -1,7 +1,7 @@
 """面试业务的领域模型 — 所有面试专属概念都在这里。"""
 
 from pydantic import BaseModel, Field
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Union
 
 NodeStatus = Literal["INIT", "GATHERING_SIGNALS", "SATISFIED", "NEEDS_PROBING", "FATAL_FLAW"]
 
@@ -44,6 +44,6 @@ class EvaluatorPatch(BaseModel):
     """Evaluator 输出 — 面试专属的补丁格式"""
     internal_thought: str = ""
     updates: Dict[str, NodeStatus] = Field(default_factory=dict)
-    new_positive_signals: Dict[str, str] = Field(default_factory=dict)
-    new_negative_signals: Dict[str, str] = Field(default_factory=dict)
+    new_positive_signals: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
+    new_negative_signals: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
     probe_suggestions: Dict[str, str] = Field(default_factory=dict)

@@ -1,4 +1,4 @@
-from .types import Blackboard, Patch, IEvaluator, IActor
+from .types import Blackboard, Patch, IEvaluator, IActor, TerminationChecker
 from .engine import AgentEngine
 
-__all__ = ["Blackboard", "Patch", "IEvaluator", "IActor", "AgentEngine"]
+__all__ = ["Blackboard", "Patch", "IEvaluator", "IActor", "TerminationChecker", "AgentEngine"]

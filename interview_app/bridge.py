@@ -6,7 +6,7 @@
 """
 
 from ube_core import Blackboard, Patch
-from ube_core.types import DirectiveExtractor
+from ube_core.types import DirectiveExtractor, TerminationChecker
 from .models import RubricNode
 
 _PRIORITY = {
@@ -51,17 +51,19 @@ def merge_patch(board: Blackboard, patch: Patch) -> None:
         if nid:
             board.state_tree[nid]["status"] = new_status
 
-    # 正面信号
+    # 正面信号（兼容 str 和 List[str]，始终 extend）
     for key, signal in ev_patch.get("new_positive_signals", {}).items():
         nid = _resolve_node_id(key, valid_ids)
         if nid:
-            board.state_tree[nid].setdefault("positive_signals", []).append(signal)
+            signals = signal if isinstance(signal, list) else [signal]
+            board.state_tree[nid].setdefault("positive_signals", []).extend(signals)
 
-    # 负面信号
+    # 负面信号（兼容 str 和 List[str]，始终 extend）
     for key, signal in ev_patch.get("new_negative_signals", {}).items():
         nid = _resolve_node_id(key, valid_ids)
         if nid:
-            board.state_tree[nid].setdefault("negative_signals", []).append(signal)
+            signals = signal if isinstance(signal, list) else [signal]
+            board.state_tree[nid].setdefault("negative_signals", []).extend(signals)
 
     # 追问建议
     for key, suggestion in ev_patch.get("probe_suggestions", {}).items():
@@ -96,3 +98,27 @@ class InterviewDirectiveExtractor(DirectiveExtractor):
             return candidates[0][2]
 
         return "继续倾听。如果候选人停顿或跑偏，用一句话把他拉回正轨。"
+
+
+class InterviewTerminationChecker(TerminationChecker):
+    """面试终态检测器。"""
+
+    def should_terminate(self, board: Blackboard) -> bool:
+        nodes = list(board.state_tree.values())
+        if not nodes:
+            return False
+
+        # 条件 1：>=2 个 FATAL_FLAW → 提前终止
+        fatal = sum(1 for n in nodes if n.get("status") == "FATAL_FLAW")
+        if fatal >= 2:
+            return True
+
+        # 条件 2：所有维度都已离开未完成态 → 考察完毕
+        pending = sum(
+            1 for n in nodes
+            if n.get("status") in ("INIT", "GATHERING_SIGNALS", "NEEDS_PROBING")
+        )
+        if pending == 0:
+            return True
+
+        return False
