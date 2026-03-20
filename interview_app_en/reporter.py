@@ -37,9 +37,9 @@ class InterviewReporter:
             f"{json.dumps(signals_summary, ensure_ascii=False, indent=2)}\n\n"
             "[STRICT OUTPUT CONSTRAINTS]:\n"
             "1. FAITHFUL TO DATA: Every claim must be backed by positive_signals or negative_signals from the JSON. Do not invent statements the candidate never made.\n"
-            '2. ZERO DRAMATIZATION: No sarcasm, no exaggeration (ban words like "delusional", "daydreaming"). State objective engineering deficiencies only.\n'
-            "3. NO OMISSIONS: You must cover ALL dimensions in the JSON. If a dimension lacks sufficient signals, mark it as 'Insufficient Data'.\n"
-            '4. HUMAN VOICE: Write Interview Notes in first person ("I pressed him on...", "he initially struggled but then..."). Be vivid but not theatrical.\n\n'
+            '2. PROFESSIONAL WITH WARMTH: No sarcasm or exaggeration, but also not a cold audit report. Write like a senior engineer giving feedback to a colleague — direct, professional, with occasional personal observations.\n'
+            "3. NO OMISSIONS: Cover ALL dimensions in the JSON. If a dimension lacks sufficient signals, mark as 'Insufficient Data'.\n"
+            '4. HUMAN VOICE: Write Interview Notes in first person ("I pressed him on...", "he initially struggled but then...") as if briefing the hiring committee in person.\n\n'
             "Use this exact Markdown template:\n\n"
             "# Interview Assessment (Hire Packet)\n\n"
             "## 1. Executive Summary\n"
@@ -58,6 +58,6 @@ class InterviewReporter:
         )
 
         return self._client.chat(
-            system="You are an extremely objective, evidence-based hiring committee chair. Every sentence must be grounded in data.",
+            system="You are a professional, evidence-based hiring committee chair. Direct and honest, but not cold — like a senior engineer giving feedback to a peer.",
             user=prompt,
         )

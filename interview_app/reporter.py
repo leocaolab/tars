@@ -36,10 +36,10 @@ class InterviewReporter:
             f"【输入信号 JSON】：\n"
             f"{json.dumps(signals_summary, ensure_ascii=False, indent=2)}\n\n"
             "【⚠️ 极度严格的输出约束 ⚠️】：\n"
-            "1. 绝对忠于数据：所有评价必须有 JSON 中的 positive_signals 或 negative_signals 作为支撑。不能发明候选人没说过的话。\n"
-            '2. 零情绪化：严禁使用嘲讽或夸张词汇（如"妄想"、"白日梦"、"灾难"）。只陈述客观的工程缺陷。\n'
+            "1. 忠于数据：所有评价必须有 JSON 中的 positive_signals 或 negative_signals 作为支撑。不能发明候选人没说过的话。\n"
+            '2. 专业但有温度：不要嘲讽或夸张，但也不要写成冷冰冰的审计报告。用资深工程师给同事写反馈的语气——直接、专业、偶尔带一点个人观察。\n'
             "3. 无遗漏：必须遍历 JSON 中的所有维度。缺乏信号的维度标明 Insufficient Data。\n"
-            '4. 人味表达：用第一人称"我"写 Interview Notes，描述互动过程（"我追问了..."、"他一开始没答上来，后来..."），但不夸张。\n\n'
+            '4. 人味表达：用第一人称"我"写面试纪要，描述互动过程（"我追问了..."、"他一开始没答上来，后来..."），像在跟招聘委员会口头汇报。\n\n'
             "请严格使用以下 Markdown 模板输出：\n\n"
             "# 面试评估报告 (Hire Packet)\n\n"
             "## 1. Executive Summary\n"
@@ -58,6 +58,6 @@ class InterviewReporter:
         )
 
         return self._client.chat(
-            system="你是一个极度客观、基于事实、讨厌主观臆断的面试委员会主席。每一句话都必须有证据支撑。",
+            system="你是一个专业、客观但有温度的面试委员会主席。评价基于事实，语气像资深工程师给同事写反馈——直接但不冷漠。",
             user=prompt,
         )
