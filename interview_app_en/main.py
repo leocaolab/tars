@@ -23,6 +23,7 @@ def main():
     max_turns = 5
     persona = None
     candidate_persona = None
+    blueprint_name = "ticketmaster"
     for arg in sys.argv:
         if arg.startswith("--turns="):
             max_turns = int(arg.split("=", 1)[1])
@@ -30,6 +31,8 @@ def main():
             persona = arg.split("=", 1)[1]
         elif arg.startswith("--candidate="):
             candidate_persona = arg.split("=", 1)[1]
+        elif arg.startswith("--blueprint="):
+            blueprint_name = arg.split("=", 1)[1]
 
     client = create_client(
         provider=settings.llm_provider,
@@ -38,7 +41,7 @@ def main():
     )
 
     rubric = load_rubric()
-    blueprint = load_blueprint(str(BLUEPRINTS_DIR / "ticketmaster.json"))
+    blueprint = load_blueprint(str(BLUEPRINTS_DIR / f"{blueprint_name}.json"))
 
     factory = SessionFactory(rubric)
     board = factory.create(blueprint)

@@ -58,6 +58,14 @@
       "eval_rule": "核心考察候选人的『底层基础知识准确性 (Fact Check)』。对候选人抛出的每一个技术栈（如 MySQL, Redis, Kafka, JVM, 锁机制等），核对其描述的原理、物理特性和适用场景是否符合客观常识。1. 如果候选人出现张冠李戴（例如：说 MySQL 跑在 JVM 上、用 ES 做强一致性交易落盘、用 Nginx 直接查数据库等硬伤），必须立刻记入 negative_signals。2. 如果是细微口误，状态置为 NEEDS_PROBING 进行澄清；如果是常识性严重违背，直接置为 FATAL_FLAW。"
     },
     {
+      "node_id": "knowledge.data_structures",
+      "category": "Computer Science Fundamentals",
+      "priority": 0,
+      "phase": "any",
+      "prerequisites": [],
+      "eval_rule": "专门核查基本数据结构与算法的时间复杂度常识。如果候选人声称'单向链表可以在 O(1) 时间内删除自身'、或者'哈希表的扩容绝对不会阻塞'，必须立刻记入 negative_signals。针对 LRU，必须明确听到『哈希表 + 双向链表』的核心组合，缺少任何一个都不满足 O(1)。对于分布式系统题目，检查候选人对 B+ 树、LSM 树、布隆过滤器等存储基础结构的理解是否准确。"
+    },
+    {
       "node_id": "execution.stress_testing",
       "category": "Boundary Probing",
       "priority": 3,

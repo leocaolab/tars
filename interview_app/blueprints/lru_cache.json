@@ -1,0 +1,24 @@
+{
+  "problem_id": "component_design_lru_01",
+  "title": "Design a High-Concurrency LRU Cache",
+  "interview_level": "Senior (L5/L6)",
+  "global_constants": {
+    "time_complexity_constraint": "硬约束：get 和 put 操作的平均时间复杂度必须是严格的 O(1)。",
+    "memory_constraint": "硬约束：严格受限于初始化时的 Capacity，绝对不允许发生内存泄漏（Memory Leak）。",
+    "concurrency_constraint": "业务背景：该 Cache 将被用作核心网关的本地缓存，面临极高的并发读写请求，必须保证线程安全（Thread-Safe），且极其苛求降低锁的粒度和竞争（Lock Contention）。",
+    "cache_pollution": "隐含挑战：需要考虑缓存击穿或全表扫描带来的缓存污染问题。"
+  },
+  "rubric_nodes": [
+    {
+      "id": "discovery.cujs_and_metrics",
+      "initial_probe": "今天我们需要为核心网关设计一个支持高并发的本地 LRU Cache 组件。请先定义出它的核心 API，并告诉我你会选择什么样的数据结构来支撑它？"
+    },
+    { "id": "design.logical_consistency" },
+    { "id": "design.tradeoffs_and_rationale" },
+    { "id": "design.component_deep_dive" },
+    { "id": "knowledge.factual_correctness" },
+    { "id": "knowledge.data_structures" },
+    { "id": "execution.stress_testing" },
+    { "id": "communication.clarity" }
+  ]
+}

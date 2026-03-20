@@ -1,0 +1,24 @@
+{
+  "problem_id": "component_design_lru_01",
+  "title": "Design a High-Concurrency LRU Cache",
+  "interview_level": "Senior (L5/L6)",
+  "global_constants": {
+    "time_complexity_constraint": "Hard constraint: get and put must have strict O(1) average time complexity.",
+    "memory_constraint": "Hard constraint: strictly bounded by initial capacity, zero memory leaks allowed.",
+    "concurrency_constraint": "Business context: this cache serves as a core gateway's local cache under extreme concurrent read/write load. Must be thread-safe with minimal lock contention.",
+    "cache_pollution": "Hidden challenge: must handle cache pollution from full-table scans or adversarial access patterns."
+  },
+  "rubric_nodes": [
+    {
+      "id": "discovery.cujs_and_metrics",
+      "initial_probe": "Today we need to design a high-concurrency local LRU Cache for a core gateway. Start by defining the core API and tell me what data structures you'd use to support it."
+    },
+    { "id": "design.logical_consistency" },
+    { "id": "design.tradeoffs_and_rationale" },
+    { "id": "design.component_deep_dive" },
+    { "id": "knowledge.factual_correctness" },
+    { "id": "knowledge.data_structures" },
+    { "id": "execution.stress_testing" },
+    { "id": "communication.clarity" }
+  ]
+}

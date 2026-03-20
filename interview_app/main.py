@@ -23,6 +23,7 @@ def main():
     max_turns = 5
     persona = None
     candidate_persona = None
+    blueprint_name = "ticketmaster"
     for arg in sys.argv:
         if arg.startswith("--turns="):
             max_turns = int(arg.split("=", 1)[1])
@@ -30,17 +31,17 @@ def main():
             persona = arg.split("=", 1)[1]
         elif arg.startswith("--candidate="):
             candidate_persona = arg.split("=", 1)[1]
+        elif arg.startswith("--blueprint="):
+            blueprint_name = arg.split("=", 1)[1]
 
-    # 1. LLM 客户端
     client = create_client(
         provider=settings.llm_provider,
         api_key=settings.llm_api_key,
         model=settings.llm_model,
     )
 
-    # 2. 加载静态配置
     rubric = load_rubric()
-    blueprint = load_blueprint(str(BLUEPRINTS_DIR / "ticketmaster.json"))
+    blueprint = load_blueprint(str(BLUEPRINTS_DIR / f"{blueprint_name}.json"))
 
     # 3. 创世
     factory = SessionFactory(rubric)

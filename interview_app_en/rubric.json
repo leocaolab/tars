@@ -58,6 +58,14 @@
       "eval_rule": "Fact-check the candidate's technical claims. For every technology mentioned (MySQL, Redis, Kafka, JVM, locking mechanisms), verify that their described principles, physical characteristics, and use cases match objective reality. 1. If the candidate makes category errors (e.g., claiming MySQL runs on JVM, or Redis supports SQL joins), record immediately as negative signal. 2. Minor slips -> NEEDS_PROBING for clarification; gross violations -> FATAL_FLAW."
     },
     {
+      "node_id": "knowledge.data_structures",
+      "category": "Computer Science Fundamentals",
+      "priority": 0,
+      "phase": "any",
+      "prerequisites": [],
+      "eval_rule": "Verify data structure and algorithm time complexity fundamentals. If the candidate claims 'a singly linked list can delete itself in O(1)' or 'hash table resizing never blocks', record as negative signal immediately. For LRU specifically, must hear 'HashMap + Doubly Linked List' as the core combination — missing either fails the O(1) requirement. For distributed systems, check understanding of B+ trees, LSM trees, Bloom filters."
+    },
+    {
       "node_id": "execution.stress_testing",
       "category": "Boundary Probing",
       "priority": 3,
