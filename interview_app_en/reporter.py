@@ -1,4 +1,4 @@
-"""Interview report generator — high-determinism version with signal anchoring."""
+"""Interview report generator — story-driven + evidence-anchored, hiring committee style."""
 
 import json
 from ube_core import Blackboard
@@ -29,35 +29,37 @@ class InterviewReporter:
         level = board.context.get("interview_level", "")
 
         prompt = (
-            f"You are a hiring committee chair (Bar Raiser) at a top tech company.\n"
-            f"Generate an objective, rigorous interview assessment based on the structured signals below.\n\n"
+            f"You are a senior architecture hiring committee chair (Bar Raiser) at a top tech company.\n"
+            f"Write a vivid, story-driven interview feedback report based on the structured signals below.\n\n"
             f"[Topic]: {topic}\n"
             f"[Level]: {level}\n\n"
             f"[Signal JSON]:\n"
             f"{json.dumps(signals_summary, ensure_ascii=False, indent=2)}\n\n"
-            "[STRICT OUTPUT CONSTRAINTS]:\n"
-            "1. FAITHFUL TO DATA: Every claim must be backed by positive_signals or negative_signals from the JSON. Do not invent statements the candidate never made.\n"
-            '2. PROFESSIONAL WITH WARMTH: No sarcasm or exaggeration, but also not a cold audit report. Write like a senior engineer giving feedback to a colleague — direct, professional, with occasional personal observations.\n'
-            "3. NO OMISSIONS: Cover ALL dimensions in the JSON. If a dimension lacks sufficient signals, mark as 'Insufficient Data'.\n"
-            '4. HUMAN VOICE: Write Interview Notes in first person ("I pressed him on...", "he initially struggled but then...") as if briefing the hiring committee in person.\n\n'
-            "Use this exact Markdown template:\n\n"
+            "[WRITING GUIDELINES]:\n"
+            '1. NO MACHINE TASTE: Never use "Positive Evidence: None" style lists. Weave evidence into natural, flowing paragraphs.\n'
+            "2. SUMMARY = CHARACTERIZATION: Don't stack buzzwords. Tell the committee what TYPE of engineer this person is and WHY you're making this call.\n"
+            '3. NOTES = STORIES: Use the structure: "I asked X → they answered Y → I challenged with Z → they struggled/recovered → here\'s why this matters engineering-wise."\n'
+            "4. WEAVE IN GAPS: Naturally fold Unexplored Areas into the story ending — explain what didn't get covered and why.\n"
+            "5. FAITHFUL TO DATA: All claims must trace back to the JSON signals. Don't invent things the candidate never said.\n\n"
+            "Use this exact Markdown structure:\n\n"
             "# Interview Assessment (Hire Packet)\n\n"
-            "## 1. Executive Summary\n"
-            "[2-3 sentences based on JSON signals. Core strength and critical flaw. Objective.]\n\n"
-            "## 2. Hiring Decision\n"
-            "[Bold one: Strong Hire / Hire / Leaning Hire / Leaning No Hire / No Hire / Strong No Hire]\n\n"
-            "## 3. Dimensional Evaluation\n"
-            "[For EACH dimension in the JSON, use this format:]\n"
-            "* **[dimension_id]**: [Outstanding / Solid / Marginal / Lacking / Insufficient Data]\n"
-            "  * **Positive Evidence**: [Quote from positive_signals, or 'None']\n"
-            "  * **Negative Evidence**: [Quote from negative_signals, or 'None']\n\n"
-            "## 4. Key Architectural Flaws\n"
-            "[Extract the 2-3 most critical technical errors from negative_signals. Explain why each is wrong from an engineering standpoint.]\n\n"
-            "## 5. Unexplored Areas\n"
-            "[List dimensions still at INIT or NEEDS_PROBING with insufficient signals. State what should be assessed if time allowed.]\n"
+            "## 1. Executive Summary & Decision\n"
+            "**Decision:** [Strong Hire / Hire / Leaning Hire / Leaning No Hire / No Hire / Strong No Hire]\n\n"
+            "**Summary:** [1-2 paragraphs characterizing the candidate's thinking patterns and the core logic behind your decision.]\n\n"
+            "## 2. Dimensional Evaluation\n"
+            "* **[dimension] ([Outstanding/Solid/Marginal/Lacking/Insufficient Data])**: [1-2 natural sentences.]\n"
+            "(Cover ALL dimensions from the JSON.)\n\n"
+            "## 3. Interview Notes & Core Flaws\n"
+            "[2-3 titled story sections recreating the key moments. Each story needs Context, the candidate's response, your follow-up, and why it matters.]\n\n"
+            "## 4. Unexplored Areas\n"
+            "[One natural paragraph explaining what wasn't covered and why.]\n"
         )
 
         return self._client.chat(
-            system="You are a professional, evidence-based hiring committee chair. Direct and honest, but not cold — like a senior engineer giving feedback to a peer.",
+            system=(
+                "You are a professional, warm hiring committee chair. "
+                "Write feedback like telling a well-evidenced technical story to a colleague "
+                "who wasn't in the room — direct, professional, with scene-setting, but never theatrical."
+            ),
             user=prompt,
         )
