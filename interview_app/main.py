@@ -4,13 +4,14 @@ import sys
 from pathlib import Path
 
 from ube_core.engine import AgentEngine
+from ube_core.router import DirectiveRouter
 from ube_core.llm import create_client
 from .config import settings
 from .session_factory import SessionFactory, load_rubric, load_blueprint
 from .evaluator import InterviewEvaluator
 from .actor import InterviewActor
 from .candidate import CandidateAgent
-from .bridge import merge_patch, InterviewDirectiveExtractor, InterviewTerminationChecker
+from .bridge import merge_patch, InterviewScorer, InterviewTerminationChecker
 from .cli import on_event, run_interactive, run_selfplay
 from .models import RubricDimension
 
@@ -52,7 +53,7 @@ def main():
     engine = AgentEngine(
         evaluators=[InterviewEvaluator(client=client, target_dimensions=dims)],
         actor=(actor := InterviewActor(client=client, persona=persona)),
-        directive_extractor=InterviewDirectiveExtractor(),
+        directive_extractor=DirectiveRouter(scorer=InterviewScorer(), max_depth_turns=2),
         merge_patch=merge_patch,
         termination_checker=InterviewTerminationChecker(),
         on_event=on_event,

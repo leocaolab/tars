@@ -61,3 +61,26 @@ class TerminationChecker(ABC):
     @abstractmethod
     def should_terminate(self, board: Blackboard) -> bool:
         """检查黑板状态，返回 True 表示会话应该结束。"""
+
+
+class NodeScorer(ABC):
+    """节点评分器接口 — 业务层实现评分公式，框架负责排序和路由。
+
+    框架会对所有活跃节点调用 score()，选分数最高的进行追问。
+    """
+
+    @abstractmethod
+    def score(self, node_id: str, node: dict, board: Blackboard) -> float:
+        """为一个节点计算优先级分数。分数越高 = 越应该追问。"""
+
+    def get_probe_text(self, node: dict) -> str | None:
+        """从节点中提取追问文本。默认读 probe_suggestion 字段。"""
+        return node.get("probe_suggestion")
+
+    def is_terminal(self, node: dict) -> bool:
+        """判断节点是否处于终态。默认 SATISFIED/FATAL_FLAW。"""
+        return node.get("status") in ("SATISFIED", "FATAL_FLAW")
+
+    def get_prerequisites(self, node_id: str, board: Blackboard) -> list[str]:
+        """返回前置依赖节点 ID 列表。默认空。"""
+        return []
