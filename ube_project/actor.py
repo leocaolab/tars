@@ -1,9 +1,17 @@
-"""前台面试官 Agent：只看黑板红绿灯 + probe_suggestion，生成自然语言追问"""
-
-import json
+"""前台面试官 Agent：零知识传声筒，只接收 Meta Prompt + 导演指令，不知道题目/Rubric/约束"""
 
 from .llm import LLMClient
-from .models import Blackboard
+
+# 固定的 Meta Prompt — Actor 永远只看到这段话，与业务完全解耦
+META_PROMPT = """\
+你是一位顶级科技公司（如 Google/Meta）的资深架构面试官。
+
+【你的核心准则】：
+1. 极其惜字如金：每次发言绝对不要超过 2 句话。
+2. 绝对开放（Open-ended）：绝不给候选人提供结构、暗示、选项或引导框架。
+3. 让候选人主导（Let them drive）：如果他们思路混乱，让他们自己挣扎，这是考核的一部分。
+4. 当你收到"打断"或"质问"类指令时，直接、冷酷地执行，不要客气。
+5. 你不知道评分标准，不知道正确答案，你只是一个传声筒。"""
 
 
 class ActorAgent:
@@ -11,61 +19,18 @@ class ActorAgent:
     def __init__(self, client: LLMClient):
         self._client = client
 
-    def act(self, board: Blackboard) -> str:
-        dim_map = {d.node_id: d.category for d in board.rubric}
-
-        # 按优先级分层：NEEDS_PROBING > FATAL_FLAW > GATHERING_SIGNALS > INIT
-        focus_areas = {}
-        for k, v in board.state_tree.items():
-            if v.status in ("NEEDS_PROBING", "FATAL_FLAW", "GATHERING_SIGNALS", "INIT"):
-                entry = {
-                    "category": dim_map.get(k, "Unknown"),
-                    "status": v.status,
-                    "negative_signals": v.negative_signals,
-                }
-                if v.probe_suggestion:
-                    entry["probe_suggestion"] = v.probe_suggestion
-                focus_areas[k] = entry
-
-        # 全部 SATISFIED → 总结收尾
-        if not focus_areas:
-            focus_areas = {
-                k: {
-                    "category": dim_map.get(k, "Unknown"),
-                    "status": v.status,
-                    "positive_signals": v.positive_signals,
-                }
-                for k, v in board.state_tree.items()
-            }
-
-        system_prompt = (
-            f"你是一位 {board.interview_level} 级别的高级系统设计面试官。\n"
-            f"当前正在面试：{board.topic}\n\n"
-            f"【全局物理约束】: {json.dumps(board.global_constants, ensure_ascii=False)}\n\n"
-            f"【后台考官给你的指示 — 当前焦点维度】:\n"
-            f"{json.dumps(focus_areas, ensure_ascii=False, indent=2)}\n\n"
-            "=== 发问策略 ===\n"
-            "1. 最高优先级：如果有 NEEDS_PROBING 维度且附带 probe_suggestion，用它来追问\n"
-            "2. 如果有 FATAL_FLAW，直接点出矛盾，要求候选人修正\n"
-            "3. 如果有 GATHERING_SIGNALS，引导候选人深入该维度\n"
-            "4. 如果有 INIT，在合适的时机自然引入该话题\n"
-            "5. 全部 SATISFIED → 简短正面总结并结束\n\n"
-            "不要啰嗦，不要暴露后台 JSON 或维度 ID，直接说人话。\n"
-            "你的追问应该引导候选人展现思维能力，而非索要特定技术名词。"
+    def act(self, directive: str) -> str:
+        """接收一条纯文本导演指令，生成面试官发言。不接触黑板。"""
+        return self._client.chat(
+            system=META_PROMPT,
+            user=directive,
         )
 
-        # Actor 需要完整对话历史来维持上下文
-        # 过滤掉 system message（已通过 system_prompt 注入）
-        chat_messages = [m for m in board.history if m["role"] != "system"]
-
-        # 开场时没有对话历史，用 chat() 单轮；否则用 chat_multi() 多轮
-        if not chat_messages:
-            return self._client.chat(
-                system=system_prompt,
-                user="请开场。",
-            )
-
+    def act_with_history(self, directive: str, history: list[dict[str, str]]) -> str:
+        """带对话历史的多轮版本。"""
+        # 将导演指令作为最新的 user message 注入
+        messages = history + [{"role": "user", "content": f"[导演指令] {directive}"}]
         return self._client.chat_multi(
-            system=system_prompt,
-            messages=chat_messages,
+            system=META_PROMPT,
+            messages=messages,
         )

@@ -1,8 +1,6 @@
 import json
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
 from .models import Blackboard, EvaluatorPatch
 from .evaluator import EvaluatorAgent
 from .actor import ActorAgent
@@ -26,9 +24,18 @@ STATUS_ICON = {
     "FATAL_FLAW": "X  ",
 }
 
+# 状态优先级：越高越紧急
+_PRIORITY = {
+    "FATAL_FLAW": 4,
+    "NEEDS_PROBING": 3,
+    "GATHERING_SIGNALS": 2,
+    "INIT": 1,
+    "SATISFIED": 0,
+}
+
 
 def render_blackboard(board: Blackboard) -> None:
-    """用 rich 渲染累积记分牌 — 不用表格，用 Panel 列表避免截断"""
+    """用 rich 渲染累积记分牌"""
     dim_map = {d.node_id: d.category for d in board.rubric}
 
     lines: list[str] = []
@@ -72,12 +79,56 @@ def apply_patch(board: Blackboard, patch: EvaluatorPatch) -> None:
             board.state_tree[node_id].probe_suggestion = suggestion
 
 
+def extract_directive(board: Blackboard) -> str:
+    """
+    引擎桥接层：从黑板中提取最紧急的一条导演指令。
+    剥离所有 Rubric 标签，只输出纯文本指示给 Actor。
+    """
+    # 全部 SATISFIED → 收尾
+    all_satisfied = all(
+        node.status == "SATISFIED" for node in board.state_tree.values()
+    )
+    if all_satisfied:
+        return "所有考核维度已通过。用一句话给候选人正面总结，结束面试。"
+
+    # 按优先级排序，取最紧急的有 probe_suggestion 的节点
+    candidates = [
+        (node_id, node)
+        for node_id, node in board.state_tree.items()
+        if node.status not in ("SATISFIED",) and node.probe_suggestion
+    ]
+    candidates.sort(key=lambda x: _PRIORITY.get(x[1].status, 0), reverse=True)
+
+    if candidates:
+        _, top_node = candidates[0]
+        return top_node.probe_suggestion
+
+    # 没有 probe_suggestion，但有未完成的维度 → 通用指令
+    return "继续倾听。如果候选人停顿或跑偏，用一句话把他拉回正轨。"
+
+
+def _get_chat_history(board: Blackboard) -> list[dict[str, str]]:
+    """提取干净的对话历史（过滤 system message）"""
+    return [m for m in board.history if m["role"] != "system"]
+
+
+def _invoke_actor(board: Blackboard, actor: ActorAgent, directive: str) -> str:
+    """调用 Actor 并渲染导演指令"""
+    console.print(
+        f"[dim][ Engine ] 导演指令 → [/][italic yellow]\"{directive}\"[/]"
+    )
+    history = _get_chat_history(board)
+    if history:
+        return actor.act_with_history(directive, history)
+    return actor.act(directive)
+
+
 def run_loop(
     board: Blackboard,
     evaluator: EvaluatorAgent,
     actor: ActorAgent,
 ) -> None:
-    """核心事件循环：开场白 -> [用户输入 -> 考官评估 -> 面试官发问] x N"""
+    """核心事件循环（人类候选人模式）"""
     console.print(
         Panel(
             f"[bold magenta]{board.topic}[/]  |  Level: [bold]{board.interview_level}[/]\n"
@@ -89,19 +140,18 @@ def run_loop(
     render_blackboard(board)
 
     # 开场白
-    console.print("\n[dim][ Engine ] 唤醒前台面试官生成开场白...[/]")
-    greeting = actor.act(board)
+    console.print("\n[dim][ Engine ] 唤醒前台面试官...[/]")
+    directive = extract_directive(board)
+    greeting = _invoke_actor(board, actor, directive)
     board.history.append({"role": "assistant", "content": greeting})
     console.print(Panel(greeting, title="[bold blue]面试官[/]", border_style="blue"))
 
-    # 主循环
     while True:
         console.print()
         user_input = console.input("[bold green]候选人 (你): [/]")
         if user_input.strip().lower() in ("quit", "exit", "q"):
             console.print("[dim]面试结束。[/]")
             break
-
         _run_turn(board, evaluator, actor, user_input)
 
 
@@ -111,7 +161,7 @@ def _run_turn(
     actor: ActorAgent,
     user_input: str,
 ) -> None:
-    """执行一个完整回合：候选人发言 → 考官评估 → 面试官追问"""
+    """一个完整回合：候选人发言 → 考官评估 → 引擎提取指令 → Actor 发问"""
     board.history.append({"role": "user", "content": user_input})
 
     # 阶段 A：考官静默评估
@@ -139,12 +189,13 @@ def _run_turn(
     apply_patch(board, patch)
     render_blackboard(board)
 
-    # 阶段 B：面试官发话
-    console.print("[dim][ Engine ] 唤醒前台面试官发问...[/]")
-    next_question = actor.act(board)
-    board.history.append({"role": "assistant", "content": next_question})
+    # 阶段 B：引擎提取指令 → Actor 发声
+    console.print("[dim][ Engine ] 唤醒前台面试官...[/]")
+    directive = extract_directive(board)
+    response = _invoke_actor(board, actor, directive)
+    board.history.append({"role": "assistant", "content": response})
     console.print(
-        Panel(next_question, title="[bold blue]面试官[/]", border_style="blue")
+        Panel(response, title="[bold blue]面试官[/]", border_style="blue")
     )
 
 
@@ -168,8 +219,9 @@ def run_auto(
     render_blackboard(board)
 
     # 开场白
-    console.print("\n[dim][ Engine ] 唤醒前台面试官生成开场白...[/]")
-    greeting = actor.act(board)
+    console.print("\n[dim][ Engine ] 唤醒前台面试官...[/]")
+    directive = extract_directive(board)
+    greeting = _invoke_actor(board, actor, directive)
     board.history.append({"role": "assistant", "content": greeting})
     console.print(Panel(greeting, title="[bold blue]面试官[/]", border_style="blue"))
 
@@ -179,14 +231,12 @@ def run_auto(
         console.print(f"[bold bright_red]  Round {turn}/{max_turns}[/]")
         console.print(f"[bold]{'='*50}[/]")
 
-        # AI 候选人作答
         console.print("\n[dim][ Engine ] AI 候选人思考中...[/]")
         answer = candidate.answer(board)
         console.print(
             Panel(answer, title="[bold green]AI 候选人[/]", border_style="green")
         )
 
-        # 完整回合
         _run_turn(board, evaluator, actor, answer)
 
     # 结束总结

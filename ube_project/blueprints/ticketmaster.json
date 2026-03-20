@@ -10,7 +10,7 @@
   "rubric_nodes": [
     {
       "id": "discovery.cujs_and_metrics",
-      "initial_probe": "引导候选人先定义秒杀链路的核心 CUJ、读写特征和系统瓶颈。"
+      "initial_probe": "告诉候选人今天要设计一个类似 Ticketmaster 的高并发售票系统，然后问他打算怎么开始。不要给任何引导。"
     },
     { "id": "design.math_and_probabilistic" },
     { "id": "design.logical_consistency" },
