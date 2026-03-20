@@ -32,8 +32,9 @@ def load_blueprint(path: str) -> ProblemBlueprint:
 class SessionFactoryV2(LayeredSessionFactory):
     """Interview-specific overrides for context and system prompt."""
 
-    def __init__(self, base_dir: str = None):
+    def __init__(self, base_dir: str = None, lang: str = "zh"):
         super().__init__(base_dir or str(Path(__file__).parent))
+        self._lang = lang
 
     def build_context(self, blueprint: dict, rubric_dims: list[dict]) -> dict:
         return {
@@ -44,11 +45,11 @@ class SessionFactoryV2(LayeredSessionFactory):
         }
 
     def build_system_prompt(self, blueprint: dict) -> str | None:
-        level = blueprint.get("interview_level", "")
-        title = blueprint.get("title", "")
-        return (
-            f"你是一位极其严苛的 {level} 级架构面试官。"
-            f"今天你要考察候选人设计：{title}。"
+        from .prompts import load_prompt
+        data = load_prompt("session", self._lang)
+        return data["system_prompt_template"].format(
+            level=blueprint.get("interview_level", ""),
+            title=blueprint.get("title", ""),
         )
 
 
