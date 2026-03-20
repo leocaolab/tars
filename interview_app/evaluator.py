@@ -59,18 +59,31 @@ class InterviewEvaluator(IEvaluator):
             "只返回纯 JSON，不要 markdown 代码块。"
         )
 
-        raw = self._client.chat(system=system_prompt, user=user_prompt)
+        # 重试最多 3 次 — LLM 偶尔返回非法 JSON
+        last_err = None
+        for attempt in range(3):
+            raw = self._client.chat(system=system_prompt, user=user_prompt)
 
-        text = raw.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
+            text = raw.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+                if text.endswith("```"):
+                    text = text[:-3]
+                text = text.strip()
 
-        patch_data = EvaluatorPatch.model_validate_json(text)
+            # 尝试提取第一个 { 到最后一个 } 之间的内容
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1:
+                text = text[start:end + 1]
 
-        # 将面试专属的 EvaluatorPatch 转换为框架的通用 Patch
-        return Patch(updates={
-            "_evaluator_patch": patch_data.model_dump()
-        })
+            try:
+                patch_data = EvaluatorPatch.model_validate_json(text)
+                return Patch(updates={"_evaluator_patch": patch_data.model_dump()})
+            except Exception as e:
+                last_err = e
+
+        # 全部失败 — 返回空补丁，不崩溃
+        import sys
+        print(f"[Evaluator] JSON 解析失败 (3 次重试): {last_err}", file=sys.stderr)
+        return Patch(updates={})
