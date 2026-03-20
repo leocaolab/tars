@@ -95,6 +95,31 @@ def _generate_report(engine: AgentEngine, board: Blackboard) -> None:
     console.print(f"[dim][ Engine ] Report -> {report_file}[/]")
 
 
+def _print_stats(engine: AgentEngine, board: Blackboard) -> None:
+    from rich.table import Table
+    client = engine.actor._client if hasattr(engine.actor, "_client") else None
+    usage = client.usage_summary if client and hasattr(client, "usage_summary") else {}
+    ctx_chars = sum(len(json.dumps(v, ensure_ascii=False)) for v in board.context.values())
+    history_chars = sum(len(m.get("content", "")) for m in board.history)
+    turns = sum(1 for m in board.history if m.get("role") == "user")
+
+    table = Table(title="Session Statistics", show_lines=True)
+    table.add_column("Metric", style="cyan", min_width=25)
+    table.add_column("Value", style="bold", min_width=15)
+    table.add_row("Turns (user messages)", str(turns))
+    table.add_row("Context size (chars)", f"{ctx_chars:,}")
+    table.add_row("History size (chars)", f"{history_chars:,}")
+    table.add_row("State tree nodes", str(len(board.state_tree)))
+    table.add_row("", "")
+    table.add_row("LLM calls", str(usage.get("calls", "N/A")))
+    table.add_row("Tokens in (prompt)", f"{usage.get('tokens_in', 0):,}")
+    table.add_row("Tokens out (completion)", f"{usage.get('tokens_out', 0):,}")
+    table.add_row("Tokens total", f"{usage.get('tokens_total', 0):,}")
+    table.add_row("Tokens cached", f"{usage.get('tokens_cached', 0):,}")
+    table.add_row("Cache hit ratio", f"{usage.get('cache_hit_ratio_pct', 0)}%")
+    console.print(table)
+
+
 def save_log(board: Blackboard, log_dir: str = "logs") -> str:
     path = Path(log_dir)
     path.mkdir(exist_ok=True)
@@ -135,6 +160,7 @@ def run_interactive(engine: AgentEngine, board: Blackboard) -> None:
             console.print("\n[bold bright_red][ Engine ] Termination triggered — interview auto-ended[/]")
             break
     _generate_report(engine, board)
+    _print_stats(engine, board)
     save_log(board)
 
 
@@ -172,4 +198,5 @@ def run_selfplay(
     console.print(f"[bold]{'='*50}[/]\n")
     render_blackboard(board)
     _generate_report(engine, board)
+    _print_stats(engine, board)
     save_log(board)

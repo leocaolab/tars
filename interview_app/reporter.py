@@ -1,4 +1,4 @@
-"""面试报告生成器 — 提取黑板数据，生成大厂标准的 Hire Packet。"""
+"""面试报告生成器 — 高确定性版，强制信号挂钩 + 零遗漏 + 无情绪化。"""
 
 import json
 from ube_core import Blackboard
@@ -6,7 +6,6 @@ from ube_core.llm import LLMClient
 
 
 def _get_val(node, key, default):
-    """兼容 dict 和 Pydantic 对象的安全取值"""
     if isinstance(node, dict):
         return node.get(key, default)
     return getattr(node, key, default)
@@ -21,47 +20,44 @@ class InterviewReporter:
         signals_summary = {}
         for node_id, node in board.state_tree.items():
             signals_summary[node_id] = {
-                "状态": _get_val(node, "status", "INIT"),
-                "正面证据": _get_val(node, "positive_signals", []),
-                "负面盲点": _get_val(node, "negative_signals", []),
+                "status": _get_val(node, "status", "INIT"),
+                "positive_signals": _get_val(node, "positive_signals", []),
+                "negative_signals": _get_val(node, "negative_signals", []),
             }
 
         topic = board.context.get("topic", "")
         level = board.context.get("interview_level", "")
 
         prompt = (
-            f"你现在是顶级科技公司（如 Meta/Google）的资深架构面委（Bar Raiser）。\n"
-            f"你刚刚亲自面完了一场针对【{topic}】的 {level} 级别面试。\n\n"
-            f"【这是你的后台助手帮你收集的全量打分数据（JSON）】：\n"
+            f"你是顶级科技公司的面试委员会主席（Bar Raiser）。\n"
+            f"请根据以下黑板引擎提取的结构化信号（JSON），生成一份极度客观、严谨的面试评估报告。\n\n"
+            f"【面试题目】：{topic}\n"
+            f"【面试级别】：{level}\n\n"
+            f"【输入信号 JSON】：\n"
             f"{json.dumps(signals_summary, ensure_ascii=False, indent=2)}\n\n"
-            "请根据这些数据，写一份极其专业但**极具人味（口语化、第一人称）**的面试反馈报告（Hire Packet）。\n\n"
-            "【⚠️ 极其重要的行文警告 ⚠️】：\n"
-            '1. 绝对不要像机器翻译 JSON！禁止使用"候选人构建了..."、"补齐了..."、"反映出其具备..."这种僵化的 AI 八股文词汇。\n'
-            '2. 必须写出【互动画面感】。使用"我一直追问..."、"他一开始没绕明白，后来才反应过来..."、"问到细节时他开始避重就轻"这样的动态交流描述。\n'
-            "3. 把专业词汇揉碎在口语里，不要像念说明书一样过度堆砌名词。\n\n"
-            "报告必须严格遵循以下结构：\n\n"
+            "【⚠️ 极度严格的输出约束 ⚠️】：\n"
+            "1. 绝对忠于数据：所有评价必须有 JSON 中的 positive_signals 或 negative_signals 作为支撑。不能发明候选人没说过的话。\n"
+            '2. 零情绪化：严禁使用嘲讽或夸张词汇（如"妄想"、"白日梦"、"灾难"）。只陈述客观的工程缺陷。\n'
+            "3. 无遗漏：必须遍历 JSON 中的所有维度。缺乏信号的维度标明 Insufficient Data。\n"
+            '4. 人味表达：用第一人称"我"写 Interview Notes，描述互动过程（"我追问了..."、"他一开始没答上来，后来..."），但不夸张。\n\n'
+            "请严格使用以下 Markdown 模板输出：\n\n"
             "# 面试评估报告 (Hire Packet)\n\n"
             "## 1. Executive Summary\n"
-            "用 2-3 句话极其精炼地概括他最牛的亮点和最要命的硬伤。一针见血，切中要害。\n\n"
+            "[基于 JSON 信号，2-3 句话总结核心亮点与致命缺陷。客观、冰冷。]\n\n"
             "## 2. Hiring Decision\n"
-            "只允许从以下选项中选择一个并加粗：\n"
-            "[Strong Hire (SH) / Hire (H) / Leaning Hire (LH) / "
-            "Leaning No Hire (LNH) / No Hire (NH) / Strong No Hire (SNH)]\n\n"
+            "[只输出一个结论并加粗：Strong Hire / Hire / Leaning Hire / Leaning No Hire / No Hire / Strong No Hire]\n\n"
             "## 3. Dimensional Evaluation\n"
-            "将每个维度映射到以下层次之一：\n"
-            "- Outstanding (超出预期)\n"
-            "- Solid (符合预期)\n"
-            "- Marginal (勉强达标)\n"
-            "- Lacking (致命缺陷)\n\n"
-            "对每个维度的评价，必须结合 JSON 里的 evidence，用人话陈述为什么给他打这个分。\n\n"
-            "## 4. Interview Notes\n"
-            '用主考官写面评的口吻（第一人称"我"），按技术模块还原咱们聊的过程。重点写：\n'
-            "- 他一上来主动抛出了什么好的思路或昏招？\n"
-            "- 我往深了挖（比如极限容灾、一致性底线）时，他是怎么挣扎或应对的？\n"
-            "- 哪些坑是他自己爬出来的，哪些是我喂到嘴边都没吃进去的？\n"
+            "[严格按 JSON 中的每个维度遍历，使用以下格式：]\n"
+            "* **[维度名称]**: [Outstanding / Solid / Marginal / Lacking / Insufficient Data]\n"
+            "  * **Positive Evidence**: [引用 JSON 正向信号原文，无则写 None]\n"
+            "  * **Negative Evidence**: [引用 JSON 负向信号原文，无则写 None]\n\n"
+            "## 4. Key Architectural Flaws\n"
+            "[从负面信号中提取最致命的 2-3 个技术缺陷，说明为什么在工程上是错的。]\n\n"
+            "## 5. Unexplored Areas\n"
+            "[列出 JSON 中状态为 INIT 或 NEEDS_PROBING 且无充分信号的考点。说明如果时间允许还应考察什么。]\n"
         )
 
         return self._client.chat(
-            system="你是一个冷酷、客观但说话极具人味、极其讨厌官腔八股文的大厂面试官。",
+            system="你是一个极度客观、基于事实、讨厌主观臆断的面试委员会主席。每一句话都必须有证据支撑。",
             user=prompt,
         )

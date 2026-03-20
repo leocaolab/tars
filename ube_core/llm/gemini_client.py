@@ -11,12 +11,9 @@ THINKING_BUDGET = 8192
 class GeminiClient(LLMClient):
 
     def __init__(self, api_key: str, model: str):
+        super().__init__()
         self._client = genai.Client(api_key=api_key)
         self._model = model
-        # Token usage tracking
-        self.tokens_in = 0
-        self.tokens_out = 0
-        self.tokens_cached = 0
 
     def chat(self, system: str, user: str, max_tokens: int = 16_384) -> str:
         return self.chat_multi(system, [{"role": "user", "content": user}], max_tokens)
@@ -42,6 +39,7 @@ class GeminiClient(LLMClient):
             contents=contents,
             config=config,
         )
+        self.call_count += 1
 
         # Track token usage
         usage = getattr(response, "usage_metadata", None)

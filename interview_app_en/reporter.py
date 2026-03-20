@@ -1,4 +1,4 @@
-"""Interview report generator — produces a Hire Packet from blackboard data."""
+"""Interview report generator — high-determinism version with signal anchoring."""
 
 import json
 from ube_core import Blackboard
@@ -21,44 +21,43 @@ class InterviewReporter:
         for node_id, node in board.state_tree.items():
             signals_summary[node_id] = {
                 "status": _get_val(node, "status", "INIT"),
-                "positive_evidence": _get_val(node, "positive_signals", []),
-                "negative_gaps": _get_val(node, "negative_signals", []),
+                "positive_signals": _get_val(node, "positive_signals", []),
+                "negative_signals": _get_val(node, "negative_signals", []),
             }
 
         topic = board.context.get("topic", "")
         level = board.context.get("interview_level", "")
 
         prompt = (
-            f"You are a senior architecture hiring committee chair (Bar Raiser) at a top tech company.\n"
-            f"You just personally conducted a {level}-level interview on [{topic}].\n\n"
-            f"[Scoring data collected by your backend assistant (JSON)]:\n"
+            f"You are a hiring committee chair (Bar Raiser) at a top tech company.\n"
+            f"Generate an objective, rigorous interview assessment based on the structured signals below.\n\n"
+            f"[Topic]: {topic}\n"
+            f"[Level]: {level}\n\n"
+            f"[Signal JSON]:\n"
             f"{json.dumps(signals_summary, ensure_ascii=False, indent=2)}\n\n"
-            "Write a professional but **deeply human** interview feedback report (Hire Packet).\n\n"
-            "[CRITICAL WRITING RULES]:\n"
-            '1. DO NOT machine-translate the JSON! Ban stiff phrases like "the candidate demonstrated..." or "reflects capability...".\n'
-            '2. Write with INTERACTIVE SCENE descriptions. Use "I kept pressing him on...", '
-            '"he stumbled at first, then recovered...", "when I drilled into the details, he started deflecting".\n'
-            "3. Weave technical terms naturally into conversational language.\n\n"
-            "Report structure:\n\n"
+            "[STRICT OUTPUT CONSTRAINTS]:\n"
+            "1. FAITHFUL TO DATA: Every claim must be backed by positive_signals or negative_signals from the JSON. Do not invent statements the candidate never made.\n"
+            '2. ZERO DRAMATIZATION: No sarcasm, no exaggeration (ban words like "delusional", "daydreaming"). State objective engineering deficiencies only.\n'
+            "3. NO OMISSIONS: You must cover ALL dimensions in the JSON. If a dimension lacks sufficient signals, mark it as 'Insufficient Data'.\n"
+            '4. HUMAN VOICE: Write Interview Notes in first person ("I pressed him on...", "he initially struggled but then..."). Be vivid but not theatrical.\n\n'
+            "Use this exact Markdown template:\n\n"
             "# Interview Assessment (Hire Packet)\n\n"
             "## 1. Executive Summary\n"
-            "2-3 razor-sharp sentences: strongest highlight and most critical flaw.\n\n"
+            "[2-3 sentences based on JSON signals. Core strength and critical flaw. Objective.]\n\n"
             "## 2. Hiring Decision\n"
-            "Pick exactly one (bold it):\n"
-            "[Strong Hire (SH) / Hire (H) / Leaning Hire (LH) / "
-            "Leaning No Hire (LNH) / No Hire (NH) / Strong No Hire (SNH)]\n\n"
+            "[Bold one: Strong Hire / Hire / Leaning Hire / Leaning No Hire / No Hire / Strong No Hire]\n\n"
             "## 3. Dimensional Evaluation\n"
-            "Map each dimension to one of:\n"
-            "- Outstanding / Solid / Marginal / Lacking\n"
-            "Cite specific evidence from the JSON in plain language.\n\n"
-            "## 4. Interview Notes\n"
-            'Write in first person ("I"). By technical module, describe:\n'
-            "- What did they proactively bring up vs. what was only drawn out under pressure?\n"
-            "- How did they handle being cornered on consistency, failure modes, capacity?\n"
-            "- What gaps did they never close, even after being guided?\n"
+            "[For EACH dimension in the JSON, use this format:]\n"
+            "* **[dimension_id]**: [Outstanding / Solid / Marginal / Lacking / Insufficient Data]\n"
+            "  * **Positive Evidence**: [Quote from positive_signals, or 'None']\n"
+            "  * **Negative Evidence**: [Quote from negative_signals, or 'None']\n\n"
+            "## 4. Key Architectural Flaws\n"
+            "[Extract the 2-3 most critical technical errors from negative_signals. Explain why each is wrong from an engineering standpoint.]\n\n"
+            "## 5. Unexplored Areas\n"
+            "[List dimensions still at INIT or NEEDS_PROBING with insufficient signals. State what should be assessed if time allowed.]\n"
         )
 
         return self._client.chat(
-            system="You are a cold, objective, but deeply human hiring committee chair who despises corporate jargon.",
+            system="You are an extremely objective, evidence-based hiring committee chair. Every sentence must be grounded in data.",
             user=prompt,
         )
