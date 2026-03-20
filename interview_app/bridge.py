@@ -95,7 +95,10 @@ class InterviewDirectiveExtractor(DirectiveExtractor):
         candidates.sort(key=lambda x: _PRIORITY.get(x[1], 0), reverse=True)
 
         if candidates:
-            return candidates[0][2]
+            node_id, _, directive = candidates[0]
+            # 消费后清除，防止同一条指令被重复发出
+            board.state_tree[node_id]["probe_suggestion"] = None
+            return directive
 
         return "继续倾听。如果候选人停顿或跑偏，用一句话把他拉回正轨。"
 
