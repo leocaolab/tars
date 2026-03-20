@@ -4,6 +4,7 @@ import json
 import time
 from pathlib import Path
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 
 from ube_core import Blackboard
@@ -102,6 +103,29 @@ def save_log(board: Blackboard, log_dir: str = "logs") -> str:
     return str(log_file)
 
 
+def _generate_report(engine: AgentEngine, board: Blackboard) -> None:
+    """调用 ReporterAgent 生成 Hire Packet 面评。"""
+    from .reporter import InterviewReporter
+    # 复用 actor 的 LLM client
+    client = engine.actor._client if hasattr(engine.actor, "_client") else None
+    if not client:
+        return
+    console.print("\n[dim][ Engine ] 正在生成面试评估报告...[/]")
+    reporter = InterviewReporter(client)
+    report = reporter.generate_report(board)
+    console.print(Panel(Markdown(report), title="[bold]Hire Packet[/]", border_style="bright_magenta"))
+
+    # 保存报告到文件
+    import time as _time
+    from pathlib import Path as _Path
+    log_dir = _Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    ts = _time.strftime("%Y%m%d_%H%M%S")
+    report_file = log_dir / f"report_{board.session_id}_{ts}.md"
+    report_file.write_text(report, encoding="utf-8")
+    console.print(f"[dim][ Engine ] 面评报告 → {report_file}[/]")
+
+
 def run_interactive(engine: AgentEngine, board: Blackboard) -> None:
     ctx = board.context
     console.print(Panel(
@@ -118,6 +142,7 @@ def run_interactive(engine: AgentEngine, board: Blackboard) -> None:
         user_input = console.input("[bold green]候选人 (你): [/]")
         if user_input.strip().lower() in ("quit", "exit", "q"):
             console.print("[dim]面试结束。[/]")
+            _generate_report(engine, board)
             save_log(board)
             break
         engine.push_input(board, user_input)
@@ -163,4 +188,5 @@ def run_selfplay(
     console.print("[bold bright_red]  Self-Play Complete[/]")
     console.print(f"[bold]{'='*50}[/]\n")
     render_blackboard(board)
+    _generate_report(engine, board)
     save_log(board)

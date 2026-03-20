@@ -92,10 +92,12 @@ class InterviewEvaluator(IEvaluator):
             "- FATAL_FLAW: 出现致命逻辑漏洞\n\n"
             "=== 输出要求 ===\n"
             "- internal_thought: 逐维度分析候选人此轮发言\n"
-            "- updates: 只包含状态确实需要变化的 node_id → 新状态\n"
-            "- new_positive_signals: 正面证据\n"
-            "- new_negative_signals: 负面证据\n"
-            "- probe_suggestions: NEEDS_PROBING 时的追问建议\n\n"
+            "- updates: Dict[node_id → 新状态]，key 必须是上面列出的 node_id（如 \"discovery.cujs_and_metrics\"）\n"
+            "- new_positive_signals: Dict[node_id → 一句话正面证据]，key 必须是 node_id\n"
+            "- new_negative_signals: Dict[node_id → 一句话负面证据]，key 必须是 node_id\n"
+            "- probe_suggestions: Dict[node_id → 追问建议]，key 必须是 node_id\n\n"
+            "极其重要：所有字典的 key 必须使用上面【能力维度】中列出的 node_id（带点号的），"
+            "例如 \"design.math_and_probabilistic\"。绝对不要使用自创的描述性 key。\n\n"
             "只返回纯 JSON，不要 markdown 代码块。"
         )
 

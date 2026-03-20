@@ -18,31 +18,56 @@ _PRIORITY = {
 }
 
 
+def _resolve_node_id(key: str, valid_ids: set[str]) -> str | None:
+    """尝试将 LLM 返回的 key 匹配到合法的 node_id。
+
+    LLM 有时返回自创的描述性 key（如 "atomicity_awareness"）而非
+    正确的 node_id（如 "design.logical_consistency"）。
+    先精确匹配，再尝试子串包含匹配。
+    """
+    if key in valid_ids:
+        return key
+    # 子串匹配：如果 key 包含某个 node_id 的尾部片段
+    key_lower = key.lower().replace("_", ".").replace("-", ".")
+    for nid in valid_ids:
+        # "design.logical_consistency" 包含 "logical" 或 "consistency"
+        tail = nid.split(".")[-1]
+        if tail in key_lower or key_lower in nid:
+            return nid
+    return None
+
+
 def merge_patch(board: Blackboard, patch: Patch) -> None:
     """将 Evaluator 的通用 Patch 解包为面试专属的黑板更新。"""
     ev_patch = patch.updates.get("_evaluator_patch")
     if not ev_patch:
         return
 
+    valid_ids = set(board.state_tree.keys())
+
     # 状态更新
-    for node_id, new_status in ev_patch.get("updates", {}).items():
-        if node_id in board.state_tree:
-            board.state_tree[node_id]["status"] = new_status
+    for key, new_status in ev_patch.get("updates", {}).items():
+        nid = _resolve_node_id(key, valid_ids)
+        if nid:
+            board.state_tree[nid]["status"] = new_status
 
     # 正面信号
-    for node_id, signal in ev_patch.get("new_positive_signals", {}).items():
-        if node_id in board.state_tree:
-            board.state_tree[node_id].setdefault("positive_signals", []).append(signal)
+    for key, signal in ev_patch.get("new_positive_signals", {}).items():
+        nid = _resolve_node_id(key, valid_ids)
+        if nid:
+            board.state_tree[nid].setdefault("positive_signals", []).append(signal)
 
     # 负面信号
-    for node_id, signal in ev_patch.get("new_negative_signals", {}).items():
-        if node_id in board.state_tree:
-            board.state_tree[node_id].setdefault("negative_signals", []).append(signal)
+    for key, signal in ev_patch.get("new_negative_signals", {}).items():
+        nid = _resolve_node_id(key, valid_ids)
+        if nid:
+            board.state_tree[nid].setdefault("negative_signals", []).append(signal)
 
     # 追问建议
-    for node_id, suggestion in ev_patch.get("probe_suggestions", {}).items():
-        if node_id in board.state_tree:
-            board.state_tree[node_id]["probe_suggestion"] = suggestion
+    for key, suggestion in ev_patch.get("probe_suggestions", {}).items():
+        nid = _resolve_node_id(key, valid_ids)
+        if nid:
+            board.state_tree[nid]["probe_suggestion"] = suggestion
 
 
 class InterviewDirectiveExtractor(DirectiveExtractor):
