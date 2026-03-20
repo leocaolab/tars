@@ -1,6 +1,6 @@
 """面试业务的领域模型 — 所有面试专属概念都在这里。"""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Literal, Optional, Union
 
 NodeStatus = Literal["INIT", "GATHERING_SIGNALS", "SATISFIED", "NEEDS_PROBING", "FATAL_FLAW"]
@@ -52,5 +52,18 @@ class EvaluatorPatch(BaseModel):
     updates: Dict[str, NodeStatus] = Field(default_factory=dict)
     new_positive_signals: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
     new_negative_signals: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
-    # 支持 str (旧格式) 或 {question, urgency} (新格式)
-    probe_suggestions: Dict[str, Union[str, dict]] = Field(default_factory=dict)
+    probe_suggestions: Dict[str, ProbeInstruction] = Field(default_factory=dict)
+
+    @field_validator("probe_suggestions", mode="before")
+    @classmethod
+    def _coerce_probes(cls, v):
+        """Backward compat: coerce plain strings to ProbeInstruction."""
+        if not isinstance(v, dict):
+            return v
+        result = {}
+        for k, val in v.items():
+            if isinstance(val, str):
+                result[k] = {"question": val, "urgency": 3}
+            else:
+                result[k] = val
+        return result

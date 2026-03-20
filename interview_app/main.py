@@ -23,7 +23,8 @@ def main():
     max_turns = 5
     persona = None
     candidate_persona = None
-    blueprint_name = "ticketmaster"
+    blueprint_name = "ticketmaster_v2"
+    legacy_mode = "--legacy" in sys.argv
     for arg in sys.argv:
         if arg.startswith("--turns="):
             max_turns = int(arg.split("=", 1)[1])
@@ -34,8 +35,6 @@ def main():
         elif arg.startswith("--blueprint="):
             blueprint_name = arg.split("=", 1)[1]
 
-    v2_mode = "--v2" in sys.argv
-
     client = create_client(
         provider=settings.llm_provider,
         api_key=settings.llm_api_key,
@@ -44,16 +43,15 @@ def main():
 
     bp_path = str(BLUEPRINTS_DIR / f"{blueprint_name}.json")
 
-    if v2_mode:
-        # V2: three-layer rubric (universal + domain + inline custom)
-        factory_v2 = SessionFactoryV2()
-        board = factory_v2.create(bp_path)
-    else:
-        # Legacy: single rubric.json
+    if legacy_mode:
         rubric = load_rubric()
         blueprint = load_blueprint(bp_path)
         factory = SessionFactory(rubric)
         board = factory.create(blueprint)
+    else:
+        # Default: V2 three-layer rubric (universal + domain + inline custom)
+        factory_v2 = SessionFactoryV2()
+        board = factory_v2.create(bp_path)
 
     # 4. 从 context 中恢复 RubricDimension 列表（给 Evaluator 用）
     dims = [RubricDimension(**d) for d in board.context["rubric"]]
