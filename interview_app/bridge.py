@@ -1,15 +1,10 @@
-"""业务桥接层 — 实现框架要求的 merge_patch 和 DirectiveExtractor。
-
-这是框架与业务之间的"翻译器"：
-- merge_patch: 把框架的通用 Patch 翻译成面试专属的黑板更新
-- InterviewDirectiveExtractor: 从面试黑板中提取导演指令给 Actor
-"""
+"""业务桥接层 — merge_patch, DirectiveExtractor (含考点锁+深度熔断), TerminationChecker。"""
 
 from ube_core import Blackboard, Patch
 from ube_core.types import DirectiveExtractor, TerminationChecker
-from .models import RubricNode
 
-_PRIORITY = {
+# 状态紧急度
+_STATUS_PRIORITY = {
     "FATAL_FLAW": 4,
     "NEEDS_PROBING": 3,
     "GATHERING_SIGNALS": 2,
@@ -17,20 +12,32 @@ _PRIORITY = {
     "SATISFIED": 0,
 }
 
+# 考点静态优先级 — P0 最高，决定深挖顺序
+_NODE_PRIORITY = {
+    "discovery.cujs_and_metrics": 0,       # P0: 需求不清绝不往后走
+    "design.logical_consistency": 1,       # P1: 架构逻辑自洽
+    "design.math_and_probabilistic": 2,    # P2: 容量估算
+    "design.tradeoffs_and_rationale": 3,   # P3: 方案权衡
+    "design.ilities_and_tradeoffs": 4,     # P4: 非功能性
+    "design.component_deep_dive": 5,       # P5: 底层深挖（前置稳了才深挖）
+    "knowledge.factual_correctness": 6,    # P6: 事实核查
+    "execution.stress_testing": 7,         # P7: 极端压力
+    "communication.clarity": 99,           # 最低: 全盘评估，不需要专门发问
+}
+
+# 深度熔断阈值：同一考点最多连续追问 N 轮
+MAX_DEPTH_TURNS = 2
+
+# 终态集合
+_TERMINAL = {"SATISFIED", "FATAL_FLAW"}
+
 
 def _resolve_node_id(key: str, valid_ids: set[str]) -> str | None:
-    """尝试将 LLM 返回的 key 匹配到合法的 node_id。
-
-    LLM 有时返回自创的描述性 key（如 "atomicity_awareness"）而非
-    正确的 node_id（如 "design.logical_consistency"）。
-    先精确匹配，再尝试子串包含匹配。
-    """
+    """尝试将 LLM 返回的 key 匹配到合法的 node_id。"""
     if key in valid_ids:
         return key
-    # 子串匹配：如果 key 包含某个 node_id 的尾部片段
     key_lower = key.lower().replace("_", ".").replace("-", ".")
     for nid in valid_ids:
-        # "design.logical_consistency" 包含 "logical" 或 "consistency"
         tail = nid.split(".")[-1]
         if tail in key_lower or key_lower in nid:
             return nid
@@ -45,60 +52,117 @@ def merge_patch(board: Blackboard, patch: Patch) -> None:
 
     valid_ids = set(board.state_tree.keys())
 
-    # 状态更新
     for key, new_status in ev_patch.get("updates", {}).items():
         nid = _resolve_node_id(key, valid_ids)
         if nid:
             board.state_tree[nid]["status"] = new_status
 
-    # 正面信号（兼容 str 和 List[str]，始终 extend）
     for key, signal in ev_patch.get("new_positive_signals", {}).items():
         nid = _resolve_node_id(key, valid_ids)
         if nid:
             signals = signal if isinstance(signal, list) else [signal]
             board.state_tree[nid].setdefault("positive_signals", []).extend(signals)
 
-    # 负面信号（兼容 str 和 List[str]，始终 extend）
     for key, signal in ev_patch.get("new_negative_signals", {}).items():
         nid = _resolve_node_id(key, valid_ids)
         if nid:
             signals = signal if isinstance(signal, list) else [signal]
             board.state_tree[nid].setdefault("negative_signals", []).extend(signals)
 
-    # 追问建议
     for key, suggestion in ev_patch.get("probe_suggestions", {}).items():
         nid = _resolve_node_id(key, valid_ids)
         if nid:
             board.state_tree[nid]["probe_suggestion"] = suggestion
 
 
+def _get_focus(board: Blackboard) -> tuple[str | None, int]:
+    """从 context 读取当前考点锁状态。"""
+    return (
+        board.context.get("_focused_node_id"),
+        board.context.get("_focused_turn_count", 0),
+    )
+
+
+def _set_focus(board: Blackboard, node_id: str | None, turns: int = 0) -> None:
+    """写入考点锁状态到 context。"""
+    board.context["_focused_node_id"] = node_id
+    board.context["_focused_turn_count"] = turns
+
+
+def _pick_next_node(board: Blackboard) -> str | None:
+    """按优先级挑选下一个需要追问的考点。"""
+    candidates = []
+    for node_id, node in board.state_tree.items():
+        status = node.get("status", "INIT")
+        if status in _TERMINAL:
+            continue
+        probe = node.get("probe_suggestion")
+        if not probe:
+            continue
+        # 组合排序：先按状态紧急度降序，再按考点优先级升序
+        candidates.append((
+            -_STATUS_PRIORITY.get(status, 0),
+            _NODE_PRIORITY.get(node_id, 50),
+            node_id,
+        ))
+    candidates.sort()
+    return candidates[0][2] if candidates else None
+
+
 class InterviewDirectiveExtractor(DirectiveExtractor):
-    """从面试黑板中提取最紧急的导演指令。"""
+    """从面试黑板中提取导演指令。
+
+    核心机制：
+    1. 考点锁 (Topic Lock): 锁定一个考点连续追问，防止跳来跳去
+    2. 深度熔断 (Depth Timeout): 同一考点最多追问 MAX_DEPTH_TURNS 轮后强制切题
+    3. 优先级队列: 按 _NODE_PRIORITY 选择下一个考点
+    """
 
     def extract(self, board: Blackboard) -> str:
-        # 全部 SATISFIED → 收尾
-        all_satisfied = all(
-            node.get("status") == "SATISFIED"
-            for node in board.state_tree.values()
-        )
-        if all_satisfied:
-            return "所有考核维度已通过。用一句话给候选人正面总结，结束面试。"
+        # 全部终态 → 收尾
+        if all(n.get("status") in _TERMINAL for n in board.state_tree.values()):
+            _set_focus(board, None)
+            return "所有考核维度已评估完毕。用一句话给候选人总结，结束面试。"
 
-        # 按优先级排序，取最紧急的有 probe_suggestion 的节点
-        candidates = []
-        for node_id, node_data in board.state_tree.items():
-            status = node_data.get("status", "INIT")
-            probe = node_data.get("probe_suggestion")
-            if status != "SATISFIED" and probe:
-                candidates.append((node_id, status, probe))
+        focused_id, turn_count = _get_focus(board)
 
-        candidates.sort(key=lambda x: _PRIORITY.get(x[1], 0), reverse=True)
+        # === 如果当前有锁定的考点 ===
+        if focused_id and focused_id in board.state_tree:
+            node = board.state_tree[focused_id]
+            status = node.get("status", "INIT")
 
-        if candidates:
-            node_id, _, directive = candidates[0]
-            # 消费后清除，防止同一条指令被重复发出
-            board.state_tree[node_id]["probe_suggestion"] = None
-            return directive
+            # 考点已到终态 → 自然解锁
+            if status in _TERMINAL:
+                _set_focus(board, None)
+                # 继续往下选新考点
+
+            # 深度熔断 → 强制切题
+            elif turn_count >= MAX_DEPTH_TURNS:
+                _set_focus(board, None)
+                return (
+                    f"在当前底层话题上的深挖已经足够了。"
+                    f"请用一句话优雅地收束当前话题（如'好的，这块我大概了解你的深度了'），"
+                    f"然后立即将话题转移到系统设计的下一个关键问题。"
+                )
+
+            # 正常深挖 → 继续追问，轮数 +1
+            else:
+                probe = node.get("probe_suggestion")
+                if probe:
+                    node["probe_suggestion"] = None  # 消费
+                    _set_focus(board, focused_id, turn_count + 1)
+                    return probe
+                else:
+                    # 没有新的 probe → 解锁，选下一个
+                    _set_focus(board, None)
+
+        # === 选择下一个考点锁定 ===
+        next_id = _pick_next_node(board)
+        if next_id:
+            probe = board.state_tree[next_id].get("probe_suggestion")
+            board.state_tree[next_id]["probe_suggestion"] = None  # 消费
+            _set_focus(board, next_id, 1)
+            return probe or "继续倾听。如果候选人停顿或跑偏，用一句话把他拉回正轨。"
 
         return "继续倾听。如果候选人停顿或跑偏，用一句话把他拉回正轨。"
 
@@ -111,12 +175,10 @@ class InterviewTerminationChecker(TerminationChecker):
         if not nodes:
             return False
 
-        # 条件 1：>=2 个 FATAL_FLAW → 提前终止
         fatal = sum(1 for n in nodes if n.get("status") == "FATAL_FLAW")
         if fatal >= 2:
             return True
 
-        # 条件 2：所有维度都已离开未完成态 → 考察完毕
         pending = sum(
             1 for n in nodes
             if n.get("status") in ("INIT", "GATHERING_SIGNALS", "NEEDS_PROBING")
