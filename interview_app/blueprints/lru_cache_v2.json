@@ -1,0 +1,33 @@
+{
+  "problem_id": "component_design_lru_02",
+  "title": "Design a High-Concurrency LRU Cache",
+  "interview_level": "Senior (L5/L6)",
+  "rubric_layers": ["rubrics/universal.json", "rubrics/domain_backend.json"],
+  "global_constants": {
+    "time_complexity": "硬约束：get 和 put 操作平均时间复杂度必须是严格的 O(1)。",
+    "memory": "硬约束：严格受限于初始化时的 Capacity，绝对不允许内存泄漏。",
+    "concurrency": "业务背景：作为核心网关本地缓存，面临极高并发读写，必须线程安全且锁粒度极低。",
+    "pollution": "隐含挑战：需考虑缓存击穿或全表扫描带来的缓存污染问题。"
+  },
+  "rubric_nodes": [
+    {
+      "id": "core.discovery",
+      "initial_probe": "今天我们需要为核心网关设计一个支持高并发的本地 LRU Cache 组件。请先定义核心 API，并告诉我你会选择什么数据结构来支撑它？"
+    },
+    { "id": "core.tradeoffs" },
+    { "id": "core.communication" },
+    { "id": "core.factual_correctness" },
+    { "id": "backend.logical_consistency" },
+    { "id": "backend.component_depth" },
+    { "id": "backend.data_structures" },
+    { "id": "backend.stress_testing" },
+    {
+      "id": "custom.lru.o1_guarantee",
+      "category": "Problem Specific",
+      "priority": 0,
+      "phase": "early",
+      "prerequisites": [],
+      "eval_rule": "【本题专属红线】候选人必须明确给出 HashMap + 双向链表的核心组合来保证 O(1)。如果使用单链表、数组、或 TreeMap 等无法满足 O(1) get/put 的数据结构，直接记为 FATAL_FLAW。"
+    }
+  ]
+}

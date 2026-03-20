@@ -7,7 +7,7 @@ from ube_core.engine import AgentEngine
 from ube_core.router import DirectiveRouter
 from ube_core.llm import create_client
 from .config import settings
-from .session_factory import SessionFactory, load_rubric, load_blueprint
+from .session_factory import SessionFactory, SessionFactoryV2, load_rubric, load_blueprint
 from .evaluator import InterviewEvaluator
 from .actor import InterviewActor
 from .candidate import CandidateAgent
@@ -34,18 +34,26 @@ def main():
         elif arg.startswith("--blueprint="):
             blueprint_name = arg.split("=", 1)[1]
 
+    v2_mode = "--v2" in sys.argv
+
     client = create_client(
         provider=settings.llm_provider,
         api_key=settings.llm_api_key,
         model=settings.llm_model,
     )
 
-    rubric = load_rubric()
-    blueprint = load_blueprint(str(BLUEPRINTS_DIR / f"{blueprint_name}.json"))
+    bp_path = str(BLUEPRINTS_DIR / f"{blueprint_name}.json")
 
-    # 3. 创世
-    factory = SessionFactory(rubric)
-    board = factory.create(blueprint)
+    if v2_mode:
+        # V2: three-layer rubric (universal + domain + inline custom)
+        factory_v2 = SessionFactoryV2()
+        board = factory_v2.create(bp_path)
+    else:
+        # Legacy: single rubric.json
+        rubric = load_rubric()
+        blueprint = load_blueprint(bp_path)
+        factory = SessionFactory(rubric)
+        board = factory.create(blueprint)
 
     # 4. 从 context 中恢复 RubricDimension 列表（给 Evaluator 用）
     dims = [RubricDimension(**d) for d in board.context["rubric"]]
