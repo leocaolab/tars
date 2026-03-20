@@ -123,6 +123,13 @@ def run_interactive(engine: AgentEngine, board: Blackboard) -> None:
         engine.push_input(board, user_input)
 
 
+def _get_persona_label(engine: AgentEngine) -> str:
+    actor = engine.actor
+    if hasattr(actor, "persona"):
+        return f"{actor.persona['name']}"
+    return "default"
+
+
 def run_selfplay(
     engine: AgentEngine,
     board: Blackboard,
@@ -130,10 +137,11 @@ def run_selfplay(
     max_turns: int = 5,
 ) -> None:
     ctx = board.context
+    persona_label = _get_persona_label(engine)
     console.print(Panel(
         f"[bold magenta]{ctx.get('topic', '')}[/]  |  Level: [bold]{ctx.get('interview_level', '')}[/]\n"
         f"物理约束: {json.dumps(ctx.get('global_constants', {}), ensure_ascii=False)}\n"
-        f"对抗轮数: [bold]{max_turns}[/]",
+        f"面试官人设: [bold]{persona_label}[/]  |  对抗轮数: [bold]{max_turns}[/]",
         title="=== UBE Self-Play Arena ===", border_style="bright_red",
     ))
     render_blackboard(board)

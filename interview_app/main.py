@@ -20,9 +20,12 @@ BLUEPRINTS_DIR = Path(__file__).parent / "blueprints"
 def main():
     auto_mode = "--auto" in sys.argv
     max_turns = 5
+    persona = None
     for arg in sys.argv:
         if arg.startswith("--turns="):
             max_turns = int(arg.split("=", 1)[1])
+        elif arg.startswith("--persona="):
+            persona = arg.split("=", 1)[1]
 
     # 1. LLM 客户端
     client = create_client(
@@ -45,7 +48,7 @@ def main():
     # 5. 组装框架引擎 — 注入业务组件
     engine = AgentEngine(
         evaluators=[InterviewEvaluator(client=client, target_dimensions=dims)],
-        actor=InterviewActor(client=client),
+        actor=(actor := InterviewActor(client=client, persona=persona)),
         directive_extractor=InterviewDirectiveExtractor(),
         merge_patch=merge_patch,
         on_event=on_event,
