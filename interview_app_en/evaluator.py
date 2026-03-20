@@ -88,7 +88,8 @@ class InterviewEvaluator(IEvaluator):
             "- updates: Dict[node_id -> new_status], keys MUST be exact node_ids listed above\n"
             "- new_positive_signals: Dict[node_id -> evidence string], keys MUST be node_ids\n"
             "- new_negative_signals: Dict[node_id -> evidence string], keys MUST be node_ids\n"
-            "- probe_suggestions: Dict[node_id -> follow-up question], keys MUST be node_ids\n\n"
+            '- probe_suggestions: Dict[node_id -> {"question": "follow-up text", "urgency": 1-5}], keys MUST be node_ids\n'
+            "  urgency scale: 5=critical flaw must interrupt immediately, 3=important but not urgent, 1=minor nitpick\n\n"
             "CRITICAL: all dict keys must use the exact node_ids with dots (e.g. \"design.logical_consistency\").\n"
             "Return pure JSON only, no markdown code blocks."
         )

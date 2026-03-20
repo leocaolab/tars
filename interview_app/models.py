@@ -40,10 +40,17 @@ class ProblemBlueprint(BaseModel):
     rubric_nodes: List[BlueprintNode]
 
 
+class ProbeInstruction(BaseModel):
+    """追问指令 — 带紧急度评分"""
+    question: str = Field(description="具体的追问话术")
+    urgency: int = Field(default=3, description="紧急程度 1-5。5=致命必须立刻打断，1=小瑕疵")
+
+
 class EvaluatorPatch(BaseModel):
     """Evaluator 输出 — 面试专属的补丁格式"""
     internal_thought: str = ""
     updates: Dict[str, NodeStatus] = Field(default_factory=dict)
     new_positive_signals: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
     new_negative_signals: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
-    probe_suggestions: Dict[str, str] = Field(default_factory=dict)
+    # 支持 str (旧格式) 或 {question, urgency} (新格式)
+    probe_suggestions: Dict[str, Union[str, dict]] = Field(default_factory=dict)

@@ -51,7 +51,12 @@ def merge_patch(board: Blackboard, patch: Patch) -> None:
     for key, suggestion in ev_patch.get("probe_suggestions", {}).items():
         nid = _resolve_node_id(key, valid_ids)
         if nid:
-            board.state_tree[nid]["probe_suggestion"] = suggestion
+            if isinstance(suggestion, dict):
+                board.state_tree[nid]["probe_suggestion"] = suggestion.get("question", "")
+                board.state_tree[nid]["probe_urgency"] = suggestion.get("urgency", 3)
+            else:
+                board.state_tree[nid]["probe_suggestion"] = suggestion
+                board.state_tree[nid]["probe_urgency"] = 3
 
 
 def _get_turn_number(board: Blackboard) -> int:
@@ -76,7 +81,7 @@ def _get_dim_meta(node_id: str, board: Blackboard) -> dict:
 
 
 class InterviewScorer(NodeScorer):
-    """score = (100 - priority) + (status_urgency * 20) + phase_bonus"""
+    """score = (100 - priority) + (status * 20) + phase_bonus + (urgency * 15)"""
 
     def score(self, node_id: str, node: dict, board: Blackboard) -> float:
         meta = _get_dim_meta(node_id, board)
@@ -84,6 +89,7 @@ class InterviewScorer(NodeScorer):
         s += (100 - meta.get("priority", 50))
         status = node.get("status", "INIT")
         s += _STATUS_WEIGHT.get(status, 0) * 20
+        s += node.get("probe_urgency", 3) * 15
         current = _get_current_phase(board)
         node_phase = meta.get("phase", "any")
         if node_phase == "any" or node_phase == current:

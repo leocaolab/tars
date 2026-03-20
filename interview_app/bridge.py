@@ -61,7 +61,13 @@ def merge_patch(board: Blackboard, patch: Patch) -> None:
     for key, suggestion in ev_patch.get("probe_suggestions", {}).items():
         nid = _resolve_node_id(key, valid_ids)
         if nid:
-            board.state_tree[nid]["probe_suggestion"] = suggestion
+            # 支持新格式 {"question": "...", "urgency": N} 和旧格式 "..."
+            if isinstance(suggestion, dict):
+                board.state_tree[nid]["probe_suggestion"] = suggestion.get("question", "")
+                board.state_tree[nid]["probe_urgency"] = suggestion.get("urgency", 3)
+            else:
+                board.state_tree[nid]["probe_suggestion"] = suggestion
+                board.state_tree[nid]["probe_urgency"] = 3
 
 
 # ==========================================
@@ -93,7 +99,7 @@ def _get_dim_meta(node_id: str, board: Blackboard) -> dict:
 class InterviewScorer(NodeScorer):
     """面试专属评分公式。
 
-    score = (100 - static_priority) + (status_urgency × 20) + phase_match_bonus
+    score = (100 - static_priority) + (status_weight × 20) + phase_bonus + (urgency × 15)
     """
 
     def score(self, node_id: str, node: dict, board: Blackboard) -> float:
@@ -106,6 +112,10 @@ class InterviewScorer(NodeScorer):
         # 维度 2：状态紧急度
         status = node.get("status", "INIT")
         s += _STATUS_WEIGHT.get(status, 0) * 20
+
+        # 维度 4：LLM 动态 urgency（1-5，默认 3）
+        urgency = node.get("probe_urgency", 3)
+        s += urgency * 15
 
         # 维度 3：阶段匹配度
         current = _get_current_phase(board)

@@ -95,7 +95,8 @@ class InterviewEvaluator(IEvaluator):
             "- updates: Dict[node_id → 新状态]，key 必须是上面列出的 node_id（如 \"discovery.cujs_and_metrics\"）\n"
             "- new_positive_signals: Dict[node_id → 一句话正面证据]，key 必须是 node_id\n"
             "- new_negative_signals: Dict[node_id → 一句话负面证据]，key 必须是 node_id\n"
-            "- probe_suggestions: Dict[node_id → 追问建议]，key 必须是 node_id\n\n"
+            '- probe_suggestions: Dict[node_id → {"question": "追问话术", "urgency": 1-5}]，key 必须是 node_id\n'
+            "  urgency 评分标准：5=致命架构缺陷必须立刻打断质问，3=重要但不紧急，1=小瑕疵稍后再问\n\n"
             "极其重要：所有字典的 key 必须使用上面【能力维度】中列出的 node_id（带点号的），"
             "例如 \"design.math_and_probabilistic\"。绝对不要使用自创的描述性 key。\n\n"
             "只返回纯 JSON，不要 markdown 代码块。"

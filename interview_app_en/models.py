@@ -40,9 +40,14 @@ class ProblemBlueprint(BaseModel):
     rubric_nodes: List[BlueprintNode]
 
 
+class ProbeInstruction(BaseModel):
+    question: str = Field(description="Follow-up question text")
+    urgency: int = Field(default=3, description="Urgency 1-5. 5=critical must interrupt, 1=minor")
+
+
 class EvaluatorPatch(BaseModel):
     internal_thought: str = ""
     updates: Dict[str, NodeStatus] = Field(default_factory=dict)
     new_positive_signals: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
     new_negative_signals: Dict[str, Union[str, List[str]]] = Field(default_factory=dict)
-    probe_suggestions: Dict[str, str] = Field(default_factory=dict)
+    probe_suggestions: Dict[str, Union[str, dict]] = Field(default_factory=dict)
