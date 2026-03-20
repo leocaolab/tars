@@ -22,6 +22,11 @@
       "eval_rule": "评估候选人对扩展性 (Scale)、弹性 (Resilience)、可靠性 (Reliability) 和成本 (Cost) 的权衡。是否考虑了灾备、降级、限流？方案是否能在极端条件下生存？"
     },
     {
+      "node_id": "design.tradeoffs_and_rationale",
+      "category": "Architecture Proposal",
+      "eval_rule": "核心考察候选人的『Trade-off（权衡）能力』。当候选人提出核心技术组件（如数据库、缓存、消息队列）时，检查他们是否主动对比了至少两种方案（Pros/Cons）并给出选择依据。1. 如果候选人直接抛出单一方案（如'我用 Redis'）而无横向对比，必须记一条负面信号（扣分），并将状态置为 NEEDS_PROBING，建议前台面试官引导其做对比。2. 如果经引导后候选人仍答不出其他方案或强行胡编，记极其严重的负面信号并置为 FATAL_FLAW。"
+    },
+    {
       "node_id": "execution.stress_testing",
       "category": "Boundary Probing",
       "eval_rule": "通过极端条件假设（如流量突增 100 倍、核心机房断网），寻找候选人的知识边界和应急思考能力。评估其是在盲目猜测，还是能依据底层原理推演应对方案。"

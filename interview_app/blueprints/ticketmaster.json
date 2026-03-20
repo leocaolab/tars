@@ -14,6 +14,7 @@
     },
     { "id": "design.math_and_probabilistic" },
     { "id": "design.logical_consistency" },
+    { "id": "design.tradeoffs_and_rationale" },
     { "id": "design.ilities_and_tradeoffs" },
     { "id": "execution.stress_testing" },
     { "id": "communication.clarity" }
