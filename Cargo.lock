@@ -1935,6 +1935,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tars-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tars-types",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "tars-types"
 version = "0.1.0"
 dependencies = [

@@ -9,6 +9,7 @@ members = [
     "crates/tars-melt",
     "crates/tars-storage",
     "crates/tars-runtime",
+    "crates/tars-tools",
     "crates/tars-cli",
 ]
 
