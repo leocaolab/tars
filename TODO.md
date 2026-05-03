@@ -111,19 +111,18 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **Trigger**: First user demo where "I want to switch providers without restarting" matters.
 
 ### B-4. M3 Agent Runtime — real Worker + ContextStore + Backtrack + replay
-- Storage + runtime + agent primitive + AgentMessage envelope + all 3 default agents (Orchestrator + stub Worker + Critic) + the multi-step `run_task` orchestration loop are shipped — see CHANGELOG. **Still missing**:
+- Storage + runtime + agent primitive + AgentMessage envelope + all 3 default agents (Orchestrator + stub Worker + Critic) + the multi-step `run_task` orchestration loop + the `tars run-task` CLI are shipped — see CHANGELOG. **Still missing**:
   - **Real `WorkerAgent` (tool-using)** — today's stub asks the LLM to *describe* what it would do; a real Worker executes file I/O / git / web fetch / shell. Blocked on B-9 (`tars-tools`). Same `AgentMessage::PartialResult` envelope, so the swap is internal to the Worker.
   - **`run_task` replan-on-Reject** — current MVP treats `VerdictKind::Reject` as task-failed. Doc 04 §4.2's full design has Reject trigger a fresh Orchestrator call with the rejection reason as feedback. Slot in when a real consumer hits "the Critic was right to reject but the task is still salvageable".
-  - **CLI: `tars run-task <goal>`** — wire `run_task` into the CLI alongside `tars plan`. Same `dispatch.rs` plumbing pattern; small follow-on.
   - **`ContextStore` + `ContextCompactor`** (Doc 04 §3.3 / §5). Schema-aware history pruner so multi-step trajectories don't grow the prompt unboundedly. Sits between the Trajectory log and the next `AgentContext`. Trigger: when `run_task` traces start exceeding a model's context window in real use.
   - **`PromptBuilder` trait + default impl** (Doc 04 §6). Composes system + tool + persona blocks into a `ChatRequest`. Today each agent constructs its own ad-hoc (Orchestrator + Critic + Worker each have hand-written PROMPT constants — 3 of the trigger-4 reached). Trigger: 4th agent that repeats the pattern.
   - **Backtrack + Saga compensation** (Doc 04 §6). Concrete `CompensationAction` types + `AgentEvent::CompensationExecuted` + the runtime hook that runs compensations in reverse on backtrack. Trigger: first real Worker that has externally-visible side effects (writes a file, makes an API call) AND a real failure-recovery scenario where rolling them back matters.
   - **CLI: `tars trajectory replay <ID>`** — replays a trajectory's LLM/tool calls against the recorded inputs. Needed once Workers have real side effects (compensation interacts with replay). Trigger: lands with Backtrack.
-- **Trigger / order**: `tars run-task` CLI (cheap user-facing win) → real WorkerAgent (after B-9) → ContextStore (when prompts grow) → PromptBuilder (when 4th agent appears) → Backtrack + replay (when Saga matters).
+- **Trigger / order**: real WorkerAgent (after B-9) → ContextStore (when prompts grow) → PromptBuilder (when 4th agent appears) → Backtrack + replay (when Saga matters).
 
 ### B-5. `tars-cli` follow-on subcommands
-- M1 / M2 / M3-first-cut surface is shipped (`tars run` + `tars trajectory list/show`) — see CHANGELOG. Remaining CLI surface from Doc 07 §5:
-  - `tars chat` — interactive REPL (long-lived process, multi-turn). Where the breaker / pipeline-cache cross-call value actually pays off, and where the multi-step Agent loop (B-4) gets its first user-facing home.
+- M1 / M2 / M3 surface is shipped (`tars run` + `tars plan` + `tars run-task` + `tars trajectory list/show`) — see CHANGELOG. Remaining CLI surface from Doc 07 §5:
+  - `tars chat` — interactive REPL (long-lived process, multi-turn). Where the breaker / pipeline-cache cross-call value actually pays off; would build on the same agent triad `tars run-task` already exposes but with multi-turn context state.
   - `tars trajectory delete <ID>` — needs a retention policy decision (rolling window? size cap? both?). Today the file just grows.
   - `tars trajectory replay <ID>` — needs the multi-step Agent loop (B-4) to know what "replay" means at the action level.
   - `tars trajectory diff <ID-A> <ID-B>` — same prompt, two providers / two configs, what differed. Useful demo when EnsemblePolicy lands.

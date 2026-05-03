@@ -32,6 +32,27 @@ needs real I/O — file system, git, web fetch). The loop's
 `AgentMessage::PartialResult` envelope is the same shape a real
 tool-using Worker will emit, so swap-in is a Worker-internal change.
 
+### `tars run-task <goal>` CLI subcommand (`959be20`)
+
+Wires `tars_runtime::run_task` into the CLI alongside `tars run` and
+`tars plan`. The user-facing M3 entry point — humans can now drive
+the full Orchestrator → Worker → Critic loop from a single command
+instead of needing Rust call-site access.
+
+- Shares the same `DispatchArgs` (provider/tier/model/cache/breaker/
+  trajectory) as `tars run` / `tars plan` so flag semantics stay
+  uniform.
+- Specific args: `--goal/-g`, `--max-refinements N` (default 2 —
+  matches `RunTaskConfig::default`), `--worker-domain LABEL`
+  (default `general`; surfaces in `AgentRole::Worker`), `--json`
+  (full `TaskOutcome` as JSON instead of human format).
+- Trajectory id printed to stderr **always** — including on failure
+  paths — so the user can immediately `tars trajectory show <ID>`
+  to inspect what happened.
+- `--no-trajectory` falls through to an in-memory `SqliteEventStore`
+  rather than disabling the runtime (run_task requires a real
+  `Runtime`); events still flow but leave no SQLite artefacts.
+
 ### `run_task` multi-step loop + WorkerAgent stub (`c3cea5b`)
 
 The first user-facing M3 piece. Given a goal, drives the typed agent
