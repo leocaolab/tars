@@ -1,28 +1,24 @@
-//! `tars probe <provider-id>` — sanity-check a CLI provider.
+//! `tars probe <provider-id>` — sanity-check any provider.
 //!
 //! ## What it does
 //!
-//! Loads the user's config, builds the named provider (must be one of
-//! `claude_cli` / `gemini_cli` / `codex_cli`), sends a fixed "say
-//! hello" prompt, and streams every [`ChatEvent`] to stderr in
+//! Loads the user's config, builds the named provider, sends a fixed
+//! "say hello" prompt, and streams every [`ChatEvent`] to stderr in
 //! human-readable form. Exits non-zero on any error or if the stream
 //! ends without a `Finished` event.
 //!
-//! ## Why CLI-only
+//! ## Works for every provider type
 //!
-//! HTTP providers (openai / anthropic / gemini / vllm / mlx /
-//! llamacpp) already give clear failure signals — auth errors, network
-//! errors, 400/401/403 — straight from the wire. There's no need for
-//! a separate probe command; `tars run -P openai_main --prompt ...`
-//! is just as informative.
-//!
-//! CLI providers are different — they shell out to a user-installed
-//! binary, do credential resolution out-of-band (`~/.codex/auth.json`
-//! / `claude login` / `gemini auth login`), and surface most failures
-//! as opaque non-zero exits or JSONL stream errors. The probe command
-//! makes the streaming + auth + binary plumbing visible so a user
-//! debugging "why doesn't `tars run-task -P codex_cli` work" sees
-//! exactly which step broke.
+//! Originally CLI-only (`claude_cli` / `gemini_cli` / `codex_cli`)
+//! because those are the trickiest to get auth + binary lookup right.
+//! Loosened to **all provider types** since the event-by-event dump
+//! is genuinely more informative than `tars run` for HTTP providers
+//! too — you see usage breakdown, model echo, individual deltas, and
+//! exact error variants. Especially useful for local OpenAI-compat
+//! servers (LM Studio / vLLM / MLX / llama.cpp) where the user
+//! typically wants to confirm "yes, the local model server is up,
+//! the loaded model name is X, and tars can talk to it" before using
+//! it in `tars run-task`.
 //!
 //! ## Output shape
 //!
@@ -46,7 +42,6 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 use futures::StreamExt;
 
-use tars_config::ProviderConfig;
 use tars_provider::auth::basic;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::registry::ProviderRegistry;
@@ -56,9 +51,11 @@ use crate::config_loader;
 
 #[derive(Args, Debug)]
 pub struct ProbeArgs {
-    /// Provider id to probe. Must be a CLI-type provider
-    /// (`claude_cli` / `gemini_cli` / `codex_cli`); HTTP providers
-    /// are rejected with a hint.
+    /// Provider id from your config. Works for every provider type —
+    /// CLI subscriptions (`claude_cli` / `gemini_cli` / `codex_cli`),
+    /// direct HTTP APIs (`openai` / `anthropic` / `gemini`), and
+    /// local OpenAI-compatible servers (`openai_compat` / `vllm` /
+    /// `mlx` / `llamacpp`).
     pub provider: String,
 
     /// Override the provider's `default_model` for this probe.
@@ -91,17 +88,6 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
             configured.join(", "),
         )
     })?;
-
-    if !is_cli_provider(provider_cfg) {
-        bail!(
-            "`tars probe` only supports CLI providers (`claude_cli` / `gemini_cli` / \
-             `codex_cli`). `{}` is type `{}` — for HTTP providers use `tars run -P {} \
-             --prompt 'say hi'` which gives the same signal via the normal request path.",
-            args.provider,
-            provider_cfg.type_label(),
-            args.provider,
-        );
-    }
 
     let model = args
         .model
@@ -198,59 +184,3 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
     Ok(())
 }
 
-fn is_cli_provider(cfg: &ProviderConfig) -> bool {
-    matches!(
-        cfg,
-        ProviderConfig::ClaudeCli { .. }
-            | ProviderConfig::GeminiCli { .. }
-            | ProviderConfig::CodexCli { .. }
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tars_types::Auth;
-
-    fn http_cfg() -> ProviderConfig {
-        ProviderConfig::Openai {
-            base_url: None,
-            auth: Auth::None,
-            default_model: "gpt-4o".into(),
-            extras: Default::default(),
-        }
-    }
-
-    fn claude_cli_cfg() -> ProviderConfig {
-        ProviderConfig::ClaudeCli {
-            executable: "claude".into(),
-            timeout_secs: 300,
-            default_model: "sonnet".into(),
-        }
-    }
-
-    #[test]
-    fn is_cli_provider_accepts_all_three_cli_types() {
-        assert!(is_cli_provider(&claude_cli_cfg()));
-        assert!(is_cli_provider(&ProviderConfig::GeminiCli {
-            executable: "gemini".into(),
-            timeout_secs: 300,
-            default_model: "gemini-2.5-pro".into(),
-        }));
-        assert!(is_cli_provider(&ProviderConfig::CodexCli {
-            executable: "codex".into(),
-            timeout_secs: 600,
-            sandbox: tars_config::CodexSandboxConfig::ReadOnly,
-            skip_git_repo_check: true,
-            default_model: "gpt-5.5".into(),
-        }));
-    }
-
-    #[test]
-    fn is_cli_provider_rejects_http_types() {
-        assert!(!is_cli_provider(&http_cfg()));
-        assert!(!is_cli_provider(&ProviderConfig::Mock {
-            canned_response: "x".into(),
-        }));
-    }
-}
