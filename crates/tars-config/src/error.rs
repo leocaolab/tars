@@ -37,7 +37,24 @@ pub enum ConfigError {
     Internal(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ConfigError {
+    /// Construct a `ValidationFailed` variant, asserting the error list
+    /// is non-empty. Callers building this enum from validation results
+    /// already short-circuit on an empty list (see `Config::validate`),
+    /// so an empty vec here would indicate an upstream bug — surface it
+    /// in debug builds rather than rendering "config validation failed (0)".
+    pub fn validation_failed(errors: Vec<ValidationError>) -> Self {
+        debug_assert!(
+            !errors.is_empty(),
+            "ConfigError::validation_failed called with no errors — \
+             validation success should be reported as Ok(()), not as a failure variant",
+        );
+        Self::ValidationFailed { errors }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{key}: {message}")]
 pub struct ValidationError {
     pub key: String,
     pub message: String,
@@ -46,11 +63,5 @@ pub struct ValidationError {
 impl ValidationError {
     pub fn new(key: impl Into<String>, message: impl Into<String>) -> Self {
         Self { key: key.into(), message: message.into() }
-    }
-}
-
-impl std::fmt::Display for ValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.key, self.message)
     }
 }

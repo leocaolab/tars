@@ -63,5 +63,10 @@ mod tests {
         assert!(CacheError::UnresolvedTier.is_not_cacheable());
         assert!(CacheError::UncacheableEnsemble.is_not_cacheable());
         assert!(!CacheError::Backend("eviction".into()).is_not_cacheable());
+        // Serialize is a real failure, not a "not cacheable" signal —
+        // exercise the variant explicitly so refactors of `is_not_cacheable`
+        // can't silently misclassify it.
+        let serde_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        assert!(!CacheError::Serialize(serde_err).is_not_cacheable());
     }
 }

@@ -110,7 +110,17 @@ impl AuthResolver for BasicAuthResolver {
                     Ok(ResolvedAuth::ApiKey(value.expose().to_string()))
                 }
                 SecretRef::Env { var } => match std::env::var(var) {
-                    Ok(v) => Ok(ResolvedAuth::ApiKey(v)),
+                    Ok(v) => {
+                        // An empty / whitespace-only env var produces
+                        // mysterious 401s downstream — surface it as a
+                        // missing credential here.
+                        if v.trim().is_empty() {
+                            return Err(AuthError::Missing(format!(
+                                "env var `{var}` is set but empty"
+                            )));
+                        }
+                        Ok(ResolvedAuth::ApiKey(v))
+                    }
                     // Audit `tars-provider-src-auth-1`: VarError has
                     // two distinct cases — surfacing them separately
                     // turns "auth doesn't work" into actionable
@@ -127,9 +137,14 @@ impl AuthResolver for BasicAuthResolver {
                     let raw = std::fs::read_to_string(path).map_err(|e| {
                         AuthError::Io(format!("reading {}: {e}", path.display()))
                     })?;
-                    Ok(ResolvedAuth::ApiKey(
-                        raw.trim_end_matches(['\n', '\r']).to_string(),
-                    ))
+                    let trimmed = raw.trim_end_matches(['\n', '\r']).to_string();
+                    if trimmed.trim().is_empty() {
+                        return Err(AuthError::Missing(format!(
+                            "credential file `{}` is empty",
+                            path.display()
+                        )));
+                    }
+                    Ok(ResolvedAuth::ApiKey(trimmed))
                 }
             },
         }

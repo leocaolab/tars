@@ -44,6 +44,16 @@ impl RequestContext {
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
+        self.cancel.is_cancelled() || self.is_deadline_exceeded()
+    }
+
+    /// True iff a deadline is set and `Instant::now()` has passed it.
+    /// Kept separate from `is_cancelled()` for callers that want to
+    /// distinguish a hard timeout from explicit caller cancellation.
+    pub fn is_deadline_exceeded(&self) -> bool {
+        match self.deadline {
+            Some(d) => Instant::now() >= d,
+            None => false,
+        }
     }
 }

@@ -61,8 +61,7 @@ impl ConfigManager {
             path: path.clone(),
             source: Box::new(e),
         })?;
-        cfg.validate()
-            .map_err(|errors| ConfigError::ValidationFailed { errors })?;
+        cfg.validate().map_err(ConfigError::validation_failed)?;
         Ok(cfg)
     }
 
@@ -73,8 +72,7 @@ impl ConfigManager {
             path: PathBuf::from("<inline>"),
             source: Box::new(e),
         })?;
-        cfg.validate()
-            .map_err(|errors| ConfigError::ValidationFailed { errors })?;
+        cfg.validate().map_err(ConfigError::validation_failed)?;
         Ok(cfg)
     }
 }

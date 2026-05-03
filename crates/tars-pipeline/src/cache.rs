@@ -241,8 +241,13 @@ fn wrap_stream_for_write(
             original_usage: response.usage,
             response,
         };
+        let label = key.debug_label.clone();
         if let Err(e) = registry.write(key, value, &policy).await {
-            tracing::warn!(error = %e, "cache: write failed (degraded silently)");
+            tracing::warn!(
+                error = %e,
+                label = %label,
+                "cache: write failed (degraded silently)",
+            );
         }
     }
 }

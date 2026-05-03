@@ -172,18 +172,24 @@ mod tests {
     #[test]
     fn openai_default_includes_org_and_project_env_headers() {
         let cfg = default_openai();
-        match cfg {
+        match &cfg {
             ProviderConfig::Openai { extras, .. } => {
                 assert_eq!(
-                    extras.env_http_headers.get("OpenAI-Organization").unwrap(),
+                    extras
+                        .env_http_headers
+                        .get("OpenAI-Organization")
+                        .expect("OpenAI-Organization env header missing"),
                     "OPENAI_ORGANIZATION"
                 );
                 assert_eq!(
-                    extras.env_http_headers.get("OpenAI-Project").unwrap(),
+                    extras
+                        .env_http_headers
+                        .get("OpenAI-Project")
+                        .expect("OpenAI-Project env header missing"),
                     "OPENAI_PROJECT"
                 );
             }
-            _ => panic!("wrong variant"),
+            other => panic!("expected Openai variant, got: {other:?}"),
         }
     }
 
@@ -202,12 +208,15 @@ mod tests {
         .collect();
         let merged = merge_builtin_with_user(user);
         // Now `openai` is the user version, not the default.
-        match merged.get(&ProviderId::new("openai")).unwrap() {
+        let cfg = merged
+            .get(&ProviderId::new("openai"))
+            .expect("merged config should contain 'openai' provider");
+        match cfg {
             ProviderConfig::Openai { base_url, default_model, .. } => {
                 assert_eq!(base_url.as_deref(), Some("https://my.proxy/v1"));
                 assert_eq!(default_model, "gpt-4o-mini");
             }
-            _ => panic!(),
+            other => panic!("expected Openai variant after override, got: {other:?}"),
         }
         // Other built-ins unchanged.
         assert!(merged.contains_key(&ProviderId::new("anthropic")));
@@ -235,25 +244,25 @@ mod tests {
     #[test]
     fn mlx_default_targets_mlx_community_qwen() {
         let cfg = default_mlx();
-        match cfg {
+        match &cfg {
             ProviderConfig::Mlx { default_model, base_url, auth, .. } => {
                 assert!(default_model.starts_with("mlx-community/"));
                 assert!(base_url.is_none()); // adapter falls back to localhost:8080
                 assert!(matches!(auth, Auth::None));
             }
-            _ => panic!("wrong variant"),
+            other => panic!("expected Mlx variant, got: {other:?}"),
         }
     }
 
     #[test]
     fn llamacpp_default_targets_gguf_filename() {
         let cfg = default_llamacpp();
-        match cfg {
+        match &cfg {
             ProviderConfig::Llamacpp { default_model, .. } => {
                 // GGUF naming convention: <model>-<size>-<quant>
                 assert!(default_model.contains("Q5_K_M") || default_model.contains("Q4"));
             }
-            _ => panic!("wrong variant"),
+            other => panic!("expected Llamacpp variant, got: {other:?}"),
         }
     }
 }
