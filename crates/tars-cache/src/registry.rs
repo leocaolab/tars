@@ -143,11 +143,27 @@ impl CacheRegistry for MemoryCacheRegistry {
         if !policy.l1 {
             return Ok(());
         }
-        // moka's per-entry TTL needs an `Expiry` impl on the cache
-        // builder — for M1 we accept the global `default_ttl` (set at
-        // construction time) for everything in L1. The policy's
-        // `l1_ttl` is honoured by L2 once L2 lands.
-        let _ = policy.l1_ttl.unwrap_or(self.default_ttl);
+        // Audit `tars-cache-src-registry-1`: previously this computed
+        // `policy.l1_ttl.unwrap_or(self.default_ttl)` and immediately
+        // discarded it with `let _ = ...`, while the constructor doc
+        // claimed `l1_ttl` would override on a per-write basis. moka's
+        // per-entry TTL actually requires an `Expiry` policy impl on
+        // the builder — `Cache::insert` doesn't take a TTL. Be honest
+        // about it: log a debug message when a caller tries to
+        // override and we silently ignore. SqliteCacheRegistry's L2
+        // path DOES honor `l1_ttl` (per its own builder); a future
+        // moka builder rev that exposes per-entry insert can plumb
+        // this through here.
+        if let Some(requested) = policy.l1_ttl {
+            if requested != self.default_ttl {
+                tracing::debug!(
+                    requested_ms = requested.as_millis() as u64,
+                    actual_ms = self.default_ttl.as_millis() as u64,
+                    "cache: MemoryCacheRegistry honors only the constructor-time \
+                     default_ttl; per-write l1_ttl override ignored",
+                );
+            }
+        }
         self.inner.insert(key.fingerprint, Arc::new(value)).await;
         Ok(())
     }

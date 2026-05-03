@@ -161,8 +161,22 @@ impl LlmService for CacheLookupService {
 const POLICY_ATTR: &str = "cache.policy";
 
 fn read_policy(ctx: &RequestContext) -> CachePolicy {
-    let Ok(attrs) = ctx.attributes.read() else {
-        return CachePolicy::default();
+    // Audit `tars-pipeline-src-cache-1`: lock poisoning previously
+    // degraded silently to default. Poison = a panic occurred
+    // while another task held the write side; treating that as
+    // "default policy is fine" hides the underlying bug. Log loud,
+    // then degrade.
+    let attrs = match ctx.attributes.read() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "cache: ctx.attributes RwLock poisoned during read; \
+                 falling back to default policy. The underlying panic \
+                 should be investigated.",
+            );
+            return CachePolicy::default();
+        }
     };
     let Some(v) = attrs.get(POLICY_ATTR) else {
         return CachePolicy::default();
@@ -254,8 +268,25 @@ pub fn set_cache_policy(ctx: &RequestContext, policy: &CachePolicy) {
             return;
         }
     };
-    if let Ok(mut attrs) = ctx.attributes.write() {
-        attrs.insert(POLICY_ATTR.into(), value);
+    // Audit `tars-pipeline-src-cache-5`: lock poisoning was
+    // previously a silent no-op — the caller's explicit policy
+    // wouldn't apply, but the function returned as if it had.
+    // Log loud so a poisoned-lock incident leaves a trace; the
+    // function still doesn't return Result because a "tell me your
+    // cache preference" call shouldn't be on the request critical
+    // path.
+    match ctx.attributes.write() {
+        Ok(mut attrs) => {
+            attrs.insert(POLICY_ATTR.into(), value);
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "cache: ctx.attributes RwLock poisoned during set_cache_policy; \
+                 the caller's explicit policy was NOT applied. Investigate the \
+                 prior panic that poisoned the lock.",
+            );
+        }
     }
 }
 

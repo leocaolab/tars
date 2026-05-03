@@ -73,21 +73,45 @@ async fn list(runtime: &LocalRuntime) -> Result<()> {
     ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
     println!("{:<34} {:>6}  STATUS", "ID", "EVENTS");
+    // Audit `tars-cli-src-trajectory-1`: per-trajectory replay()
+    // failures used to bail out via `?`, which meant one corrupted
+    // row hid every other (working) trajectory from the user. Now
+    // we render the row with a `<error>` status + log the cause to
+    // stderr so a human can chase it.
+    let mut had_errors = false;
     for id in &ids {
-        let events = runtime.replay(id).await?;
-        let count = events.len();
-        let status = if events.last().is_some_and(tars_runtime::AgentEvent::is_terminal) {
-            // Distinguish completed vs abandoned at the row level
-            // — the last event's discriminator carries it.
-            match events.last().unwrap() {
-                tars_runtime::AgentEvent::TrajectoryCompleted { .. } => "completed",
-                tars_runtime::AgentEvent::TrajectoryAbandoned { .. } => "abandoned",
-                _ => "terminal",
+        match runtime.replay(id).await {
+            Ok(events) => {
+                let count = events.len();
+                let status = if events.last().is_some_and(tars_runtime::AgentEvent::is_terminal) {
+                    // Distinguish completed vs abandoned at the row level
+                    // — the last event's discriminator carries it.
+                    match events.last().unwrap() {
+                        tars_runtime::AgentEvent::TrajectoryCompleted { .. } => "completed",
+                        tars_runtime::AgentEvent::TrajectoryAbandoned { .. } => "abandoned",
+                        _ => "terminal",
+                    }
+                } else {
+                    "active"
+                };
+                println!("{:<34} {:>6}  {}", id.as_str(), count, status);
             }
-        } else {
-            "active"
-        };
-        println!("{:<34} {:>6}  {}", id.as_str(), count, status);
+            Err(e) => {
+                had_errors = true;
+                tracing::warn!(
+                    trajectory_id = %id,
+                    error = %e,
+                    "trajectory list: replay failed; row marked <error>",
+                );
+                println!("{:<34} {:>6}  <error>", id.as_str(), "?");
+            }
+        }
+    }
+    if had_errors {
+        eprintln!(
+            "(some trajectories couldn't be read — see logs above; \
+             other rows still listed for visibility)"
+        );
     }
     Ok(())
 }
