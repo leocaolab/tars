@@ -32,8 +32,9 @@ use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 /// Default cap on entries returned per call.
 pub const DEFAULT_MAX_ENTRIES: usize = 256;
 
-/// Description prompt — externalized to `list_dir.txt` so iteration
-/// doesn't need a Rust recompile (TODO L-1).
+/// Description prompt — externalized to `list_dir.txt` (TODO L-1).
+/// See `read_file.rs::DESCRIPTION_TRIMMED` for the security rationale
+/// (compile-time embed, NOT runtime file load).
 static DESCRIPTION_TRIMMED: LazyLock<String> =
     LazyLock::new(|| include_str!("list_dir.txt").trim_end().to_string());
 

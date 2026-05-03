@@ -37,6 +37,57 @@ ContextStore + ContextCompactor, PromptBuilder, Backtrack + Saga,
 `tars trajectory replay`. None of these block the M3 acceptance
 criteria; they're enhancements to a fully functional baseline.
 
+### opencode-borrow P1 wave: L-1 + L-3 + L-4 (`7290e27` / `c5d8e5d`)
+
+First three `defer > delete > implement` items from the opencode
+survey (TODO L-1..L-12). All three were "do now" tier — small
+cost, immediate value, no dependencies.
+
+**L-1: tool descriptions externalized to `.txt` files** (`7290e27`)
+- `Tool::description()` returns `include_str!("read_file.txt").trim_end()`
+  via a `LazyLock<String>` instead of an inline `&'static str`.
+- New sibling files: `crates/tars-tools/src/builtins/read_file.txt`
+  + `list_dir.txt`. Mirrors opencode's tool/<name>.txt pattern.
+- **Wins**: prompt diffs review separately from Rust changes; clean
+  per-prompt git history; future i18n via per-locale `.txt` swap.
+- **Security posture**: `include_str!` is a compile-time embed — the
+  prompts are baked into the signed binary, no runtime mutation
+  surface, no per-tenant cross-contamination via shared filesystem.
+  This is the right enterprise posture; runtime file loading would
+  be a real prompt-injection escalation surface and is deliberately
+  NOT done. (Earlier "no recompile needed" framing was incorrect —
+  editing a .txt does still require `cargo build`.)
+
+**L-3: `ToolResult.title` for trajectory + future-TUI readability** (`7290e27`)
+- `ToolResult { title: String, content: String, is_error: bool }`
+  with new constructors `titled_success` / `titled_error` alongside
+  the untitled ones (back-compat for external callers).
+- `ReadFileTool` fills `"Read foo.rs (4096 bytes)"` /
+  `"foo.rs not found"` / `"foo.rs is not UTF-8"`.
+- `ListDirTool` fills `"Listed src/ (23 entries)"` /
+  `"Listed src/ (256+ entries, truncated)"`.
+- `ToolRegistry::dispatch` emits a `tracing::info!` with the title;
+  the title is **not** placed into `Message::Tool` (LLM-visible
+  content stays unchanged).
+
+**L-4: Retry-After header parsing in `RetryMiddleware`** (`c5d8e5d`)
+- New `tars_provider::http_base::parse_retry_after(&HeaderMap) ->
+  Option<Duration>` with three-tier resolution:
+  1. `retry-after-ms` (millisecond-precision; Anthropic uses this)
+  2. `retry-after` as positive integer (seconds, RFC 7231)
+  3. `retry-after` as HTTP date (past dates clamp to ZERO so the
+     caller can retry immediately)
+- API change: `HttpAdapter::classify_error` grew a `&HeaderMap`
+  parameter between `status` and `body`. http_base.rs snapshots
+  headers before consuming the response.
+- All three HTTP backends (openai / anthropic / gemini) now populate
+  `RateLimited::retry_after` from headers instead of `None`.
+- `RetryMiddleware` already had `respect_retry_after = true` by
+  default — now it actually has a value to honor.
+- Dep added: `httpdate 1` (~5 KB compiled, RFC 7231 date parser).
+- 7 unit tests on the helper + 2 backend tests pinning the populated
+  field. tars-provider: 99 tests (was 90).
+
 ### `codex_cli` provider + `tars probe` (`a4e2254` / `72091b4` / `dd99b48` / `8712937`)
 
 Third subscription-CLI provider lands alongside `claude_cli` /

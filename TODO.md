@@ -167,12 +167,14 @@ Surveyed `../opencode` (TypeScript-based AI coding agent, Effect-TS runtime, ~5-
 
 > **Vocabulary**: `L-N` = Lesson learned from prior art. Same `defer > delete > implement` discipline applies — these are recommendations, not commitments. Each carries a trigger condition.
 
-### L-1. Externalize tool descriptions to `.txt` files
-- **What**: every `Tool::description()` becomes `include_str!("read_file.txt")` instead of an inline string literal in Rust source.
-- **Source**: `opencode/packages/opencode/src/tool/{read,edit,grep,…}.txt` — each tool ships with its description as a sibling text file, imported via the bundler.
-- **Why**: descriptions are LLM-facing prompts that get iterated frequently — currently every tweak is a Rust recompile + commit. Externalizing them unblocks fast iteration, future i18n, and lets non-Rust collaborators edit prompts.
-- **Cost**: ~30 min per tool × 2 tools (`fs.read_file` / `fs.list_dir`) + a 5-line refactor pattern.
-- **Trigger**: now (cheapest item; no real reason to defer).
+### L-1. Externalize tool descriptions to `.txt` files — ✅ shipped (`7290e27`)
+- **What**: `Tool::description()` returns `include_str!("read_file.txt").trim_end()` instead of an inline string literal.
+- **Source**: `opencode/packages/opencode/src/tool/{read,edit,grep,…}.txt`.
+- **What this actually buys** (correcting an earlier overclaim): `include_str!` is a **compile-time** embed — editing a `.txt` file still requires `cargo build`. The wins are: (a) prompt diffs review cleaner separated from Rust changes; (b) `git log -- read_file.txt` gives a clean per-prompt history; (c) future i18n can swap `.txt` files per locale at compile time.
+- **Enterprise security posture** — TARS is targeting enterprise deployments, which raises the bar:
+  - Compile-time embed is the **right** posture: prompts are part of the signed binary, no runtime mutation surface, no tenant-cross contamination, audit-friendly (the binary hash pins exactly which prompts were running).
+  - Runtime file loading (`std::fs::read_to_string("~/.config/tars/prompts/...")`) would be a **real escalation surface** — any process / user with write access could inject malicious instructions into every subsequent LLM call. In multi-tenant deployments one tenant could affect all others. Don't add this without IAM-gated config dir + signature verification + symlink rejection + tenant scoping.
+  - **Follow-on for SOC 2 / audit**: `LlmCallCaptured` should grow a `system_prompt_hash` field so the trajectory log proves "this LLM call used exactly system prompt SHA256(...)". Today the prompt version is implicit in the binary hash — fine for single-deploy, weak for distributed audits. Trigger: first compliance review.
 
 ### L-2. Universal output truncation in `ToolRegistry::dispatch`
 - **What**: `ToolRegistry::dispatch` wraps every tool's `ToolResult` through a per-agent `OutputTruncator` (default: write-overflow-to-file, return path + tail). Today each tool implements its own cap (`fs.read_file` 256 KiB, `fs.list_dir` 256 entries) — no shared limit, no per-agent override.
@@ -181,19 +183,13 @@ Surveyed `../opencode` (TypeScript-based AI coding agent, Effect-TS runtime, ~5-
 - **Cost**: ~half-day. Add `OutputTruncator` trait + default impl to `tars-tools`. `AgentContext` grows an `output_budget` field. Existing per-tool caps become "the upper bound the truncator never exceeds even if agent budget is bigger".
 - **Trigger**: when adding the 4th builtin OR when a real consumer tunes per-agent truncation.
 
-### L-3. Add `title` field to `ToolResult`
-- **What**: `pub struct ToolResult { title: String, content: String, is_error: bool }` — short human-readable label like `"Read foo.rs"`, `"Run cargo test"`, `"Listed src/ (23 entries)"`.
-- **Source**: `opencode/packages/opencode/src/tool/tool.ts:30` — `ExecuteResult.title`.
-- **Why**: trajectory log's `LlmCallCaptured.response_summary` currently just truncates `content` to 200 chars, which is often noise (file bytes, dir listings). A `title` is what humans actually want to see when scanning `tars trajectory show <ID>`.
-- **Cost**: ~10 min — add field, fill in the 2 builtins, optionally project into trajectory event summaries.
-- **Trigger**: now (trivial).
+### L-3. Add `title` field to `ToolResult` — ✅ shipped (`7290e27`)
+- **What shipped**: `ToolResult { title: String, content: String, is_error: bool }` + `titled_success` / `titled_error` constructors. `ReadFileTool` fills `"Read foo.rs (4096 bytes)"`-style titles; `ListDirTool` fills `"Listed src/ (23 entries)"`. `ToolRegistry::dispatch` emits a `tracing::info!` with the title; the title is **not** placed into `Message::Tool` (LLM-visible content stays unchanged).
+- **Follow-on (deferred)**: project the title into `LlmCallCaptured.response_summary` when the assistant turn includes a tool call — today the trace event is the only consumer. Wait until trajectory-replay or TUI work has a real reason to read it back.
 
-### L-4. Parse `Retry-After` headers in `RetryMiddleware`
-- **What**: `tars-pipeline/src/retry.rs` reads `retry-after-ms` (millisecond-precision, when present) → `retry-after` (seconds OR HTTP date) → falls back to current exponential backoff. Today we use exponential backoff exclusively, ignoring server hints.
-- **Source**: `opencode/packages/opencode/src/session/retry.ts:21` (`delay()` fn) — three-tier resolution.
-- **Why**: Anthropic and OpenAI both emit `retry-after` precisely so clients can avoid retry storms during rate limiting. Ignoring it means we either retry too fast (worsen the rate limit) or too slow (waste time).
-- **Cost**: 1-2h. Add `extract_retry_after_ms(&ProviderError) -> Option<u64>` helper, wire into RetryMiddleware schedule.
-- **Trigger**: now (cheap, real value, no dependencies).
+### L-4. Parse `Retry-After` headers in `RetryMiddleware` — ✅ shipped (`c5d8e5d`)
+- **What shipped**: new `tars_provider::http_base::parse_retry_after(&HeaderMap) -> Option<Duration>` with three-tier resolution (`retry-after-ms` → `retry-after` seconds → `retry-after` HTTP-date; past dates clamp to ZERO). `HttpAdapter::classify_error` grew a `&HeaderMap` parameter; openai / anthropic / gemini all populate `RateLimited::retry_after` from headers. `RetryMiddleware` already had `respect_retry_after = true` by default — now it actually has a value to honor. `httpdate 1` added as the only new dep.
+- **Tests**: 7 unit tests on the helper (priority / formats / garbage / past-date), 2 backend tests pinning the populated field. 99 provider tests total.
 
 ### L-5. Permission system (`Ruleset` of `(permission, pattern, action)` rules)
 - **What**: a per-agent `Ruleset = Vec<{permission, pattern, action: allow|deny|ask}>` with wildcard match, last-match-wins. Tools call `ctx.ask({permission, patterns, metadata})` to gate side-effecting operations interactively. Replaces `ReadFileTool::with_root` (static jail) with a more general policy.

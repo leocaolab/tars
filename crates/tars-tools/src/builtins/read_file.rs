@@ -42,10 +42,14 @@ use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 /// Default max bytes read by `fs.read_file`. ~256 KiB.
 pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024;
 
-/// Description prompt — externalized to `read_file.txt` so iteration
-/// doesn't need a Rust recompile (TODO L-1). Loaded once at first
-/// access; trailing newline is trimmed because the file naturally
-/// ends with one and that's noise to consumers.
+/// Description prompt — externalized to `read_file.txt` (TODO L-1)
+/// so prompt diffs review cleanly separately from Rust changes.
+/// `include_str!` is **compile-time**: editing the .txt still needs
+/// `cargo build`. This is deliberate — the compile-time embed is the
+/// correct enterprise security posture (prompts baked into the
+/// signed binary, no runtime mutation surface, no per-tenant
+/// contamination via shared filesystem). Trailing newline trimmed
+/// because the file naturally ends with one and that's noise.
 static DESCRIPTION_TRIMMED: LazyLock<String> =
     LazyLock::new(|| include_str!("read_file.txt").trim_end().to_string());
 
