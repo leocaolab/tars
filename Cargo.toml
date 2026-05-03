@@ -4,6 +4,7 @@ members = [
     "crates/tars-types",
     "crates/tars-config",
     "crates/tars-provider",
+    "crates/tars-pipeline",
 ]
 
 [workspace.package]

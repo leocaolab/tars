@@ -1317,6 +1317,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tars-pipeline"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures",
+ "serde_json",
+ "tars-provider",
+ "tars-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "tars-provider"
 version = "0.1.0"
 dependencies = [
