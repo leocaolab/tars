@@ -20,6 +20,9 @@ tars-provider = { path = "../tars-provider" }
 tars-pipeline = { path = "../tars-pipeline" }
 tars-cache = { path = "../tars-cache" }
 tars-melt = { path = "../tars-melt" }
+tars-storage = { path = "../tars-storage" }
+tars-runtime = { path = "../tars-runtime" }
+serde_json.workspace = true
 
 # Async
 tokio.workspace = true
@@ -35,4 +38,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-serde_json.workspace = true
+tempfile = "3"

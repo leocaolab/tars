@@ -36,12 +36,13 @@ use tars_pipeline::{
 use tars_provider::auth::basic;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::registry::ProviderRegistry;
+use tars_runtime::{AgentEvent, LocalRuntime, Runtime, StepIdempotencyKey};
 use tars_types::{
     CacheHitInfo, ChatEvent, ChatRequest, CostUsd, ModelHint, ModelTier, ProviderId,
-    RequestContext, Usage,
+    RequestContext, TrajectoryId, Usage,
 };
 
-use crate::config_loader;
+use crate::{config_loader, event_store};
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
@@ -105,6 +106,21 @@ pub struct RunArgs {
     /// scripting many calls in sequence against the same SQLite cache.
     #[arg(long)]
     pub breaker: bool,
+
+    /// Skip writing this invocation to the trajectory event store.
+    /// Default: every `tars run` opens a new trajectory and writes
+    /// the lifecycle (`Started → StepStarted → LlmCallCaptured →
+    /// StepCompleted → TrajectoryCompleted`) so `tars trajectory list`
+    /// / `tars trajectory show` can replay history. Opt out for
+    /// scripts that fire thousands of calls and don't want the file
+    /// to grow.
+    #[arg(long)]
+    pub no_trajectory: bool,
+
+    /// Override the event store path. Default:
+    /// `$XDG_DATA_HOME/tars/events.sqlite`.
+    #[arg(long, env = "TARS_EVENTS_PATH")]
+    pub events_path: Option<PathBuf>,
 }
 
 pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> {
@@ -134,7 +150,7 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     let cache_registry = build_cache(args.cache_path.as_deref());
     let cache_factory = CacheKeyFactory::new(1);
 
-    let pipeline = Pipeline::builder_with_inner(dispatch.inner)
+    let pipeline = Pipeline::builder_with_inner(dispatch.inner.clone())
         .layer(TelemetryMiddleware::new())
         .layer(CacheLookupMiddleware::new(
             cache_registry,
@@ -148,18 +164,272 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     if args.no_cache {
         set_cache_policy(&ctx, &CachePolicy::off());
     }
+
+    // Trajectory log — best-effort. Default ON; --no-trajectory or a
+    // missing XDG data dir skips. Any error mid-write degrades to a
+    // tracing::warn so the LLM call itself isn't blocked by a
+    // local-state hiccup (same Doc 03 §4.3 "best-effort, never fatal"
+    // discipline the cache uses).
+    let trajectory_logger = build_trajectory_logger(&args, &dispatch).await;
+
     let dispatch_label = dispatch.label.clone();
-    let stream = Arc::new(pipeline)
-        .call(req, ctx)
-        .await
-        .with_context(|| format!("opening stream via {dispatch_label}"))?;
 
-    let outcome = drain_stream_to_stdout(stream).await?;
+    let stream_result = Arc::new(pipeline).call(req, ctx).await;
+    let stream = match stream_result {
+        Ok(s) => s,
+        Err(e) => {
+            // Open-time failure — log StepFailed + abandon, then bubble.
+            if let Some(logger) = &trajectory_logger {
+                logger.record_open_failure(&e).await;
+            }
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("opening stream via {dispatch_label}"));
+        }
+    };
 
+    let outcome = drain_stream_to_stdout(stream).await;
+
+    // Whatever happened (success / mid-stream error), close out the
+    // trajectory before propagating.
+    if let Some(logger) = &trajectory_logger {
+        logger.record_outcome(&outcome, &dispatch).await;
+    }
+
+    let outcome = outcome?;
     if !args.no_summary {
         print_summary(dispatch.cost_provider.as_ref(), &outcome);
+        if let Some(logger) = &trajectory_logger {
+            eprintln!("── trajectory: {}", logger.id());
+        }
     }
     Ok(())
+}
+
+/// Holds the per-invocation trajectory + the runtime handle that
+/// writes to it. Lifecycle: `start_for_run()` writes
+/// `TrajectoryStarted + StepStarted`; later `record_outcome()`
+/// writes the rest.
+///
+/// All methods swallow errors with a `tracing::warn` rather than
+/// propagating — trajectory logging is observability, not the
+/// critical path. A SQLite hiccup must not block the user's LLM
+/// response.
+struct TrajectoryLogger {
+    runtime: Arc<LocalRuntime>,
+    traj: TrajectoryId,
+    // Note: the StepStarted event already carries its idempotency key
+    // — recovery code that wants it reads `runtime.replay(&traj)` and
+    // pulls it from there. We don't keep an extra copy on the logger.
+}
+
+impl TrajectoryLogger {
+    fn id(&self) -> &TrajectoryId {
+        &self.traj
+    }
+
+    async fn record_open_failure(&self, err: &tars_types::ProviderError) {
+        let class = format!("{:?}", err.class()).to_lowercase();
+        let _ = self
+            .runtime
+            .append(
+                &self.traj,
+                AgentEvent::StepFailed {
+                    traj: self.traj.clone(),
+                    step_seq: 1,
+                    error: format!("{err}"),
+                    classification: class,
+                },
+            )
+            .await
+            .map_err(|e| tracing::warn!(error = %e, "trajectory: failed to record StepFailed"));
+        let _ = self
+            .runtime
+            .append(
+                &self.traj,
+                AgentEvent::TrajectoryAbandoned {
+                    traj: self.traj.clone(),
+                    cause: format!("open-time error: {err}"),
+                },
+            )
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "trajectory: failed to record TrajectoryAbandoned")
+            });
+    }
+
+    async fn record_outcome(
+        &self,
+        outcome: &Result<StreamOutcome>,
+        dispatch: &Dispatch,
+    ) {
+        match outcome {
+            Ok(o) => {
+                let _ = self
+                    .runtime
+                    .append(
+                        &self.traj,
+                        AgentEvent::LlmCallCaptured {
+                            traj: self.traj.clone(),
+                            step_seq: 1,
+                            provider: dispatch.cache_origin_id.clone(),
+                            prompt_summary: format!(
+                                "see step's input_summary; model={}",
+                                dispatch.model_label
+                            ),
+                            response_summary: response_summary(o),
+                            usage: o.usage,
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "trajectory: failed to record LlmCallCaptured")
+                    });
+                let _ = self
+                    .runtime
+                    .append(
+                        &self.traj,
+                        AgentEvent::StepCompleted {
+                            traj: self.traj.clone(),
+                            step_seq: 1,
+                            output_summary: response_summary(o),
+                            usage: o.usage,
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "trajectory: failed to record StepCompleted")
+                    });
+                let stop = o
+                    .stop_reason
+                    .map(|s| format!("{s:?}"))
+                    .unwrap_or_else(|| "no-finished".into());
+                let _ = self
+                    .runtime
+                    .append(
+                        &self.traj,
+                        AgentEvent::TrajectoryCompleted {
+                            traj: self.traj.clone(),
+                            summary: format!(
+                                "stop={stop}; tokens in={} out={}",
+                                o.usage.input_tokens, o.usage.output_tokens
+                            ),
+                        },
+                    )
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "trajectory: failed to record TrajectoryCompleted")
+                    });
+            }
+            Err(e) => {
+                let _ = self
+                    .runtime
+                    .append(
+                        &self.traj,
+                        AgentEvent::StepFailed {
+                            traj: self.traj.clone(),
+                            step_seq: 1,
+                            error: format!("{e:#}"),
+                            classification: "stream_error".into(),
+                        },
+                    )
+                    .await;
+                let _ = self
+                    .runtime
+                    .append(
+                        &self.traj,
+                        AgentEvent::TrajectoryAbandoned {
+                            traj: self.traj.clone(),
+                            cause: format!("mid-stream error: {e:#}"),
+                        },
+                    )
+                    .await;
+            }
+        }
+    }
+}
+
+fn response_summary(o: &StreamOutcome) -> String {
+    // Doc 04 says payloads are "small (<4KB), large goes to ContentStore".
+    // For now we keep a 200-char head to stay well under the cap;
+    // ContentStore (D-1 / future B-7 follow-up) replaces this.
+    let head: String = o
+        .response_text
+        .chars()
+        .take(200)
+        .collect::<String>();
+    if o.response_text.chars().count() > 200 {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+async fn build_trajectory_logger(
+    args: &RunArgs,
+    dispatch: &Dispatch,
+) -> Option<TrajectoryLogger> {
+    if args.no_trajectory {
+        return None;
+    }
+    let store = match event_store::open(args.events_path.as_deref()) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::warn!(
+                "trajectory: no XDG data dir on this platform; skipping log",
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "trajectory: opening event store failed; skipping log");
+            return None;
+        }
+    };
+    let runtime = LocalRuntime::new(store);
+
+    // Reason carries the dispatch label so `tars trajectory show`
+    // surfaces what was wired without re-parsing the events.
+    let reason = format!("tars run via {}", dispatch.label);
+    let traj = match runtime.create_trajectory(None, &reason).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "trajectory: create_trajectory failed; skipping log");
+            return None;
+        }
+    };
+
+    let input_summary = format!(
+        "prompt({} chars), model={}",
+        // We don't have the prompt here without threading it; the
+        // length signal is enough for log-grep + future replay.
+        // build_request stamped req.model = Explicit(model_label),
+        // so model_label is the right thing to record.
+        dispatch.model_label.len(),
+        dispatch.model_label,
+    );
+    let key = StepIdempotencyKey::compute(&traj, 1, &input_summary);
+    let agent = if dispatch.label.starts_with("tier") {
+        "tars-cli/run/tier".to_string()
+    } else {
+        "tars-cli/run/single-provider".to_string()
+    };
+    if let Err(e) = runtime
+        .append(
+            &traj,
+            AgentEvent::StepStarted {
+                traj: traj.clone(),
+                step_seq: 1,
+                agent,
+                idempotency_key: key.clone(),
+                input_summary,
+            },
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "trajectory: StepStarted append failed; skipping further logging");
+        return None;
+    }
+
+    Some(TrajectoryLogger { runtime, traj })
 }
 
 /// What `execute` needs to drive the pipeline once per call: the
@@ -394,6 +664,12 @@ pub struct StreamOutcome {
     /// Cache info from the Started event. Non-zero
     /// `cached_input_tokens` means we replayed a hit.
     pub cache_hit: CacheHitInfo,
+    /// Concatenated text deltas. Captured in addition to streaming
+    /// to stdout so the trajectory log can record a head-of-response
+    /// summary without re-reading the network. Bounded by whatever
+    /// the model emitted — for very long responses we summarise on
+    /// the way into the event log.
+    pub response_text: String,
 }
 
 async fn drain_stream_to_stdout(
@@ -412,6 +688,7 @@ async fn drain_stream_to_stdout(
                 out.write_all(text.as_bytes()).context("stdout write")?;
                 out.flush().context("stdout flush")?;
                 outcome.wrote_anything = !text.is_empty() || outcome.wrote_anything;
+                outcome.response_text.push_str(&text);
             }
             ChatEvent::ThinkingDelta { .. } => {
                 // Hide thinking deltas from stdout by default — they're
@@ -549,6 +826,8 @@ mod tests {
             no_cache: false,
             cache_path: None,
             breaker: false,
+            no_trajectory: false,
+            events_path: None,
         };
         let req = build_request(&args, "gpt-4o");
         assert_eq!(req.max_output_tokens, Some(64));

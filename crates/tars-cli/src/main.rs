@@ -17,7 +17,9 @@ use clap::{Parser, Subcommand};
 use tars_melt::TelemetryConfig;
 
 mod config_loader;
+mod event_store;
 mod run;
+mod trajectory;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -45,6 +47,8 @@ struct Cli {
 enum Command {
     /// Send a single prompt to a provider and stream the response.
     Run(run::RunArgs),
+    /// Inspect the trajectory event log written by `tars run`.
+    Trajectory(trajectory::TrajectoryArgs),
 }
 
 #[tokio::main]
@@ -60,6 +64,7 @@ async fn main() -> ExitCode {
 
     let result: Result<()> = match cli.command {
         Command::Run(args) => run::execute(args, cli.config).await,
+        Command::Trajectory(args) => trajectory::execute(args).await,
     };
 
     match result {
