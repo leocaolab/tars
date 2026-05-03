@@ -34,6 +34,7 @@
 //!   is a derived projection we'll add when something consumes it).
 
 mod agent;
+mod critic;
 mod error;
 mod event;
 mod message;
@@ -43,6 +44,7 @@ mod runtime;
 pub use agent::{
     Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult, SingleShotAgent,
 };
+pub use critic::{CriticAgent, CriticError, PartialResultRef};
 pub use error::RuntimeError;
 pub use event::{AgentEvent, StepIdempotencyKey};
 pub use message::{AgentMessage, VerdictKind};
