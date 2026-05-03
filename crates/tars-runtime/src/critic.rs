@@ -39,11 +39,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use tars_types::{AgentId, ChatRequest, JsonSchema, ModelHint};
+use tars_types::{AgentId, ChatRequest};
 
 use crate::agent::{Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult};
 use crate::message::{AgentMessage, VerdictKind};
 use crate::orchestrator::Plan;
+use crate::prompt::PromptBuilder;
 
 // ── CriticAgent ────────────────────────────────────────────────────────
 
@@ -125,13 +126,11 @@ impl CriticAgent {
         let user_text = serde_json::to_string_pretty(&user_payload)
             .expect("JSON encoding of plan/result is infallible for valid types");
 
-        let mut req = ChatRequest::user(ModelHint::Explicit(self.model.clone()), user_text);
-        req.system = Some(CRITIC_SYSTEM_PROMPT.to_string());
-        req.structured_output = Some(JsonSchema::strict("Verdict", verdict_json_schema()));
-        // Critic must be deterministic given the same inputs — cache /
-        // replay both rely on it.
-        req.temperature = Some(0.0);
-        req
+        PromptBuilder::new(self.model.clone(), user_text)
+            .system(CRITIC_SYSTEM_PROMPT)
+            .structured_output("Verdict", verdict_json_schema())
+            .deterministic()
+            .build()
     }
 }
 

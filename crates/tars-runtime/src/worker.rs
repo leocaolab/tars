@@ -52,13 +52,13 @@ use thiserror::Error;
 use tars_pipeline::LlmService;
 use tars_tools::{ToolContext, ToolRegistry};
 use tars_types::{
-    AgentId, ChatRequest, ChatResponseBuilder, ContentBlock, JsonSchema, Message, ModelHint,
-    RequestContext,
+    AgentId, ChatRequest, ChatResponseBuilder, ContentBlock, Message, RequestContext,
 };
 
 use crate::agent::{Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult};
 use crate::message::AgentMessage;
 use crate::orchestrator::{Plan, PlanStep};
+use crate::prompt::PromptBuilder;
 
 /// Default safety cap on Worker tool-loop iterations. 8 round-trips
 /// (each LLM call + tool dispatch) is enough headroom for a Worker
@@ -200,20 +200,23 @@ impl WorkerAgent {
         let user_text = serde_json::to_string_pretty(&payload)
             .expect("JSON encoding of plan/step is infallible for valid types");
 
-        let mut req = ChatRequest::user(ModelHint::Explicit(self.model.clone()), user_text);
-        req.system = Some(if self.tools.is_some() {
-            WORKER_SYSTEM_PROMPT_WITH_TOOLS.to_string()
+        let system_prompt = if self.tools.is_some() {
+            WORKER_SYSTEM_PROMPT_WITH_TOOLS
         } else {
-            WORKER_SYSTEM_PROMPT.to_string()
-        });
-        req.structured_output = Some(JsonSchema::strict("WorkerResult", worker_json_schema()));
-        if let Some(registry) = &self.tools {
-            req.tools = registry.to_tool_specs();
-        }
-        // Worker output should be deterministic for the same step so
-        // cache + replay both work.
-        req.temperature = Some(0.0);
-        req
+            WORKER_SYSTEM_PROMPT
+        };
+        let tool_specs = self
+            .tools
+            .as_ref()
+            .map(|r| r.to_tool_specs())
+            .unwrap_or_default();
+
+        PromptBuilder::new(self.model.clone(), user_text)
+            .system(system_prompt)
+            .structured_output("WorkerResult", worker_json_schema())
+            .tools(tool_specs)
+            .deterministic()
+            .build()
     }
 
     /// Lower-level: parse the JSON the model emitted into a typed

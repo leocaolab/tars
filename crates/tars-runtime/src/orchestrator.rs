@@ -34,9 +34,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use tars_types::{AgentId, ChatRequest, JsonSchema, ModelHint};
+use tars_types::{AgentId, ChatRequest};
 
 use crate::agent::{Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult};
+use crate::prompt::PromptBuilder;
 
 // ── Plan data model ────────────────────────────────────────────────────
 
@@ -168,14 +169,12 @@ impl OrchestratorAgent {
     /// [`crate::execute_agent_step`]; integration tests use it to
     /// inspect what we'd send without invoking an LLM.
     pub fn build_planner_request(&self, goal: &str) -> ChatRequest {
-        let mut req = ChatRequest::user(ModelHint::Explicit(self.model.clone()), goal);
-        req.system = Some(PLANNER_SYSTEM_PROMPT.to_string());
-        req.structured_output = Some(JsonSchema::strict("Plan", plan_json_schema()));
-        // Plans must be deterministic for the same goal — the cache
-        // layer needs it (cache key requires explicit zero), and
-        // replay debugging needs it.
-        req.temperature = Some(0.0);
-        req
+        // Determinism rationale lives on `PromptBuilder::deterministic`.
+        PromptBuilder::new(self.model.clone(), goal)
+            .system(PLANNER_SYSTEM_PROMPT)
+            .structured_output("Plan", plan_json_schema())
+            .deterministic()
+            .build()
     }
 }
 
