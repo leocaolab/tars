@@ -43,12 +43,14 @@
 mod cache;
 mod middleware;
 mod retry;
+mod routing;
 mod service;
 mod telemetry;
 
 pub use cache::{set_cache_policy, CacheLookupMiddleware};
 pub use middleware::{Middleware, Pipeline, PipelineBuilder};
 pub use retry::{RetryConfig, RetryMiddleware};
+pub use routing::{RoutingPolicy, RoutingService, StaticPolicy, TierPolicy};
 pub use service::{LlmService, ProviderService};
 pub use telemetry::TelemetryMiddleware;
 

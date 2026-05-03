@@ -30,13 +30,15 @@ use tars_cache::{
 };
 use tars_config::Config;
 use tars_pipeline::{
-    set_cache_policy, CacheLookupMiddleware, Pipeline, RetryMiddleware, TelemetryMiddleware,
+    set_cache_policy, CacheLookupMiddleware, LlmService, Pipeline, RetryMiddleware,
+    RoutingService, StaticPolicy, TelemetryMiddleware,
 };
 use tars_provider::auth::basic;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::registry::ProviderRegistry;
 use tars_types::{
-    CacheHitInfo, ChatEvent, ChatRequest, CostUsd, ModelHint, ProviderId, RequestContext, Usage,
+    CacheHitInfo, ChatEvent, ChatRequest, CostUsd, ModelHint, ModelTier, ProviderId,
+    RequestContext, Usage,
 };
 
 use crate::config_loader;
@@ -51,9 +53,17 @@ pub struct RunArgs {
     #[arg(short, long)]
     pub system: Option<String>,
 
-    /// Provider id to route through. Required iff config has > 1 provider.
-    #[arg(short = 'P', long)]
+    /// Provider id to route through. Required iff config has > 1 provider
+    /// AND `--tier` is not set. Mutually exclusive with `--tier`.
+    #[arg(short = 'P', long, conflicts_with = "tier")]
     pub provider: Option<String>,
+
+    /// Route by model tier instead of picking a single provider.
+    /// Reads the `[routing.tiers]` section from config; tries each
+    /// candidate in order with retriable-error fallback.
+    /// Valid values: `reasoning`, `default`, `fast`, `local`.
+    #[arg(short, long, conflicts_with = "provider", value_parser = parse_tier)]
+    pub tier: Option<ModelTier>,
 
     /// Override the provider's `default_model`.
     #[arg(short, long)]
@@ -87,28 +97,14 @@ pub struct RunArgs {
 
 pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> {
     let cfg = config_loader::load(config_path)?;
-    let registry = build_registry(&cfg)?;
-    let provider_id = pick_provider(&cfg, args.provider.as_deref())?;
-    let provider = registry.get(&provider_id).ok_or_else(|| {
-        anyhow::anyhow!(
-            "registry missing provider `{provider_id}` (validated config but build failed?)"
-        )
-    })?;
+    let registry = Arc::new(build_registry(&cfg)?);
 
-    let model_label = args
-        .model
-        .clone()
-        .or_else(|| pick_default_model(&cfg, &provider_id))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model: pass --model, or set `default_model` on provider `{provider_id}`"
-            )
-        })?;
+    // Decide the dispatch shape: single-provider passthrough vs
+    // tier-routed multi-provider with fallback. Mutually exclusive
+    // (clap's `conflicts_with` enforces it on the flag side).
+    let dispatch = build_dispatch(&cfg, &registry, &args)?;
 
-    let req = build_request(&args, &model_label);
-    // Capture the provider Arc for cost computation post-stream — the
-    // Arc<dyn LlmProvider> is also moved into the pipeline below.
-    let provider_for_cost = provider.clone();
+    let req = build_request(&args, &dispatch.model_label);
 
     // Cache: SQLite L2 by default (cross-invocation hits), in-memory
     // L1 always present. `--cache-path :memory:` falls back to pure-
@@ -116,12 +112,12 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     let cache_registry = build_cache(args.cache_path.as_deref());
     let cache_factory = CacheKeyFactory::new(1);
 
-    let pipeline = Pipeline::builder(provider)
+    let pipeline = Pipeline::builder_with_inner(dispatch.inner)
         .layer(TelemetryMiddleware::new())
         .layer(CacheLookupMiddleware::new(
             cache_registry,
             cache_factory,
-            provider_id.clone(),
+            dispatch.cache_origin_id.clone(),
         ))
         .layer(RetryMiddleware::default())
         .build();
@@ -130,17 +126,158 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     if args.no_cache {
         set_cache_policy(&ctx, &CachePolicy::off());
     }
+    let dispatch_label = dispatch.label.clone();
     let stream = Arc::new(pipeline)
         .call(req, ctx)
         .await
-        .with_context(|| format!("opening stream against provider `{provider_id}`"))?;
+        .with_context(|| format!("opening stream via {dispatch_label}"))?;
 
     let outcome = drain_stream_to_stdout(stream).await?;
 
     if !args.no_summary {
-        print_summary(&provider_for_cost, &outcome);
+        print_summary(dispatch.cost_provider.as_ref(), &outcome);
     }
     Ok(())
+}
+
+/// What `execute` needs to drive the pipeline once per call: the
+/// bottom-of-pipeline service, plus diagnostic / billing-attribution
+/// metadata.
+struct Dispatch {
+    inner: Arc<dyn LlmService>,
+    /// The model to put on `req.model` before sending. For single-
+    /// provider mode it's `--model` or the provider's `default_model`.
+    /// For tier mode it's the FIRST candidate's `default_model`
+    /// (a hint; the routing layer resolves Tier→Explicit per call,
+    /// see `RoutingService::resolve_model_for_provider`).
+    model_label: String,
+    /// What to log / attribute cost against. For single-provider mode
+    /// this is the actual provider; for tier mode it's the first
+    /// candidate (best-effort — until we surface "which provider
+    /// actually answered" through the stream, this is the closest
+    /// approximation).
+    cost_provider: Arc<dyn tars_provider::LlmProvider>,
+    /// ProviderId stamped on cached responses' `origin_provider` field.
+    /// For single-provider mode = the provider. For tier mode = the
+    /// first candidate (same caveat as `cost_provider`).
+    cache_origin_id: ProviderId,
+    /// Diagnostic label for log + error context.
+    label: String,
+}
+
+fn build_dispatch(
+    cfg: &Config,
+    registry: &Arc<ProviderRegistry>,
+    args: &RunArgs,
+) -> Result<Dispatch> {
+    if let Some(tier) = args.tier {
+        return build_tier_dispatch(cfg, registry, tier, args);
+    }
+    build_single_provider_dispatch(cfg, registry, args)
+}
+
+fn build_single_provider_dispatch(
+    cfg: &Config,
+    registry: &Arc<ProviderRegistry>,
+    args: &RunArgs,
+) -> Result<Dispatch> {
+    let provider_id = pick_provider(cfg, args.provider.as_deref())?;
+    let provider = registry.get(&provider_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "registry missing provider `{provider_id}` (validated config but build failed?)"
+        )
+    })?;
+    let model_label = args
+        .model
+        .clone()
+        .or_else(|| pick_default_model(cfg, &provider_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model: pass --model, or set `default_model` on provider `{provider_id}`"
+            )
+        })?;
+    let label = format!("provider `{provider_id}`");
+    let inner: Arc<dyn LlmService> = tars_pipeline::ProviderService::new(provider.clone());
+    Ok(Dispatch {
+        inner,
+        model_label,
+        cost_provider: provider,
+        cache_origin_id: provider_id,
+        label,
+    })
+}
+
+fn build_tier_dispatch(
+    cfg: &Config,
+    registry: &Arc<ProviderRegistry>,
+    tier: ModelTier,
+    args: &RunArgs,
+) -> Result<Dispatch> {
+    let candidates = cfg.routing.tiers.get(&tier).cloned().unwrap_or_default();
+    if candidates.is_empty() {
+        anyhow::bail!(
+            "routing: tier `{tier:?}` has no candidates configured. \
+             Add `[routing.tiers]\\n{} = [\\\"...\\\"]` to your config.",
+            format!("{tier:?}").to_lowercase(),
+        );
+    }
+    // The first candidate becomes our cost / cache-attribution proxy.
+    // It must exist in the registry (validated at config-load time,
+    // but defensive double-check).
+    let first = candidates.first().expect("non-empty checked above");
+    let cost_provider = registry.get(first).ok_or_else(|| {
+        anyhow::anyhow!(
+            "routing: tier `{tier:?}` first candidate `{first}` not in registry"
+        )
+    })?;
+    let model_label = args
+        .model
+        .clone()
+        .or_else(|| pick_default_model(cfg, first))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no model: pass --model, or set `default_model` on provider `{first}` (tier `{tier:?}` first candidate)"
+            )
+        })?;
+
+    // Tier→candidates resolution happens here at startup; the runtime
+    // policy is StaticPolicy with the resolved list. We don't use
+    // TierPolicy at runtime because that would require req.model to be
+    // ModelHint::Tier(...) for the lookup to fire — but the CLI's
+    // existing flow always sets req.model = Explicit (from --model or
+    // the provider's default_model). Resolving up-front keeps the two
+    // concerns clean: config layer maps tiers, runtime layer just
+    // dispatches in fallback order.
+    let policy = Arc::new(StaticPolicy::new(candidates.clone()));
+    let inner: Arc<dyn LlmService> = RoutingService::new(registry.clone(), policy);
+    let label = format!(
+        "tier `{tier:?}` (candidates: {})",
+        candidates
+            .iter()
+            .map(|p| p.as_ref())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    Ok(Dispatch {
+        inner,
+        model_label,
+        cost_provider,
+        cache_origin_id: first.clone(),
+        label,
+    })
+}
+
+/// Clap value parser for `--tier` — explicit set of accepted values.
+fn parse_tier(s: &str) -> Result<ModelTier, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "reasoning" => Ok(ModelTier::Reasoning),
+        "default" => Ok(ModelTier::Default),
+        "fast" => Ok(ModelTier::Fast),
+        "local" => Ok(ModelTier::Local),
+        _ => Err(format!(
+            "unknown tier `{s}` (valid: reasoning, default, fast, local)"
+        )),
+    }
 }
 
 /// Pick a cache backend based on the `--cache-path` flag and platform:
@@ -268,7 +405,7 @@ async fn drain_stream_to_stdout(
     Ok(outcome)
 }
 
-fn print_summary(provider: &Arc<dyn tars_provider::LlmProvider>, outcome: &StreamOutcome) {
+fn print_summary(provider: &dyn tars_provider::LlmProvider, outcome: &StreamOutcome) {
     let cost = provider.cost(&outcome.usage);
     if outcome.wrote_anything {
         // Push the summary onto its own line so it doesn't glue to the response.
@@ -382,6 +519,7 @@ mod tests {
             prompt: "hi".into(),
             system: Some("be brief".into()),
             provider: None,
+            tier: None,
             model: None,
             max_output_tokens: Some(64),
             temperature: Some(0.3),

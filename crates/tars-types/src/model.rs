@@ -43,7 +43,7 @@ impl ModelHint {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelTier {
     /// Top-of-the-line reasoning models (Claude Opus, o1, Gemini Pro).

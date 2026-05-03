@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, ValidationError};
 use crate::providers::ProvidersConfig;
+use crate::routing::RoutingConfig;
 
 /// Top-level configuration. Future fields (pipeline, cache, agents,
 /// tools, tenants, secrets, observability, deployment) land here as
@@ -16,6 +17,12 @@ use crate::providers::ProvidersConfig;
 pub struct Config {
     #[serde(default)]
     pub providers: ProvidersConfig,
+
+    /// M2: tier-based routing table. Doc 01 §12 + Doc 02 §4.6.
+    /// Optional — if missing, the CLI falls through to single-provider
+    /// dispatch (existing behaviour).
+    #[serde(default)]
+    pub routing: RoutingConfig,
 }
 
 impl Config {
@@ -24,6 +31,10 @@ impl Config {
     pub fn validate(&self) -> Result<(), Vec<ValidationError>> {
         let mut errs = Vec::new();
         self.providers.validate(&mut errs);
+        // Routing references must point at known provider IDs.
+        let known: std::collections::HashSet<_> =
+            self.providers.iter().map(|(id, _)| id.clone()).collect();
+        self.routing.validate(&known, &mut errs);
         if errs.is_empty() { Ok(()) } else { Err(errs) }
     }
 }

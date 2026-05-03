@@ -25,6 +25,7 @@ pub mod builtin;
 pub mod error;
 pub mod manager;
 pub mod providers;
+pub mod routing;
 
 pub use builtin::{
     built_in_provider_defaults, default_anthropic, default_claude_cli, default_gemini,
@@ -33,3 +34,4 @@ pub use builtin::{
 pub use error::ConfigError;
 pub use manager::{Config, ConfigManager};
 pub use providers::{ProviderConfig, ProvidersConfig};
+pub use routing::RoutingConfig;
