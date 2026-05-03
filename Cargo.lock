@@ -1824,6 +1824,7 @@ dependencies = [
  "tars-provider",
  "tars-runtime",
  "tars-storage",
+ "tars-tools",
  "tars-types",
  "tempfile",
  "tokio",

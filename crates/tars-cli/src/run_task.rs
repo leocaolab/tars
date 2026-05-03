@@ -39,6 +39,7 @@ use tars_runtime::{
     RunTaskError, TaskOutcome, VerdictKind, WorkerAgent,
 };
 use tars_storage::{EventStore, SqliteEventStore};
+use tars_tools::{builtins::ReadFileTool, ToolRegistry};
 use tars_types::AgentId;
 use tokio_util::sync::CancellationToken;
 
@@ -77,6 +78,25 @@ pub struct RunTaskArgs {
     /// into another tool.
     #[arg(long)]
     pub json: bool,
+
+    /// Enable the default safe tool set on the WorkerAgent. Today
+    /// that's `fs.read_file` only — read-only, jailed to
+    /// `--tools-root` (default: current working directory). Without
+    /// this flag the Worker is the no-tools stub flavour.
+    ///
+    /// As more built-in tools land (`fs.list_dir`, `git.fetch_pr_diff`,
+    /// etc.) they'll join this default set. Tools with externally-
+    /// visible side effects (`fs.write_file`, `shell.exec`) won't —
+    /// they need explicit opt-in flags so the safe baseline stays
+    /// safe.
+    #[arg(long)]
+    pub tools: bool,
+
+    /// Directory the Worker's filesystem tools are jailed to. Only
+    /// consulted when `--tools` is set. Default: process cwd. Symlinks
+    /// resolving outside this root are also rejected.
+    #[arg(long, value_name = "PATH")]
+    pub tools_root: Option<PathBuf>,
 }
 
 pub async fn execute(args: RunTaskArgs, config_path: Option<PathBuf>) -> Result<()> {
@@ -111,11 +131,7 @@ pub async fn execute(args: RunTaskArgs, config_path: Option<PathBuf>) -> Result<
     // tier flag already gives some leverage.
     let model = dispatch.model_label.clone();
     let orchestrator = OrchestratorAgent::new(AgentId::new("orchestrator"), model.clone());
-    let worker = WorkerAgent::new(
-        AgentId::new("worker"),
-        model.clone(),
-        args.worker_domain.clone(),
-    );
+    let worker = build_worker(&args, model.clone())?;
     let critic = CriticAgent::new(AgentId::new("critic"), model);
 
     let config = RunTaskConfig { max_refinements_per_step: args.max_refinements };
@@ -150,6 +166,50 @@ pub async fn execute(args: RunTaskArgs, config_path: Option<PathBuf>) -> Result<
             Err(into_anyhow(e))
         }
     }
+}
+
+/// Construct the WorkerAgent based on `--tools` / `--tools-root`. When
+/// `--tools` is unset returns the no-tools stub flavour (preserves the
+/// behaviour we shipped in `959be20`); when set, registers the default
+/// safe tool set jailed to `--tools-root` (or cwd).
+fn build_worker(args: &RunTaskArgs, model: String) -> Result<Arc<WorkerAgent>> {
+    if !args.tools {
+        return Ok(WorkerAgent::new(
+            AgentId::new("worker"),
+            model,
+            args.worker_domain.clone(),
+        ));
+    }
+
+    let root = match &args.tools_root {
+        Some(p) => p.clone(),
+        None => std::env::current_dir().context("resolve cwd for --tools jail root")?,
+    };
+
+    let read_file = ReadFileTool::with_root(&root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "tools root `{}` does not exist or cannot be canonicalized",
+            root.display(),
+        )
+    })?;
+
+    let mut registry = ToolRegistry::new();
+    registry
+        .register_owned(read_file)
+        .context("register fs.read_file in tool registry")?;
+
+    eprintln!(
+        "── tools enabled: {} (jailed to {})",
+        registry.names().join(", "),
+        root.display(),
+    );
+
+    Ok(WorkerAgent::with_tools(
+        AgentId::new("worker"),
+        model,
+        args.worker_domain.clone(),
+        Arc::new(registry),
+    ))
 }
 
 async fn build_runtime(args: &RunTaskArgs) -> Result<Arc<dyn Runtime>> {
