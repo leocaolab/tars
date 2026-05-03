@@ -219,3 +219,7 @@ Cargo.lock.bak
 
 # Claude Code per-user settings
 .claude/settings.local.json
+
+# Gemini CLI local data
+.arc/
+

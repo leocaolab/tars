@@ -26,5 +26,16 @@ pub use provider::{LlmProvider, LlmEventStream};
 pub use tool_buffer::ToolCallBuffer;
 
 // Re-export concrete backends at the crate root for ergonomic use.
-pub use backends::mock::MockProvider;
-pub use backends::openai::{OpenAiProvider, OpenAiProviderBuilder};
+pub use backends::anthropic::{AnthropicAdapter, AnthropicProvider, AnthropicProviderBuilder};
+pub use backends::claude_cli::{
+    claude_cli, ClaudeCliProvider, ClaudeCliProviderBuilder,
+    SubprocessRunner as ClaudeCliSubprocessRunner,
+};
+pub use backends::gemini::{GeminiAdapter, GeminiProvider, GeminiProviderBuilder};
+pub use backends::gemini_cli::{
+    gemini_cli, GeminiCliProvider, GeminiCliProviderBuilder,
+    SubprocessRunner as GeminiCliSubprocessRunner,
+};
+pub use backends::mock::{CannedResponse, MockProvider};
+pub use backends::openai::{OpenAiAdapter, OpenAiProvider, OpenAiProviderBuilder};
+pub use backends::vllm::{vllm, vllm_local};
