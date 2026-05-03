@@ -19,18 +19,59 @@ is authoritative. This file aggregates.
 
 ---
 
-## M3 — Agent Runtime first cut (DONE 2026-05-03; orchestration loop pending)
+## M3 — Agent Runtime first cut (DONE 2026-05-03; real Worker pending B-9)
 
-Doc 14 §9 deliverable. **Substantively** done — the storage primitive,
-the runtime facade, the agent contract, the typed inter-agent envelope,
-two of three default agents (Orchestrator + Critic), and the CLI
-integration that proves the whole stack composes are all shipped.
-**Pending** is the real `WorkerAgent` (blocked on `tars-tools` for
-real I/O capability) and the multi-step orchestration loop
-(`Runtime::run_task`) that drives Orchestrator → Worker → Critic →
-replan. With Orchestrator + Critic + a stub Worker, the loop's
-plumbing can be tested in isolation; real Workers land as `tars-tools`
-ships.
+Doc 14 §9 deliverable. **The user-facing milestone is live**: the
+storage primitive, the runtime facade, the agent contract, the typed
+inter-agent envelope, all three default agents (Orchestrator +
+stub WorkerAgent + Critic), the multi-step `run_task` orchestration
+loop with Critic-driven Refine retries, and the CLI integration that
+proves the stack composes are all shipped. **Pending** is only the
+real `WorkerAgent` (blocked on B-9 `tars-tools` for any step that
+needs real I/O — file system, git, web fetch). The loop's
+`AgentMessage::PartialResult` envelope is the same shape a real
+tool-using Worker will emit, so swap-in is a Worker-internal change.
+
+### `run_task` multi-step loop + WorkerAgent stub (`c3cea5b`)
+
+The first user-facing M3 piece. Given a goal, drives the typed agent
+triad end-to-end with full trajectory logging. The actual M3
+milestone Doc 14 §9 specifies.
+
+- **`WorkerAgent`** (`worker.rs`) — third concrete default agent.
+  Stub today (no tool registry until B-9 ships); emits the typed
+  `AgentMessage::PartialResult` envelope a real tool-using Worker
+  will produce later, so downstream code (Critic, orchestration
+  loop, replay) doesn't need to change when the stub becomes real.
+  Same flat-JSON-schema-on-the-wire pattern as Critic: model emits
+  `{summary, confidence}`, we map to typed `PartialResult` with
+  confidence clamped to `0.0..=1.0`. `temperature=0.0` baked in for
+  determinism.
+- **`run_task`** (`task.rs`) — the loop itself. Orchestrator → Plan
+  → for each step: Worker → Critic → (Approve advance / Refine retry
+  with suggestions threaded into next Worker prompt / Reject fail).
+  Bounded by `RunTaskConfig::max_refinements_per_step` (default 2).
+  Every agent call routes through `execute_agent_step` so the
+  trajectory log captures `StepStarted + LlmCallCaptured +
+  StepCompleted` per call (or `StepFailed` on error). Trajectory
+  closes with `TrajectoryCompleted` on success or
+  `TrajectoryAbandoned` on any failure path so a recovery scan sees
+  it as terminal. Replan-on-Reject deferred — first cut treats
+  Reject as task-failed.
+- **Refactor**: `OrchestratorAgent::build_planner_request` +
+  `parse_plan_response` and `CriticAgent::build_critique_request`
+  + new `parse_verdict_response` are now `pub` (were `pub(crate)`)
+  so `run_task` can split build/execute/parse across
+  `execute_agent_step`. The typed `plan()` / `critique()` helpers
+  still exist for callers that want one-shot use.
+- **6 integration tests** (`tests/run_task.rs`) using a local
+  `QueuedProvider` that pops canned JSON in FIFO order — happy
+  path single-step, refine-then-approve with suggestion threading,
+  reject aborts + abandons trajectory, refine exhaustion with
+  attempt count, multi-step plan ordering, malformed plan abandons.
+  Per-test trajectory event-count assertions pin the
+  `1 + 3*N + 1` shape so future changes that miss an event boundary
+  fail loudly.
 
 ### Agent ecosystem additions (2026-05-03 follow-up wave)
 

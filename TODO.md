@@ -110,15 +110,16 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - Currently load-once. Real-world: change `~/.config/tars/config.toml` and have it pick up without restart.
 - **Trigger**: First user demo where "I want to switch providers without restarting" matters.
 
-### B-4. M3 Agent Runtime — Worker + multi-step loop + ContextStore
-- Storage + runtime + agent primitive + AgentMessage envelope + 2 of 3 default agents (Orchestrator + Critic) are shipped — see CHANGELOG. **Still missing**:
-  - **`WorkerAgent`** — executes one PlanStep. Blocked on B-9 (`tars-tools`) for any Worker that does more than text completion (file I/O, git, web fetch). A degenerate text-only Worker could ship sooner if there's value, but the orchestration loop can be developed against a stub Worker without one.
-  - **Multi-step orchestration loop** — the `Runtime::run_task(goal)` entry point that drives Orchestrator → Worker (per step) → Critic → (continue | replan). The actual M3 user-facing milestone. The Orchestrator + Critic + AgentMessage envelope shipped means this can build now against a stub Worker, with real Workers slotting in later.
-  - **`ContextStore` + `ContextCompactor`** (Doc 04 §3.3 / §5). Schema-aware history pruner so multi-step trajectories don't grow the prompt unboundedly. Sits between the Trajectory log and the next `AgentContext`.
-  - **`PromptBuilder` trait + default impl** (Doc 04 §6). Composes system + tool + persona blocks into a `ChatRequest`. Today each agent constructs its own ad-hoc (OrchestratorAgent + CriticAgent both have hand-written PROMPT constants).
-  - **Backtrack + Saga compensation** (Doc 04 §6). Concrete `CompensationAction` types + `AgentEvent::CompensationExecuted` + the runtime hook that runs compensations in reverse on backtrack.
-  - **CLI: `tars trajectory replay <ID>`** — needs the orchestration loop first (knows what "replay" means at the action level).
-- **Trigger / order**: Multi-step loop with stub Worker → ContextStore (so the loop's prompts stay bounded) → real WorkerAgent (after B-9 lands `tars-tools`) → PromptBuilder (extract the constants once we have 4+ agents repeating the pattern) → Backtrack (when Saga is needed).
+### B-4. M3 Agent Runtime — real Worker + ContextStore + Backtrack + replay
+- Storage + runtime + agent primitive + AgentMessage envelope + all 3 default agents (Orchestrator + stub Worker + Critic) + the multi-step `run_task` orchestration loop are shipped — see CHANGELOG. **Still missing**:
+  - **Real `WorkerAgent` (tool-using)** — today's stub asks the LLM to *describe* what it would do; a real Worker executes file I/O / git / web fetch / shell. Blocked on B-9 (`tars-tools`). Same `AgentMessage::PartialResult` envelope, so the swap is internal to the Worker.
+  - **`run_task` replan-on-Reject** — current MVP treats `VerdictKind::Reject` as task-failed. Doc 04 §4.2's full design has Reject trigger a fresh Orchestrator call with the rejection reason as feedback. Slot in when a real consumer hits "the Critic was right to reject but the task is still salvageable".
+  - **CLI: `tars run-task <goal>`** — wire `run_task` into the CLI alongside `tars plan`. Same `dispatch.rs` plumbing pattern; small follow-on.
+  - **`ContextStore` + `ContextCompactor`** (Doc 04 §3.3 / §5). Schema-aware history pruner so multi-step trajectories don't grow the prompt unboundedly. Sits between the Trajectory log and the next `AgentContext`. Trigger: when `run_task` traces start exceeding a model's context window in real use.
+  - **`PromptBuilder` trait + default impl** (Doc 04 §6). Composes system + tool + persona blocks into a `ChatRequest`. Today each agent constructs its own ad-hoc (Orchestrator + Critic + Worker each have hand-written PROMPT constants — 3 of the trigger-4 reached). Trigger: 4th agent that repeats the pattern.
+  - **Backtrack + Saga compensation** (Doc 04 §6). Concrete `CompensationAction` types + `AgentEvent::CompensationExecuted` + the runtime hook that runs compensations in reverse on backtrack. Trigger: first real Worker that has externally-visible side effects (writes a file, makes an API call) AND a real failure-recovery scenario where rolling them back matters.
+  - **CLI: `tars trajectory replay <ID>`** — replays a trajectory's LLM/tool calls against the recorded inputs. Needed once Workers have real side effects (compensation interacts with replay). Trigger: lands with Backtrack.
+- **Trigger / order**: `tars run-task` CLI (cheap user-facing win) → real WorkerAgent (after B-9) → ContextStore (when prompts grow) → PromptBuilder (when 4th agent appears) → Backtrack + replay (when Saga matters).
 
 ### B-5. `tars-cli` follow-on subcommands
 - M1 / M2 / M3-first-cut surface is shipped (`tars run` + `tars trajectory list/show`) — see CHANGELOG. Remaining CLI surface from Doc 07 §5:
@@ -147,14 +148,14 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 
 ### B-9. `tars-tools` crate — Tool registry + Tool dispatch (Doc 05)
 - The other half of agent capability. Today an Agent can ask the model to emit `ToolCall` events (via `ChatRequest::tools`); we surface them in `AgentOutput::ToolCalls` — but **nothing actually executes them**. The agent's caller would have to dispatch the tools and feed results back as a follow-up `Message::Tool` turn manually.
-- M3 Default agents (B-4 Worker / Critic) need this before they can do anything useful beyond pure-text completion.
+- M3's `WorkerAgent` (B-4) is shipped as a stub today (LLM describes what it would do); needs `tars-tools` before a Worker can do anything beyond text completion.
 - **Scope when built**:
   - `Tool` trait (Doc 05 §3.3): `name() / description() / input_schema() / execute(args) -> ToolResult`.
   - `ToolRegistry` for lookup by name.
   - Tool-call mini-pipeline: IAM check / idempotency dedupe (using `StepIdempotencyKey`) / side-effect declaration / budget / audit / timeout. Same onion shape as the LLM pipeline, scaled-down.
   - Built-in tools: `fs.read_file`, `fs.write_file`, `git.fetch_pr_diff` (Doc 14 §10.1).
   - MCP integration (Doc 05 §5) — load external tool servers via the standard MCP protocol.
-- **Trigger**: First default agent (B-4 Worker) needs to actually do something. Order: tools crate first, then Worker, then Orchestrator.
+- **Trigger**: B-4's stub WorkerAgent already exists and proves the loop; the trigger to ship `tars-tools` is "we have a real use case where Worker text-only output is no longer good enough" (e.g. the user wants `tars run-task` to actually edit files).
 
 ---
 
