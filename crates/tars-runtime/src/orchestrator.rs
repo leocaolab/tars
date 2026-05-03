@@ -150,16 +150,24 @@ impl OrchestratorAgent {
                 )));
             }
         };
-        let plan: Plan = serde_json::from_str(&json_text)
-            .map_err(OrchestratorError::Decode)?;
+        Self::parse_plan_response(&json_text)
+    }
+
+    /// Lower-level: parse the JSON the planner emitted into a typed,
+    /// validated [`Plan`]. Exposed `pub` so the orchestration loop can
+    /// drive trajectory-logged execution via [`crate::execute_agent_step`]
+    /// (which returns raw [`AgentOutput`]) and parse the result here.
+    pub fn parse_plan_response(json_text: &str) -> Result<Plan, OrchestratorError> {
+        let plan: Plan = serde_json::from_str(json_text).map_err(OrchestratorError::Decode)?;
         plan.validate()?;
         Ok(plan)
     }
 
-    /// Construct the planner ChatRequest. Exposed `pub(crate)` so the
-    /// integration tests can inspect what we'd send (system prompt
-    /// shape, schema correctness) without invoking an LLM.
-    pub(crate) fn build_planner_request(&self, goal: &str) -> ChatRequest {
+    /// Construct the planner ChatRequest. Exposed `pub` so the
+    /// orchestration loop can drive trajectory-logged execution via
+    /// [`crate::execute_agent_step`]; integration tests use it to
+    /// inspect what we'd send without invoking an LLM.
+    pub fn build_planner_request(&self, goal: &str) -> ChatRequest {
         let mut req = ChatRequest::user(ModelHint::Explicit(self.model.clone()), goal);
         req.system = Some(PLANNER_SYSTEM_PROMPT.to_string());
         req.structured_output = Some(JsonSchema::strict("Plan", plan_json_schema()));

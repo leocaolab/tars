@@ -40,6 +40,8 @@ mod event;
 mod message;
 mod orchestrator;
 mod runtime;
+mod task;
+mod worker;
 
 pub use agent::{
     Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult, SingleShotAgent,
@@ -50,3 +52,5 @@ pub use event::{AgentEvent, StepIdempotencyKey};
 pub use message::{AgentMessage, VerdictKind};
 pub use orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep};
 pub use runtime::{execute_agent_step, AgentExecutionError, LocalRuntime, Runtime};
+pub use task::{run_task, RunTaskConfig, RunTaskError, StepOutcome, TaskOutcome};
+pub use worker::{WorkerAgent, WorkerError};

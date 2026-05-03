@@ -84,19 +84,32 @@ impl CriticAgent {
                 )));
             }
         };
-        let raw: RawVerdict = serde_json::from_str(&json_text).map_err(CriticError::Decode)?;
+        Self::parse_verdict_response(&json_text, &self.id, result.step_id)
+    }
+
+    /// Lower-level: parse the JSON the Critic emitted into a typed
+    /// [`AgentMessage::Verdict`]. Exposed `pub` so the orchestration
+    /// loop can drive trajectory-logged execution via
+    /// [`crate::execute_agent_step`] and parse the result here.
+    pub fn parse_verdict_response(
+        json_text: &str,
+        from_agent: &AgentId,
+        target_step_id: Option<&str>,
+    ) -> Result<AgentMessage, CriticError> {
+        let raw: RawVerdict = serde_json::from_str(json_text).map_err(CriticError::Decode)?;
         let verdict = raw.into_verdict_kind()?;
         Ok(AgentMessage::Verdict {
-            from_agent: self.id.clone(),
-            target_step_id: result.step_id.map(|s| s.to_string()),
+            from_agent: from_agent.clone(),
+            target_step_id: target_step_id.map(str::to_string),
             verdict,
         })
     }
 
-    /// `pub(crate)` so the integration tests can inspect what we'd
-    /// send (system prompt shape, schema correctness) without
+    /// Exposed `pub` so the orchestration loop can drive
+    /// trajectory-logged execution via [`crate::execute_agent_step`];
+    /// integration tests use it to inspect what we'd send without
     /// invoking an LLM.
-    pub(crate) fn build_critique_request(
+    pub fn build_critique_request(
         &self,
         plan: &Plan,
         result: &PartialResultRef<'_>,
