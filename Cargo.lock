@@ -1324,12 +1324,14 @@ dependencies = [
  "async-trait",
  "futures",
  "serde_json",
+ "tars-config",
  "tars-provider",
  "tars-types",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

@@ -27,3 +27,5 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 serde_json.workspace = true
+wiremock.workspace = true
+tars-config = { path = "../tars-config" }
