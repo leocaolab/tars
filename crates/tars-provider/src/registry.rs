@@ -99,27 +99,39 @@ fn build_one(
     auth_resolver: Arc<dyn AuthResolver>,
 ) -> Result<Arc<dyn LlmProvider>, RegistryError> {
     let provider: Arc<dyn LlmProvider> = match cfg {
-        ProviderConfig::Openai { base_url, auth, default_model: _ } => {
-            let mut builder = OpenAiProviderBuilder::new(id, auth.clone());
+        ProviderConfig::Openai {
+            base_url,
+            auth,
+            default_model: _,
+            extras,
+        } => {
+            let mut builder =
+                OpenAiProviderBuilder::new(id, auth.clone()).extras(extras.clone());
             if let Some(url) = base_url {
                 builder = builder.base_url(url.clone());
             }
             builder.build(http, auth_resolver)
         }
 
-        ProviderConfig::OpenaiCompat { base_url, auth, default_model: _ } => {
-            OpenAiProviderBuilder::new(id, auth.clone())
-                .base_url(base_url.clone())
-                .build(http, auth_resolver)
-        }
+        ProviderConfig::OpenaiCompat {
+            base_url,
+            auth,
+            default_model: _,
+            extras,
+        } => OpenAiProviderBuilder::new(id, auth.clone())
+            .base_url(base_url.clone())
+            .extras(extras.clone())
+            .build(http, auth_resolver),
 
         ProviderConfig::Anthropic {
             base_url,
             api_version,
             auth,
             default_model: _,
+            extras,
         } => {
-            let mut builder = AnthropicProviderBuilder::new(id, auth.clone());
+            let mut builder =
+                AnthropicProviderBuilder::new(id, auth.clone()).extras(extras.clone());
             if let Some(url) = base_url {
                 builder = builder.base_url(url.clone());
             }
@@ -129,17 +141,33 @@ fn build_one(
             builder.build(http, auth_resolver)
         }
 
-        ProviderConfig::Gemini { base_url, auth, default_model: _ } => {
-            let mut builder = GeminiProviderBuilder::new(id, auth.clone());
+        ProviderConfig::Gemini {
+            base_url,
+            auth,
+            default_model: _,
+            extras,
+        } => {
+            let mut builder =
+                GeminiProviderBuilder::new(id, auth.clone()).extras(extras.clone());
             if let Some(url) = base_url {
                 builder = builder.base_url(url.clone());
             }
             builder.build(http, auth_resolver)
         }
 
-        ProviderConfig::Vllm { base_url, auth, default_model: _ } => {
-            vllm(id, base_url.clone(), auth.clone(), http, auth_resolver)
-        }
+        ProviderConfig::Vllm {
+            base_url,
+            auth,
+            default_model: _,
+            extras,
+        } => vllm(
+            id,
+            base_url.clone(),
+            auth.clone(),
+            extras.clone(),
+            http,
+            auth_resolver,
+        ),
 
         ProviderConfig::ClaudeCli { executable, timeout_secs, default_model: _ } => {
             ClaudeCliProviderBuilder::new(id)

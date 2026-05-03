@@ -21,7 +21,7 @@ use tars_types::{
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};
-use crate::http_base::{stream_via_adapter, HttpAdapter, HttpProviderBase, SseEvent};
+use crate::http_base::{stream_via_adapter, HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent};
 use crate::provider::{LlmEventStream, LlmProvider};
 use crate::tool_buffer::ToolCallBuffer;
 
@@ -38,6 +38,7 @@ pub struct OpenAiProviderBuilder {
     base_url: String,
     auth: Auth,
     capabilities: Option<Capabilities>,
+    extras: HttpProviderExtras,
 }
 
 impl OpenAiProviderBuilder {
@@ -47,6 +48,7 @@ impl OpenAiProviderBuilder {
             base_url: DEFAULT_BASE_URL.to_string(),
             auth,
             capabilities: None,
+            extras: HttpProviderExtras::default(),
         }
     }
 
@@ -63,6 +65,13 @@ impl OpenAiProviderBuilder {
         self
     }
 
+    /// Attach user-config-supplied http_headers / env_http_headers /
+    /// query_params (Doc 01 §6.1 + codex-rs `ModelProviderInfo` parity).
+    pub fn extras(mut self, extras: HttpProviderExtras) -> Self {
+        self.extras = extras;
+        self
+    }
+
     pub fn build(
         self,
         http: Arc<HttpProviderBase>,
@@ -71,6 +80,7 @@ impl OpenAiProviderBuilder {
         let caps = self.capabilities.unwrap_or_else(default_openai_capabilities);
         let adapter = Arc::new(OpenAiAdapter {
             base_url: self.base_url,
+            extras: self.extras,
         });
         Arc::new(OpenAiProvider {
             id: self.id,
@@ -138,6 +148,7 @@ impl LlmProvider for OpenAiProvider {
 /// The wire-format adapter — pure functions, no state.
 pub struct OpenAiAdapter {
     base_url: String,
+    extras: HttpProviderExtras,
 }
 
 impl OpenAiAdapter {
@@ -505,6 +516,10 @@ impl HttpAdapter for OpenAiAdapter {
             _ => ProviderError::InvalidRequest(format!("status {status}: {message}")),
         }
     }
+
+    fn extras(&self) -> &HttpProviderExtras {
+        &self.extras
+    }
 }
 
 fn parse_openai_usage(usage: &serde_json::Map<String, Value>) -> Usage {
@@ -570,21 +585,21 @@ mod tests {
 
     #[test]
     fn classify_401_is_auth() {
-        let a = OpenAiAdapter { base_url: DEFAULT_BASE_URL.into() };
+        let a = OpenAiAdapter { base_url: DEFAULT_BASE_URL.into(), extras: HttpProviderExtras::default() };
         let err = a.classify_error(StatusCode::UNAUTHORIZED, "{\"error\":{\"message\":\"bad\"}}");
         assert!(matches!(err, ProviderError::Auth(_)));
     }
 
     #[test]
     fn classify_429_is_rate_limited() {
-        let a = OpenAiAdapter { base_url: DEFAULT_BASE_URL.into() };
+        let a = OpenAiAdapter { base_url: DEFAULT_BASE_URL.into(), extras: HttpProviderExtras::default() };
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, "");
         assert!(matches!(err, ProviderError::RateLimited { .. }));
     }
 
     #[test]
     fn classify_400_context_length_is_typed() {
-        let a = OpenAiAdapter { base_url: DEFAULT_BASE_URL.into() };
+        let a = OpenAiAdapter { base_url: DEFAULT_BASE_URL.into(), extras: HttpProviderExtras::default() };
         let body = r#"{"error":{"message":"context_length_exceeded: too many tokens"}}"#;
         let err = a.classify_error(StatusCode::BAD_REQUEST, body);
         assert!(matches!(err, ProviderError::ContextTooLong { .. }));

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use tars_types::{Auth, ProviderId};
+use tars_types::{Auth, HttpProviderExtras, ProviderId};
 
 use crate::error::ValidationError;
 
@@ -34,6 +34,12 @@ pub struct ProvidersConfig {
 }
 
 impl ProvidersConfig {
+    pub fn from_map(map: HashMap<ProviderId, ProviderConfig>) -> Self {
+        Self { providers: map }
+    }
+}
+
+impl ProvidersConfig {
     pub fn iter(&self) -> impl Iterator<Item = (&ProviderId, &ProviderConfig)> {
         self.providers.iter()
     }
@@ -54,8 +60,12 @@ impl ProvidersConfig {
 /// One declarative provider entry. The serde tag is `type` to match the
 /// TOML idiom (`type = "openai"`) — yes, "type" is a reserved word in
 /// Rust source, but as a serde tag it's just a string.
+///
+/// HTTP-shape variants accept user-supplied `http_headers /
+/// env_http_headers / query_params` fields (flattened into the variant
+/// body). See [`HttpProviderExtras`] for semantics.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderConfig {
     /// Direct OpenAI HTTP API.
     Openai {
@@ -63,6 +73,8 @@ pub enum ProviderConfig {
         base_url: Option<String>,
         auth: Auth,
         default_model: String,
+        #[serde(flatten)]
+        extras: HttpProviderExtras,
     },
 
     /// OpenAI-compatible HTTP server (Groq, Together, DeepSeek,
@@ -73,6 +85,8 @@ pub enum ProviderConfig {
         #[serde(default = "Auth::none")]
         auth: Auth,
         default_model: String,
+        #[serde(flatten)]
+        extras: HttpProviderExtras,
     },
 
     /// Anthropic HTTP API.
@@ -83,6 +97,8 @@ pub enum ProviderConfig {
         api_version: Option<String>,
         auth: Auth,
         default_model: String,
+        #[serde(flatten)]
+        extras: HttpProviderExtras,
     },
 
     /// Google Gemini HTTP API.
@@ -91,6 +107,8 @@ pub enum ProviderConfig {
         base_url: Option<String>,
         auth: Auth,
         default_model: String,
+        #[serde(flatten)]
+        extras: HttpProviderExtras,
     },
 
     /// vLLM local server (sub-case of openai_compat with sensible defaults).
@@ -100,6 +118,8 @@ pub enum ProviderConfig {
         #[serde(default = "Auth::none")]
         auth: Auth,
         default_model: String,
+        #[serde(flatten)]
+        extras: HttpProviderExtras,
     },
 
     /// Claude Code CLI subscription path.
@@ -281,7 +301,7 @@ mod tests {
         "#;
         let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
         match cfg {
-            ProviderConfig::Openai { base_url, auth, default_model } => {
+            ProviderConfig::Openai { base_url, auth, default_model, extras: _ } => {
                 assert!(base_url.is_none());
                 assert_eq!(default_model, "gpt-4o");
                 match auth {
@@ -334,6 +354,7 @@ mod tests {
             api_version: None,
             auth: Auth::None,
             default_model: "claude-opus-4-7".into(),
+            extras: HttpProviderExtras::default(),
         };
         let id = ProviderId::new("ant");
         let mut errs = Vec::new();
@@ -347,6 +368,7 @@ mod tests {
             base_url: String::new(),
             auth: Auth::None,
             default_model: "x".into(),
+            extras: HttpProviderExtras::default(),
         };
         let id = ProviderId::new("compat");
         let mut errs = Vec::new();

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::secret::SecretRef;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Auth {
     /// Backend doesn't authenticate (local OpenAI-compatible servers,
     /// the in-process mock, etc.).

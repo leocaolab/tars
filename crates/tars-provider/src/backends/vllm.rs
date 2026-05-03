@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::auth::{Auth, AuthResolver};
 use crate::backends::openai::OpenAiProviderBuilder;
-use crate::http_base::HttpProviderBase;
+use crate::http_base::{HttpProviderBase, HttpProviderExtras};
 use crate::provider::LlmProvider;
 
 /// Default vLLM base URL — matches Python `DEFAULT_BASE_URL`.
@@ -30,6 +30,7 @@ pub fn vllm(
     id: impl Into<tars_types::ProviderId>,
     base_url: Option<String>,
     auth: Auth,
+    extras: HttpProviderExtras,
     http: Arc<HttpProviderBase>,
     auth_resolver: Arc<dyn AuthResolver>,
 ) -> Arc<dyn LlmProvider> {
@@ -48,6 +49,7 @@ pub fn vllm(
     };
     OpenAiProviderBuilder::new(id, normalized_auth)
         .base_url(url)
+        .extras(extras)
         // Override capabilities: local servers don't have implicit
         // prefix cache; thinking is model-specific (Qwen Thinker has
         // it, but that's per-deployment, not per-vLLM).
@@ -61,7 +63,14 @@ pub fn vllm_local(
     http: Arc<HttpProviderBase>,
     auth_resolver: Arc<dyn AuthResolver>,
 ) -> Arc<dyn LlmProvider> {
-    vllm(id, None, Auth::None, http, auth_resolver)
+    vllm(
+        id,
+        None,
+        Auth::None,
+        HttpProviderExtras::default(),
+        http,
+        auth_resolver,
+    )
 }
 
 fn local_openai_compat_capabilities() -> tars_types::Capabilities {
@@ -113,6 +122,13 @@ mod tests {
         let http = HttpProviderBase::default_arc().unwrap();
         // Should not panic; the empty inline gets coerced to Auth::None
         // before reaching OpenAiProvider's auth resolution.
-        let _ = vllm("vllm_t", None, Auth::inline(String::new()), http, basic());
+        let _ = vllm(
+            "vllm_t",
+            None,
+            Auth::inline(String::new()),
+            HttpProviderExtras::default(),
+            http,
+            basic(),
+        );
     }
 }

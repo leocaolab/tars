@@ -36,7 +36,7 @@ use tars_types::{
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};
-use crate::http_base::{stream_via_adapter, HttpAdapter, HttpProviderBase, SseEvent};
+use crate::http_base::{stream_via_adapter, HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent};
 use crate::provider::{LlmEventStream, LlmProvider};
 use crate::tool_buffer::ToolCallBuffer;
 
@@ -54,6 +54,7 @@ pub struct AnthropicProviderBuilder {
     api_version: String,
     auth: Auth,
     capabilities: Option<Capabilities>,
+    extras: HttpProviderExtras,
 }
 
 impl AnthropicProviderBuilder {
@@ -64,6 +65,7 @@ impl AnthropicProviderBuilder {
             api_version: DEFAULT_API_VERSION.to_string(),
             auth,
             capabilities: None,
+            extras: HttpProviderExtras::default(),
         }
     }
 
@@ -82,6 +84,11 @@ impl AnthropicProviderBuilder {
         self
     }
 
+    pub fn extras(mut self, extras: HttpProviderExtras) -> Self {
+        self.extras = extras;
+        self
+    }
+
     pub fn build(
         self,
         http: Arc<HttpProviderBase>,
@@ -91,6 +98,7 @@ impl AnthropicProviderBuilder {
         let adapter = Arc::new(AnthropicAdapter {
             base_url: self.base_url,
             api_version: self.api_version,
+            extras: self.extras,
         });
         Arc::new(AnthropicProvider {
             id: self.id,
@@ -155,6 +163,7 @@ impl LlmProvider for AnthropicProvider {
 pub struct AnthropicAdapter {
     base_url: String,
     api_version: String,
+    extras: HttpProviderExtras,
 }
 
 impl AnthropicAdapter {
@@ -567,6 +576,10 @@ impl HttpAdapter for AnthropicAdapter {
             _ => ProviderError::InvalidRequest(format!("status {status}: {message}")),
         }
     }
+
+    fn extras(&self) -> &HttpProviderExtras {
+        &self.extras
+    }
 }
 
 fn map_stop_reason(s: &str) -> StopReason {
@@ -616,6 +629,7 @@ mod tests {
         let a = AnthropicAdapter {
             base_url: DEFAULT_BASE_URL.into(),
             api_version: DEFAULT_API_VERSION.into(),
+            extras: HttpProviderExtras::default(),
         };
         let err = a.classify_error(
             StatusCode::UNAUTHORIZED,
@@ -629,6 +643,7 @@ mod tests {
         let a = AnthropicAdapter {
             base_url: DEFAULT_BASE_URL.into(),
             api_version: DEFAULT_API_VERSION.into(),
+            extras: HttpProviderExtras::default(),
         };
         let req = ChatRequest::user(
             tars_types::ModelHint::Explicit("claude-opus-4-7".into()),
@@ -648,6 +663,7 @@ mod tests {
         let a = AnthropicAdapter {
             base_url: DEFAULT_BASE_URL.into(),
             api_version: DEFAULT_API_VERSION.into(),
+            extras: HttpProviderExtras::default(),
         };
         let mut req = ChatRequest::user(
             tars_types::ModelHint::Explicit("claude-opus-4-7".into()),
@@ -670,6 +686,7 @@ mod tests {
         let a = AnthropicAdapter {
             base_url: DEFAULT_BASE_URL.into(),
             api_version: DEFAULT_API_VERSION.into(),
+            extras: HttpProviderExtras::default(),
         };
         let mut req = ChatRequest::user(
             tars_types::ModelHint::Explicit("claude-opus-4-7".into()),
@@ -691,6 +708,7 @@ mod tests {
         let a = AnthropicAdapter {
             base_url: DEFAULT_BASE_URL.into(),
             api_version: DEFAULT_API_VERSION.into(),
+            extras: HttpProviderExtras::default(),
         };
         let err = a.build_headers(&ResolvedAuth::None).unwrap_err();
         assert!(matches!(err, ProviderError::Auth(_)));

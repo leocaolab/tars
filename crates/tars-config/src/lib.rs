@@ -21,10 +21,15 @@
 //! into an `OpenAiProvider`. That happens in `tars-provider`'s
 //! `ProviderRegistry::from_config()` factory, which depends on us.
 
+pub mod builtin;
 pub mod error;
 pub mod manager;
 pub mod providers;
 
+pub use builtin::{
+    built_in_provider_defaults, default_anthropic, default_claude_cli, default_gemini,
+    default_gemini_cli, default_openai, merge_builtin_with_user,
+};
 pub use error::ConfigError;
 pub use manager::{Config, ConfigManager};
 pub use providers::{ProviderConfig, ProvidersConfig};

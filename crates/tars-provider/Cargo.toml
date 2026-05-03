@@ -20,6 +20,7 @@ async-trait.workspace = true
 futures.workspace = true
 async-stream.workspace = true
 pin-project-lite.workspace = true
+bytes.workspace = true
 
 # Serde
 serde.workspace = true

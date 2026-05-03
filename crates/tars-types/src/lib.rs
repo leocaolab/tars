@@ -30,6 +30,7 @@ pub mod chat;
 pub mod context;
 pub mod error;
 pub mod events;
+pub mod http_extras;
 pub mod ids;
 pub mod model;
 pub mod principal;
@@ -48,6 +49,7 @@ pub use chat::{ChatRequest, ContentBlock, ImageData, Message};
 pub use context::{CancellationToken, RequestContext};
 pub use error::{ErrorClass, ProviderError};
 pub use events::{ChatChunk, ChatEvent, PartialUsage, StopReason};
+pub use http_extras::HttpProviderExtras;
 pub use ids::{
     L3HandleId, PrincipalId, ProviderId, SessionId, TaskId, TenantId,
     TraceId, TrajectoryId,

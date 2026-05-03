@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// asynchronously) at use time by an external resolver — Provider
 /// layer never touches a `SecretRef` directly except to forward it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "source", rename_all = "snake_case")]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SecretRef {
     /// Plaintext embedded in config. Test/dev only — production should
     /// emit a startup warning if any inline secret is observed.

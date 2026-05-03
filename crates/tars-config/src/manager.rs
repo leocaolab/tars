@@ -12,6 +12,7 @@ use crate::providers::ProvidersConfig;
 /// tools, tenants, secrets, observability, deployment) land here as
 /// each subsystem comes online.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub providers: ProvidersConfig,
@@ -132,6 +133,29 @@ mod tests {
     #[test]
     fn malformed_toml_returns_parse_error_with_path() {
         let toml_str = "not valid toml = = =";
+        let err = ConfigManager::load_from_str(toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn typo_in_top_level_key_is_caught_by_deny_unknown_fields() {
+        let toml_str = r#"
+            [providerz.x]      # typo: providerz instead of providers
+            type = "mock"
+        "#;
+        let err = ConfigManager::load_from_str(toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn typo_in_provider_field_is_caught_by_deny_unknown_fields() {
+        let toml_str = r#"
+            [providers.x]
+            type = "openai"
+            base_ulr = "wrong"   # typo: base_ulr
+            auth = { kind = "secret", secret = { source = "env", var = "OPENAI_API_KEY" } }
+            default_model = "gpt-4o"
+        "#;
         let err = ConfigManager::load_from_str(toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
     }

@@ -35,7 +35,7 @@ use tars_types::{
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};
-use crate::http_base::{stream_via_adapter, HttpAdapter, HttpProviderBase, SseEvent};
+use crate::http_base::{stream_via_adapter, HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent};
 use crate::provider::{LlmEventStream, LlmProvider};
 use crate::tool_buffer::ToolCallBuffer;
 
@@ -48,6 +48,7 @@ pub struct GeminiProviderBuilder {
     base_url: String,
     auth: Auth,
     capabilities: Option<Capabilities>,
+    extras: HttpProviderExtras,
 }
 
 impl GeminiProviderBuilder {
@@ -57,6 +58,7 @@ impl GeminiProviderBuilder {
             base_url: DEFAULT_BASE_URL.to_string(),
             auth,
             capabilities: None,
+            extras: HttpProviderExtras::default(),
         }
     }
 
@@ -70,13 +72,21 @@ impl GeminiProviderBuilder {
         self
     }
 
+    pub fn extras(mut self, extras: HttpProviderExtras) -> Self {
+        self.extras = extras;
+        self
+    }
+
     pub fn build(
         self,
         http: Arc<HttpProviderBase>,
         auth_resolver: Arc<dyn AuthResolver>,
     ) -> Arc<GeminiProvider> {
         let caps = self.capabilities.unwrap_or_else(default_capabilities);
-        let adapter = Arc::new(GeminiAdapter { base_url: self.base_url });
+        let adapter = Arc::new(GeminiAdapter {
+            base_url: self.base_url,
+            extras: self.extras,
+        });
         Arc::new(GeminiProvider {
             id: self.id,
             http,
@@ -167,6 +177,7 @@ enum ResolvedAuthWithKey {
 /// Pure adapter without the API key (for testability).
 pub struct GeminiAdapter {
     base_url: String,
+    extras: HttpProviderExtras,
 }
 
 /// Composed adapter that knows the API key — produced per request.
@@ -207,6 +218,10 @@ impl HttpAdapter for GeminiAdapterWithKey {
 
     fn classify_error(&self, status: StatusCode, body: &str) -> ProviderError {
         self.inner.classify_error(status, body)
+    }
+
+    fn extras(&self) -> &HttpProviderExtras {
+        &self.inner.extras
     }
 }
 
@@ -543,6 +558,10 @@ impl HttpAdapter for GeminiAdapter {
             _ => ProviderError::InvalidRequest(format!("status {status}: {message}")),
         }
     }
+
+    fn extras(&self) -> &HttpProviderExtras {
+        &self.extras
+    }
 }
 
 fn map_stop_reason(s: &str) -> StopReason {
@@ -606,7 +625,10 @@ mod tests {
     use super::*;
 
     fn adapter() -> GeminiAdapter {
-        GeminiAdapter { base_url: DEFAULT_BASE_URL.into() }
+        GeminiAdapter {
+            base_url: DEFAULT_BASE_URL.into(),
+            extras: HttpProviderExtras::default(),
+        }
     }
 
     #[test]
