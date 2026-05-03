@@ -19,18 +19,95 @@ is authoritative. This file aggregates.
 
 ---
 
-## M3 — Agent Runtime first cut (DONE 2026-05-03; real Worker pending B-9)
+## M3 — Agent Runtime (DONE 2026-05-03)
 
-Doc 14 §9 deliverable. **The user-facing milestone is live**: the
-storage primitive, the runtime facade, the agent contract, the typed
-inter-agent envelope, all three default agents (Orchestrator +
-stub WorkerAgent + Critic), the multi-step `run_task` orchestration
-loop with Critic-driven Refine retries, and the CLI integration that
-proves the stack composes are all shipped. **Pending** is only the
-real `WorkerAgent` (blocked on B-9 `tars-tools` for any step that
-needs real I/O — file system, git, web fetch). The loop's
-`AgentMessage::PartialResult` envelope is the same shape a real
-tool-using Worker will emit, so swap-in is a Worker-internal change.
+Doc 14 §9 deliverable. **Fully done.** Storage primitive, runtime
+facade, agent contract, typed inter-agent envelope, all three default
+agents (Orchestrator + WorkerAgent + Critic), the multi-step
+`run_task` orchestration loop with Critic-driven Refine retries, the
+`tars run-task` CLI, **and** real tool-using WorkerAgent (built on
+the new `tars-tools` crate) are all live. WorkerAgent now ships in
+two flavours behind the same `Agent`-trait surface: stub (no tools,
+LLM describes work) and tool-using (LLM dispatches tool calls
+mid-conversation). The same `AgentMessage::PartialResult` envelope
+flows out either way, so the orchestration loop is unchanged.
+
+Carried forward to follow-on work (see TODO B-4): replan-on-Reject,
+ContextStore + ContextCompactor, PromptBuilder, Backtrack + Saga,
+`tars trajectory replay`. None of these block the M3 acceptance
+criteria; they're enhancements to a fully functional baseline.
+
+### WorkerAgent + tools — stub becomes real (`148cda5`)
+
+Wires the new `tars-tools` crate into WorkerAgent. The stub still
+exists (`WorkerAgent::new`); `WorkerAgent::with_tools(..., registry)`
+adds the tool-using flavour.
+
+- **Inner dispatch loop** lives in `WorkerAgent::execute` itself,
+  NOT in `run_task` — one `Agent::execute` call drives N internal
+  LLM calls (drain stream → on tool calls dispatch via registry →
+  append assistant + tool messages → re-prompt → repeat). Stops on
+  first text-only answer or `max_tool_iterations` (default 8).
+  Usage sums across calls.
+- **Trajectory observability tradeoff**: the loop is invisible to
+  the trajectory layer (one StepStarted/LlmCallCaptured/StepCompleted
+  per Worker step regardless of tool round-trip count). Deferred
+  until per-call replay has a consumer — the new event variants
+  would be `LlmSubcallCaptured` + `ToolCallExecuted`, slotting in
+  alongside Backtrack + Saga.
+- **Two system prompts**: `WORKER_SYSTEM_PROMPT` (no tools) +
+  `WORKER_SYSTEM_PROMPT_WITH_TOOLS` (instructs "call tools when you
+  need them, only emit final JSON when done"). `structured_output`
+  stays set in both — strict mode + tool calls coexist; tool calls
+  bypass the response_format constraint, only the final text-only
+  answer must conform.
+- 4 integration tests in `tests/worker_with_tools.rs` using a small
+  `EventQueueProvider` that pops `Vec<ChatEvent>` per call. Cover
+  real `fs.read_file` dispatch + result threading, tool-spec
+  advertising on first call, max-iteration safety cap, and
+  stub-flavour regression.
+
+### `tars-tools` crate — Tool trait + ToolRegistry + fs.read_file (`c4c5357`)
+
+10th workspace member. The executable side of tool calling — typed
+plumbing (`ToolSpec` / `ToolCall` / `Message::Tool`) already lived in
+`tars-types`; this crate adds what actually runs.
+
+- **`Tool` trait** — async `name() / description() / input_schema() /
+  execute(args, ctx) -> Result<ToolResult, ToolError>`. Same
+  `Arc<dyn Tool>` handle pattern as `Arc<dyn Agent>` in
+  `tars-runtime`.
+- **`ToolContext`** — `cancel` + `cwd` today; principal/tenant/
+  deadline/budget slot in as their backing crates ship (matches
+  `AgentContext` rationale).
+- **`ToolResult { content, is_error }`** distinct from `ToolError`:
+  Result is "tool ran but the operation failed, LLM should adapt";
+  Error is "couldn't even attempt — Cancelled / InvalidArguments /
+  Execute".
+- **`ToolRegistry`** — name-keyed lookup, `register` errors on
+  duplicate (silent overwrite would be a footgun), `to_tool_specs()`
+  for `ChatRequest.tools`, `dispatch(call) → Message::Tool`. Both
+  lookup-miss and execute-error become `is_error=true` messages
+  rather than `Result::Err` so the agent loop has something to feed
+  the model on the next turn.
+- **Built-in `fs.read_file`** — UTF-8 read with optional path-jail
+  (canonicalize-then-starts_with), 256 KiB default cap,
+  NotFound/Binary/TooLarge surface as clean `is_error` results.
+  Cancel-aware. The first real Tool — exercises every trait
+  responsibility end-to-end so additional read-only tools become
+  mechanical to write.
+- **Out of scope**, each gets its own commit when consumer appears:
+  idempotency tags (today's `StepIdempotencyKey` covers per-step
+  dedupe), side-effect declarations (need Saga from Doc 04 §6),
+  iam_scopes (need `tars-security` M6), budget_hint (need
+  BudgetMiddleware), timeout (CancellationToken covers
+  upstream-cancel today). Additional builtins (`fs.write_file`,
+  `fs.list_dir`, `git.*`, `web.fetch`, `shell.exec`) ship one at a
+  time as WorkerAgent needs them — `fs.write_file` specifically
+  waits for Saga thinking before it can ship safely.
+- 19 unit tests covering trait basics, registry register/get/names/
+  dispatch, ReadFileTool happy + jail + size cap + binary + cancel +
+  invalid args + missing file paths.
 
 ### `tars run-task <goal>` CLI subcommand (`959be20`)
 

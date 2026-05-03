@@ -110,15 +110,15 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - Currently load-once. Real-world: change `~/.config/tars/config.toml` and have it pick up without restart.
 - **Trigger**: First user demo where "I want to switch providers without restarting" matters.
 
-### B-4. M3 Agent Runtime — real Worker + ContextStore + Backtrack + replay
-- Storage + runtime + agent primitive + AgentMessage envelope + all 3 default agents (Orchestrator + stub Worker + Critic) + the multi-step `run_task` orchestration loop + the `tars run-task` CLI are shipped — see CHANGELOG. **Still missing**:
-  - **Real `WorkerAgent` (tool-using)** — today's stub asks the LLM to *describe* what it would do; a real Worker executes file I/O / git / web fetch / shell. Blocked on B-9 (`tars-tools`). Same `AgentMessage::PartialResult` envelope, so the swap is internal to the Worker.
+### B-4. M3 Agent Runtime — enhancements beyond the M3 baseline
+- M3 is **fully shipped** — see CHANGELOG. Storage + runtime + agent primitive + AgentMessage envelope + all 3 default agents (Orchestrator + WorkerAgent in both stub and tool-using flavours + Critic) + multi-step `run_task` loop + `tars run-task` CLI + `tars-tools` crate (Tool trait + Registry + `fs.read_file`) all live. The remaining items here are **enhancements** to a working baseline, not gates on M3 completion:
   - **`run_task` replan-on-Reject** — current MVP treats `VerdictKind::Reject` as task-failed. Doc 04 §4.2's full design has Reject trigger a fresh Orchestrator call with the rejection reason as feedback. Slot in when a real consumer hits "the Critic was right to reject but the task is still salvageable".
-  - **`ContextStore` + `ContextCompactor`** (Doc 04 §3.3 / §5). Schema-aware history pruner so multi-step trajectories don't grow the prompt unboundedly. Sits between the Trajectory log and the next `AgentContext`. Trigger: when `run_task` traces start exceeding a model's context window in real use.
-  - **`PromptBuilder` trait + default impl** (Doc 04 §6). Composes system + tool + persona blocks into a `ChatRequest`. Today each agent constructs its own ad-hoc (Orchestrator + Critic + Worker each have hand-written PROMPT constants — 3 of the trigger-4 reached). Trigger: 4th agent that repeats the pattern.
-  - **Backtrack + Saga compensation** (Doc 04 §6). Concrete `CompensationAction` types + `AgentEvent::CompensationExecuted` + the runtime hook that runs compensations in reverse on backtrack. Trigger: first real Worker that has externally-visible side effects (writes a file, makes an API call) AND a real failure-recovery scenario where rolling them back matters.
+  - **Per-LLM-call observability inside Worker tool loops** — when WorkerAgent has tools, one `Agent::execute` drives N internal LLM calls + tool dispatches but the trajectory log only captures one StepStarted/LlmCallCaptured/StepCompleted triple (with summed usage + final-answer summary). New event variants `LlmSubcallCaptured` + `ToolCallExecuted` would expose the inner timeline. Trigger: lands alongside Backtrack/Saga (per-call replay needs the granularity anyway) OR when debugging-a-stuck-tool-loop becomes a regular pain point.
+  - **`ContextStore` + `ContextCompactor`** (Doc 04 §3.3 / §5). Schema-aware history pruner so multi-step trajectories don't grow the prompt unboundedly. Sits between the Trajectory log and the next `AgentContext`. Trigger: when `run_task` traces start exceeding a model's context window in real use (especially likely once tool-using Workers chain reads).
+  - **`PromptBuilder` trait + default impl** (Doc 04 §6). Composes system + tool + persona blocks into a `ChatRequest`. Today each agent constructs its own ad-hoc — Orchestrator + Critic + Worker(stub) + Worker(tools) all have hand-written PROMPT constants. **4 of the trigger-4 reached.** Next agent or major prompt overhaul → time to extract.
+  - **Backtrack + Saga compensation** (Doc 04 §6). Concrete `CompensationAction` types + `AgentEvent::CompensationExecuted` + the runtime hook that runs compensations in reverse on backtrack. Trigger: first Tool with externally-visible side effects (`fs.write_file`, `git push`, `web POST`) AND a real failure-recovery scenario where rolling them back matters. **Specifically blocks `fs.write_file` from shipping safely** — see B-9's "additional builtins" note.
   - **CLI: `tars trajectory replay <ID>`** — replays a trajectory's LLM/tool calls against the recorded inputs. Needed once Workers have real side effects (compensation interacts with replay). Trigger: lands with Backtrack.
-- **Trigger / order**: real WorkerAgent (after B-9) → ContextStore (when prompts grow) → PromptBuilder (when 4th agent appears) → Backtrack + replay (when Saga matters).
+- **Trigger / order**: ContextStore (when prompts grow) → PromptBuilder (extract the 4 PROMPT constants) → Backtrack + Saga + replay together (when first side-effecting tool ships).
 
 ### B-5. `tars-cli` follow-on subcommands
 - M1 / M2 / M3 surface is shipped (`tars run` + `tars plan` + `tars run-task` + `tars trajectory list/show`) — see CHANGELOG. Remaining CLI surface from Doc 07 §5:
@@ -145,16 +145,19 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - Mini version shipped — see CHANGELOG. Pending for M5 (Doc 14 §11): all metrics from Doc 08 §5, OTel SDK + OTLP exporter, cardinality validator, `SecretField<T>` generic wrapper (today `SecretString` covers the only consumer), trace head + tail sampling, `AdaptiveSampler`.
 - **Trigger**: M5 starts (Doc 14 calls for it concurrent with CLI/TUI work).
 
-### B-9. `tars-tools` crate — Tool registry + Tool dispatch (Doc 05)
-- The other half of agent capability. Today an Agent can ask the model to emit `ToolCall` events (via `ChatRequest::tools`); we surface them in `AgentOutput::ToolCalls` — but **nothing actually executes them**. The agent's caller would have to dispatch the tools and feed results back as a follow-up `Message::Tool` turn manually.
-- M3's `WorkerAgent` (B-4) is shipped as a stub today (LLM describes what it would do); needs `tars-tools` before a Worker can do anything beyond text completion.
-- **Scope when built**:
-  - `Tool` trait (Doc 05 §3.3): `name() / description() / input_schema() / execute(args) -> ToolResult`.
-  - `ToolRegistry` for lookup by name.
-  - Tool-call mini-pipeline: IAM check / idempotency dedupe (using `StepIdempotencyKey`) / side-effect declaration / budget / audit / timeout. Same onion shape as the LLM pipeline, scaled-down.
-  - Built-in tools: `fs.read_file`, `fs.write_file`, `git.fetch_pr_diff` (Doc 14 §10.1).
-  - MCP integration (Doc 05 §5) — load external tool servers via the standard MCP protocol.
-- **Trigger**: B-4's stub WorkerAgent already exists and proves the loop; the trigger to ship `tars-tools` is "we have a real use case where Worker text-only output is no longer good enough" (e.g. the user wants `tars run-task` to actually edit files).
+### B-9. `tars-tools` — additional builtins + MCP + tool-call mini-pipeline
+- Crate skeleton + `Tool` trait + `ToolRegistry` + `fs.read_file` + WorkerAgent integration shipped — see CHANGELOG. **Still missing**:
+  - **Additional read-only builtins**: `fs.list_dir`, `git.fetch_pr_diff`, `web.fetch`. Each is mechanical — same pattern as `fs.read_file`. Trigger: first Worker run where the LLM-via-`fs.read_file` solo isn't enough (typically appears the first time a goal involves "look at git history" or "check this URL").
+  - **`fs.write_file`** — gated on Backtrack + Saga (B-4). Writing without a rollback story is exactly the failure mode "tool ran, side effect committed, downstream step failed, no way to undo" we want to avoid normalising. Specifically: `fs.write_file` ships **after** `AgentEvent::CompensationExecuted` exists.
+  - **`shell.exec`** — biggest blast radius. Ships **last**, with an explicit allowlist of binaries + jail + per-command audit log. Don't add until Saga + IAM both exist (B-4 + `tars-security` M6).
+  - **Tool-call mini-pipeline** (Doc 05 §3.3) — onion of IAM check / idempotency dedupe / budget / audit / timeout around `ToolRegistry::dispatch`. Today's dispatch is bare. Each layer has its own consumer:
+    - IAM check → blocked on `tars-security` (Doc 14 M6).
+    - Idempotency dedupe (per-tool, distinct from `StepIdempotencyKey`) → blocked on KVStore (B-7).
+    - Budget → blocked on BudgetMiddleware (B-2).
+    - Timeout → could ship now; defer until first long-running tool.
+    - Audit → could ship now; pairs naturally with `tars-melt` metrics (B-8).
+  - **MCP integration** (Doc 05 §5) — load external tool servers over the standard MCP protocol. Big surface; defer until either (a) a user has a specific MCP server they want to plug in, OR (b) we hit the wall of "writing built-ins for everything is unsustainable".
+- **Trigger / order per item above**.
 
 ---
 
