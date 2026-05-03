@@ -72,6 +72,34 @@ impl ProviderRegistry {
         Ok(Self { providers: Arc::new(map) })
     }
 
+    /// Build from a pre-existing map of (id, provider). Useful when a
+    /// caller wants to **transform** an existing registry — e.g. wrap
+    /// every provider in a `CircuitBreaker` (Doc 02 §4.7) — without
+    /// rebuilding from `ProvidersConfig`. Same duplicate-id rule as
+    /// `from_config` (relies on the input being a `HashMap` to
+    /// pre-deduplicate).
+    pub fn from_map(map: HashMap<ProviderId, Arc<dyn LlmProvider>>) -> Self {
+        Self { providers: Arc::new(map) }
+    }
+
+    /// Map every provider through `f` and return a new registry. The
+    /// closure runs once per provider at registry-build time, so any
+    /// state held by the wrapped provider (e.g. CircuitBreaker counters)
+    /// is keyed to a single instance per id — wrapping the same
+    /// provider twice would give two independent state machines, which
+    /// is almost never what you want.
+    pub fn map_providers<F>(&self, mut f: F) -> Self
+    where
+        F: FnMut(&ProviderId, Arc<dyn LlmProvider>) -> Arc<dyn LlmProvider>,
+    {
+        let mapped: HashMap<ProviderId, Arc<dyn LlmProvider>> = self
+            .providers
+            .iter()
+            .map(|(id, p)| (id.clone(), f(id, p.clone())))
+            .collect();
+        Self::from_map(mapped)
+    }
+
     pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn LlmProvider>> {
         self.providers.get(id).cloned()
     }
@@ -239,6 +267,28 @@ mod tests {
         let r = ProviderRegistry::empty();
         assert!(r.is_empty());
         assert_eq!(r.len(), 0);
+    }
+
+    #[test]
+    fn map_providers_preserves_ids_and_count() {
+        let cfg = ConfigManager::load_from_str(
+            r#"
+            [providers.a]
+            type = "mock"
+            canned_response = "ok"
+
+            [providers.b]
+            type = "mock"
+            canned_response = "ok"
+            "#,
+        )
+        .unwrap();
+        let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
+        // Identity transform — every provider passes through unchanged.
+        let mapped = reg.map_providers(|_id, p| p);
+        assert_eq!(mapped.len(), 2);
+        assert!(mapped.get(&ProviderId::new("a")).is_some());
+        assert!(mapped.get(&ProviderId::new("b")).is_some());
     }
 
     #[test]

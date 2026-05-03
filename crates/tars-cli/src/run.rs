@@ -30,8 +30,8 @@ use tars_cache::{
 };
 use tars_config::Config;
 use tars_pipeline::{
-    set_cache_policy, CacheLookupMiddleware, LlmService, Pipeline, RetryMiddleware,
-    RoutingService, StaticPolicy, TelemetryMiddleware,
+    set_cache_policy, CacheLookupMiddleware, CircuitBreaker, CircuitBreakerConfig, LlmService,
+    Pipeline, RetryMiddleware, RoutingService, StaticPolicy, TelemetryMiddleware,
 };
 use tars_provider::auth::basic;
 use tars_provider::http_base::HttpProviderBase;
@@ -93,11 +93,33 @@ pub struct RunArgs {
     /// when you want process-isolated caching for tests / scripted runs).
     #[arg(long, env = "TARS_CACHE_PATH")]
     pub cache_path: Option<PathBuf>,
+
+    /// Wrap each registry provider in a CircuitBreaker before routing.
+    ///
+    /// The breaker has cross-call value (a long-lived process avoids
+    /// hammering a downed provider for the whole cooldown window),
+    /// but a single `tars run` invocation only fires one request per
+    /// provider — Retry already covers the within-request retry case.
+    /// Flag exists to demo the composition + give long-lived consumers
+    /// (REPL, server) a reference path. Defaults to off; opt in when
+    /// scripting many calls in sequence against the same SQLite cache.
+    #[arg(long)]
+    pub breaker: bool,
 }
 
 pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> {
     let cfg = config_loader::load(config_path)?;
-    let registry = Arc::new(build_registry(&cfg)?);
+    let mut registry = build_registry(&cfg)?;
+    if args.breaker {
+        // Wrap once per provider so the breaker state is keyed to a
+        // single instance per id. See ProviderRegistry::map_providers
+        // for the rationale.
+        let cfg_default = CircuitBreakerConfig::default();
+        registry = registry.map_providers(|_id, p| {
+            CircuitBreaker::wrap(p, cfg_default.clone())
+        });
+    }
+    let registry = Arc::new(registry);
 
     // Decide the dispatch shape: single-provider passthrough vs
     // tier-routed multi-provider with fallback. Mutually exclusive
@@ -526,6 +548,7 @@ mod tests {
             no_summary: false,
             no_cache: false,
             cache_path: None,
+            breaker: false,
         };
         let req = build_request(&args, "gpt-4o");
         assert_eq!(req.max_output_tokens, Some(64));
