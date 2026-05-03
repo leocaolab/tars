@@ -42,6 +42,7 @@ These were called out in the self-review on 2026-05-03. Decision: **keep** for n
 - **Why deferred**: Functionally correct, just placed wrong. Stream-level state shoved into a struct named for tool calls.
 - **Cleaner**: Either let `Started` events repeat (consumer dedupes — `ChatResponseBuilder` already handles it) and drop the flag, OR introduce a proper `StreamState { tool_buf, started_emitted, … }`.
 - **Trigger**: Next time we add a third per-stream flag → tipping point for the rename.
+- **2026-05-03 update (commit 67de40d)**: We added `pending_stop_reason` for the openai-7/22 fix. That's now **2** stream-level flags on `ToolCallBuffer` — one short of the trigger. Next added flag means "rename now".
 
 ### O-7. `SecretString` is theatre, not protection
 - **Where**: `crates/tars-types/src/secret.rs`
@@ -78,21 +79,18 @@ The 2026-05-03 A.R.C. review (`3ab2b7fa`) flagged 208 issues; commit `9683ce8` f
 Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch` — tests cover the main path but not edge cases.
 - **Trigger**: Dedicated test-hardening pass, or whenever we touch the relevant module for another reason.
 
-### A-2. `Capabilities` invariant gaps (audit:capabilities-{2,3})
-- Empty `modalities_in/out` HashSets allowed; `StructuredOutputMode::ToolUseEmulation` doesn't enforce `supports_tool_use = true`.
-- **Trigger**: Tied to O-4 — when Capabilities gets readers, validate at construction time.
+### ~~A-2. `Capabilities` invariant gaps (audit:capabilities-{2,3})~~ ✅ 2026-05-03 (67de40d)
+- Resolved by adding `Capabilities::validate()` (rejects empty modalities + ToolUseEmulation without supports_tool_use). `CapabilityError` enum at `tars-types/src/capabilities.rs`.
 
-### A-3. `usage.rs` `saturating_sub` masking invalid usage data
-- If `cached + creation > input`, `billable_input` silently becomes 0 and we under-bill.
-- **Trigger**: When we build telemetry for cost reconciliation, log a warning when the saturation path triggers.
+### ~~A-3. `usage.rs` `saturating_sub` masking invalid usage data~~ ✅ 2026-05-03 (67de40d)
+- Resolved with `debug_assert!(cached + creation <= input)` in `Pricing::cost_for`. Saturating-sub stays as a release-build safety net.
 
 ### A-4. `events.rs` `ToolCallArgsDelta` lacks `id` field
 - Correlation relies on `index` alone. If a provider ever reuses an index across calls in the same stream, args get cross-contaminated.
 - **Trigger**: First time a provider's streaming protocol surfaces this. Anthropic and OpenAI both use stable index per stream today; not a real bug yet.
 
-### A-5. `cache.rs` `SystemTime` serialization
-- Default serde for `SystemTime` is non-portable across platforms.
-- **Trigger**: When ProviderCacheHandle gets persisted (Doc 03 implementation) — switch to `chrono::DateTime<Utc>` or epoch millis.
+### ~~A-5. `cache.rs` `SystemTime` serialization~~ ✅ 2026-05-03 (67de40d)
+- Resolved early — switched to portable epoch-millis i64 via custom `systemtime_millis` serde module (no chrono dep needed). Round-trip test `use_explicit_directive_round_trips_with_handle` proves it.
 
 ---
 
@@ -103,10 +101,11 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **Goal**: Long-lived process pool with `--output-format stream-json` for low-latency interactive use.
 - **Cost**: ~1 week of careful work (cancel guards, session pool lifecycle, JSONL bidi protocol).
 
-### B-2. `tars-pipeline` skeleton (Doc 02)
+### B-2. `tars-pipeline` skeleton (Doc 02) — ⏳ partially done
 - Tower-style middleware framework with the Doc 02 onion layers.
 - **Order**: Telemetry → Auth → IAM → Budget → Cache → Guard → Routing → CircuitBreaker → Retry.
-- **MVP scope**: Just the trait + Routing + RetryMiddleware. Other layers fill in later as their dependencies ship.
+- **MVP shipped (bdaf3b5 + 15600a2)**: `LlmService` trait, `Middleware` + `Pipeline` builder, `ProviderService` (bottom adapter), `TelemetryMiddleware`, `RetryMiddleware` (open-time only, error-class driven, cancel-aware backoff). 13 tests (10 unit + 3 wiremock integration).
+- **Still missing**: Routing (= D-8), CacheLookup (needs `tars-cache`), CircuitBreaker, Auth/IAM (needs `tars-security`), Budget (needs `tars-storage` for token-bucket), PromptGuard (needs `tars-tools` ONNX classifier).
 
 ### B-3. Hot reload for `ConfigManager` (Doc 06 §6)
 - Currently load-once. Real-world: change `~/.config/tars/config.toml` and have it pick up without restart.
@@ -122,6 +121,75 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 
 ### B-6. PyO3 + napi-rs bindings (Doc 12 §6, §7)
 - **Trigger**: First Python or Node user.
+
+---
+
+## Doc 01 — LLM Provider gap items
+
+Audit run 2026-05-03 against `docs/01-llm-provider.md`. Code currently implements ~85% of the doc surface (HTTP + CLI + capability + tool-call + structured-output + cache directive + error model + registry are all in). What's still missing:
+
+### D-1. `ExplicitCacheProvider` sub-trait (Doc 01 §10)
+- `create_cache(content, ttl) -> ProviderCacheHandle`, `delete_cache(&handle)`, `extend_ttl(&handle, additional)`. Anthropic + Gemini implement; OpenAI never (auto-cache only).
+- **Why deferred**: Caller-side has no Janitor / Cache Registry yet to issue creates and track handles. Adding the trait without consumers means dead code per the O-prefix decision rule.
+- **Trigger**: When `tars-cache` lands and needs to reach into provider-side caches.
+- **Blocker for**: Real cost control on Anthropic-heavy workloads (Doc 01 §10.1 "must actively delete").
+
+### D-2. `Auth::SecretManager` + `Auth::GoogleAdc` + `per_tenant_home` flag
+- **Where**: `crates/tars-types/src/auth.rs`. Doc 01 §7 lists 6 Auth variants; we have 3 (None / Delegate / Secret{SecretRef}).
+- **Missing**:
+  - `Auth::SecretManager { backend: Vault|Aws|Gcp|Azure, key }` — pluggable secret backends
+  - `Auth::GoogleAdc { scope: Vec<String> }` — Application Default Credentials for Vertex / Gemini
+  - `per_tenant_home` flag on `Auth::Delegate` — multi-tenant CLI HOME isolation (Doc 01 §6.2 + §7)
+- **Why deferred**: All three live in the future `tars-security` crate (Doc 14 M6). The `BasicAuthResolver` in `tars-provider` is documented as "test/personal-mode"; production resolvers swap in.
+- **Trigger**: M6 (Multi-tenant + Postgres + 安全) per Doc 14.
+
+### D-3. mistral.rs embedded backend (Doc 01 §6.3)
+- In-process LLM inference via `mistral.rs` crate. Apple Silicon Metal backend especially useful for the Mac Pro node (covers same posture as MLX but Rust-native, no `mlx_lm.server` subprocess).
+- **Why deferred**: Adds a heavy native dep + GPU-toolchain CI pain. The `mlx`/`llamacpp` HTTP-server backends already cover the same hardware via subprocess. No call-path benefit until someone needs in-process inference (e.g. embedded scenarios with no network stack).
+- **Trigger**: First user with "I want zero-process, Rust-only inference" — likely an embedded / WASM-adjacent use case.
+
+### D-4. ONNX `ClassifierProvider` trait (Doc 01 §6.3)
+- Separate trait — **not** `LlmProvider`. Used by PromptGuard middleware's slow lane (DeBERTa injection classifier).
+- **Why deferred**: PromptGuard middleware itself doesn't exist (B-2 list). Trait without consumers = dead code.
+- **Trigger**: When PromptGuard slow-lane is implemented (Doc 14 M4).
+
+### D-5. Real tokenizer for `count_tokens` (Doc 01 §3 + §15.1)
+- `LlmProvider::count_tokens(req, fast=false)` is supposed to load the real tokenizer (`tiktoken-rs` for OpenAI, `tokenizers` for HF-tokenized models). Current default impl ignores `fast` and always returns `chars/4`.
+- **Why deferred**: Budget middleware (the only consumer that needs real counts) doesn't exist. Doc 01 §15.1 is explicit: "don't do precise token counting on the request path; estimate with chars/4, get truth from `response.usage`."
+- **Trigger**: When BudgetMiddleware needs pre-flight precision to reject requests over the per-tenant cap *before* incurring provider cost.
+
+### D-6. `capabilities_override` config field (Doc 01 §13)
+- Per-provider TOML can override the built-in capability profile (e.g. local llama.cpp deployment with `supports_thinking = false, prompt_cache = "none"`). Currently capabilities are hardcoded per backend builder.
+- **Why deferred**: We can already achieve this in code via `OpenAiProviderBuilder::capabilities(...)`; just not from config. Adding the TOML deserialization is small (~30 lines) but low-value until users have heterogeneous local deployments.
+- **Trigger**: First user TOML-only deployment that needs to flag a capability off (e.g. "this vLLM doesn't actually do strict JSON, please don't route strict-output requests here").
+
+### D-7. `ContextTooLong { limit, requested }` populated from error message (Doc 01 §11.1)
+- All HTTP adapters currently classify context overflow as `ProviderError::ContextTooLong { limit: 0, requested: 0 }` — typed correctly but with placeholder numbers. Doc 01 §11.1 says these fields enable "上层有明确处理路径（截断 / 摘要）". Without the numbers, callers can't make the truncation decision intelligently.
+- **Where**: `crates/tars-provider/src/backends/{openai,anthropic,gemini}.rs` — `classify_error` paths.
+- **Why deferred**: Each provider's error message format is different and changes without notice. Real fix is "regex over the message body" — hacky but unavoidable.
+- **Trigger**: First time the agent loop hits a long-context request and the truncation policy needs the actual numbers (not just the error class). Until then `0/0` is honest about "we know it overflowed, we don't know by how much".
+
+### D-8. Routing layer (Doc 01 §12) — split out from B-2
+- `RoutingPolicy` trait + 5 policies: `ExplicitPolicy`, `TierPolicy`, `CostPolicy`, `LatencyPolicy`, `EnsemblePolicy`. Plus `FallbackChain<P>`. Plus `RoutingMiddleware` that consumes the policy.
+- **Where it'll live**: `tars-pipeline` (the policy lives in the pipeline crate that already holds the middleware framework).
+- **Why deferred**: Useless without > 1 candidate provider in a single deployment AND a `ModelHint::Tier` use case. Today's call sites all use `ModelHint::Explicit` and pick one provider by id.
+- **Trigger**: First time a user wants `gpt-4o-mini → claude-haiku → local-qwen` fallback ordering — the integration test for this lives in TODO already.
+- **Tied to**: O-4 (Capabilities slimming); routing's actual reads decide which fields stay.
+
+### D-9. Conformance test suite (Doc 01 §14)
+- One test body, run as a generic over `Arc<dyn LlmProvider>`. Each provider impl runs the same conformance set: tool use, structured output, streaming, cancel, error classification, parallel tool-call interleave.
+- **Where**: New `crates/tars-provider/tests/conformance.rs`, parameterised over a `provider_factory: fn() -> Arc<dyn LlmProvider>`.
+- **Why deferred**: Each backend currently has its own `*_integration.rs` covering its specific wire format. The duplication will become annoying once we have 3+ providers behaving subtly differently — at that point we extract the shared body. Today the duplication is bearable.
+- **Trigger**: When we add a 4th HTTP-shape provider (xAI? Mistral La Plateforme?) and copy-paste fatigue hits.
+- **Doc 01 §14 also calls for**: nightly CI hitting real APIs for ~$0.01/run. Defer until budget for that exists.
+
+### D-10. Doc 01 §17 open questions
+Verbatim from the doc; tracked here so they don't get lost:
+- mistral.rs Metal-backend verification on Apple Silicon (blocked by D-3)
+- Claude Code CLI `interrupt` JSONL command spec confirmation across versions (blocked by B-1)
+- Gemini CLI stream-protocol maturity assessment (blocked by B-1)
+- OAuth token auto-refresh for Anthropic + Google (blocked by D-2)
+- ONNX classifier multi-thread inference scheduling (blocked by D-4)
 
 ---
 
