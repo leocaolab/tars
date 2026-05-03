@@ -39,7 +39,10 @@ use tars_runtime::{
     RunTaskError, TaskOutcome, VerdictKind, WorkerAgent,
 };
 use tars_storage::{EventStore, SqliteEventStore};
-use tars_tools::{builtins::ReadFileTool, ToolRegistry};
+use tars_tools::{
+    builtins::{ListDirTool, ReadFileTool},
+    ToolRegistry,
+};
 use tars_types::AgentId;
 use tokio_util::sync::CancellationToken;
 
@@ -192,11 +195,19 @@ fn build_worker(args: &RunTaskArgs, model: String) -> Result<Arc<WorkerAgent>> {
             root.display(),
         )
     })?;
+    // list_dir paired with read_file so prompts can discover before
+    // reading. with_root is infallible here (we just canonicalized
+    // the same path above for read_file).
+    let list_dir = ListDirTool::with_root(&root)
+        .expect("tools root canonicalized for read_file; list_dir must succeed too");
 
     let mut registry = ToolRegistry::new();
     registry
         .register_owned(read_file)
         .context("register fs.read_file in tool registry")?;
+    registry
+        .register_owned(list_dir)
+        .context("register fs.list_dir in tool registry")?;
 
     eprintln!(
         "── tools enabled: {} (jailed to {})",
