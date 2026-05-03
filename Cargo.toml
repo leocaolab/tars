@@ -8,6 +8,7 @@ members = [
     "crates/tars-cache",
     "crates/tars-melt",
     "crates/tars-storage",
+    "crates/tars-runtime",
     "crates/tars-cli",
 ]
 
@@ -57,6 +58,9 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 
 # Crypto / hash
 sha2 = "0.10"
+# UUID — used by tars-runtime for new TrajectoryId generation.
+# v4 (random) is the right shape: no clock dependency, no MAC leak.
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Cache
 moka = { version = "0.12", features = ["future"] }
