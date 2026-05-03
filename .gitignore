@@ -2,6 +2,9 @@
 logs/
 selfplay_log.txt
 
+# arc CLI per-invocation log (touched whenever `arc run` fires; never useful in-tree)
+arc.log.jsonl
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
