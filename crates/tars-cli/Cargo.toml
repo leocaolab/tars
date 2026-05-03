@@ -19,6 +19,7 @@ tars-config = { path = "../tars-config" }
 tars-provider = { path = "../tars-provider" }
 tars-pipeline = { path = "../tars-pipeline" }
 tars-cache = { path = "../tars-cache" }
+tars-melt = { path = "../tars-melt" }
 
 # Async
 tokio.workspace = true
@@ -31,7 +32,6 @@ dirs.workspace = true
 
 # Logging
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

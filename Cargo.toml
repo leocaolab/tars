@@ -6,6 +6,7 @@ members = [
     "crates/tars-provider",
     "crates/tars-pipeline",
     "crates/tars-cache",
+    "crates/tars-melt",
     "crates/tars-cli",
 ]
 
@@ -43,7 +44,7 @@ thiserror = "1"
 
 # Tracing (instrumentation only — full MELT stack later)
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }

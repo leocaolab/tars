@@ -1,0 +1,18 @@
+[package]
+name = "tars-melt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Telemetry init (tracing subscriber + format + future OTel) — Doc 08."
+
+[lints]
+workspace = true
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

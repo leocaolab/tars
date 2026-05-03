@@ -14,6 +14,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tars_melt::TelemetryConfig;
 
 mod config_loader;
 mod run;
@@ -49,7 +50,13 @@ enum Command {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_tracing(cli.verbose);
+    // Telemetry init goes through tars-melt so every binary in the
+    // workspace lands the same formatter / env-filter / span shape.
+    // The guard is bound to `_telemetry` so `Drop` runs at process
+    // exit (M1 no-op; M5 will flush the OTel exporter).
+    let mut config = TelemetryConfig::from_verbosity(cli.verbose);
+    config.service = "tars-cli".into();
+    let _telemetry = tars_melt::init_or_warn(config);
 
     let result: Result<()> = match cli.command {
         Command::Run(args) => run::execute(args, cli.config).await,
@@ -63,26 +70,4 @@ async fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-/// Wire up `tracing` so middleware events go to stderr (stdout stays
-/// clean for the LLM response). `RUST_LOG` wins; otherwise `--verbose`
-/// drives the level. Default = WARN so a casual `tars run` is silent
-/// on the diagnostics side.
-fn init_tracing(verbose: u8) {
-    use tracing_subscriber::filter::EnvFilter;
-    let default_level = match verbose {
-        0 => "warn",
-        1 => "tars=info,warn",
-        2 => "tars=debug,info",
-        _ => "tars=trace,debug",
-    };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
-
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
 }
