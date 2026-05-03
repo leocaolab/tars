@@ -31,6 +31,8 @@ pub fn built_in_provider_defaults() -> HashMap<ProviderId, ProviderConfig> {
         (ProviderId::new("gemini"), default_gemini()),
         (ProviderId::new("claude_cli"), default_claude_cli()),
         (ProviderId::new("gemini_cli"), default_gemini_cli()),
+        (ProviderId::new("mlx"), default_mlx()),
+        (ProviderId::new("llamacpp"), default_llamacpp()),
     ]
     .into_iter()
     .collect()
@@ -97,6 +99,30 @@ pub fn default_gemini_cli() -> ProviderConfig {
     }
 }
 
+/// Default MLX: `mlx_lm.server` on `localhost:8080`, no auth, a Qwen
+/// 32B 4-bit MLX-converted Coder model. Override `default_model` to
+/// match whatever you've actually loaded into mlx-lm.server.
+pub fn default_mlx() -> ProviderConfig {
+    ProviderConfig::Mlx {
+        base_url: None,
+        auth: Auth::None,
+        default_model: "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit".into(),
+        extras: HttpProviderExtras::default(),
+    }
+}
+
+/// Default llama.cpp: `llama-server` on `localhost:8080`, no auth, a
+/// 7B coder GGUF. Override `default_model` to match the file you
+/// loaded with `-m`.
+pub fn default_llamacpp() -> ProviderConfig {
+    ProviderConfig::Llamacpp {
+        base_url: None,
+        auth: Auth::None,
+        default_model: "Qwen2.5-Coder-7B-Q5_K_M".into(),
+        extras: HttpProviderExtras::default(),
+    }
+}
+
 /// Merge user-declared providers on top of built-in defaults.
 ///
 /// Semantics:
@@ -127,7 +153,15 @@ mod tests {
     #[test]
     fn defaults_set_includes_all_well_known_providers() {
         let defs = built_in_provider_defaults();
-        for id in ["openai", "anthropic", "gemini", "claude_cli", "gemini_cli"] {
+        for id in [
+            "openai",
+            "anthropic",
+            "gemini",
+            "claude_cli",
+            "gemini_cli",
+            "mlx",
+            "llamacpp",
+        ] {
             assert!(
                 defs.contains_key(&ProviderId::new(id)),
                 "missing default: {id}"
@@ -193,8 +227,33 @@ mod tests {
         .into_iter()
         .collect();
         let merged = merge_builtin_with_user(user);
-        // 5 built-ins + 1 new
-        assert_eq!(merged.len(), 6);
+        // 7 built-ins + 1 new
+        assert_eq!(merged.len(), 8);
         assert!(merged.contains_key(&ProviderId::new("local_qwen")));
+    }
+
+    #[test]
+    fn mlx_default_targets_mlx_community_qwen() {
+        let cfg = default_mlx();
+        match cfg {
+            ProviderConfig::Mlx { default_model, base_url, auth, .. } => {
+                assert!(default_model.starts_with("mlx-community/"));
+                assert!(base_url.is_none()); // adapter falls back to localhost:8080
+                assert!(matches!(auth, Auth::None));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn llamacpp_default_targets_gguf_filename() {
+        let cfg = default_llamacpp();
+        match cfg {
+            ProviderConfig::Llamacpp { default_model, .. } => {
+                // GGUF naming convention: <model>-<size>-<quant>
+                assert!(default_model.contains("Q5_K_M") || default_model.contains("Q4"));
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

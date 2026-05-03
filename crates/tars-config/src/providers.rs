@@ -122,6 +122,33 @@ pub enum ProviderConfig {
         extras: HttpProviderExtras,
     },
 
+    /// Apple Silicon native runner (`mlx_lm.server`). Same wire format
+    /// as vLLM/llama.cpp/OpenAI-compat — the dedicated variant exists
+    /// so logs and routing can identify "this is the unified-memory
+    /// box" at a glance and apply Mac-specific capability defaults.
+    Mlx {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        #[serde(default = "Auth::none")]
+        auth: Auth,
+        default_model: String,
+        #[serde(flatten)]
+        extras: HttpProviderExtras,
+    },
+
+    /// llama.cpp `llama-server` (GGUF + Vulkan/Metal). Use this for
+    /// Ryzen iGPU clusters or any host where `llama.cpp` is the
+    /// preferred runner. Same wire format as the other local backends.
+    Llamacpp {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+        #[serde(default = "Auth::none")]
+        auth: Auth,
+        default_model: String,
+        #[serde(flatten)]
+        extras: HttpProviderExtras,
+    },
+
     /// Claude Code CLI subscription path.
     ClaudeCli {
         #[serde(default = "default_claude_executable")]
@@ -183,6 +210,8 @@ impl ProviderConfig {
             Anthropic { .. } => "anthropic",
             Gemini { .. } => "gemini",
             Vllm { .. } => "vllm",
+            Mlx { .. } => "mlx",
+            Llamacpp { .. } => "llamacpp",
             ClaudeCli { .. } => "claude_cli",
             GeminiCli { .. } => "gemini_cli",
             Mock { .. } => "mock",
@@ -199,6 +228,8 @@ impl ProviderConfig {
             | Anthropic { default_model, .. }
             | Gemini { default_model, .. }
             | Vllm { default_model, .. }
+            | Mlx { default_model, .. }
+            | Llamacpp { default_model, .. }
             | ClaudeCli { default_model, .. }
             | GeminiCli { default_model, .. } => default_model,
             Mock { .. } => "mock-model",
@@ -310,6 +341,37 @@ mod tests {
                     }
                     _ => panic!("wrong auth"),
                 }
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn mlx_uses_default_auth_none_when_omitted() {
+        let toml_str = r#"
+            type = "mlx"
+            default_model = "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"
+        "#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
+        match cfg {
+            ProviderConfig::Mlx { auth, default_model, .. } => {
+                assert!(matches!(auth, Auth::None));
+                assert!(default_model.contains("Qwen"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn llamacpp_uses_default_auth_none_when_omitted() {
+        let toml_str = r#"
+            type = "llamacpp"
+            default_model = "Qwen2.5-Coder-7B-Q5_K_M"
+        "#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
+        match cfg {
+            ProviderConfig::Llamacpp { auth, .. } => {
+                assert!(matches!(auth, Auth::None));
             }
             _ => panic!("wrong variant"),
         }

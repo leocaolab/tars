@@ -25,6 +25,8 @@ use crate::backends::gemini::GeminiProviderBuilder;
 use crate::backends::gemini_cli::GeminiCliProviderBuilder;
 use crate::backends::mock::{CannedResponse, MockProvider};
 use crate::backends::openai::OpenAiProviderBuilder;
+use crate::backends::llamacpp::llamacpp;
+use crate::backends::mlx::mlx;
 use crate::backends::vllm::vllm;
 use crate::http_base::HttpProviderBase;
 use crate::provider::LlmProvider;
@@ -169,6 +171,34 @@ fn build_one(
             auth_resolver,
         ),
 
+        ProviderConfig::Mlx {
+            base_url,
+            auth,
+            default_model: _,
+            extras,
+        } => mlx(
+            id,
+            base_url.clone(),
+            auth.clone(),
+            extras.clone(),
+            http,
+            auth_resolver,
+        ),
+
+        ProviderConfig::Llamacpp {
+            base_url,
+            auth,
+            default_model: _,
+            extras,
+        } => llamacpp(
+            id,
+            base_url.clone(),
+            auth.clone(),
+            extras.clone(),
+            http,
+            auth_resolver,
+        ),
+
         ProviderConfig::ClaudeCli { executable, timeout_secs, default_model: _ } => {
             ClaudeCliProviderBuilder::new(id)
                 .executable(executable.clone())
@@ -238,6 +268,14 @@ mod tests {
             type = "vllm"
             default_model = "Qwen/Qwen2.5-Coder-32B-Instruct"
 
+            [providers.mlx_local]
+            type = "mlx"
+            default_model = "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"
+
+            [providers.llamacpp_local]
+            type = "llamacpp"
+            default_model = "Qwen2.5-Coder-7B-Q5_K_M"
+
             [providers.claude_cli]
             type = "claude_cli"
             default_model = "claude-opus-4-7"
@@ -252,12 +290,14 @@ mod tests {
         "#;
         let cfg = ConfigManager::load_from_str(toml_str).unwrap();
         let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
-        assert_eq!(reg.len(), 8);
+        assert_eq!(reg.len(), 10);
         assert!(reg.get(&ProviderId::new("openai_main")).is_some());
         assert!(reg.get(&ProviderId::new("openai_compat_local")).is_some());
         assert!(reg.get(&ProviderId::new("anthropic_main")).is_some());
         assert!(reg.get(&ProviderId::new("gemini_main")).is_some());
         assert!(reg.get(&ProviderId::new("vllm_local")).is_some());
+        assert!(reg.get(&ProviderId::new("mlx_local")).is_some());
+        assert!(reg.get(&ProviderId::new("llamacpp_local")).is_some());
         assert!(reg.get(&ProviderId::new("claude_cli")).is_some());
         assert!(reg.get(&ProviderId::new("gemini_cli")).is_some());
         assert!(reg.get(&ProviderId::new("mock_test")).is_some());
