@@ -22,13 +22,19 @@ pub struct CachePolicy {
 }
 
 impl Default for CachePolicy {
-    /// L1 on, L2/L3 off (until their backends exist). Doc 03 §2.2's
-    /// recommended default also has L2 on; we'll flip that bit when
-    /// the L2 backend is real.
+    /// L1 + L2 on (matches Doc 03 §2.2). L3 is opt-in per request
+    /// because explicit provider-side caches cost storage rent and
+    /// only pay back for long-prefix multi-turn workloads.
+    ///
+    /// L2 only does anything when the registry impl is L2-aware
+    /// ([`crate::SqliteCacheRegistry`]). [`crate::MemoryCacheRegistry`]
+    /// silently ignores the `l2` flag — same shape, narrower
+    /// implementation — so callers don't need to know which backend
+    /// is wired.
     fn default() -> Self {
         Self {
             l1: true,
-            l2: false,
+            l2: true,
             l3: false,
             l1_ttl: None,
             l2_ttl: None,
@@ -64,11 +70,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_enables_l1_only() {
+    fn default_enables_l1_and_l2() {
         let p = CachePolicy::default();
         assert!(p.l1);
-        assert!(!p.l2);
-        assert!(!p.l3);
+        assert!(p.l2);
+        assert!(!p.l3, "L3 stays opt-in per Doc 03 §2.2");
         assert!(p.any_enabled());
     }
 

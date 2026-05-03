@@ -24,9 +24,15 @@ use crate::policy::CachePolicy;
 
 /// What we put into the cache. Wraps the response with enough metadata
 /// to (a) replay correctly and (b) tell observers "you saved $X".
+///
+/// `cached_at` uses `tars_types::systemtime_millis` so the on-wire/
+/// on-disk format stays portable across platforms (default `SystemTime`
+/// serde uses a tagged `(secs, nanos)` struct that isn't a stable
+/// format — pre-Unix-epoch times even error out on some platforms).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CachedResponse {
     pub response: ChatResponse,
+    #[serde(with = "tars_types::systemtime_millis")]
     pub cached_at: SystemTime,
     pub origin_provider: ProviderId,
     /// Usage figures from the original (cache-miss) call. Lets the

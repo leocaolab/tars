@@ -26,9 +26,16 @@ sha2.workspace = true
 # In-process cache
 moka.workspace = true
 
+# Persistent L2 cache (Personal mode)
+rusqlite.workspace = true
+
+# XDG cache dir resolution (for `default_personal_cache_path`)
+dirs.workspace = true
+
 # Errors / tracing
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tempfile = "3"

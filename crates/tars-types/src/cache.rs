@@ -117,7 +117,11 @@ pub struct CacheHitInfo {
 /// pre-1970 case (rare but possible on time-skewed test fixtures) is
 /// representable instead of erroring out the way the default
 /// `SystemTime` serde does on negative durations.
-mod systemtime_millis {
+///
+/// Public so other crates that persist `SystemTime` (cache L2,
+/// future event store) can reuse the same wire format via
+/// `#[serde(with = "tars_types::systemtime_millis")]`.
+pub mod systemtime_millis {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use serde::{Deserialize, Deserializer, Serializer};

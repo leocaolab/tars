@@ -25,7 +25,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args;
 use futures::StreamExt;
-use tars_cache::{CacheKeyFactory, CachePolicy, MemoryCacheRegistry};
+use tars_cache::{
+    open_at_path, CacheKeyFactory, CachePolicy, CacheRegistry, MemoryCacheRegistry,
+};
 use tars_config::Config;
 use tars_pipeline::{
     set_cache_policy, CacheLookupMiddleware, Pipeline, RetryMiddleware, TelemetryMiddleware,
@@ -75,6 +77,12 @@ pub struct RunArgs {
     /// same bytes every time).
     #[arg(long)]
     pub no_cache: bool,
+
+    /// Override the cache file path. Default: `$XDG_CACHE_HOME/tars/cache.sqlite`.
+    /// Pass `:memory:` to use a per-invocation in-memory cache (useful
+    /// when you want process-isolated caching for tests / scripted runs).
+    #[arg(long, env = "TARS_CACHE_PATH")]
+    pub cache_path: Option<PathBuf>,
 }
 
 pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> {
@@ -102,12 +110,10 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     // Arc<dyn LlmProvider> is also moved into the pipeline below.
     let provider_for_cost = provider.clone();
 
-    // Process-wide L1 cache. For a single `tars run` invocation the
-    // cache only matters if the same prompt fires twice in the same
-    // process — but the wiring is here so a future REPL / `tars chat`
-    // gets cross-call hits for free, and so the integration test
-    // (second-call-hits-cache) has somewhere to live.
-    let cache_registry = MemoryCacheRegistry::default_arc();
+    // Cache: SQLite L2 by default (cross-invocation hits), in-memory
+    // L1 always present. `--cache-path :memory:` falls back to pure-
+    // in-memory; missing XDG cache dir does the same with a warning.
+    let cache_registry = build_cache(args.cache_path.as_deref());
     let cache_factory = CacheKeyFactory::new(1);
 
     let pipeline = Pipeline::builder(provider)
@@ -135,6 +141,37 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
         print_summary(&provider_for_cost, &outcome);
     }
     Ok(())
+}
+
+/// Pick a cache backend based on the `--cache-path` flag and platform:
+/// - explicit `:memory:` → in-memory L1 only
+/// - explicit path → SQLite at that path (parents created as needed)
+/// - default → SQLite at `dirs::cache_dir()/tars/cache.sqlite`
+/// - no XDG cache dir on this platform → in-memory L1 with a warning
+///
+/// Falls back to in-memory on any sqlite open / migration failure too —
+/// caching is best-effort, never fatal (Doc 03 §4.3).
+fn build_cache(explicit: Option<&std::path::Path>) -> Arc<dyn CacheRegistry> {
+    use std::path::Path;
+
+    fn warn_to_memory(reason: &str) -> Arc<dyn CacheRegistry> {
+        tracing::warn!("cache: {reason}; using in-memory L1 only (no cross-process hits)");
+        MemoryCacheRegistry::default_arc()
+    }
+
+    let path = match explicit {
+        Some(p) if p == Path::new(":memory:") => return MemoryCacheRegistry::default_arc(),
+        Some(p) => p.to_path_buf(),
+        None => match tars_cache::default_personal_cache_path() {
+            Some(p) => p,
+            None => return warn_to_memory("no XDG cache dir on this platform"),
+        },
+    };
+
+    match open_at_path(&path) {
+        Ok(reg) => reg,
+        Err(e) => warn_to_memory(&format!("opening sqlite cache at {path:?} failed: {e}")),
+    }
 }
 
 fn build_registry(cfg: &Config) -> Result<ProviderRegistry> {
@@ -350,6 +387,7 @@ mod tests {
             temperature: Some(0.3),
             no_summary: false,
             no_cache: false,
+            cache_path: None,
         };
         let req = build_request(&args, "gpt-4o");
         assert_eq!(req.max_output_tokens, Some(64));

@@ -41,7 +41,7 @@ pub mod tools;
 pub mod usage;
 
 pub use auth::Auth;
-pub use cache::{CacheDirective, CacheHitInfo, ProviderCacheHandle};
+pub use cache::{systemtime_millis, CacheDirective, CacheHitInfo, ProviderCacheHandle};
 pub use capabilities::{
     Capabilities, Modality, PromptCacheKind, StructuredOutputMode,
 };

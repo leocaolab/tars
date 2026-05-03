@@ -59,6 +59,9 @@ sha2 = "0.10"
 # Cache
 moka = { version = "0.12", features = ["future"] }
 
+# SQLite (cache L2, future event store, content store)
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
+
 # Test deps
 wiremock = "0.6"
 tokio-test = "0.4"
