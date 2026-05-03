@@ -25,13 +25,16 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args;
 use futures::StreamExt;
+use tars_cache::{CacheKeyFactory, CachePolicy, MemoryCacheRegistry};
 use tars_config::Config;
-use tars_pipeline::{Pipeline, RetryMiddleware, TelemetryMiddleware};
+use tars_pipeline::{
+    set_cache_policy, CacheLookupMiddleware, Pipeline, RetryMiddleware, TelemetryMiddleware,
+};
 use tars_provider::auth::basic;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::registry::ProviderRegistry;
 use tars_types::{
-    ChatEvent, ChatRequest, CostUsd, ModelHint, ProviderId, RequestContext, Usage,
+    CacheHitInfo, ChatEvent, ChatRequest, CostUsd, ModelHint, ProviderId, RequestContext, Usage,
 };
 
 use crate::config_loader;
@@ -65,6 +68,13 @@ pub struct RunArgs {
     /// Skip the trailing `tokens: ... cost: ...` summary line.
     #[arg(long)]
     pub no_summary: bool,
+
+    /// Disable response caching for this call. Useful when iterating
+    /// on a prompt and you want to see the model's variation across
+    /// requests (otherwise temperature=0 + cache returns the exact
+    /// same bytes every time).
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> {
@@ -91,12 +101,29 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     // Capture the provider Arc for cost computation post-stream — the
     // Arc<dyn LlmProvider> is also moved into the pipeline below.
     let provider_for_cost = provider.clone();
+
+    // Process-wide L1 cache. For a single `tars run` invocation the
+    // cache only matters if the same prompt fires twice in the same
+    // process — but the wiring is here so a future REPL / `tars chat`
+    // gets cross-call hits for free, and so the integration test
+    // (second-call-hits-cache) has somewhere to live.
+    let cache_registry = MemoryCacheRegistry::default_arc();
+    let cache_factory = CacheKeyFactory::new(1);
+
     let pipeline = Pipeline::builder(provider)
         .layer(TelemetryMiddleware::new())
+        .layer(CacheLookupMiddleware::new(
+            cache_registry,
+            cache_factory,
+            provider_id.clone(),
+        ))
         .layer(RetryMiddleware::default())
         .build();
 
     let ctx = RequestContext::test_default(); // no IAM/audit yet (M6)
+    if args.no_cache {
+        set_cache_policy(&ctx, &CachePolicy::off());
+    }
     let stream = Arc::new(pipeline)
         .call(req, ctx)
         .await
@@ -168,6 +195,9 @@ pub struct StreamOutcome {
     /// True if we ever wrote *something* to stdout. Lets us print
     /// a leading newline before the summary only when needed.
     pub wrote_anything: bool,
+    /// Cache info from the Started event. Non-zero
+    /// `cached_input_tokens` means we replayed a hit.
+    pub cache_hit: CacheHitInfo,
 }
 
 async fn drain_stream_to_stdout(
@@ -179,6 +209,9 @@ async fn drain_stream_to_stdout(
 
     while let Some(ev) = stream.next().await {
         match ev.context("stream error")? {
+            ChatEvent::Started { cache_hit, .. } => {
+                outcome.cache_hit = cache_hit;
+            }
             ChatEvent::Delta { text } => {
                 out.write_all(text.as_bytes()).context("stdout write")?;
                 out.flush().context("stdout flush")?;
@@ -208,8 +241,13 @@ fn print_summary(provider: &Arc<dyn tars_provider::LlmProvider>, outcome: &Strea
         .stop_reason
         .map(|s| format!("{s:?}"))
         .unwrap_or_else(|| "<no Finished event>".into());
+    let cache_tag = if outcome.cache_hit.replayed_from_cache {
+        " (cache hit; cost saved)"
+    } else {
+        ""
+    };
     eprintln!(
-        "── tokens: in={} out={} thinking={} cached={}  cost: {}  stop: {stop}",
+        "── tokens: in={} out={} thinking={} cached={}  cost: {}{cache_tag}  stop: {stop}",
         outcome.usage.input_tokens,
         outcome.usage.output_tokens,
         outcome.usage.thinking_tokens,
@@ -311,6 +349,7 @@ mod tests {
             max_output_tokens: Some(64),
             temperature: Some(0.3),
             no_summary: false,
+            no_cache: false,
         };
         let req = build_request(&args, "gpt-4o");
         assert_eq!(req.max_output_tokens, Some(64));

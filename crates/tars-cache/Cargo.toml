@@ -1,0 +1,34 @@
+[package]
+name = "tars-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Multi-level LLM response cache (Doc 03)"
+
+[lints]
+workspace = true
+
+[dependencies]
+tars-types = { path = "../tars-types" }
+
+# Async
+tokio.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Hashing
+sha2.workspace = true
+
+# In-process cache
+moka.workspace = true
+
+# Errors / tracing
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

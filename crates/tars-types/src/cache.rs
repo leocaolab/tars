@@ -103,8 +103,14 @@ impl std::fmt::Debug for ProviderCacheHandle {
 pub struct CacheHitInfo {
     /// Tokens served from prefix cache (Provider-implicit or explicit).
     pub cached_input_tokens: u64,
-    /// Whether an explicit handle was used.
+    /// Whether an explicit handle was used (L3 / `cachedContent`).
     pub used_explicit_handle: bool,
+    /// True when the *response* was served entirely from L1/L2 cache —
+    /// no provider call happened. Distinct from `cached_input_tokens`,
+    /// which only marks L3 / provider-implicit prefix discounts. M1
+    /// cache middleware sets this on full L1 replay.
+    #[serde(default)]
+    pub replayed_from_cache: bool,
 }
 
 /// Portable epoch-millis serde for `SystemTime`. Stored as `i64` so the

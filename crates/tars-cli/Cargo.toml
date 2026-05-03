@@ -18,6 +18,7 @@ tars-types = { path = "../tars-types" }
 tars-config = { path = "../tars-config" }
 tars-provider = { path = "../tars-provider" }
 tars-pipeline = { path = "../tars-pipeline" }
+tars-cache = { path = "../tars-cache" }
 
 # Async
 tokio.workspace = true

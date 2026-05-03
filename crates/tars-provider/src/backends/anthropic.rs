@@ -436,6 +436,7 @@ impl HttpAdapter for AnthropicAdapter {
                             .and_then(|x| x.as_u64())
                             .unwrap_or(0),
                         used_explicit_handle: false,
+                        replayed_from_cache: false,
                     })
                     .unwrap_or_default();
                 out.push(ChatEvent::Started {

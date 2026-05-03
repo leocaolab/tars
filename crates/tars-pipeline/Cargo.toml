@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 tars-types = { path = "../tars-types" }
 tars-provider = { path = "../tars-provider" }
+tars-cache = { path = "../tars-cache" }
 
 # Async
 tokio.workspace = true
@@ -23,6 +24,9 @@ async-stream.workspace = true
 # Errors / tracing
 thiserror.workspace = true
 tracing.workspace = true
+
+# Cache policy serialization (read from RequestContext.attributes)
+serde_json.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

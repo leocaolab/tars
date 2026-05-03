@@ -27,6 +27,56 @@ impl ChatResponse {
     pub fn is_finished(&self) -> bool {
         self.stop_reason.is_some()
     }
+
+    /// Replay this response as a sequence of [`ChatEvent`]s. Used by
+    /// the cache layer to short-circuit a hit back into the streaming
+    /// contract — middleware above the cache can't tell the difference
+    /// between a fresh response and a replayed one.
+    ///
+    /// `cache_hit` is overwritten on the emitted Started event so
+    /// observers can flag the replay; the rest of the fields are
+    /// reconstituted in their original order:
+    /// Started → ThinkingDelta? → Delta? → tool calls → Finished.
+    pub fn into_events(self, cache_hit: CacheHitInfo) -> Vec<ChatEvent> {
+        let Self {
+            actual_model,
+            text,
+            thinking,
+            tool_calls,
+            stop_reason,
+            usage,
+            cache_hit: _, // overridden by argument
+        } = self;
+
+        let mut out = Vec::with_capacity(3 + tool_calls.len() * 2);
+        out.push(ChatEvent::Started { actual_model, cache_hit });
+        if !thinking.is_empty() {
+            out.push(ChatEvent::ThinkingDelta { text: thinking });
+        }
+        if !text.is_empty() {
+            out.push(ChatEvent::Delta { text });
+        }
+        for (index, tc) in tool_calls.into_iter().enumerate() {
+            out.push(ChatEvent::ToolCallStart {
+                index,
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+            });
+            out.push(ChatEvent::ToolCallEnd {
+                index,
+                id: tc.id,
+                parsed_args: tc.arguments,
+            });
+        }
+        // A cached response that lacks a stop_reason is incoherent (we
+        // refuse to cache mid-stream failures), but preserve EndTurn as
+        // a sane default so consumers always see a terminal event.
+        out.push(ChatEvent::Finished {
+            stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
+            usage,
+        });
+        out
+    }
 }
 
 /// Stateful builder that consumes [`ChatEvent`]s and produces a
@@ -126,6 +176,61 @@ mod tests {
         let r = b.finish();
         assert_eq!(r.text, "Hello, world!");
         assert!(r.is_finished());
+    }
+
+    #[test]
+    fn into_events_round_trips_through_the_builder() {
+        // A response → events → builder → response cycle should be
+        // structurally lossless for everything cache replay needs.
+        let original = ChatResponse {
+            actual_model: "gpt-4o".into(),
+            text: "hello world".into(),
+            thinking: "ponder".into(),
+            tool_calls: vec![ToolCall::new("call_1", "search", json!({"q": "rust"}))],
+            stop_reason: Some(StopReason::ToolUse),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 4,
+                ..Default::default()
+            },
+            cache_hit: CacheHitInfo::default(),
+        };
+        let events = original.clone().into_events(CacheHitInfo {
+            cached_input_tokens: 8,
+            used_explicit_handle: false,
+            replayed_from_cache: true,
+        });
+        let mut b = ChatResponseBuilder::new();
+        for ev in events {
+            b.apply(ev);
+        }
+        let back = b.finish();
+        assert_eq!(back.text, original.text);
+        assert_eq!(back.thinking, original.thinking);
+        assert_eq!(back.tool_calls.len(), 1);
+        assert_eq!(back.tool_calls[0].arguments, json!({"q": "rust"}));
+        assert_eq!(back.stop_reason, original.stop_reason);
+        assert_eq!(back.usage.input_tokens, 10);
+        // cache_hit was overwritten — verify it carried through.
+        assert_eq!(back.cache_hit.cached_input_tokens, 8);
+    }
+
+    #[test]
+    fn into_events_skips_empty_text_and_thinking_blocks() {
+        let r = ChatResponse {
+            actual_model: "m".into(),
+            text: String::new(),
+            thinking: String::new(),
+            tool_calls: vec![],
+            stop_reason: Some(StopReason::EndTurn),
+            usage: Usage::default(),
+            cache_hit: CacheHitInfo::default(),
+        };
+        let events = r.into_events(CacheHitInfo::default());
+        // Just Started + Finished — no empty Delta to confuse consumers.
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], ChatEvent::Started { .. }));
+        assert!(matches!(events[1], ChatEvent::Finished { .. }));
     }
 
     #[test]

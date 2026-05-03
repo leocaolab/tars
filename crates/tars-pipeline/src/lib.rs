@@ -40,11 +40,13 @@
 //! Layer order matches the call order: the first `.layer(...)` wraps
 //! everything else and runs first on the inbound, last on the outbound.
 
+mod cache;
 mod middleware;
 mod retry;
 mod service;
 mod telemetry;
 
+pub use cache::{set_cache_policy, CacheLookupMiddleware};
 pub use middleware::{Middleware, Pipeline, PipelineBuilder};
 pub use retry::{RetryConfig, RetryMiddleware};
 pub use service::{LlmService, ProviderService};
