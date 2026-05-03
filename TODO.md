@@ -146,8 +146,8 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **Trigger**: M5 starts (Doc 14 calls for it concurrent with CLI/TUI work).
 
 ### B-9. `tars-tools` — additional builtins + MCP + tool-call mini-pipeline
-- Crate skeleton + `Tool` trait + `ToolRegistry` + `fs.read_file` + WorkerAgent integration shipped — see CHANGELOG. **Still missing**:
-  - **Additional read-only builtins**: `fs.list_dir`, `git.fetch_pr_diff`, `web.fetch`. Each is mechanical — same pattern as `fs.read_file`. Trigger: first Worker run where the LLM-via-`fs.read_file` solo isn't enough (typically appears the first time a goal involves "look at git history" or "check this URL").
+- Crate skeleton + `Tool` trait + `ToolRegistry` + `fs.read_file` + `fs.list_dir` + WorkerAgent integration shipped — see CHANGELOG. **Still missing**:
+  - **Additional read-only builtins**: `git.fetch_pr_diff`, `web.fetch`. Each is mechanical — same pattern as the shipped `fs.*` tools. Trigger per item: first Worker run where the existing `fs.*` set isn't enough (typically a goal involving "look at git history" or "check this URL").
   - **`fs.write_file`** — gated on Backtrack + Saga (B-4). Writing without a rollback story is exactly the failure mode "tool ran, side effect committed, downstream step failed, no way to undo" we want to avoid normalising. Specifically: `fs.write_file` ships **after** `AgentEvent::CompensationExecuted` exists.
   - **`shell.exec`** — biggest blast radius. Ships **last**, with an explicit allowlist of binaries + jail + per-command audit log. Don't add until Saga + IAM both exist (B-4 + `tars-security` M6).
   - **Tool-call mini-pipeline** (Doc 05 §3.3) — onion of IAM check / idempotency dedupe / budget / audit / timeout around `ToolRegistry::dispatch`. Today's dispatch is bare. Each layer has its own consumer:

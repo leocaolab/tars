@@ -151,6 +151,27 @@ plumbing (`ToolSpec` / `ToolCall` / `Message::Tool`) already lived in
   dispatch, ReadFileTool happy + jail + size cap + binary + cancel +
   invalid args + missing file paths.
 
+### `fs.list_dir` builtin + CLI wire-up (`b4cc406`)
+
+Second built-in tool. Pairs with `fs.read_file`: the LLM can't read
+what it hasn't located, so adding `fs.list_dir` lets prompts like
+"summarise the README in this repo" work without prompts containing
+literal paths.
+
+- Same safety posture as `fs.read_file`: optional path-jail, cancel-
+  aware, 256-entry default cap (truncation flagged in output so the
+  LLM knows to try a more specific path).
+- Output format: one entry per line, sorted, with type glyph (`d`
+  dir / `f` file / `l` symlink) + name + optional size or symlink
+  target. Compact for the LLM context, structured enough that the
+  LLM doesn't have to guess what's a directory.
+- Edge cases (not found, not-a-directory, outside jail root) surface
+  as `is_error=true` ToolResult — the not-a-directory path also
+  hints "use fs.read_file instead" so the model self-corrects.
+- Wired into `tars run-task --tools` alongside `fs.read_file`,
+  sharing the same jail root.
+- 10 unit tests; tars-tools now has 29 unit tests total.
+
 ### `tars run-task --tools` flag (`87845aa`)
 
 Capstone on M3. Wires `fs.read_file` (jailed to cwd by default) into
