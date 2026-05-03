@@ -41,6 +41,7 @@
 //! everything else and runs first on the inbound, last on the outbound.
 
 mod cache;
+mod circuit_breaker;
 mod middleware;
 mod retry;
 mod routing;
@@ -48,6 +49,7 @@ mod service;
 mod telemetry;
 
 pub use cache::{set_cache_policy, CacheLookupMiddleware};
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use middleware::{Middleware, Pipeline, PipelineBuilder};
 pub use retry::{RetryConfig, RetryMiddleware};
 pub use routing::{RoutingPolicy, RoutingService, StaticPolicy, TierPolicy};

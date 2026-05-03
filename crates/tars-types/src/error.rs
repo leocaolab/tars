@@ -39,6 +39,14 @@ pub enum ProviderError {
     #[error("model overloaded")]
     ModelOverloaded,
 
+    /// Circuit breaker is open for this provider — recent failure rate
+    /// crossed the configured threshold. The breaker rejects calls
+    /// without contacting the provider until `until`.
+    /// Class is Retriable so a RoutingService fallback chain skips to
+    /// the next candidate immediately. Doc 02 §4.7.
+    #[error("circuit open until {until:?}")]
+    CircuitOpen { until: std::time::Instant },
+
     /// Network / transport-level failure.
     #[error("network: {0}")]
     Network(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -71,7 +79,9 @@ impl ProviderError {
     pub fn class(&self) -> ErrorClass {
         use ProviderError::*;
         match self {
-            RateLimited { .. } | ModelOverloaded | Network(_) => ErrorClass::Retriable,
+            RateLimited { .. } | ModelOverloaded | Network(_) | CircuitOpen { .. } => {
+                ErrorClass::Retriable
+            }
             Auth(_) | InvalidRequest(_) | ContextTooLong { .. }
             | ContentFiltered { .. } | BudgetExceeded => ErrorClass::Permanent,
             Parse(_) | Internal(_) | CliSubprocessDied { .. } => {
@@ -85,6 +95,9 @@ impl ProviderError {
         match self {
             Self::RateLimited { retry_after } => *retry_after,
             Self::ModelOverloaded => Some(Duration::from_secs(10)),
+            Self::CircuitOpen { until } => until
+                .checked_duration_since(std::time::Instant::now())
+                .or(Some(Duration::ZERO)),
             _ => None,
         }
     }
