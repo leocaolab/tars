@@ -37,6 +37,74 @@ ContextStore + ContextCompactor, PromptBuilder, Backtrack + Saga,
 `tars trajectory replay`. None of these block the M3 acceptance
 criteria; they're enhancements to a fully functional baseline.
 
+### `codex_cli` provider + `tars probe` (`a4e2254` / `72091b4` / `dd99b48` / `8712937`)
+
+Third subscription-CLI provider lands alongside `claude_cli` /
+`gemini_cli` — gives TARS users a way to leech ChatGPT Plus/Pro
+inference for `gpt-5.5` / `gpt-5.4` / `gpt-5.3-codex` etc. without
+burning API credits. All three subscription-leech paths verified
+end-to-end against real binaries.
+
+- **`codex_cli` backend** (`a4e2254`) — `tars-provider/src/backends/
+  codex_cli.rs`. Spawns `codex exec --json --model X --sandbox
+  read-only -c approval_policy="never" --skip-git-repo-check -`,
+  feeds prompt on stdin, streams stdout JSONL line-by-line. Strips
+  `OPENAI_API_KEY` / `CODEX_API_KEY` / `CODEX_AGENT_IDENTITY` env
+  vars (case-insensitive) to force codex through `~/.codex/auth.json`
+  (ChatGPT OAuth) instead of the API path. Same posture as
+  `claude_cli`'s `ANTHROPIC_API_KEY` strip.
+
+- **ThreadEvent → ChatEvent mapping (v1, conservative)**: drops
+  codex's internal scratch work, surfaces only the LLM's text:
+
+      agent_message.text  → Delta { text }
+      reasoning.text      → ThinkingDelta { text }
+      turn.completed      → Finished { EndTurn, <converted usage> }
+      turn.failed         → ProviderError::CliSubprocessDied
+      lifecycle / tool / file_change / mcp_tool_call / web_search
+                           / todo_list events → drop in v1
+      unknown variants    → log + skip (forward-compat)
+
+  Folding tool/file events into Delta text is a v2 knob. Today's
+  consumer (TARS `WorkerAgent` + Critic) only cares about the final
+  text answer, and surfacing codex's internal sandbox-shell
+  invocations would pollute summaries + confuse the Critic.
+
+- **Real-binary fixes** (`72091b4`) — first smoke run caught two
+  bugs the docs lied about:
+  - `--ask-for-approval` flag doesn't exist in codex 0.128 — the
+    documented flag is gone in favor of `-c approval_policy="never"`
+    config override.
+  - Bare model names `gpt-5` / `gpt-5-codex` are API-only; ChatGPT
+    accounts must use tier-specific names like `gpt-5.5` / `gpt-5.4`
+    / `gpt-5.3-codex`. Backend doesn't hardcode anything — caller
+    picks per their account.
+
+- **Live smoke tests for all three subscription CLIs** (`72091b4` /
+  `dd99b48`) — `#[ignore]`-d so normal `cargo test` doesn't burn
+  quota. Run with `cargo test -p tars-provider --test
+  <claude|gemini|codex>_cli_smoke -- --ignored --nocapture`.
+  Every backend produces a clean Started → Delta → Finished triple
+  with usage (input/output/cached/thinking) all populated:
+
+      claude_cli  sonnet           "hello from claude"
+                    in=3 out=6 cached=11631 thinking=0
+      gemini_cli  gemini-2.5-pro   "hello from gemini"
+                    in=5804 out=4 cached=0 thinking=17
+      codex_cli   gpt-5.5          "hello from codex"
+                    in=13023 out=19 cached=11648 thinking=9
+
+- **`tars probe <cli-provider>`** (`8712937`) — exposes the smoke
+  pattern as a user-facing subcommand. Loads config, validates the
+  named provider is `*_cli` type (HTTP types get a friendly hint to
+  use `tars run` instead), sends a fixed "say hi" prompt, streams
+  every ChatEvent to stderr in human-readable form. Useful for
+  debugging "why doesn't `tars run-task -P codex_cli` work" —
+  shows exactly which step (auth / binary / mapping) broke.
+
+  Args: `--model <NAME>` (override default for tier-restricted
+  accounts), `--prompt <STR>` (custom prompt).
+
 ### Audit fixes — round 4 (`57c893d`)
 
 A.R.C. run `1d8e3308` against `148cda5`. Ergonomics + actionability

@@ -94,9 +94,9 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 ## Real backlog (not overengineering)
 
 ### B-1. CLI providers: long-lived stream-json mode (Doc 01 §6.2.1)
-- Current `claude_cli` / `gemini_cli` spawn a fresh subprocess per call (cold start 200-500ms).
-- **Goal**: Long-lived process pool with `--output-format stream-json` for low-latency interactive use.
-- **Cost**: ~1 week of careful work (cancel guards, session pool lifecycle, JSONL bidi protocol).
+- Current `claude_cli` / `gemini_cli` / `codex_cli` all spawn a fresh subprocess per call (cold start 200-500ms; codex's startup is heavier).
+- **Goal**: Long-lived process pool with `--output-format stream-json` (claude/gemini) / sustained `codex exec --json` over a stdio session (codex). Low-latency interactive use.
+- **Cost**: ~1 week of careful work (cancel guards, session pool lifecycle, JSONL bidi protocol). Per-CLI quirks compound — each one's session model differs.
 
 ### B-2. `tars-pipeline` middleware layers — remaining onion layers
 - M2-tier middleware (Telemetry / Retry / CacheLookup / Routing / CircuitBreaker) is shipped — see CHANGELOG. **Still missing in the Doc 02 onion**:
@@ -219,10 +219,11 @@ Audit run 2026-05-03 against `docs/01-llm-provider.md`. Code currently implement
   - `EnsemblePolicy` (parallel fan-out + merge — also needs a merge primitive)
 - **Tied to**: O-4 (Capabilities slimming) — routing's actual reads decide which fields stay. After M3 lands, audit Capabilities against routing usage.
 
-### D-12. CLI-provider conformance (Doc 01 §14 follow-on)
-- The HTTP-backend conformance suite (D-9, shipped) doesn't cover `claude_cli` / `gemini_cli` — their wire path is fundamentally different (no SSE, no HTTP; subprocess JSON). They'd need a `Scenarios` impl that mounts a fake subprocess runner instead of wiremock.
-- **Why deferred**: each CLI backend's existing tests (with `FakeRunner`) cover its specific surface. Until we have **3+ subprocess-style backends** the dedupe value is low.
-- **Trigger**: 3rd CLI-style backend lands (e.g. Codex CLI, Cursor CLI, etc.).
+### D-12. CLI-provider conformance (Doc 01 §14 follow-on) — ⚡ trigger fired
+- The HTTP-backend conformance suite (D-9, shipped) doesn't cover `claude_cli` / `gemini_cli` / `codex_cli` — their wire path is fundamentally different (no SSE, no HTTP; subprocess JSON). They'd need a `Scenarios` impl that mounts a fake subprocess runner instead of wiremock.
+- **Trigger fired** with codex_cli (`a4e2254`): the 3rd subprocess-style backend has landed. We're paying the per-backend test maintenance cost across 3 separate test files (`*_smoke.rs` for live + per-backend unit tests for mock paths).
+- **Each CLI backend's existing tests** (with `FakeRunner` for unit + `*_smoke.rs` for live) DO cover its specific surface. The `Scenarios` harness would dedupe the cross-backend invariants (env-strip pattern, JSON-or-text decoding, cancel-via-Drop, timeout handling, model-not-supported error → ProviderError). Worth ~1 day of refactor; payoff is "add the 4th CLI backend in 100 lines instead of 500".
+- **Updated trigger**: when adding a 4th CLI backend (e.g. Cursor CLI, Cline CLI, ChatGPT app's hidden CLI, etc.) — at that point the dedupe pays for itself in one go.
 
 ### D-13. Live-API nightly conformance tier (Doc 01 §14)
 - Doc 01 §14 calls for a nightly CI tier hitting REAL APIs (~$0.01/run) so the `Scenarios` wiremock fixtures don't drift from the actual provider behaviour. This is the safety net that catches "OpenAI changed the streaming format last week and our fixtures are now lying".
