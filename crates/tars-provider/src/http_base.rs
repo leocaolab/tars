@@ -123,7 +123,16 @@ pub trait HttpAdapter: Send + Sync + 'static {
     ) -> Result<Vec<ChatEvent>, ProviderError>;
 
     /// Map a non-2xx HTTP response into a typed [`ProviderError`].
-    fn classify_error(&self, status: StatusCode, body: &str) -> ProviderError;
+    /// `headers` carry the response headers (Retry-After, etc.) so
+    /// the adapter can populate `RateLimited::retry_after`. Headers
+    /// are passed by reference because the body has already been
+    /// consumed by the caller.
+    fn classify_error(
+        &self,
+        status: StatusCode,
+        headers: &reqwest::header::HeaderMap,
+        body: &str,
+    ) -> ProviderError;
 
     /// Extras (custom headers / query params) declared in the provider
     /// config. Default is empty — adapters that store extras override
@@ -193,6 +202,10 @@ where
 
     let status = response.status();
     if !status.is_success() {
+        // Snapshot headers before the body read consumes the response.
+        // `classify_error` needs them for Retry-After parsing
+        // (TODO L-4 / opencode parity).
+        let headers = response.headers().clone();
         // True bounded read — stream chunks and stop at the cap so a
         // 1 GB hostile error body can't OOM us. Audit
         // `tars-provider-src-http-base-1` (round 2): the prior
@@ -204,7 +217,7 @@ where
         // (round-1 fix); we keep that.
         let body = read_bounded_body(response, ERROR_BODY_CAP_BYTES).await;
         let trunc = truncate_utf8(&body, ERROR_BODY_CAP_BYTES);
-        return Err(adapter.classify_error(status, trunc));
+        return Err(adapter.classify_error(status, &headers, trunc));
     }
 
     let idle = base.config.stream_idle_timeout;
@@ -296,6 +309,41 @@ pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+/// Parse the standard rate-limit cooldown headers that providers
+/// send back on 429 responses. Tries three forms in order:
+///
+/// 1. `retry-after-ms` — millisecond-precision value (Anthropic).
+/// 2. `retry-after` as a positive number — seconds (RFC 7231).
+/// 3. `retry-after` as an HTTP date (RFC 7231) — convert to a
+///    duration from `now`. Negative deltas (date already passed)
+///    yield `Some(Duration::ZERO)` rather than `None` so the caller
+///    can still distinguish "header was honoured, retry now" from
+///    "no header present".
+///
+/// Returns `None` when no recognised header is present or the value
+/// fails to parse. Adapter authors thread this through
+/// `ProviderError::RateLimited::retry_after`; the
+/// [`crate::pipeline::RetryMiddleware`] (when `respect_retry_after`
+/// is set) sleeps for that duration on the next attempt.
+///
+/// Borrowed pattern from opencode's `session/retry.ts::delay()`
+/// (TODO L-4).
+pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    if let Some(v) = headers.get("retry-after-ms").and_then(|v| v.to_str().ok())
+        && let Ok(ms) = v.trim().parse::<u64>()
+    {
+        return Some(Duration::from_millis(ms));
+    }
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    // HTTP-date format (RFC 7231 §7.1.1.1). httpdate-style parser.
+    let target = httpdate::parse_http_date(raw).ok()?;
+    let now = std::time::SystemTime::now();
+    Some(target.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 /// Tiny error type used so the `ProviderError::Network` carries something
@@ -394,5 +442,73 @@ mod tests {
             body.len(),
         );
         assert!(body.starts_with('X'), "should contain the start of the body");
+    }
+
+    // ── parse_retry_after ──────────────────────────────────────────────
+
+    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+    #[test]
+    fn parse_retry_after_returns_none_for_empty_headers() {
+        assert_eq!(parse_retry_after(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn parse_retry_after_prefers_retry_after_ms_when_present() {
+        // Anthropic-style millisecond-precision header takes priority.
+        let mut h = HeaderMap::new();
+        h.insert("retry-after-ms", HeaderValue::from_static("250"));
+        h.insert(RETRY_AFTER, HeaderValue::from_static("60"));
+        assert_eq!(parse_retry_after(&h), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn parse_retry_after_handles_seconds() {
+        let mut h = HeaderMap::new();
+        h.insert(RETRY_AFTER, HeaderValue::from_static("42"));
+        assert_eq!(parse_retry_after(&h), Some(Duration::from_secs(42)));
+    }
+
+    #[test]
+    fn parse_retry_after_handles_http_date_in_future() {
+        let mut h = HeaderMap::new();
+        let future = std::time::SystemTime::now() + Duration::from_secs(60);
+        let date_str = httpdate::fmt_http_date(future);
+        h.insert(RETRY_AFTER, HeaderValue::from_str(&date_str).unwrap());
+        let parsed = parse_retry_after(&h).expect("HTTP date should parse");
+        // Allow a small fudge for the round-trip (date precision is
+        // 1s; we may have crossed a second boundary).
+        assert!(
+            parsed.as_secs() >= 58 && parsed.as_secs() <= 62,
+            "expected ~60s, got {parsed:?}",
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_handles_http_date_already_passed() {
+        let mut h = HeaderMap::new();
+        let past = std::time::SystemTime::now() - Duration::from_secs(120);
+        h.insert(
+            RETRY_AFTER,
+            HeaderValue::from_str(&httpdate::fmt_http_date(past)).unwrap(),
+        );
+        // Past dates clamp to zero (caller can retry immediately).
+        assert_eq!(parse_retry_after(&h), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn parse_retry_after_returns_none_for_garbage_value() {
+        let mut h = HeaderMap::new();
+        h.insert(RETRY_AFTER, HeaderValue::from_static("not-a-date-or-number"));
+        assert_eq!(parse_retry_after(&h), None);
+    }
+
+    #[test]
+    fn parse_retry_after_returns_none_for_garbage_ms_value() {
+        // Bad retry-after-ms falls through to retry-after, which here
+        // is also missing, so result is None.
+        let mut h = HeaderMap::new();
+        h.insert("retry-after-ms", HeaderValue::from_static("not-a-number"));
+        assert_eq!(parse_retry_after(&h), None);
     }
 }

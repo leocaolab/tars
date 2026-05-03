@@ -550,7 +550,12 @@ impl HttpAdapter for AnthropicAdapter {
         Ok(out)
     }
 
-    fn classify_error(&self, status: StatusCode, body: &str) -> ProviderError {
+    fn classify_error(
+        &self,
+        status: StatusCode,
+        headers: &reqwest::header::HeaderMap,
+        body: &str,
+    ) -> ProviderError {
         let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
         let message = v
             .get("error")
@@ -561,7 +566,9 @@ impl HttpAdapter for AnthropicAdapter {
 
         match status {
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ProviderError::Auth(message),
-            StatusCode::TOO_MANY_REQUESTS => ProviderError::RateLimited { retry_after: None },
+            StatusCode::TOO_MANY_REQUESTS => ProviderError::RateLimited {
+                retry_after: crate::http_base::parse_retry_after(headers),
+            },
             StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => {
                 ProviderError::ModelOverloaded
             }
@@ -642,9 +649,29 @@ mod tests {
         };
         let err = a.classify_error(
             StatusCode::UNAUTHORIZED,
+            &reqwest::header::HeaderMap::new(),
             r#"{"error":{"message":"invalid"}}"#,
         );
         assert!(matches!(err, ProviderError::Auth(_)));
+    }
+
+    #[test]
+    fn classify_429_with_retry_after_ms_populates_field() {
+        // Anthropic uses retry-after-ms (millisecond precision).
+        let a = AnthropicAdapter {
+            base_url: DEFAULT_BASE_URL.into(),
+            api_version: DEFAULT_API_VERSION.into(),
+            extras: HttpProviderExtras::default(),
+        };
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after-ms", "1500".parse().unwrap());
+        let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &headers, "");
+        match err {
+            ProviderError::RateLimited { retry_after } => {
+                assert_eq!(retry_after, Some(std::time::Duration::from_millis(1500)));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
     }
 
     #[test]

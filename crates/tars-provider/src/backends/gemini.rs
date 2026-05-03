@@ -216,8 +216,13 @@ impl HttpAdapter for GeminiAdapterWithKey {
         self.inner.parse_event(raw, buf)
     }
 
-    fn classify_error(&self, status: StatusCode, body: &str) -> ProviderError {
-        self.inner.classify_error(status, body)
+    fn classify_error(
+        &self,
+        status: StatusCode,
+        headers: &reqwest::header::HeaderMap,
+        body: &str,
+    ) -> ProviderError {
+        self.inner.classify_error(status, headers, body)
     }
 
     fn extras(&self) -> &HttpProviderExtras {
@@ -551,7 +556,12 @@ impl HttpAdapter for GeminiAdapter {
         Ok(out)
     }
 
-    fn classify_error(&self, status: StatusCode, body: &str) -> ProviderError {
+    fn classify_error(
+        &self,
+        status: StatusCode,
+        headers: &reqwest::header::HeaderMap,
+        body: &str,
+    ) -> ProviderError {
         let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
         let message = v
             .pointer("/error/message")
@@ -561,7 +571,9 @@ impl HttpAdapter for GeminiAdapter {
 
         match status {
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ProviderError::Auth(message),
-            StatusCode::TOO_MANY_REQUESTS => ProviderError::RateLimited { retry_after: None },
+            StatusCode::TOO_MANY_REQUESTS => ProviderError::RateLimited {
+                retry_after: crate::http_base::parse_retry_after(headers),
+            },
             StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT => {
                 ProviderError::ModelOverloaded
             }
@@ -737,7 +749,11 @@ mod tests {
     fn classify_400_token_limit_is_context_too_long() {
         let a = adapter();
         let body = r#"{"error":{"message":"input token limit exceeded"}}"#;
-        let err = a.classify_error(StatusCode::BAD_REQUEST, body);
+        let err = a.classify_error(
+            StatusCode::BAD_REQUEST,
+            &reqwest::header::HeaderMap::new(),
+            body,
+        );
         assert!(matches!(err, ProviderError::ContextTooLong { .. }));
     }
 }

@@ -1918,6 +1918,7 @@ dependencies = [
  "bytes",
  "eventsource-stream",
  "futures",
+ "httpdate",
  "pin-project-lite",
  "reqwest",
  "serde",

@@ -30,6 +30,7 @@ serde_json.workspace = true
 reqwest.workspace = true
 eventsource-stream.workspace = true
 url.workspace = true
+httpdate = "1"
 
 # Errors / tracing
 thiserror.workspace = true
