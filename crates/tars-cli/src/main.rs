@@ -21,6 +21,7 @@ mod dispatch;
 mod event_store;
 mod plan;
 mod run;
+mod run_task;
 mod trajectory;
 
 #[derive(Parser, Debug)]
@@ -51,7 +52,9 @@ enum Command {
     Run(run::RunArgs),
     /// Drive an OrchestratorAgent: turn a goal into a typed Plan.
     Plan(plan::PlanArgs),
-    /// Inspect the trajectory event log written by `tars run` / `tars plan`.
+    /// Drive the multi-step Orchestrator → Worker → Critic loop end-to-end.
+    RunTask(run_task::RunTaskArgs),
+    /// Inspect the trajectory event log written by `tars run` / `tars plan` / `tars run-task`.
     Trajectory(trajectory::TrajectoryArgs),
 }
 
@@ -69,6 +72,7 @@ async fn main() -> ExitCode {
     let result: Result<()> = match cli.command {
         Command::Run(args) => run::execute(args, cli.config).await,
         Command::Plan(args) => plan::execute(args, cli.config).await,
+        Command::RunTask(args) => run_task::execute(args, cli.config).await,
         Command::Trajectory(args) => trajectory::execute(args).await,
     };
 
