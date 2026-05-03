@@ -98,10 +98,10 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **Goal**: Long-lived process pool with `--output-format stream-json` for low-latency interactive use.
 - **Cost**: ~1 week of careful work (cancel guards, session pool lifecycle, JSONL bidi protocol).
 
-### B-2. `tars-pipeline` middleware layers — M3+ remainder
+### B-2. `tars-pipeline` middleware layers — remaining onion layers
 - M2-tier middleware (Telemetry / Retry / CacheLookup / Routing / CircuitBreaker) is shipped — see CHANGELOG. **Still missing in the Doc 02 onion**:
   - **Auth / IAM** middleware: needs `tars-security` (Doc 14 M6).
-  - **Budget** middleware: needs `tars-storage` (B-7) for token-bucket state across restarts.
+  - **Budget** middleware: needs `tars-storage`'s `KVStore` (B-7's second half) for token-bucket state across restarts.
   - **PromptGuard** middleware: needs `tars-tools` + ONNX classifier (D-4 frozen).
   - **L3 cache hooks** (cache-create / cache-extend on existing CacheLookupMiddleware): depends on D-1 (`ExplicitCacheProvider`).
   - **CostPolicy / LatencyPolicy / EnsemblePolicy** for routing: need per-provider runtime metrics + (for Ensemble) a fan-out + merge primitive. All blocked on metrics infra (B-8 / M5).
@@ -110,34 +110,51 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - Currently load-once. Real-world: change `~/.config/tars/config.toml` and have it pick up without restart.
 - **Trigger**: First user demo where "I want to switch providers without restarting" matters.
 
-### B-4. SQLite event store + Trajectory tree (Doc 04 §3, Doc 09 §4)
-- The actual M3 Agent Runtime work.
-- **Blockers**: B-7 (`tars-storage` traits) needs to exist first; pipeline (B-2) is now sufficient on its M2 cut.
+### B-4. M3 Agent Runtime — orchestration + multi-step loop
+- M3's storage + runtime + agent primitive are shipped — see CHANGELOG. **Still missing**:
+  - **`AgentMessage` typed protocol** (Doc 04 §4.2). The "禁止纯文本互喷" envelope: `PlanIssued / PartialResult / NeedsClarification / Verdict / ...`. Inter-agent flows go through this once Orchestrator → Worker handoffs exist.
+  - **Default agents**: `OrchestratorAgent` (LLM → task DAG), `WorkerAgent` (executes a plan node), `CriticAgent` (Approve/Reject/Refine). Each needs prompt design + the typed message envelope + integration tests against a real provider's tool-use path.
+  - **Multi-step orchestration loop** — the `Runtime::run_task(task_spec)` entry point that creates a trajectory, drives Orchestrator, fans out to Workers, runs the Critic, replans on rejection. The end-to-end M3 user-facing milestone.
+  - **`ContextStore` + `ContextCompactor`** (Doc 04 §3.3 / §5). Schema-aware history pruner so multi-step trajectories don't grow the prompt unboundedly. Sits between the Trajectory log and the next `AgentContext`.
+  - **`PromptBuilder` trait + default impl** (Doc 04 §6). Composes system + tool + persona blocks into a `ChatRequest`. Today each agent constructs its own ad-hoc.
+  - **Backtrack + Saga compensation** (Doc 04 §6). Concrete `CompensationAction` types + `AgentEvent::CompensationExecuted` + the runtime hook that runs compensations in reverse on backtrack.
+- **Trigger**: each item is its own commit, in order: AgentMessage → at least one Default agent → orchestration loop → ContextStore → PromptBuilder → Backtrack.
 
 ### B-5. `tars-cli` follow-on subcommands
-- M1 / M2 surface (`tars run`) is shipped — see CHANGELOG. The remaining CLI surface from Doc 07 §5:
-  - `tars chat` — interactive REPL (long-lived process, multi-turn). Where the breaker / pipeline-cache cross-call value actually pays off.
+- M1 / M2 / M3-first-cut surface is shipped (`tars run` + `tars trajectory list/show`) — see CHANGELOG. Remaining CLI surface from Doc 07 §5:
+  - `tars chat` — interactive REPL (long-lived process, multi-turn). Where the breaker / pipeline-cache cross-call value actually pays off, and where the multi-step Agent loop (B-4) gets its first user-facing home.
+  - `tars trajectory delete <ID>` — needs a retention policy decision (rolling window? size cap? both?). Today the file just grows.
+  - `tars trajectory replay <ID>` — needs the multi-step Agent loop (B-4) to know what "replay" means at the action level.
+  - `tars trajectory diff <ID-A> <ID-B>` — same prompt, two providers / two configs, what differed. Useful demo when EnsemblePolicy lands.
   - `tars dash` — launcher for the future web dashboard (M7).
   - Shell completions (bash / zsh / fish).
   - `--output json` / CI mode adapter (GitHub PR comment / junit-xml).
-- **Trigger**: When a user wants any of the above. `chat` is the most likely first.
+- **Trigger**: each item independent. `chat` is the most likely first since multi-turn proves out the runtime / cache / breaker cross-call value.
 
 ### B-6. PyO3 + napi-rs bindings (Doc 12 §6, §7)
 - **Trigger**: First Python or Node user.
 
-### B-7. `tars-storage` proper — `EventStore` + `ContentStore` + `KVStore` traits
-- Today the SQLite work in `tars-cache` is private to that crate (one `cache_entries` table, schema_version=1, WAL pragmas). M3 needs:
-  - **`EventStore`** for Trajectory append-only log (Doc 04 §3 + Doc 09 §4).
-  - **`ContentStore`** for large-blob references (image bytes, long contexts).
-  - **`KVStore`** for cache L2, idempotency, budget token-bucket — generalises what `SqliteCacheRegistry` already does.
-- **Why deferred**: M2 finished without needing any of these; tars-cache's private SQLite is honest about being a cache-only special case. Generalising before there are 3 consumers is the trap O-N entries warn against.
-- **Trigger / blocker for**: M3 Agent Runtime (B-4), BudgetMiddleware (B-2 cap), and the future Postgres impl (Doc 14 M6).
-- **Order of implementation when started**: traits first (in tars-storage), then a SQLite impl that backfills the cache crate's needs, then a Postgres impl gated behind a feature.
+### B-7. `tars-storage` — `ContentStore` + `KVStore` (EventStore done)
+- `EventStore` + `SqliteEventStore` shipped — see CHANGELOG. Two traits still pending:
+  - **`ContentStore`** — large-blob refs (image bytes, long-context payloads, raw LLM responses for parser-rewind replay). Slots in once `AgentEvent` payloads need to grow beyond the 4 KiB inline budget Doc 04 §3.2 sets, AND once we add the second `LlmResponseCaptured` event variant (separate from `LlmCallCaptured`) that carries the raw bytes.
+  - **`KVStore`** — generic small-value persistence. Slots in when BudgetMiddleware (B-2 cap) needs cross-restart token-bucket state, OR when `tars-cache`'s SQLite L2 wants to be deduped onto a generalised KVStore. Today's `SqliteCacheRegistry` is fine standalone; refactoring just to share scaffolding would be O-style overengineering.
+- **Postgres impls** for both EventStore + the future ContentStore/KVStore: M6 work (Doc 14).
+- **Trigger**: ContentStore = first agent emits a payload that won't fit inline. KVStore = BudgetMiddleware or Tools idempotency table needs persistence.
 
 ### B-8. Full `tars-melt` (metrics, OTel exporter, cardinality validator, `SecretField<T>`)
-- Mini version shipped 2026-05-03 (080b05f) — tracing init + JSON formatter + `TelemetryGuard` placeholder.
-- **Pending for M5** (Doc 14 §11): all metrics from Doc 08 §5, OTel SDK + OTLP exporter, cardinality validator, `SecretField<T>` generic wrapper (today `SecretString` covers the only consumer), trace head + tail sampling, `AdaptiveSampler`.
+- Mini version shipped — see CHANGELOG. Pending for M5 (Doc 14 §11): all metrics from Doc 08 §5, OTel SDK + OTLP exporter, cardinality validator, `SecretField<T>` generic wrapper (today `SecretString` covers the only consumer), trace head + tail sampling, `AdaptiveSampler`.
 - **Trigger**: M5 starts (Doc 14 calls for it concurrent with CLI/TUI work).
+
+### B-9. `tars-tools` crate — Tool registry + Tool dispatch (Doc 05)
+- The other half of agent capability. Today an Agent can ask the model to emit `ToolCall` events (via `ChatRequest::tools`); we surface them in `AgentOutput::ToolCalls` — but **nothing actually executes them**. The agent's caller would have to dispatch the tools and feed results back as a follow-up `Message::Tool` turn manually.
+- M3 Default agents (B-4 Worker / Critic) need this before they can do anything useful beyond pure-text completion.
+- **Scope when built**:
+  - `Tool` trait (Doc 05 §3.3): `name() / description() / input_schema() / execute(args) -> ToolResult`.
+  - `ToolRegistry` for lookup by name.
+  - Tool-call mini-pipeline: IAM check / idempotency dedupe (using `StepIdempotencyKey`) / side-effect declaration / budget / audit / timeout. Same onion shape as the LLM pipeline, scaled-down.
+  - Built-in tools: `fs.read_file`, `fs.write_file`, `git.fetch_pr_diff` (Doc 14 §10.1).
+  - MCP integration (Doc 05 §5) — load external tool servers via the standard MCP protocol.
+- **Trigger**: First default agent (B-4 Worker) needs to actually do something. Order: tools crate first, then Worker, then Orchestrator.
 
 ---
 

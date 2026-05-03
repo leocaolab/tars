@@ -19,6 +19,148 @@ is authoritative. This file aggregates.
 
 ---
 
+## M3 — Agent Runtime first cut (DONE 2026-05-03; orchestration loop pending)
+
+Doc 14 §9 deliverable. **Substantively** done — the storage primitive,
+the runtime facade, the agent contract, and the CLI integration that
+proves the whole stack composes are all shipped. **Pending** are the
+real orchestration agents (Orchestrator + Worker + Critic with prompt
+design + the typed inter-agent message protocol) and the multi-step
+loop that drives them. Those need their own PRs once the typed
+`AgentMessage` envelope lands; the primitives here are the
+foundation.
+
+### tars-storage — EventStore + SqliteEventStore (`e348c09`)
+- 8th workspace member. Trait + SQLite impl that backs trajectory
+  replay (Doc 04 §3) and is the durability primitive
+  recovery-from-checkpoint relies on.
+- `EventStore` trait (5 methods: append / read_all / read_since /
+  high_water / list_trajectories). Boundary type is
+  `serde_json::Value` not generic `<E>` — keeps the trait
+  monomorphic so `Arc<dyn EventStore>` works cleanly + makes rows
+  debuggable via `sqlite3 events.db`.
+- `SqliteEventStore` reuses the `tars-cache::SqliteCacheRegistry`
+  scaffolding pattern (single connection in `Arc<Mutex>`,
+  spawn_blocking for ops, WAL + `synchronous=NORMAL` +
+  `temp_store=MEMORY`, `user_version` migration marker). Key
+  departure from the cache crate's policy: an unknown prior
+  schema_version **refuses to migrate** rather than wiping —
+  events are durable user history, not cache.
+- `(trajectory_id, sequence_no)` composite PK; `sequence_no`
+  computed inside an open transaction so per-trajectory writes
+  stay gap-free under concurrent calls.
+- Default location: `dirs::data_dir()/tars/events.sqlite` (XDG
+  data dir, NOT cache dir — events ≠ cache).
+- 12 tests including `append_survives_close_and_reopen` (the
+  recovery promise) and `reopen_with_unknown_schema_version_errors`.
+- `ContentStore` + `KVStore` from Doc 14 §6.1 deliberately deferred
+  — no consumer yet, per `defer > delete > implement`.
+
+### tars-runtime — AgentEvent + Runtime + LocalRuntime (`7c93e6e`)
+- 9th workspace member. Thin facade over `EventStore` that handles
+  trajectory creation + typed-event append/read.
+- `AgentEvent` enum, 8 variants for the first cut: 4 trajectory-
+  lifecycle (Started / Completed / Suspended / Abandoned) + 3
+  step-lifecycle (StepStarted / StepCompleted / StepFailed) + 1
+  external-call capture (LlmCallCaptured).
+- Doc 04 §3.2 has 10 variants including separate
+  `LlmResponseCaptured` (raw bytes for parser-rewind replay) +
+  `Compensation*` + `Checkpoint`. Skipped — no consumer:
+  - Compensation* lands with the Saga work.
+  - Llm{Response/Step}Completed split matters when "we changed
+    the parser, replay against raw bytes" is real; today we
+    record summaries.
+  - Checkpoint becomes useful when replay is dominating recovery
+    cost; today's trajectories are short.
+- `StepIdempotencyKey::compute(traj, step_seq, input_summary)`
+  — Doc 04 §3.2 invariant 3. Stored inline on `StepStarted`;
+  external operations carry it as metadata for replay dedupe.
+  64-char lowercase hex format pinned by test.
+- `Runtime` trait + `LocalRuntime` impl. Mints `uuid v4 simple`
+  trajectory ids. Defensive guard: `append()` rejects events
+  whose embedded trajectory_id doesn't match the append target
+  (catches the obvious bug at the runtime layer).
+- 15 unit tests + 2 integration tests
+  (`tests/recovery.rs::trajectory_survives_runtime_restart`
+  proves the recovery-from-checkpoint promise end-to-end).
+- Field shapes deliberately primitive (String summaries, plain
+  ProviderId/Usage). Doc 04's typed `BranchReason`, `ContentRef`,
+  `AgentMessage`, etc. land when their consumers exist.
+
+### tars-cli runtime integration + `tars trajectory` (`4460c3e`)
+- Every `tars run` now opens a trajectory and writes the lifecycle:
+  `Started → StepStarted → LlmCallCaptured → StepCompleted →
+  Completed` (or `StepFailed → Abandoned` on error). Footer
+  appears after the summary: `── trajectory: <uuid>`.
+- Best-effort discipline: every trajectory write swallows errors
+  with `tracing::warn` rather than propagating. SQLite hiccup
+  must not block the user's LLM response — same Doc 03 §4.3
+  stance the cache uses.
+- `--no-trajectory` opt-out + `--events-path` override
+  (`TARS_EVENTS_PATH` env). Default location:
+  `$XDG_DATA_HOME/tars/events.sqlite`.
+- New `tars trajectory` subcommand:
+  - `list` — id / event count / status (active / completed /
+    abandoned).
+  - `show <ID>` — every event as JSON lines on stdout (pipeable:
+    `tars trajectory show ID | jq -c …`).
+- Deferred subcommands (no consumer): `delete <ID>` (needs
+  retention policy), `replay <ID>` (needs the Agent execution
+  loop to know what "replay" means at the action level).
+- `StreamOutcome` gained `response_text: String` so the trajectory
+  log's `output_summary` doesn't re-read the network.
+- New shared module `event_store::open()` keeps `tars run` and
+  `tars trajectory` from drifting on default-path resolution.
+
+### Agent trait + SingleShotAgent + execute_agent_step (`f6b6c4e`)
+- The first M3 agent primitive. Real Orchestrator/Worker/Critic
+  agents stack on this once the typed `AgentMessage` protocol +
+  prompt design land.
+- `Agent` trait: `id() / role() / execute(ctx, input) -> Result<AgentStepResult, AgentError>`.
+- `AgentRole` enum: Orchestrator / Worker { domain } / Critic.
+  Doc 04 §4.1 also lists `Aggregator` (pure-code agent, no LLM);
+  skipped — no consumer.
+- `AgentContext` minimal — `trajectory_id + step_seq + llm`
+  (`Arc<dyn LlmService>` from tars-pipeline) `+ cancel`. Doc 04 §4.1
+  lists more (budget, principal, deadline, context_store,
+  tool_registry); each slots in as its backing crate ships.
+- `AgentOutput` enum: `Text / ToolCalls / Mixed`. Constructed from
+  a drained `ChatResponse`'s (text, tool_calls) via
+  `from_response_parts`. `summary(max_chars)` for trajectory log
+  payloads (200-char cap today).
+- `AgentError`: `Provider(ProviderError) / Cancelled / Internal`.
+  `classification()` maps to one-word strings (permanent /
+  retriable / maybe_retriable / cancelled / internal) — same
+  shape `AgentEvent::StepFailed::classification` expects.
+- `SingleShotAgent`: drains an LLM stream → ChatResponse →
+  AgentOutput. Cancel-aware: `select!`s `ctx.cancel.cancelled()`
+  against both stream-open AND each event poll so a Drop'd parent
+  doesn't leak the HTTP/subprocess connection. Role is
+  `Worker { domain: "single_shot" }` — placeholder until real
+  domain agents land.
+- `execute_agent_step()` free function wraps `Agent::execute` with
+  full event-log writes (`StepStarted → LlmCallCaptured +
+  StepCompleted` or `StepFailed`).
+  - **Bug caught + fixed by tests**: `step_seq` was being computed
+    as `event_high_water + 1`, off-by-one'ing the very first
+    step (TrajectoryStarted occupies event_seq=1). Fixed to count
+    `StepStarted` events specifically — `step_seq` is the LOGICAL
+    step identifier (Doc 04 §3.2 invariant 3), not the event
+    sequencing primitive. The
+    `step_seq_increments_across_multiple_agent_calls` test pins it.
+  - Storage failures propagate as `RuntimeError` (not best-effort)
+    — internal-tool stance, opposite of the CLI's "logging is
+    optional, never fatal" stance.
+- `AgentExecutionError` splits Agent failure (the model said no)
+  from Runtime failure (event store is down).
+- `AgentId` joins the existing string-id family in tars-types.
+- 6 unit tests in agent.rs + 3 integration tests in
+  `tests/agent_step.rs` driving the full stack (Pipeline +
+  ProviderService + MockProvider + LocalRuntime + SqliteEventStore
+  on disk).
+
+---
+
 ## M2 — Multi-provider + Routing (DONE 2026-05-03)
 
 Doc 14 §8 deliverable. Provider impls were already in from earlier
