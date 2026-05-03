@@ -161,6 +161,97 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 
 ---
 
+## Cross-project survey — opencode (2026-05-03)
+
+Surveyed `../opencode` (TypeScript-based AI coding agent, Effect-TS runtime, ~5-10× our LOC) for borrowable patterns. Items below are **specific borrows** with known sources; explicitly NOT a port of opencode's framework choices (Effect / Layer DI / dynamic-import plugins). Each ranked by ROI per implementation hour.
+
+> **Vocabulary**: `L-N` = Lesson learned from prior art. Same `defer > delete > implement` discipline applies — these are recommendations, not commitments. Each carries a trigger condition.
+
+### L-1. Externalize tool descriptions to `.txt` files
+- **What**: every `Tool::description()` becomes `include_str!("read_file.txt")` instead of an inline string literal in Rust source.
+- **Source**: `opencode/packages/opencode/src/tool/{read,edit,grep,…}.txt` — each tool ships with its description as a sibling text file, imported via the bundler.
+- **Why**: descriptions are LLM-facing prompts that get iterated frequently — currently every tweak is a Rust recompile + commit. Externalizing them unblocks fast iteration, future i18n, and lets non-Rust collaborators edit prompts.
+- **Cost**: ~30 min per tool × 2 tools (`fs.read_file` / `fs.list_dir`) + a 5-line refactor pattern.
+- **Trigger**: now (cheapest item; no real reason to defer).
+
+### L-2. Universal output truncation in `ToolRegistry::dispatch`
+- **What**: `ToolRegistry::dispatch` wraps every tool's `ToolResult` through a per-agent `OutputTruncator` (default: write-overflow-to-file, return path + tail). Today each tool implements its own cap (`fs.read_file` 256 KiB, `fs.list_dir` 256 entries) — no shared limit, no per-agent override.
+- **Source**: `opencode/packages/opencode/src/tool/truncate.ts` (referenced as `Truncate.Service` from registry); every tool init goes through `truncate.output(result.output, {}, agent)`.
+- **Why**: as the builtin set grows (B-9 plans `git.fetch_pr_diff`, `web.fetch`, `shell.exec`), repeated cap logic compounds and there's no way to tune per-agent (small models need more aggressive truncation).
+- **Cost**: ~half-day. Add `OutputTruncator` trait + default impl to `tars-tools`. `AgentContext` grows an `output_budget` field. Existing per-tool caps become "the upper bound the truncator never exceeds even if agent budget is bigger".
+- **Trigger**: when adding the 4th builtin OR when a real consumer tunes per-agent truncation.
+
+### L-3. Add `title` field to `ToolResult`
+- **What**: `pub struct ToolResult { title: String, content: String, is_error: bool }` — short human-readable label like `"Read foo.rs"`, `"Run cargo test"`, `"Listed src/ (23 entries)"`.
+- **Source**: `opencode/packages/opencode/src/tool/tool.ts:30` — `ExecuteResult.title`.
+- **Why**: trajectory log's `LlmCallCaptured.response_summary` currently just truncates `content` to 200 chars, which is often noise (file bytes, dir listings). A `title` is what humans actually want to see when scanning `tars trajectory show <ID>`.
+- **Cost**: ~10 min — add field, fill in the 2 builtins, optionally project into trajectory event summaries.
+- **Trigger**: now (trivial).
+
+### L-4. Parse `Retry-After` headers in `RetryMiddleware`
+- **What**: `tars-pipeline/src/retry.rs` reads `retry-after-ms` (millisecond-precision, when present) → `retry-after` (seconds OR HTTP date) → falls back to current exponential backoff. Today we use exponential backoff exclusively, ignoring server hints.
+- **Source**: `opencode/packages/opencode/src/session/retry.ts:21` (`delay()` fn) — three-tier resolution.
+- **Why**: Anthropic and OpenAI both emit `retry-after` precisely so clients can avoid retry storms during rate limiting. Ignoring it means we either retry too fast (worsen the rate limit) or too slow (waste time).
+- **Cost**: 1-2h. Add `extract_retry_after_ms(&ProviderError) -> Option<u64>` helper, wire into RetryMiddleware schedule.
+- **Trigger**: now (cheap, real value, no dependencies).
+
+### L-5. Permission system (`Ruleset` of `(permission, pattern, action)` rules)
+- **What**: a per-agent `Ruleset = Vec<{permission, pattern, action: allow|deny|ask}>` with wildcard match, last-match-wins. Tools call `ctx.ask({permission, patterns, metadata})` to gate side-effecting operations interactively. Replaces `ReadFileTool::with_root` (static jail) with a more general policy.
+- **Source**: `opencode/packages/opencode/src/permission/{evaluate,index}.ts` — `evaluate(permission, pattern, ...rulesets)` returns matching rule.
+- **Why**: M4 Doc 14 §10.1's full IAM check is M6 work (blocked on `tars-security`). A Ruleset-based permission system is the smaller version that ships before IAM — and it's the **prerequisite for `fs.write_file`** (we should not let an LLM mutate the filesystem without an approval gate). Also subsumes the `with_root` jail pattern.
+- **Cost**: 1-2 days. New module `tars-tools/src/permission.rs` (~300 LOC + Wildcard match util). `AgentContext` grows `permission: Arc<Ruleset>`, `ToolContext` grows `ask: AskFn`. `tars run-task --tools` gets a default permissive ruleset for read-only builtins.
+- **Trigger**: **fires immediately when `fs.write_file` enters the queue** (B-9). Should ship together — write tool + permission gate in one commit.
+
+### L-6. Tool gating per model
+- **What**: `ToolRegistry::for_model(model_id)` filters the advertised tools to ones the model is good at. opencode hands GPT models `apply_patch`, others `edit/write`.
+- **Source**: `opencode/packages/opencode/src/tool/registry.ts:284` — `tools()` filter logic.
+- **Why**: LLM tool-use proficiency varies sharply by model + tool combination. Surfacing all tools to all models hurts smaller / older models. Today we hand every tool to every Worker.
+- **Cost**: ~half-day. Add per-tool `compatible_models: Option<Pattern>` field; registry filter at `to_tool_specs(model_id)`.
+- **Trigger**: when we have **both** (a) 4+ builtins AND (b) a measured case where a model misuses a tool. Until then a global tool list is fine.
+
+### L-7. Split `fs.write_file` into `edit` (string-replace) + `apply_patch` (unified-diff)
+- **What**: instead of a single `fs.write_file` taking full content, two surgical tools: `fs.edit_file` (oldString/newString) for small mods, `fs.apply_patch` (unified diff) for larger refactors. Pair with L-6 to gate per-model.
+- **Source**: opencode ships both — `tool/edit.ts` (711 LOC, exact string replace with locking + BOM + format hooks) and `tool/apply_patch.ts` (309 LOC, unified diff applier).
+- **Why**: full-content writes are wasteful for small changes (cost + risk of LLM losing detail in a long re-emit) and clumsy for big changes (LLM has to reproduce 1000 lines verbatim to change 5). Surgical tools match how models actually want to modify files.
+- **Cost**: 2-3 days for both. Each needs file locking, BOM/line-ending preservation, format-after-write hook.
+- **Trigger**: blocked on **L-5 Permission + Backtrack/Saga (B-4)**. When `fs.write_file` finally ships, ship as these two from the start, never as a single full-content write.
+
+### L-8. Bus / event-publishing for tool side effects
+- **What**: tools that mutate state publish events (`File.Edited { path }`, `Patch.Applied { changes }`). Other subsystems subscribe (LSP refresh, snapshot/undo, TUI live update).
+- **Source**: `opencode/packages/opencode/src/bus.ts` + per-tool `bus.publish(File.Event.Edited, ...)`.
+- **Why**: decouples tool implementations from observers (LSP doesn't need to know about every edit-tool variant; snapshot service doesn't need to import each tool).
+- **Cost**: 1 day. Generic event bus + 1-2 event types per tool.
+- **Trigger**: when there's a 2nd consumer of "a tool just changed file X" — probably LSP integration (deferred) or snapshot service (Backtrack work). Today we have one consumer (the trajectory log) and pull-based access is fine.
+
+### L-9. `MessageV2` token tracking — split `cache.read` + `cache.write`
+- **What**: opencode's `MessageV2.Assistant.tokens` has `cache: { read, write }`. Our `Usage` has `cached_input_tokens` (read only) + `cache_creation_tokens` (write). Same idea, different naming.
+- **Source**: `opencode/packages/opencode/src/session/message-v2.ts`.
+- **Why**: not a real fix — we're already nominally aligned. Mention only because the structural shape (`cache` as a substructure) reads better than two flat fields. **No change recommended** — renaming touches every provider adapter.
+- **Trigger**: never, unless a major Usage refactor for unrelated reasons happens.
+
+### L-10. Compaction service tuning constants
+- **What**: when B-4's `ContextStore + ContextCompactor` ships, opencode's tuned constants are a useful starting point: `PRUNE_MINIMUM = 20K tokens`, `PRUNE_PROTECT = 40K`, `MIN/MAX_PRESERVE_RECENT_TOKENS = 2K..8K`, `PRUNE_PROTECTED_TOOLS = ["skill"]` (skill output never pruned).
+- **Source**: `opencode/packages/opencode/src/session/compaction.ts:38-43`.
+- **Why**: these aren't theoretical — they're empirical numbers from a system in production with real users. Faster to start here and tune than to derive from scratch.
+- **Cost**: nominal — just a reference when implementing B-4's ContextStore.
+- **Trigger**: when implementing ContextStore (B-4).
+
+### L-11. LiteLLM/Bedrock dummy tool injection
+- **What**: when `tools` is empty but message history contains tool calls, inject a dummy `_noop` tool (description: "Do not call this. Exists only for API compatibility.") to satisfy LiteLLM/Bedrock validation.
+- **Source**: `opencode/packages/opencode/src/session/llm.ts:212-219`.
+- **Why**: LiteLLM proxies and Bedrock both reject requests with stale tool calls but no `tools` param. We'll trip this when a user routes through LiteLLM as an OpenAI-compat backend with tool history.
+- **Cost**: ~30 min in `tars-pipeline` or per-backend adapter.
+- **Trigger**: first user reports of LiteLLM/Bedrock 400s. Trivial fix when it appears; no need to ship preemptively.
+
+### L-12. `invalid` tool — graceful unknown-tool handler
+- **What**: special tool registered under id `"invalid"` that catches "model called a tool that doesn't exist" and returns a clean error message back to the model so it can adapt.
+- **Source**: `opencode/packages/opencode/src/tool/invalid.ts`.
+- **Why**: today `ToolRegistry::dispatch` returns an `is_error` Tool message when the lookup misses (we already do this — `registry-1` test case in the existing dispatch helper). The `invalid` pattern is the cleaner version: register one tool that handles ALL unknowns, with a tuned message that explains what the model did wrong.
+- **Cost**: 1h.
+- **Trigger**: when an LLM repeatedly hallucinates non-existent tools and burns through retries. Until then our existing miss-as-is_error covers it.
+
+---
+
 ## Doc 01 — LLM Provider gap items
 
 Audit run 2026-05-03 against `docs/01-llm-provider.md`. Code currently implements ~85% of the doc surface (HTTP + CLI + capability + tool-call + structured-output + cache directive + error model + registry are all in). What's still missing:
