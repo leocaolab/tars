@@ -194,11 +194,27 @@ impl OpenAiAdapter {
                 }
                 out
             }
-            Message::Tool { tool_call_id, content, is_error: _ } => json!({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": Self::translate_content(content),
-            }),
+            Message::Tool { tool_call_id, content, is_error } => {
+                // OpenAI's tool-role message has no literal `is_error`
+                // field. The convention is to prefix the content with
+                // a marker so the model sees the error semantically.
+                // Audit finding `tars-provider-src-backends-openai-7`:
+                // failed tool execution was being presented as success.
+                let mut content_blocks = Self::translate_content(content);
+                if *is_error {
+                    if let Value::Array(arr) = &mut content_blocks {
+                        arr.insert(
+                            0,
+                            json!({"type": "text", "text": "[tool execution failed]\n"}),
+                        );
+                    }
+                }
+                json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": content_blocks,
+                })
+            }
             Message::System { content } => json!({
                 "role": "system",
                 "content": Self::translate_content(content),
@@ -287,6 +303,14 @@ impl HttpAdapter for OpenAiAdapter {
             }));
         }
         for m in &req.messages {
+            // Audit `tars-provider-src-backends-openai-9`: if the caller
+            // supplied both `req.system` and an inline `Message::System`,
+            // we used to emit two system blocks. The pattern here is
+            // "system field wins" — drop inline System messages when
+            // `req.system` is set.
+            if req.system.is_some() && matches!(m, Message::System { .. }) {
+                continue;
+            }
             messages.push(Self::translate_message(m));
         }
 
@@ -351,11 +375,15 @@ impl HttpAdapter for OpenAiAdapter {
     ) -> Result<Vec<ChatEvent>, ProviderError> {
         // OpenAI emits `data: [DONE]` as the terminator. Stop quietly.
         if raw.data.trim() == "[DONE]" {
-            // Ensure any open tool calls are finalized (defensive — the
-            // last delta usually ends with finish_reason=tool_calls,
-            // which we already turn into ToolCallEnd below).
-            buf.discard();
-            return Ok(Vec::new());
+            // Audit `tars-provider-src-backends-openai-13`: the comment
+            // claimed we discard "defensively" because finish_reason
+            // already finalizes tool calls. But finish_reason is
+            // optional in some streams (proxies, partial server
+            // implementations). Drain into ToolCallEnd events first so
+            // accumulated tool args aren't silently dropped.
+            let mut emitted = Vec::new();
+            drain_buffer_into(buf, &mut emitted);
+            return Ok(emitted);
         }
 
         let v: Value = serde_json::from_str(&raw.data).map_err(|e| {
@@ -389,22 +417,15 @@ impl HttpAdapter for OpenAiAdapter {
             None => return Ok(out),
         };
 
-        for choice in choices {
-            // A heuristic: emit Started once, on the first chunk that
-            // has a `model` field. Caller already saw 1 chunk per
-            // stream so we don't carry across-chunk state for this in
-            // the buffer — using `index 0` as a fingerprint is fine.
-            // (Worst case we re-emit, which only happens if `model`
-            // somehow arrives twice; cheap.)
-            if !model.is_empty() && out.is_empty() {
-                // Emit Started exactly once per stream — we guard with
-                // an empty-out check above. This is not perfect (if a
-                // tool delta also lands in the same SSE chunk we'd skip)
-                // but for OpenAI's chunking shape it works.
-                // Better: track in adapter state. Future improvement.
-            }
-            let _ = model; // used above for potential Started; suppress unused warn
+        // Audit `tars-provider-src-backends-openai-15`: the previous
+        // implementation had an empty `if` block pretending to emit
+        // Started. Now we use ToolCallBuffer.take_started() to fire
+        // exactly once per stream, on the first chunk carrying a model.
+        if !model.is_empty() && buf.take_started() {
+            out.push(ChatEvent::started(model.clone()));
+        }
 
+        for choice in choices {
             let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                 if !content.is_empty() {
@@ -413,12 +434,18 @@ impl HttpAdapter for OpenAiAdapter {
             }
 
             if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-                for tc in tcs {
+                for (iter_pos, tc) in tcs.iter().enumerate() {
+                    // OpenAI's spec sends `index` for parallel tool
+                    // calls. Audit `tars-provider-src-backends-openai-17`:
+                    // unconditionally defaulting missing index to 0
+                    // collapses parallel calls into one. Fall back to
+                    // the iteration position so distinct tcs in the
+                    // same delta stay distinct even if the spec slips.
                     let index = tc
                         .get("index")
                         .and_then(|i| i.as_u64())
                         .map(|i| i as usize)
-                        .unwrap_or(0);
+                        .unwrap_or(iter_pos);
                     let id = tc.get("id").and_then(|s| s.as_str()).unwrap_or("").to_string();
                     let name = tc
                         .get("function")
@@ -556,10 +583,11 @@ fn drain_buffer_into(buf: &mut ToolCallBuffer, out: &mut Vec<ChatEvent>) {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let trimmed = crate::http_base::truncate_utf8(s, max);
+    if trimmed.len() == s.len() {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        format!("{trimmed}…")
     }
 }
 
@@ -581,6 +609,73 @@ mod tests {
         assert_eq!(v["role"], "user");
         assert_eq!(v["content"][0]["type"], "text");
         assert_eq!(v["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn tool_message_marks_failure_when_is_error_set() {
+        // Audit `tars-provider-src-backends-openai-7`: failed tool
+        // executions used to be silently presented as successful.
+        let m = Message::Tool {
+            tool_call_id: "tu_1".into(),
+            content: vec![tars_types::ContentBlock::text("permission denied")],
+            is_error: true,
+        };
+        let v = OpenAiAdapter::translate_message(&m);
+        assert_eq!(v["role"], "tool");
+        // Marker prefix must appear so the model sees it as an error.
+        assert_eq!(v["content"][0]["text"], "[tool execution failed]\n");
+        assert_eq!(v["content"][1]["text"], "permission denied");
+    }
+
+    #[test]
+    fn tool_message_no_marker_on_success() {
+        let m = Message::Tool {
+            tool_call_id: "tu_1".into(),
+            content: vec![tars_types::ContentBlock::text("42")],
+            is_error: false,
+        };
+        let v = OpenAiAdapter::translate_message(&m);
+        // Just the original content, no error prefix.
+        assert_eq!(v["content"][0]["text"], "42");
+        assert!(v["content"].as_array().unwrap().len() == 1);
+    }
+
+    #[test]
+    fn translate_request_dedups_system_when_req_system_set() {
+        // Audit `tars-provider-src-backends-openai-9`: caller set
+        // both req.system AND an inline System message → 2 system
+        // blocks were emitted. Now the inline System is skipped.
+        let a = OpenAiAdapter {
+            base_url: DEFAULT_BASE_URL.into(),
+            extras: HttpProviderExtras::default(),
+        };
+        let req = ChatRequest {
+            model: tars_types::ModelHint::Explicit("gpt-4o".into()),
+            system: Some("explicit system".into()),
+            messages: vec![
+                Message::System {
+                    content: vec![tars_types::ContentBlock::text("inline system")],
+                },
+                Message::user_text("hi"),
+            ],
+            tools: vec![],
+            tool_choice: Default::default(),
+            structured_output: None,
+            max_output_tokens: None,
+            temperature: None,
+            stop_sequences: vec![],
+            seed: None,
+            cache_directives: vec![],
+            thinking: Default::default(),
+        };
+        let body = a.translate_request(&req).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let system_count = messages
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .count();
+        assert_eq!(system_count, 1, "should dedupe to one system message");
+        assert_eq!(messages[0]["content"][0]["text"], "explicit system");
     }
 
     #[test]

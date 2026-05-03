@@ -40,7 +40,11 @@ pub enum CacheDirective {
 /// **Security**: `external_id` is a bearer-style "claim ticket" (Doc 03
 /// §10.4) — handed back to the provider it grants access to whatever
 /// content it wraps. Never expose to clients/logs in plaintext.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `Debug` is implemented manually to redact `external_id`. The default
+/// derive would print it via `{:?}`, defeating the "treat as secret"
+/// invariant. Audit findings `tars-types-src-cache-2..4`.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderCacheHandle {
     pub provider: ProviderId,
     /// Provider-side ID (e.g. `cachedContents/abc123`). Treat as secret.
@@ -50,6 +54,19 @@ pub struct ProviderCacheHandle {
     pub created_at: SystemTime,
     pub expires_at: SystemTime,
     pub size_estimate_bytes: Option<u64>,
+}
+
+impl std::fmt::Debug for ProviderCacheHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderCacheHandle")
+            .field("provider", &self.provider)
+            .field("external_id", &format!("<redacted:{}>", self.external_id.len()))
+            .field("tenant_namespace", &self.tenant_namespace)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("size_estimate_bytes", &self.size_estimate_bytes)
+            .finish()
+    }
 }
 
 /// Diagnostic info about a cache hit, surfaced through [`crate::events::ChatEvent::Started`].

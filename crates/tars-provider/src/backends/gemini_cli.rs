@@ -380,10 +380,11 @@ fn extract_usage(payload: &Value, model: &str) -> Usage {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let trimmed = crate::http_base::truncate_utf8(s, max);
+    if trimmed.len() == s.len() {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        format!("{trimmed}…")
     }
 }
 

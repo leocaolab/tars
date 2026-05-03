@@ -88,6 +88,14 @@ pub struct Pricing {
     pub cached_input_per_million: f64,
     /// Cache *creation* surcharge (Anthropic) — typical 125% of standard.
     pub cache_creation_per_million: f64,
+    /// Rate for thinking / reasoning tokens when the provider distinguishes
+    /// them from output. Defaults to 0 — set explicitly per provider.
+    /// Anthropic bundles thinking into `output_tokens` (use 0). Gemini
+    /// reports `thoughts_token_count` separately and bills at the output
+    /// rate (set equal to `output_per_million`). Audit findings
+    /// `tars-types-src-usage-{4,5,7}`: thinking was previously missing
+    /// from cost altogether for providers that report it separately.
+    pub thinking_per_million: f64,
 }
 
 impl Pricing {
@@ -104,7 +112,8 @@ impl Pricing {
             + (usage.cached_input_tokens as f64) * self.cached_input_per_million
                 / 1_000_000.0
             + (usage.cache_creation_tokens as f64) * self.cache_creation_per_million
-                / 1_000_000.0;
+                / 1_000_000.0
+            + (usage.thinking_tokens as f64) * self.thinking_per_million / 1_000_000.0;
         CostUsd(total)
     }
 }
@@ -121,12 +130,36 @@ mod tests {
     }
 
     #[test]
+    fn pricing_includes_thinking_tokens_when_priced() {
+        // Audit `tars-types-src-usage-{4,5,7}`: thinking was previously
+        // omitted from cost. Gemini reports thoughts_token_count
+        // separately and bills it at the output rate.
+        let p = Pricing {
+            input_per_million: 0.0,
+            output_per_million: 0.0,
+            cached_input_per_million: 0.0,
+            cache_creation_per_million: 0.0,
+            thinking_per_million: 30.0,
+        };
+        let u = Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            cache_creation_tokens: 0,
+            thinking_tokens: 1000,
+        };
+        // 1000 * 30 / 1e6 = 0.03
+        assert!((p.cost_for(&u).0 - 0.03).abs() < 1e-9);
+    }
+
+    #[test]
     fn pricing_subtracts_cached_from_billable_input() {
         let p = Pricing {
             input_per_million: 10.0,
             output_per_million: 30.0,
             cached_input_per_million: 1.0,
             cache_creation_per_million: 12.5,
+            thinking_per_million: 0.0,
         };
         // 1000 input total, 200 of which were cached.
         let u = Usage {

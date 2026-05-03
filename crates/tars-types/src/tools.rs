@@ -59,12 +59,32 @@ pub struct ToolCall {
 
 impl ToolCall {
     /// Convenience constructor used by tests + adapters.
+    ///
+    /// **Debug-builds-only invariant**: `arguments` must be a JSON
+    /// object. Anything else (string, array, bare scalar) violates the
+    /// type's documented contract — production calls into the model
+    /// would emit malformed `tool_calls.arguments` strings. We
+    /// `debug_assert!` rather than panic in release because adapter
+    /// code that constructs many ToolCalls in hot paths shouldn't pay
+    /// for this check on every release-build call. Audit findings
+    /// `tars-types-src-tools-{4,5}`.
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
         arguments: serde_json::Value,
     ) -> Self {
+        debug_assert!(
+            arguments.is_object(),
+            "ToolCall.arguments must be a JSON object (got {:?})",
+            arguments
+        );
         Self { id: id.into(), name: name.into(), arguments }
+    }
+
+    /// True iff `arguments` matches the documented invariant.
+    /// Useful at trust boundaries (e.g. before sending to provider).
+    pub fn args_are_object(&self) -> bool {
+        self.arguments.is_object()
     }
 }
 

@@ -40,7 +40,11 @@ impl From<AuthError> for ProviderError {
 
 /// What the resolver hands back. The Adapter decides how to apply it
 /// (Bearer header, x-api-key header, query string …).
-#[derive(Clone, Debug)]
+///
+/// `Debug` is implemented manually to redact credential bodies. Audit
+/// finding `tars-provider-src-auth-2`: a `tracing::error!(auth = ?auth)`
+/// on this type would otherwise dump the bearer/api-key plaintext.
+#[derive(Clone)]
 pub enum ResolvedAuth {
     /// Plaintext bearer-style credential string.
     Bearer(String),
@@ -48,6 +52,16 @@ pub enum ResolvedAuth {
     ApiKey(String),
     /// Nothing to inject (Auth::None / Delegate fall here).
     None,
+}
+
+impl std::fmt::Debug for ResolvedAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bearer(s) => write!(f, "Bearer(<redacted:{}>)", s.len()),
+            Self::ApiKey(s) => write!(f, "ApiKey(<redacted:{}>)", s.len()),
+            Self::None => write!(f, "None"),
+        }
+    }
 }
 
 #[async_trait]
@@ -141,6 +155,21 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(v, ResolvedAuth::None));
+    }
+
+    #[test]
+    fn resolved_auth_debug_redacts_credentials() {
+        // Audit `tars-provider-src-auth-2`: a `tracing::error!(auth = ?a)`
+        // would dump the bearer plaintext if Debug were derived.
+        let a = ResolvedAuth::Bearer("super-secret-token".into());
+        let s = format!("{a:?}");
+        assert!(!s.contains("super-secret-token"));
+        assert!(s.contains("redacted"));
+
+        let b = ResolvedAuth::ApiKey("sk-proj-abcdef".into());
+        let s = format!("{b:?}");
+        assert!(!s.contains("sk-proj-abcdef"));
+        assert!(s.contains("redacted"));
     }
 
     #[tokio::test]

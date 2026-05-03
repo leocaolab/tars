@@ -23,14 +23,35 @@ struct CallAccum {
 ///
 /// OpenAI / Anthropic both interleave parallel tool calls by `index`;
 /// you cannot just concatenate everything you see.
+///
+/// Also carries a few non-tool stream-level flags (e.g. whether
+/// [`tars_types::ChatEvent::Started`] has been emitted) so adapter
+/// `parse_event` impls can stay stateless.
 #[derive(Debug, Default)]
 pub struct ToolCallBuffer {
     inflight: HashMap<usize, CallAccum>,
+    /// Whether the adapter has emitted a `Started` event yet for the
+    /// stream this buffer belongs to. Lets adapters call
+    /// [`Self::take_started`] once and skip the rest.
+    started_emitted: bool,
 }
 
 impl ToolCallBuffer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Atomic test-and-set for "have we already emitted Started?".
+    /// Returns `true` the first time it's called per stream; `false`
+    /// thereafter. Adapters use this to emit at most one Started
+    /// event without carrying state in the adapter struct itself.
+    pub fn take_started(&mut self) -> bool {
+        if self.started_emitted {
+            false
+        } else {
+            self.started_emitted = true;
+            true
+        }
     }
 
     pub fn on_start(&mut self, index: usize, id: String, name: String) {

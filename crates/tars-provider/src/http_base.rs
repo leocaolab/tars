@@ -193,9 +193,12 @@ where
 
     let status = response.status();
     if !status.is_success() {
-        // Bounded read so a verbose error body can't OOM us.
+        // Bounded read so a verbose error body can't OOM us. Use a
+        // UTF-8-safe truncation: `&str[..n]` panics if `n` falls
+        // mid-multibyte-codepoint, and a crafted server response could
+        // weaponise that into a worker-thread panic.
         let text = response.text().await.unwrap_or_default();
-        let trunc = if text.len() > 4096 { &text[..4096] } else { &text };
+        let trunc = truncate_utf8(&text, 4096);
         return Err(adapter.classify_error(status, trunc));
     }
 
@@ -230,6 +233,25 @@ where
     };
 
     Ok(Box::pin(stream))
+}
+
+/// Truncate `s` to at most `max_bytes` while staying on a UTF-8 boundary.
+///
+/// `&s[..max_bytes]` is unsafe-by-design: the index must fall on a
+/// codepoint boundary or `str::index` panics. Bug report:
+/// `tars-provider-src-http-base-2` (audit run 3ab2b7fa). Fix lifts the
+/// idiom from std's own `floor_char_boundary` (still unstable as of 1.85).
+pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Walk back from `max_bytes` to the previous char boundary.
+    // is_char_boundary(s.len()) is always true, so this terminates.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Tiny error type used so the `ProviderError::Network` carries something
@@ -268,5 +290,30 @@ mod tests {
         // If we ever need more, raise the constant deliberately.
         assert_eq!(MAX_REQUEST_MAX_RETRIES, 100);
         assert_eq!(MAX_STREAM_MAX_RETRIES, 100);
+    }
+
+    #[test]
+    fn truncate_utf8_handles_multibyte_boundary() {
+        // Regression: `&s[..n]` panics when `n` lands mid-codepoint.
+        // Audit finding `tars-provider-src-http-base-2`.
+        // 4 bytes per emoji (each is 4-byte UTF-8) — truncate at 3
+        // would split, must round down to 0.
+        let s = "🦀🦀🦀";
+        assert_eq!(truncate_utf8(s, 3), "");
+        assert_eq!(truncate_utf8(s, 4), "🦀");
+        assert_eq!(truncate_utf8(s, 7), "🦀");
+        assert_eq!(truncate_utf8(s, 8), "🦀🦀");
+        assert_eq!(truncate_utf8(s, 100), s);
+    }
+
+    #[test]
+    fn truncate_utf8_short_input_is_passthrough() {
+        assert_eq!(truncate_utf8("hi", 100), "hi");
+    }
+
+    #[test]
+    fn truncate_utf8_ascii_like_simple_slice() {
+        let s: String = "x".repeat(10_000);
+        assert_eq!(truncate_utf8(&s, 4096).len(), 4096);
     }
 }

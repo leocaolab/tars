@@ -94,6 +94,11 @@ pub enum Message {
         content: Vec<ContentBlock>,
     },
     Assistant {
+        // OpenAI omits `content` entirely on assistant messages that
+        // are pure tool-call invocations. Without `default` here our
+        // Deserialize fails on those messages. Audit
+        // `tars-types-src-chat-13`.
+        #[serde(default)]
         content: Vec<ContentBlock>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<crate::tools::ToolCall>,
