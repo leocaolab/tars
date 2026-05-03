@@ -1827,6 +1827,7 @@ dependencies = [
  "tars-types",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
