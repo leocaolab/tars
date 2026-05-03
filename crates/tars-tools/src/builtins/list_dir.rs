@@ -19,7 +19,7 @@
 //! the LLM doesn't have to guess what's a directory vs. a file.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -31,6 +31,11 @@ use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
 /// Default cap on entries returned per call.
 pub const DEFAULT_MAX_ENTRIES: usize = 256;
+
+/// Description prompt — externalized to `list_dir.txt` so iteration
+/// doesn't need a Rust recompile (TODO L-1).
+static DESCRIPTION_TRIMMED: LazyLock<String> =
+    LazyLock::new(|| include_str!("list_dir.txt").trim_end().to_string());
 
 pub struct ListDirTool {
     /// Optional jail root. Same semantics as `ReadFileTool::with_root`.
@@ -109,11 +114,8 @@ impl Tool for ListDirTool {
     }
 
     fn description(&self) -> &str {
-        "List the entries of a directory. Use this to discover files \
-         before reading them with fs.read_file. Returns one entry per \
-         line, sorted, with type indicators (`d` directory, `f` file, \
-         `l` symlink) and file sizes. Returns an error result if the \
-         path is missing, not a directory, or outside the allowed root."
+        // Externalized to a sibling .txt file (TODO L-1).
+        DESCRIPTION_TRIMMED.as_str()
     }
 
     fn input_schema(&self) -> &JsonSchema {
@@ -155,19 +157,37 @@ impl Tool for ListDirTool {
             r = read_dir_capped(&resolved, self.max_entries) => r,
         };
 
+        // Title uses the basename when present (root listings use the
+        // full path because the basename would be empty / `.`).
+        let display_path = resolved
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| resolved.display().to_string());
+
         match listing {
             Ok(ListOutcome::Ok { entries, truncated }) => {
+                let count = entries.len();
                 let body = render_listing(&entries, truncated, self.max_entries);
-                Ok(ToolResult::success(body))
+                let title = if truncated {
+                    format!("Listed {display_path}/ ({count}+ entries, truncated)")
+                } else if count == 0 {
+                    format!("Listed {display_path}/ (empty)")
+                } else {
+                    format!("Listed {display_path}/ ({count} entries)")
+                };
+                Ok(ToolResult::titled_success(title, body))
             }
-            Ok(ListOutcome::NotFound) => Ok(ToolResult::error(format!(
-                "path `{}` not found",
-                resolved.display(),
-            ))),
-            Ok(ListOutcome::NotDirectory) => Ok(ToolResult::error(format!(
-                "path `{}` is not a directory; use fs.read_file for files",
-                resolved.display(),
-            ))),
+            Ok(ListOutcome::NotFound) => Ok(ToolResult::titled_error(
+                format!("{display_path} not found"),
+                format!("path `{}` not found", resolved.display()),
+            )),
+            Ok(ListOutcome::NotDirectory) => Ok(ToolResult::titled_error(
+                format!("{display_path} is not a directory"),
+                format!(
+                    "path `{}` is not a directory; use fs.read_file for files",
+                    resolved.display(),
+                ),
+            )),
             Err(e) => Err(ToolError::Execute(format!(
                 "listing `{}`: {e}",
                 resolved.display(),
@@ -336,6 +356,9 @@ mod tests {
         assert_eq!(lines[0], "f alpha.rs [12]");
         assert_eq!(lines[1], "d subdir");
         assert_eq!(lines[2], "f zeta.txt [2]");
+        // L-3: trajectory-readable title with basename + count.
+        let basename = dir.path().file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(r.title, format!("Listed {basename}/ (3 entries)"));
     }
 
     #[tokio::test]

@@ -1,0 +1,1 @@
+Read a UTF-8 text file from disk and return its contents. Use when you need to inspect the actual contents of a file (source code, config, documentation). Returns an error result if the file is missing, binary, or larger than the per-call byte cap.

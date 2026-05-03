@@ -31,6 +31,15 @@ pub struct ToolContext {
 /// `is_error=true` flips the same flag on the assembled message so
 /// the model knows the tool failed (vs. returned an empty result).
 ///
+/// `title` is a short human-readable summary of what the tool did
+/// (`"Read foo.rs"`, `"Listed src/ (23 entries)"`, `"hello.txt not
+/// found"`). It is **not** sent to the LLM — that's `content`'s job.
+/// Title is for trajectory-log readability + future TUI consumers
+/// who need a one-line "what just happened" without parsing the
+/// content blob. Empty string means "no title; consumers should fall
+/// back to the content head". Borrowed from opencode's
+/// `ExecuteResult.title` (TODO L-3).
+///
 /// We model failure two ways:
 /// - [`ToolError`] — execution couldn't be attempted (bad args, tool
 ///   not found, cancelled). Surfaces as `Err(_)`; the registry's
@@ -43,22 +52,39 @@ pub struct ToolContext {
 ///   on whether the LLM is expected to recover.
 #[derive(Clone, Debug)]
 pub struct ToolResult {
+    pub title: String,
     pub content: String,
     pub is_error: bool,
 }
 
 impl ToolResult {
-    /// Build a successful (`is_error=false`) result.
+    /// Build a successful (`is_error=false`) result with no title.
+    /// Prefer [`Self::titled_success`] when the tool can produce a
+    /// useful one-line summary.
     pub fn success(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: false }
+        Self { title: String::new(), content: content.into(), is_error: false }
     }
 
-    /// Build a logical-failure (`is_error=true`) result. Use when the
-    /// tool ran successfully but the *operation* didn't (the LLM
-    /// should adapt — e.g. file not found, retry with a different
-    /// path).
+    /// Build a successful result with a short human-readable title
+    /// (`"Read foo.rs"`, etc.). The title is for trajectory log /
+    /// TUI readability; it is NOT sent to the LLM.
+    pub fn titled_success(title: impl Into<String>, content: impl Into<String>) -> Self {
+        Self { title: title.into(), content: content.into(), is_error: false }
+    }
+
+    /// Build a logical-failure (`is_error=true`) result with no title.
+    /// Use when the tool ran successfully but the *operation* didn't
+    /// (the LLM should adapt — e.g. file not found, retry with a
+    /// different path). Prefer [`Self::titled_error`] when a one-line
+    /// summary is available.
     pub fn error(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: true }
+        Self { title: String::new(), content: content.into(), is_error: true }
+    }
+
+    /// Build a logical-failure result with a short human-readable
+    /// title (`"hello.txt not found"`, etc.).
+    pub fn titled_error(title: impl Into<String>, content: impl Into<String>) -> Self {
+        Self { title: title.into(), content: content.into(), is_error: true }
     }
 }
 
@@ -178,9 +204,22 @@ mod tests {
     fn tool_result_constructors() {
         let s = ToolResult::success("ok");
         assert!(!s.is_error);
+        assert!(s.title.is_empty(), "untitled success defaults to empty title");
         let e = ToolResult::error("nope");
         assert!(e.is_error);
         assert_eq!(e.content, "nope");
+        assert!(e.title.is_empty());
+    }
+
+    #[test]
+    fn titled_constructors_carry_the_title_string() {
+        let s = ToolResult::titled_success("Read foo.rs", "fn main() {}");
+        assert_eq!(s.title, "Read foo.rs");
+        assert_eq!(s.content, "fn main() {}");
+        assert!(!s.is_error);
+        let e = ToolResult::titled_error("foo.rs not found", "no such file");
+        assert_eq!(e.title, "foo.rs not found");
+        assert!(e.is_error);
     }
 
     #[test]

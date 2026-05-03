@@ -102,8 +102,8 @@ impl ToolRegistry {
     /// did.
     pub async fn dispatch(&self, call: &ToolCall, ctx: ToolContext) -> Message {
         let outcome = self.execute(call, ctx).await;
-        let (content, is_error) = match outcome {
-            Ok(result) => (result.content, result.is_error),
+        let (title, content, is_error) = match outcome {
+            Ok(result) => (result.title, result.content, result.is_error),
             Err(e) => {
                 let msg = format!("tool error ({}): {e}", e.classification());
                 tracing::warn!(
@@ -112,9 +112,23 @@ impl ToolRegistry {
                     error = %e,
                     "tool dispatch failed",
                 );
-                (msg, true)
+                (String::new(), msg, true)
             }
         };
+        // Surface the title (when present) on the trace so trajectory
+        // log readers + future TUI consumers see the one-line summary
+        // without parsing the content blob. The title is NOT placed
+        // into Message::Tool — that's the LLM-visible payload, where
+        // the full content matters.
+        if !title.is_empty() {
+            tracing::info!(
+                tool = %call.name,
+                call_id = %call.id,
+                is_error,
+                title = %title,
+                "tool dispatched",
+            );
+        }
         Message::Tool {
             tool_call_id: call.id.clone(),
             content: vec![ContentBlock::text(content)],

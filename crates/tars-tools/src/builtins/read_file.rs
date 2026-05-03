@@ -29,7 +29,7 @@
 //!   than hallucinating content from byte garbage.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -41,6 +41,13 @@ use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
 /// Default max bytes read by `fs.read_file`. ~256 KiB.
 pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024;
+
+/// Description prompt — externalized to `read_file.txt` so iteration
+/// doesn't need a Rust recompile (TODO L-1). Loaded once at first
+/// access; trailing newline is trimmed because the file naturally
+/// ends with one and that's noise to consumers.
+static DESCRIPTION_TRIMMED: LazyLock<String> =
+    LazyLock::new(|| include_str!("read_file.txt").trim_end().to_string());
 
 pub struct ReadFileTool {
     /// If set, all paths must resolve inside this directory after
@@ -137,11 +144,11 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a UTF-8 text file from disk and return its contents. \
-         Use when you need to inspect the actual contents of a file \
-         (source code, config, documentation). Returns an error \
-         result if the file is missing, binary, or larger than the \
-         per-call byte cap."
+        // Externalized to a sibling .txt file (TODO L-1) so prompt
+        // iteration doesn't need a Rust recompile + commit. The
+        // trailing newline from the .txt is harmless to the LLM but
+        // would clutter equality assertions; trim it once.
+        DESCRIPTION_TRIMMED.as_str()
     }
 
     fn input_schema(&self) -> &JsonSchema {
@@ -176,6 +183,13 @@ impl Tool for ReadFileTool {
             Ok(p) => p,
             Err(result) => return Ok(result),
         };
+        // Use the basename for titles — full path is in `content` for
+        // the LLM; the title is for human eyeballs scanning trajectory
+        // logs and wants compact identifiers.
+        let basename = resolved
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| resolved.display().to_string());
 
         // Race the actual read against cancel — fast-fail rather
         // than letting an upstream Drop wait for the file syscall.
@@ -186,22 +200,31 @@ impl Tool for ReadFileTool {
         };
 
         match bytes {
-            Ok(ReadOutcome::Ok(content)) => Ok(ToolResult::success(content)),
-            Ok(ReadOutcome::TooLarge { size }) => Ok(ToolResult::error(format!(
-                "file `{}` is {size} bytes, exceeds the {} byte cap; \
-                 read a more specific path or increase the cap",
-                resolved.display(),
-                self.max_bytes,
-            ))),
-            Ok(ReadOutcome::NotUtf8) => Ok(ToolResult::error(format!(
-                "file `{}` is not valid UTF-8 (binary?); fs.read_file only \
-                 returns text",
-                resolved.display(),
-            ))),
-            Ok(ReadOutcome::NotFound) => Ok(ToolResult::error(format!(
-                "file `{}` not found",
-                resolved.display(),
-            ))),
+            Ok(ReadOutcome::Ok(content)) => {
+                let title = format!("Read {basename} ({} bytes)", content.len());
+                Ok(ToolResult::titled_success(title, content))
+            }
+            Ok(ReadOutcome::TooLarge { size }) => Ok(ToolResult::titled_error(
+                format!("{basename} too large ({size} bytes)"),
+                format!(
+                    "file `{}` is {size} bytes, exceeds the {} byte cap; \
+                     read a more specific path or increase the cap",
+                    resolved.display(),
+                    self.max_bytes,
+                ),
+            )),
+            Ok(ReadOutcome::NotUtf8) => Ok(ToolResult::titled_error(
+                format!("{basename} is not UTF-8"),
+                format!(
+                    "file `{}` is not valid UTF-8 (binary?); fs.read_file only \
+                     returns text",
+                    resolved.display(),
+                ),
+            )),
+            Ok(ReadOutcome::NotFound) => Ok(ToolResult::titled_error(
+                format!("{basename} not found"),
+                format!("file `{}` not found", resolved.display()),
+            )),
             Err(e) => Err(ToolError::Execute(format!(
                 "reading `{}`: {e}",
                 resolved.display(),
@@ -293,6 +316,8 @@ mod tests {
             .unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content, "hello world");
+        // L-3: trajectory-readable title with basename + size.
+        assert_eq!(r.title, "Read hello.txt (11 bytes)");
     }
 
     #[tokio::test]

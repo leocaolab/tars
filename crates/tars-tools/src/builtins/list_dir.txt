@@ -1,0 +1,1 @@
+List the entries of a directory. Use this to discover files before reading them with fs.read_file. Returns one entry per line, sorted, with type indicators (`d` directory, `f` file, `l` symlink) and file sizes. Returns an error result if the path is missing, not a directory, or outside the allowed root.
