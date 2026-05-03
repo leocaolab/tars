@@ -21,6 +21,7 @@ use tars_types::{Auth, ProviderId};
 use crate::auth::AuthResolver;
 use crate::backends::anthropic::AnthropicProviderBuilder;
 use crate::backends::claude_cli::ClaudeCliProviderBuilder;
+use crate::backends::codex_cli::{CodexCliProviderBuilder, SandboxMode};
 use crate::backends::gemini::GeminiProviderBuilder;
 use crate::backends::gemini_cli::GeminiCliProviderBuilder;
 use crate::backends::mock::{CannedResponse, MockProvider};
@@ -241,6 +242,27 @@ fn build_one(
                 .build()
         }
 
+        ProviderConfig::CodexCli {
+            executable,
+            timeout_secs,
+            sandbox,
+            skip_git_repo_check,
+            default_model: _,
+        } => {
+            use tars_config::CodexSandboxConfig;
+            let runtime_sandbox = match sandbox {
+                CodexSandboxConfig::ReadOnly => SandboxMode::ReadOnly,
+                CodexSandboxConfig::WorkspaceWrite => SandboxMode::WorkspaceWrite,
+                CodexSandboxConfig::DangerFullAccess => SandboxMode::DangerFullAccess,
+            };
+            CodexCliProviderBuilder::new(id)
+                .executable(executable.clone())
+                .timeout(Duration::from_secs(*timeout_secs))
+                .sandbox(runtime_sandbox)
+                .skip_git_repo_check(*skip_git_repo_check)
+                .build()
+        }
+
         ProviderConfig::Mock { canned_response } => {
             MockProvider::new(id, CannedResponse::Text(canned_response.clone()))
         }
@@ -334,13 +356,17 @@ mod tests {
             type = "gemini_cli"
             default_model = "gemini-2.5-pro"
 
+            [providers.codex_cli]
+            type = "codex_cli"
+            default_model = "gpt-5"
+
             [providers.mock_test]
             type = "mock"
             canned_response = "hi"
         "#;
         let cfg = ConfigManager::load_from_str(toml_str).unwrap();
         let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
-        assert_eq!(reg.len(), 10);
+        assert_eq!(reg.len(), 11);
         assert!(reg.get(&ProviderId::new("openai_main")).is_some());
         assert!(reg.get(&ProviderId::new("openai_compat_local")).is_some());
         assert!(reg.get(&ProviderId::new("anthropic_main")).is_some());
@@ -350,6 +376,7 @@ mod tests {
         assert!(reg.get(&ProviderId::new("llamacpp_local")).is_some());
         assert!(reg.get(&ProviderId::new("claude_cli")).is_some());
         assert!(reg.get(&ProviderId::new("gemini_cli")).is_some());
+        assert!(reg.get(&ProviderId::new("codex_cli")).is_some());
         assert!(reg.get(&ProviderId::new("mock_test")).is_some());
     }
 

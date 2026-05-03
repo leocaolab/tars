@@ -167,6 +167,29 @@ pub enum ProviderConfig {
         default_model: String,
     },
 
+    /// OpenAI Codex CLI subscription path (ChatGPT Plus/Pro).
+    CodexCli {
+        #[serde(default = "default_codex_executable")]
+        executable: String,
+        /// Per-call timeout. codex `exec` runs a full agent loop;
+        /// default is more generous than other CLIs (10 min vs 5).
+        #[serde(default = "default_codex_timeout_secs")]
+        timeout_secs: u64,
+        /// Sandbox mode for codex's INTERNAL tools (its sandbox-shell,
+        /// apply-patch, etc. — not TARS's tool registry). Default
+        /// `read-only` keeps the principle of least surprise: a TARS
+        /// Worker shouldn't get unexpected file mutations.
+        #[serde(default)]
+        sandbox: CodexSandboxConfig,
+        /// Pass `--skip-git-repo-check` (default true). TARS Workers
+        /// often run outside a git repo (tempdir tests, scratch
+        /// files); codex's git-repo gate would reject them with
+        /// confusing wording.
+        #[serde(default = "default_true")]
+        skip_git_repo_check: bool,
+        default_model: String,
+    },
+
     /// In-process mock — for tests and dry-run config validation.
     Mock {
         /// What the mock should reply with.
@@ -183,8 +206,33 @@ fn default_gemini_executable() -> String {
     "gemini".into()
 }
 
+fn default_codex_executable() -> String {
+    "codex".into()
+}
+
 fn default_cli_timeout_secs() -> u64 {
     300
+}
+
+fn default_codex_timeout_secs() -> u64 {
+    600
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// TOML-friendly mirror of [`tars_provider::backends::codex_cli::SandboxMode`].
+/// Lives here (not in provider) because config is the canonical wire shape;
+/// the provider crate's enum is the runtime equivalent and the registry
+/// builder bridges between them.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodexSandboxConfig {
+    #[default]
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
 }
 
 fn default_mock_response() -> String {
@@ -214,6 +262,7 @@ impl ProviderConfig {
             Llamacpp { .. } => "llamacpp",
             ClaudeCli { .. } => "claude_cli",
             GeminiCli { .. } => "gemini_cli",
+            CodexCli { .. } => "codex_cli",
             Mock { .. } => "mock",
         }
     }
@@ -231,7 +280,8 @@ impl ProviderConfig {
             | Mlx { default_model, .. }
             | Llamacpp { default_model, .. }
             | ClaudeCli { default_model, .. }
-            | GeminiCli { default_model, .. } => default_model,
+            | GeminiCli { default_model, .. }
+            | CodexCli { default_model, .. } => default_model,
             Mock { .. } => "mock-model",
         }
     }
@@ -284,6 +334,20 @@ impl ProviderConfig {
                 }
             }
             ProviderConfig::GeminiCli { executable, timeout_secs, default_model, .. } => {
+                if executable.is_empty() {
+                    sink.push(ValidationError::new(key("executable"), "must not be empty"));
+                }
+                if *timeout_secs == 0 {
+                    sink.push(ValidationError::new(key("timeout_secs"), "must be > 0"));
+                }
+                if default_model.is_empty() {
+                    sink.push(ValidationError::new(
+                        key("default_model"),
+                        "must not be empty",
+                    ));
+                }
+            }
+            ProviderConfig::CodexCli { executable, timeout_secs, default_model, .. } => {
                 if executable.is_empty() {
                     sink.push(ValidationError::new(key("executable"), "must not be empty"));
                 }
@@ -404,6 +468,49 @@ mod tests {
                 assert_eq!(executable, "claude");
                 assert_eq!(timeout_secs, 300);
                 assert_eq!(default_model, "claude-opus-4-7");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn codex_cli_defaults_executable_timeout_sandbox_and_git_check() {
+        let toml_str = r#"
+            type = "codex_cli"
+            default_model = "gpt-5"
+        "#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
+        match cfg {
+            ProviderConfig::CodexCli {
+                executable,
+                timeout_secs,
+                sandbox,
+                skip_git_repo_check,
+                default_model,
+            } => {
+                assert_eq!(executable, "codex");
+                assert_eq!(timeout_secs, 600); // codex gets 10min default vs other CLIs' 5
+                assert_eq!(sandbox, CodexSandboxConfig::ReadOnly);
+                assert!(skip_git_repo_check);
+                assert_eq!(default_model, "gpt-5");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn codex_cli_sandbox_kebab_case_round_trips() {
+        // Pin the wire-format so a future renames-by-mistake breaks
+        // loudly rather than silently downgrading sandbox.
+        let toml_str = r#"
+            type = "codex_cli"
+            default_model = "gpt-5"
+            sandbox = "workspace-write"
+        "#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
+        match cfg {
+            ProviderConfig::CodexCli { sandbox, .. } => {
+                assert_eq!(sandbox, CodexSandboxConfig::WorkspaceWrite);
             }
             _ => panic!("wrong variant"),
         }

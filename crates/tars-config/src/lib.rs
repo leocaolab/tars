@@ -33,5 +33,5 @@ pub use builtin::{
 };
 pub use error::ConfigError;
 pub use manager::{Config, ConfigManager};
-pub use providers::{ProviderConfig, ProvidersConfig};
+pub use providers::{CodexSandboxConfig, ProviderConfig, ProvidersConfig};
 pub use routing::RoutingConfig;
