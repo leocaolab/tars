@@ -60,6 +60,7 @@ async fn trajectory_survives_runtime_restart() {
                     output_tokens: 4,
                     ..Default::default()
                 },
+                system_prompt_hash: None,
             },
         )
         .await

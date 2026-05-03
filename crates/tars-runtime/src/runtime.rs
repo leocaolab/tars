@@ -234,8 +234,13 @@ pub async fn execute_agent_step(
         .map_err(AgentExecutionError::Runtime)?;
 
     // 3. agent.execute()
-    let ctx = AgentContext { trajectory_id: traj.clone(), step_seq, llm, cancel };
+    // Snapshot the system-prompt hash BEFORE moving `input` into the
+    // agent — Doc 04 §3.2's audit pin (TODO L-1 enterprise follow-on).
+    // Plain SHA256 of the bytes so an external auditor can verify with
+    // `sha256sum read_file.txt`.
     let provider_for_log = guess_provider_id(&input);
+    let system_prompt_hash = crate::event::hash_system_prompt(input.system.as_deref());
+    let ctx = AgentContext { trajectory_id: traj.clone(), step_seq, llm, cancel };
     let result = agent.clone().execute(ctx, input).await;
 
     // 4 / 5. log outcome
@@ -251,6 +256,7 @@ pub async fn execute_agent_step(
                         prompt_summary: format!("agent={}", agent.id()),
                         response_summary: step_result.output.summary(200),
                         usage: step_result.usage,
+                        system_prompt_hash,
                     },
                 )
                 .await
@@ -376,6 +382,7 @@ mod tests {
                     output_tokens: 18,
                     ..Default::default()
                 },
+                system_prompt_hash: None,
             },
         )
         .await

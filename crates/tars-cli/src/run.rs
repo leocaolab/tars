@@ -204,6 +204,14 @@ impl TrajectoryLogger {
                             ),
                             response_summary: response_summary(o),
                             usage: o.usage,
+                            // tars run is a single-call ad-hoc path
+                            // (no agent loop); the audit-critical
+                            // multi-step trajectories from tars
+                            // run-task DO populate this hash via
+                            // execute_agent_step. Threading the
+                            // system prompt down to here is a
+                            // separate small refactor — None for now.
+                            system_prompt_hash: None,
                         },
                     )
                     .await

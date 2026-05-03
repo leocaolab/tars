@@ -67,6 +67,24 @@ impl StepIdempotencyKey {
     }
 }
 
+/// SHA256 hex of the system prompt that went into an LLM call.
+/// Used by [`AgentEvent::LlmCallCaptured::system_prompt_hash`] to pin
+/// the audit trail. **Plain SHA256 of the raw bytes** — no version
+/// prefix — so an external auditor can trivially verify by hashing
+/// the same prompt source (e.g. `sha256sum read_file.txt` matches
+/// what the trajectory logged).
+///
+/// Returns `None` when `system` is `None`. Distinct from
+/// `Some(sha256(""))` — the absence of a system prompt is a
+/// different audit fact than "the system prompt was empty".
+pub fn hash_system_prompt(system: Option<&str>) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let s = system?;
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    Some(format!("{:x}", h.finalize()))
+}
+
 /// Append-only event log unit. See module docs for what's in / out.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -154,6 +172,25 @@ pub enum AgentEvent {
     /// got back at a summary level. Doc 04 §3.2 envisages a separate
     /// `LlmResponseCaptured` variant carrying the *raw* response for
     /// parser-rewind replay; we'll split when that workflow exists.
+    ///
+    /// `system_prompt_hash` is the SHA256 hex of `req.system` (when
+    /// present). This is the **audit pin** — given the trajectory
+    /// log alone, an external auditor can independently verify
+    /// "this LLM call used SHA256(...) as its system prompt", then
+    /// match that hash against the prompts shipped in the binary
+    /// (e.g. by hashing the `tars-tools/src/builtins/*.txt` files at
+    /// the relevant git revision). Plain SHA256 of the raw bytes —
+    /// no version prefix — so independent verification is trivial.
+    /// `None` means no system prompt was sent (distinct from an
+    /// empty-string prompt, which would still hash). TODO L-1
+    /// enterprise follow-on.
+    ///
+    /// **Scope** — this hashes ONLY the system prompt, not the full
+    /// request fingerprint (tools / structured_output schema / user
+    /// turns). The system prompt is the highest-value audit target
+    /// because it's the model's standing instructions; everything
+    /// else is per-call data. A future "full request fingerprint"
+    /// could be added when SOC 2 / ISO audits demand it.
     LlmCallCaptured {
         traj: TrajectoryId,
         step_seq: u32,
@@ -161,6 +198,12 @@ pub enum AgentEvent {
         prompt_summary: String,
         response_summary: String,
         usage: Usage,
+        /// SHA256 hex of `req.system`; `None` when the request
+        /// carried no system prompt. See variant docs for audit
+        /// rationale. Defaulted on deserialise so older event-store
+        /// rows (before this field existed) continue to read.
+        #[serde(default)]
+        system_prompt_hash: Option<String>,
     },
 }
 
@@ -249,6 +292,115 @@ mod tests {
         assert!(k.as_str().chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
+    // ── hash_system_prompt (audit pin) ────────────────────────────
+
+    #[test]
+    fn hash_system_prompt_returns_none_for_none_input() {
+        assert_eq!(hash_system_prompt(None), None);
+    }
+
+    #[test]
+    fn hash_system_prompt_distinguishes_none_from_empty_string() {
+        // The audit fact "no system prompt was sent" differs from
+        // "the system prompt was empty"; the hash must reflect that.
+        let empty = hash_system_prompt(Some(""));
+        assert!(empty.is_some(), "empty string still hashes");
+        // Pin: SHA256("") is a well-known constant.
+        assert_eq!(
+            empty.as_deref(),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+        );
+        assert_ne!(empty, hash_system_prompt(None));
+    }
+
+    #[test]
+    fn hash_system_prompt_is_deterministic() {
+        let a = hash_system_prompt(Some("You are a planner."));
+        let b = hash_system_prompt(Some("You are a planner."));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn hash_system_prompt_changes_on_prompt_change() {
+        let a = hash_system_prompt(Some("You are a planner."));
+        let b = hash_system_prompt(Some("You are a critic."));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hash_system_prompt_format_is_64_lowercase_hex() {
+        let h = hash_system_prompt(Some("anything")).unwrap();
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn hash_system_prompt_matches_external_sha256() {
+        // The whole point of the no-version-prefix design: an
+        // external auditor can verify by running `sha256sum`. Pin a
+        // known value so accidental wrapping (e.g. someone adding a
+        // version prefix) breaks this test loudly.
+        // SHA256("hello\n") = 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
+        // We hash without the newline:
+        // SHA256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        assert_eq!(
+            hash_system_prompt(Some("hello")).as_deref(),
+            Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"),
+        );
+    }
+
+    #[test]
+    fn llm_call_captured_with_hash_round_trips_through_json() {
+        let ev = AgentEvent::LlmCallCaptured {
+            traj: t(),
+            step_seq: 1,
+            provider: ProviderId::new("p"),
+            prompt_summary: "x".into(),
+            response_summary: "y".into(),
+            usage: Usage::default(),
+            system_prompt_hash: hash_system_prompt(Some("you are a planner")),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        // Field is present + populated on serialize.
+        assert!(v["system_prompt_hash"].is_string());
+        let back: AgentEvent = serde_json::from_value(v).unwrap();
+        match back {
+            AgentEvent::LlmCallCaptured { system_prompt_hash: Some(h), .. } => {
+                assert_eq!(h.len(), 64);
+            }
+            other => panic!("expected LlmCallCaptured with hash, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_call_captured_round_trips_old_payload_without_hash_field() {
+        // Migration safety: old event-store rows (written before
+        // system_prompt_hash existed) must still parse. The serde
+        // default lets them deserialise as None.
+        let v = json!({
+            "type": "llm_call_captured",
+            "traj": "t1",
+            "step_seq": 1,
+            "provider": "p",
+            "prompt_summary": "x",
+            "response_summary": "y",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_input_tokens": 0,
+                "cache_creation_tokens": 0,
+                "thinking_tokens": 0,
+            },
+        });
+        let back: AgentEvent = serde_json::from_value(v).expect("old shape must still parse");
+        match back {
+            AgentEvent::LlmCallCaptured { system_prompt_hash, .. } => {
+                assert!(system_prompt_hash.is_none());
+            }
+            other => panic!("expected LlmCallCaptured, got {other:?}"),
+        }
+    }
+
     #[test]
     fn trajectory_id_extraction_works_for_every_variant() {
         let cases: Vec<AgentEvent> = vec![
@@ -282,6 +434,7 @@ mod tests {
                 prompt_summary: "x".into(),
                 response_summary: "y".into(),
                 usage: Usage::default(),
+                system_prompt_hash: None,
             },
         ];
         for ev in cases {
@@ -335,6 +488,7 @@ mod tests {
                     prompt_summary: "x".into(),
                     response_summary: "y".into(),
                     usage: Usage::default(),
+                    system_prompt_hash: None,
                 },
                 "llm_call_captured",
             ),
