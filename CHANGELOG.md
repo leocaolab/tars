@@ -22,13 +22,78 @@ is authoritative. This file aggregates.
 ## M3 — Agent Runtime first cut (DONE 2026-05-03; orchestration loop pending)
 
 Doc 14 §9 deliverable. **Substantively** done — the storage primitive,
-the runtime facade, the agent contract, and the CLI integration that
-proves the whole stack composes are all shipped. **Pending** are the
-real orchestration agents (Orchestrator + Worker + Critic with prompt
-design + the typed inter-agent message protocol) and the multi-step
-loop that drives them. Those need their own PRs once the typed
-`AgentMessage` envelope lands; the primitives here are the
-foundation.
+the runtime facade, the agent contract, the typed inter-agent envelope,
+two of three default agents (Orchestrator + Critic), and the CLI
+integration that proves the whole stack composes are all shipped.
+**Pending** is the real `WorkerAgent` (blocked on `tars-tools` for
+real I/O capability) and the multi-step orchestration loop
+(`Runtime::run_task`) that drives Orchestrator → Worker → Critic →
+replan. With Orchestrator + Critic + a stub Worker, the loop's
+plumbing can be tested in isolation; real Workers land as `tars-tools`
+ships.
+
+### Agent ecosystem additions (2026-05-03 follow-up wave)
+
+- **`OrchestratorAgent` + `Plan`/`PlanStep` types** (`09546bd`) — first
+  concrete LLM-driven planner. `OrchestratorAgent::plan(goal)` typed
+  helper builds a strict-JSON-schema-enforced ChatRequest
+  (system + temperature=0 + Plan schema), runs through the LLM,
+  parses + validates the dependency graph. Linear plans for MVP
+  (`depends_on` field reserved for parallel-fan-out work later).
+  9 unit + 4 integration tests.
+- **`tars plan <goal>` CLI subcommand + `dispatch` module refactor**
+  (`89dba0f`) — wires Orchestrator into the CLI. Pretty/compact JSON
+  output, full trajectory logging via `execute_agent_step`. Same
+  refactor extracted ~200 lines of dispatch / cache / registry /
+  pick_provider plumbing from `run.rs` into a shared
+  `tars-cli/src/dispatch.rs` module so future subcommands (`tars chat`)
+  flatten the same `DispatchArgs` and can't drift on flag semantics.
+- **`AgentMessage` typed inter-agent envelope** (`5d0d2a5`) — Doc 04
+  §4.2's "禁止纯文本互喷" piece. 4 variants chosen for concrete
+  near-term consumers: `PlanIssued{plan}`,
+  `PartialResult{from_agent, step_id, summary, confidence}`,
+  `Verdict{from_agent, target_step_id, verdict: VerdictKind}`,
+  `NeedsClarification{from_agent, question}`. `VerdictKind` =
+  `Approve` / `Reject{reason}` / `Refine{suggestions}`. No
+  `#[serde(other)]` catchall — unknown variants fail loudly.
+  Tag names pinned per-variant by test. 9 unit tests.
+- **`CriticAgent`** (`02ac233`) — second concrete default agent.
+  `critique(plan, partial_result, goal)` returns a typed
+  `AgentMessage::Verdict` envelope. Flat JSON schema on the wire
+  (`{kind, reason, suggestions}` all required) avoids `oneOf`
+  gymnastics that OpenAI strict mode handles awkwardly; mapped to
+  typed `VerdictKind` in the typed helper. `PartialResultRef<'a>`
+  borrowed view so the owned message stays available for the
+  trajectory log. `CriticError` separates Decode failure from
+  semantically-broken-but-parseable (`InvalidVerdict` — e.g. `kind=reject`
+  with empty `reason`). Critic system prompt biases toward
+  actionable feedback ("when uncertain between approve and refine,
+  prefer refine"). 11 unit + 6 integration tests.
+
+### Audit fixes — round 3 (`af2d8f1`)
+
+A.R.C. run `71d49588` against `09546bd`. 76 findings: 5 errors +
+9 info + 62 warnings.
+
+- **registry-1**: `MemoryCacheRegistry::write` was lying about
+  per-write `l1_ttl` — the constructor doc claimed override, but
+  `let _ = ...` discarded the value silently (moka's `Cache::insert`
+  doesn't take per-entry TTL without an `Expiry` policy on the
+  builder). Now logs at debug when caller passes a non-default
+  `l1_ttl` so the gap is visible. `SqliteCacheRegistry`'s L2 path
+  always honored it.
+- **trajectory-1**: `tars trajectory list` bailed out on the first
+  per-row replay() failure, hiding all other (working) trajectories
+  from the user. Per-row failures now render as `<error>` with cause
+  logged via `tracing::warn`; the listing continues.
+- **cache-1 / cache-5**: `RwLock` poison cases in `read_policy` /
+  `set_cache_policy` were silent. Now log at `tracing::error`
+  before degrading to default — poisoned-lock incidents leave a
+  trace.
+- **context-1**: re-disputed (duplicate of round-2's same finding;
+  tracked as A-6 in TODO with M6 trigger).
+- 9 info + 62 warnings bulk-ignored as TODO A-1's "test-quality
+  pass" bucket.
 
 ### tars-storage — EventStore + SqliteEventStore (`e348c09`)
 - 8th workspace member. Trait + SQLite impl that backs trajectory

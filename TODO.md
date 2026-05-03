@@ -75,7 +75,7 @@ These were called out in the self-review on 2026-05-03. Decision: **keep** for n
 
 ## Audit follow-up — non-critical findings to revisit
 
-The 2026-05-03 A.R.C. reviews (`3ab2b7fa`, `65be2621`) flagged ~250 issues across two rounds. The critical + error tier was fixed — see CHANGELOG `M0 → Audit fixes` for the wave (`9683ce8 / 67de40d / cf1605e`). The deferred residue:
+The 2026-05-03 A.R.C. reviews (`3ab2b7fa`, `65be2621`, `71d49588`) flagged ~330 issues across three rounds. The critical + error tier was fixed across `9683ce8 / 67de40d / cf1605e / af2d8f1` — see CHANGELOG entries for the per-round details. The deferred residue:
 
 ### A-1. Test quality (148 warnings, 8 info)
 Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch` — tests cover the main path but not edge cases.
@@ -110,15 +110,15 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - Currently load-once. Real-world: change `~/.config/tars/config.toml` and have it pick up without restart.
 - **Trigger**: First user demo where "I want to switch providers without restarting" matters.
 
-### B-4. M3 Agent Runtime — orchestration + multi-step loop
-- M3's storage + runtime + agent primitive are shipped — see CHANGELOG. **Still missing**:
-  - **`AgentMessage` typed protocol** (Doc 04 §4.2). The "禁止纯文本互喷" envelope: `PlanIssued / PartialResult / NeedsClarification / Verdict / ...`. Inter-agent flows go through this once Orchestrator → Worker handoffs exist.
-  - **Default agents**: `OrchestratorAgent` (LLM → task DAG), `WorkerAgent` (executes a plan node), `CriticAgent` (Approve/Reject/Refine). Each needs prompt design + the typed message envelope + integration tests against a real provider's tool-use path.
-  - **Multi-step orchestration loop** — the `Runtime::run_task(task_spec)` entry point that creates a trajectory, drives Orchestrator, fans out to Workers, runs the Critic, replans on rejection. The end-to-end M3 user-facing milestone.
+### B-4. M3 Agent Runtime — Worker + multi-step loop + ContextStore
+- Storage + runtime + agent primitive + AgentMessage envelope + 2 of 3 default agents (Orchestrator + Critic) are shipped — see CHANGELOG. **Still missing**:
+  - **`WorkerAgent`** — executes one PlanStep. Blocked on B-9 (`tars-tools`) for any Worker that does more than text completion (file I/O, git, web fetch). A degenerate text-only Worker could ship sooner if there's value, but the orchestration loop can be developed against a stub Worker without one.
+  - **Multi-step orchestration loop** — the `Runtime::run_task(goal)` entry point that drives Orchestrator → Worker (per step) → Critic → (continue | replan). The actual M3 user-facing milestone. The Orchestrator + Critic + AgentMessage envelope shipped means this can build now against a stub Worker, with real Workers slotting in later.
   - **`ContextStore` + `ContextCompactor`** (Doc 04 §3.3 / §5). Schema-aware history pruner so multi-step trajectories don't grow the prompt unboundedly. Sits between the Trajectory log and the next `AgentContext`.
-  - **`PromptBuilder` trait + default impl** (Doc 04 §6). Composes system + tool + persona blocks into a `ChatRequest`. Today each agent constructs its own ad-hoc.
+  - **`PromptBuilder` trait + default impl** (Doc 04 §6). Composes system + tool + persona blocks into a `ChatRequest`. Today each agent constructs its own ad-hoc (OrchestratorAgent + CriticAgent both have hand-written PROMPT constants).
   - **Backtrack + Saga compensation** (Doc 04 §6). Concrete `CompensationAction` types + `AgentEvent::CompensationExecuted` + the runtime hook that runs compensations in reverse on backtrack.
-- **Trigger**: each item is its own commit, in order: AgentMessage → at least one Default agent → orchestration loop → ContextStore → PromptBuilder → Backtrack.
+  - **CLI: `tars trajectory replay <ID>`** — needs the orchestration loop first (knows what "replay" means at the action level).
+- **Trigger / order**: Multi-step loop with stub Worker → ContextStore (so the loop's prompts stay bounded) → real WorkerAgent (after B-9 lands `tars-tools`) → PromptBuilder (extract the constants once we have 4+ agents repeating the pattern) → Backtrack (when Saga is needed).
 
 ### B-5. `tars-cli` follow-on subcommands
 - M1 / M2 / M3-first-cut surface is shipped (`tars run` + `tars trajectory list/show`) — see CHANGELOG. Remaining CLI surface from Doc 07 §5:
