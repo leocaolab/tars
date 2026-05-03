@@ -1,6 +1,8 @@
 # TODO
 
-Living list. Each entry: **what** to do, **why** it's deferred (not "shouldn't", just "not now"), and a **trigger** for when to revisit.
+Forward-looking list. Each entry: **what** to do, **why** it's deferred (not "shouldn't", just "not now"), and a **trigger** for when to revisit.
+
+**For shipped items**, see [CHANGELOG.md](./CHANGELOG.md). For the day-to-day commit history, `git log`. This file is "what's NOT done and why".
 
 ---
 
@@ -73,24 +75,19 @@ These were called out in the self-review on 2026-05-03. Decision: **keep** for n
 
 ## Audit follow-up — non-critical findings to revisit
 
-The 2026-05-03 A.R.C. review (`3ab2b7fa`) flagged 208 issues; commit `9683ce8` fixed the 1 critical and 9 of the 51 errors. The rest are deferred:
+The 2026-05-03 A.R.C. reviews (`3ab2b7fa`, `65be2621`) flagged ~250 issues across two rounds. The critical + error tier was fixed — see CHANGELOG `M0 → Audit fixes` for the wave (`9683ce8 / 67de40d / cf1605e`). The deferred residue:
 
 ### A-1. Test quality (148 warnings, 8 info)
 Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch` — tests cover the main path but not edge cases.
 - **Trigger**: Dedicated test-hardening pass, or whenever we touch the relevant module for another reason.
 
-### ~~A-2. `Capabilities` invariant gaps (audit:capabilities-{2,3})~~ ✅ 2026-05-03 (67de40d)
-- Resolved by adding `Capabilities::validate()` (rejects empty modalities + ToolUseEmulation without supports_tool_use). `CapabilityError` enum at `tars-types/src/capabilities.rs`.
-
-### ~~A-3. `usage.rs` `saturating_sub` masking invalid usage data~~ ✅ 2026-05-03 (67de40d)
-- Resolved with `debug_assert!(cached + creation <= input)` in `Pricing::cost_for`. Saturating-sub stays as a release-build safety net.
-
 ### A-4. `events.rs` `ToolCallArgsDelta` lacks `id` field
 - Correlation relies on `index` alone. If a provider ever reuses an index across calls in the same stream, args get cross-contaminated.
 - **Trigger**: First time a provider's streaming protocol surfaces this. Anthropic and OpenAI both use stable index per stream today; not a real bug yet.
 
-### ~~A-5. `cache.rs` `SystemTime` serialization~~ ✅ 2026-05-03 (67de40d)
-- Resolved early — switched to portable epoch-millis i64 via custom `systemtime_millis` serde module (no chrono dep needed). Round-trip test `use_explicit_directive_round_trips_with_handle` proves it.
+### A-6. `RequestContext` identity fields are `pub`-mut
+- From audit `65be2621` (context-1). `tenant_id` / `principal_id` / `trace_id` are public + mutable, so production code holding `&mut RequestContext` could rotate them mid-request. Audit was disputed (test code in `tars-cache` legitimately mutates `tenant_id` to construct cross-tenant scenarios; locking down to private + setters touches 50+ call sites for marginal real safety) — but the dispute holds only **until M6 multi-tenant runtime exists**.
+- **Trigger**: M6 — when there's a real security boundary the field mutability could cross.
 
 ---
 
@@ -101,11 +98,13 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **Goal**: Long-lived process pool with `--output-format stream-json` for low-latency interactive use.
 - **Cost**: ~1 week of careful work (cancel guards, session pool lifecycle, JSONL bidi protocol).
 
-### B-2. `tars-pipeline` skeleton (Doc 02) — ⏳ partially done
-- Tower-style middleware framework with the Doc 02 onion layers.
-- **Order**: Telemetry → Auth → IAM → Budget → Cache → Guard → Routing → CircuitBreaker → Retry.
-- **MVP shipped (bdaf3b5 + 15600a2)**: `LlmService` trait, `Middleware` + `Pipeline` builder, `ProviderService` (bottom adapter), `TelemetryMiddleware`, `RetryMiddleware` (open-time only, error-class driven, cancel-aware backoff). 13 tests (10 unit + 3 wiremock integration).
-- **Still missing**: Routing (= D-8), CacheLookup (needs `tars-cache`), CircuitBreaker, Auth/IAM (needs `tars-security`), Budget (needs `tars-storage` for token-bucket), PromptGuard (needs `tars-tools` ONNX classifier).
+### B-2. `tars-pipeline` middleware layers — M3+ remainder
+- M2-tier middleware (Telemetry / Retry / CacheLookup / Routing / CircuitBreaker) is shipped — see CHANGELOG. **Still missing in the Doc 02 onion**:
+  - **Auth / IAM** middleware: needs `tars-security` (Doc 14 M6).
+  - **Budget** middleware: needs `tars-storage` (B-7) for token-bucket state across restarts.
+  - **PromptGuard** middleware: needs `tars-tools` + ONNX classifier (D-4 frozen).
+  - **L3 cache hooks** (cache-create / cache-extend on existing CacheLookupMiddleware): depends on D-1 (`ExplicitCacheProvider`).
+  - **CostPolicy / LatencyPolicy / EnsemblePolicy** for routing: need per-provider runtime metrics + (for Ensemble) a fan-out + merge primitive. All blocked on metrics infra (B-8 / M5).
 
 ### B-3. Hot reload for `ConfigManager` (Doc 06 §6)
 - Currently load-once. Real-world: change `~/.config/tars/config.toml` and have it pick up without restart.
@@ -113,14 +112,32 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 
 ### B-4. SQLite event store + Trajectory tree (Doc 04 §3, Doc 09 §4)
 - The actual M3 Agent Runtime work.
-- **Blockers**: Pipeline (B-2) needs to exist first.
+- **Blockers**: B-7 (`tars-storage` traits) needs to exist first; pipeline (B-2) is now sufficient on its M2 cut.
 
-### B-5. `tars-cli` binary
-- Wires up CLI Mode adapter (Doc 07 §5).
-- **Trigger**: After Pipeline + at least one Skill is testable end-to-end.
+### B-5. `tars-cli` follow-on subcommands
+- M1 / M2 surface (`tars run`) is shipped — see CHANGELOG. The remaining CLI surface from Doc 07 §5:
+  - `tars chat` — interactive REPL (long-lived process, multi-turn). Where the breaker / pipeline-cache cross-call value actually pays off.
+  - `tars dash` — launcher for the future web dashboard (M7).
+  - Shell completions (bash / zsh / fish).
+  - `--output json` / CI mode adapter (GitHub PR comment / junit-xml).
+- **Trigger**: When a user wants any of the above. `chat` is the most likely first.
 
 ### B-6. PyO3 + napi-rs bindings (Doc 12 §6, §7)
 - **Trigger**: First Python or Node user.
+
+### B-7. `tars-storage` proper — `EventStore` + `ContentStore` + `KVStore` traits
+- Today the SQLite work in `tars-cache` is private to that crate (one `cache_entries` table, schema_version=1, WAL pragmas). M3 needs:
+  - **`EventStore`** for Trajectory append-only log (Doc 04 §3 + Doc 09 §4).
+  - **`ContentStore`** for large-blob references (image bytes, long contexts).
+  - **`KVStore`** for cache L2, idempotency, budget token-bucket — generalises what `SqliteCacheRegistry` already does.
+- **Why deferred**: M2 finished without needing any of these; tars-cache's private SQLite is honest about being a cache-only special case. Generalising before there are 3 consumers is the trap O-N entries warn against.
+- **Trigger / blocker for**: M3 Agent Runtime (B-4), BudgetMiddleware (B-2 cap), and the future Postgres impl (Doc 14 M6).
+- **Order of implementation when started**: traits first (in tars-storage), then a SQLite impl that backfills the cache crate's needs, then a Postgres impl gated behind a feature.
+
+### B-8. Full `tars-melt` (metrics, OTel exporter, cardinality validator, `SecretField<T>`)
+- Mini version shipped 2026-05-03 (080b05f) — tracing init + JSON formatter + `TelemetryGuard` placeholder.
+- **Pending for M5** (Doc 14 §11): all metrics from Doc 08 §5, OTel SDK + OTLP exporter, cardinality validator, `SecretField<T>` generic wrapper (today `SecretString` covers the only consumer), trace head + tail sampling, `AdaptiveSampler`.
+- **Trigger**: M5 starts (Doc 14 calls for it concurrent with CLI/TUI work).
 
 ---
 
@@ -174,19 +191,23 @@ Audit run 2026-05-03 against `docs/01-llm-provider.md`. Code currently implement
 - **Why deferred**: Each provider's error message format is different and changes without notice. Real fix is "regex over the message body" — hacky but unavoidable.
 - **Trigger**: First time the agent loop hits a long-context request and the truncation policy needs the actual numbers (not just the error class). Until then `0/0` is honest about "we know it overflowed, we don't know by how much".
 
-### D-8. Routing layer (Doc 01 §12) — split out from B-2
-- `RoutingPolicy` trait + 5 policies: `ExplicitPolicy`, `TierPolicy`, `CostPolicy`, `LatencyPolicy`, `EnsemblePolicy`. Plus `FallbackChain<P>`. Plus `RoutingMiddleware` that consumes the policy.
-- **Where it'll live**: `tars-pipeline` (the policy lives in the pipeline crate that already holds the middleware framework).
-- **Why deferred**: Useless without > 1 candidate provider in a single deployment AND a `ModelHint::Tier` use case. Today's call sites all use `ModelHint::Explicit` and pick one provider by id.
-- **Trigger**: First time a user wants `gpt-4o-mini → claude-haiku → local-qwen` fallback ordering — the integration test for this lives in TODO already.
-- **Tied to**: O-4 (Capabilities slimming); routing's actual reads decide which fields stay.
+### D-8. Routing layer (Doc 01 §12) — ⏳ partial: M2 cut shipped, advanced policies pending
+- **Shipped (a4ebba9)**: `RoutingPolicy` trait + `StaticPolicy` + `TierPolicy` + `RoutingService` (bottom-of-pipeline LlmService). FallbackChain inlined into `RoutingService.call`'s try-each loop — simpler than a wrapper type. CLI `--tier` flag + config `[routing.tiers]` section. `CircuitBreaker` (caf0043) pairs naturally: when a candidate's breaker opens, the typed `ProviderError::CircuitOpen` (Retriable) makes routing fall through automatically.
+- **Still pending — all blocked on metrics infra (B-8 / M5)**:
+  - `CostPolicy` (per-provider cost tracking)
+  - `LatencyPolicy` (per-provider P50 tracking)
+  - `EnsemblePolicy` (parallel fan-out + merge — also needs a merge primitive)
+- **Tied to**: O-4 (Capabilities slimming) — routing's actual reads decide which fields stay. After M3 lands, audit Capabilities against routing usage.
 
-### D-9. Conformance test suite (Doc 01 §14)
-- One test body, run as a generic over `Arc<dyn LlmProvider>`. Each provider impl runs the same conformance set: tool use, structured output, streaming, cancel, error classification, parallel tool-call interleave.
-- **Where**: New `crates/tars-provider/tests/conformance.rs`, parameterised over a `provider_factory: fn() -> Arc<dyn LlmProvider>`.
-- **Why deferred**: Each backend currently has its own `*_integration.rs` covering its specific wire format. The duplication will become annoying once we have 3+ providers behaving subtly differently — at that point we extract the shared body. Today the duplication is bearable.
-- **Trigger**: When we add a 4th HTTP-shape provider (xAI? Mistral La Plateforme?) and copy-paste fatigue hits.
-- **Doc 01 §14 also calls for**: nightly CI hitting real APIs for ~$0.01/run. Defer until budget for that exists.
+### D-12. CLI-provider conformance (Doc 01 §14 follow-on)
+- The HTTP-backend conformance suite (D-9, shipped) doesn't cover `claude_cli` / `gemini_cli` — their wire path is fundamentally different (no SSE, no HTTP; subprocess JSON). They'd need a `Scenarios` impl that mounts a fake subprocess runner instead of wiremock.
+- **Why deferred**: each CLI backend's existing tests (with `FakeRunner`) cover its specific surface. Until we have **3+ subprocess-style backends** the dedupe value is low.
+- **Trigger**: 3rd CLI-style backend lands (e.g. Codex CLI, Cursor CLI, etc.).
+
+### D-13. Live-API nightly conformance tier (Doc 01 §14)
+- Doc 01 §14 calls for a nightly CI tier hitting REAL APIs (~$0.01/run) so the `Scenarios` wiremock fixtures don't drift from the actual provider behaviour. This is the safety net that catches "OpenAI changed the streaming format last week and our fixtures are now lying".
+- **Why deferred**: needs a budget mechanism + secret management for the API keys + a separate CI workflow. No urgency until provider-side breakage actually happens.
+- **Trigger**: First confirmed wire-format change at any of OpenAI / Anthropic / Gemini that our local conformance suite missed because the fixture was stale.
 
 ### D-10. Doc 01 §17 open questions
 Verbatim from the doc; tracked here so they don't get lost:
@@ -208,13 +229,19 @@ Recorded 2026-05-03 after a `defer > delete > implement` review. These are **not
 
 **What is *not* frozen** — explicitly listed so future-me doesn't conflate "deferred" with "frozen":
 - **Tool calling** stays a first-class feature. Already wired across 5 backends (OpenAI, Anthropic, Gemini, vLLM, MLX/llamacpp). Capability flags (`supports_tool_use`, `supports_parallel_tool_calls`) handle the per-model variation cleanly; we don't try to "fix" Llama-3 quantized model tool-call format chaos in the universal layer — that's exactly D-4's domain (PromptGuard ≠ tool-call adapter, but the same "don't pollute the universal type with provider-quirk handling" principle).
-- **D-1 ExplicitCacheProvider**, **D-2 Auth::SecretManager / GoogleAdc**, **D-7 ContextTooLong numbers**, **D-8 Routing**, **D-9 conformance suite** — all still expected to land; the trigger conditions are concrete and likely to fire within v1.0 timeline (Doc 14 M3-M6).
+- **D-1 ExplicitCacheProvider**, **D-2 Auth::SecretManager / GoogleAdc**, **D-7 ContextTooLong numbers**, **D-12 CLI-provider conformance**, **D-13 live-API nightly tier** — all still expected to land; the trigger conditions are concrete and likely to fire within v1.0 timeline (Doc 14 M3-M6).
+- **D-8 Routing** + **D-9 conformance suite** are partially or fully shipped — see CHANGELOG. Remaining sub-items (Cost / Latency / Ensemble policies; CLI + nightly conformance tiers) live in their own entries above.
 
 ---
 
 ## Process notes
 
-- **Do not delete from this list silently** — strikethrough with date instead, so we keep the institutional memory of "we considered this and decided X".
+- **Two files, two roles**:
+  - `TODO.md` (this file) is forward-only: deferred / frozen / audit-deferred items + the trigger conditions for each. Reading top-to-bottom answers "what's NOT done and why".
+  - `CHANGELOG.md` is the shipped-items audit trail organized by milestone. Reading top-to-bottom answers "what IS done, in roughly what order".
+- **Don't delete deferred items silently** — they're institutional memory ("we considered this and decided X"). Items move OUT of TODO.md only when:
+  - shipped → relocated to CHANGELOG.md (with the trigger marked satisfied), OR
+  - explicitly decided "never doing this" → strikethrough + a one-line "why" stays here. Don't delete; the strikethrough is the audit signal.
 - **Trigger conditions are real** — when one fires, open the corresponding work, don't just shuffle the line.
 - When in doubt: `defer > delete > implement`. Premature deletion is also overengineering.
 - **Deferred ≠ Frozen**. Deferred = expected to ship. Frozen = explicit "no" with thaw conditions. See D-11 for the current frozen list.
