@@ -462,6 +462,15 @@ impl HttpAdapter for GeminiAdapter {
         }
 
         for cand in candidates {
+            // Track whether this candidate contained any tool call so we
+            // can override Gemini's generic `STOP` finishReason → ToolUse
+            // when appropriate. Gemini doesn't have a dedicated
+            // tool-use stop reason the way OpenAI/Anthropic do; without
+            // this normalization the cross-provider conformance suite
+            // sees ToolUse on those two but EndTurn on Gemini for the
+            // same logical "model wants to call a function" outcome.
+            let mut had_function_call = false;
+
             // Parts inside content.
             let parts = cand
                 .pointer("/content/parts")
@@ -485,6 +494,7 @@ impl HttpAdapter for GeminiAdapter {
                     }
                 }
                 if let Some(fc) = part.get("functionCall") {
+                    had_function_call = true;
                     let name = fc
                         .get("name")
                         .and_then(|s| s.as_str())
@@ -522,8 +532,17 @@ impl HttpAdapter for GeminiAdapter {
                     .and_then(|u| u.as_object())
                     .map(parse_usage)
                     .unwrap_or_default();
+                let mut stop = map_stop_reason(reason_str);
+                if had_function_call && matches!(stop, StopReason::EndTurn) {
+                    // Cross-provider normalization (Doc 01 §8): when the
+                    // model emitted a tool call, the upstream signal is
+                    // "caller, please run this and continue" — same as
+                    // OpenAI's `tool_calls` and Anthropic's `tool_use`.
+                    // Surface that instead of the wire-level STOP.
+                    stop = StopReason::ToolUse;
+                }
                 out.push(ChatEvent::Finished {
-                    stop_reason: map_stop_reason(reason_str),
+                    stop_reason: stop,
                     usage,
                 });
             }
