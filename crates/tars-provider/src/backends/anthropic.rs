@@ -593,7 +593,12 @@ fn map_stop_reason(s: &str) -> StopReason {
 }
 
 fn parse_usage(u: &serde_json::Map<String, Value>) -> Usage {
-    let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    // Anthropic reports input_tokens DISJOINT from cache_read /
+    // cache_creation. Our canonical Usage struct is OpenAI-style:
+    // input_tokens is the total prompt size and includes the cached
+    // and creation subsets. Normalize at the boundary so cost_for and
+    // total_tokens work uniformly across providers.
+    let api_input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
     let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
     let cached = u
         .get("cache_read_input_tokens")
@@ -604,7 +609,9 @@ fn parse_usage(u: &serde_json::Map<String, Value>) -> Usage {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     Usage {
-        input_tokens: input,
+        input_tokens: api_input
+            .saturating_add(cached)
+            .saturating_add(creation),
         output_tokens: output,
         cached_input_tokens: cached,
         cache_creation_tokens: creation,

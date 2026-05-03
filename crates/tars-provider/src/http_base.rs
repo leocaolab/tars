@@ -197,7 +197,15 @@ where
         // UTF-8-safe truncation: `&str[..n]` panics if `n` falls
         // mid-multibyte-codepoint, and a crafted server response could
         // weaponise that into a worker-thread panic.
-        let text = response.text().await.unwrap_or_default();
+        // Audit `tars-provider-src-http-base-1`: previously
+        // `unwrap_or_default()` silently swallowed body-read errors
+        // (network drop, non-UTF-8 body). Surface them as a typed
+        // marker so classify_error sees the real situation instead of
+        // an empty string.
+        let text = match response.text().await {
+            Ok(t) => t,
+            Err(e) => format!("<error reading response body: {e}>"),
+        };
         let trunc = truncate_utf8(&text, 4096);
         return Err(adapter.classify_error(status, trunc));
     }

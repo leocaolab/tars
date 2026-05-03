@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use serde_json::Value;
-use tars_types::ProviderError;
+use tars_types::{ProviderError, StopReason};
 
 /// Per-call slot for accumulating streaming tool args.
 #[derive(Debug, Default)]
@@ -34,11 +34,29 @@ pub struct ToolCallBuffer {
     /// stream this buffer belongs to. Lets adapters call
     /// [`Self::take_started`] once and skip the rest.
     started_emitted: bool,
+    /// Stop reason captured from a `finish_reason` chunk that didn't
+    /// carry usage data; will be paired with a later usage-only chunk.
+    /// Audit `tars-provider-src-backends-openai-{7,22}` — previously a
+    /// usage-only chunk emitted Finished with a hardcoded EndTurn,
+    /// silently overriding the real reason (ToolUse, MaxTokens, …).
+    pending_stop_reason: Option<StopReason>,
 }
 
 impl ToolCallBuffer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Stash a stop reason captured from a `finish_reason` chunk so
+    /// the adapter can pair it with a usage-only follow-up chunk.
+    pub fn record_pending_stop(&mut self, reason: StopReason) {
+        self.pending_stop_reason = Some(reason);
+    }
+
+    /// Take (and clear) the previously stashed stop reason. Returns
+    /// `None` if nothing was stashed.
+    pub fn take_pending_stop(&mut self) -> Option<StopReason> {
+        self.pending_stop_reason.take()
     }
 
     /// Atomic test-and-set for "have we already emitted Started?".
@@ -56,9 +74,31 @@ impl ToolCallBuffer {
 
     pub fn on_start(&mut self, index: usize, id: String, name: String) {
         let entry = self.inflight.entry(index).or_default();
-        entry.id = id;
-        entry.name = name;
-        entry.args.clear();
+        // Audit `tars-provider-src-tool-buffer-{2,17}`: previously this
+        // unconditionally cleared `args`, dropping any deltas that
+        // arrived before the start event (some adapters emit deltas
+        // first) AND silently overwriting an in-flight call if a
+        // provider erroneously sent a duplicate start. Two policies:
+        // 1. If args have already accumulated, KEEP them — the deltas
+        //    belong to this same logical call (id/name catch up later).
+        // 2. If we're seeing a re-start on an already-started entry,
+        //    log a warning and keep existing args (don't lose data).
+        if entry.started {
+            tracing::warn!(
+                index,
+                old_id = %entry.id,
+                new_id = %id,
+                "duplicate ToolCallStart for index; preserving accumulated args",
+            );
+        }
+        // Only adopt id/name if they're non-empty — partial start chunks
+        // shouldn't blank out values we already had.
+        if !id.is_empty() {
+            entry.id = id;
+        }
+        if !name.is_empty() {
+            entry.name = name;
+        }
         entry.started = true;
     }
 
@@ -76,9 +116,13 @@ impl ToolCallBuffer {
     /// 2. fall back to repair for trailing-comma / unclosed-string cases
     /// 3. otherwise propagate `ProviderError::Parse`
     pub fn finalize(&mut self, index: usize) -> Result<(String, String, Value), ProviderError> {
+        // Audit `tars-provider-src-tool-buffer-9`: peek before remove —
+        // if parsing fails, leave the buffer intact so the caller can
+        // wait for more deltas and retry instead of losing accumulated
+        // partial args.
         let acc = self
             .inflight
-            .remove(&index)
+            .get(&index)
             .ok_or_else(|| ProviderError::Parse(format!("tool call index {index} not started")))?;
 
         if !acc.started {
@@ -87,18 +131,44 @@ impl ToolCallBuffer {
             )));
         }
 
-        let value = serde_json::from_str::<Value>(&acc.args).or_else(|_first_err| {
-            // Cheap repair: many provider streams emit `null` for empty
-            // arg sets and otherwise valid JSON. Empty string -> {}.
-            let trimmed = acc.args.trim();
-            if trimmed.is_empty() {
-                return Ok(Value::Object(Default::default()));
-            }
-            // Try wrapping naked key:value into braces (rare).
-            let braced = format!("{{{trimmed}}}");
-            serde_json::from_str::<Value>(&braced)
-        })?;
+        // Audit `tars-provider-src-tool-buffer-7`: a finalized tool call
+        // must have a non-empty id and name. Without them, downstream
+        // (Pipeline, Agent loop) cannot route the result back, and most
+        // providers will reject the follow-up tool result message.
+        if acc.id.is_empty() || acc.name.is_empty() {
+            return Err(ProviderError::Parse(format!(
+                "tool call index {index} finalized with empty id or name (id=`{}`, name=`{}`)",
+                acc.id, acc.name,
+            )));
+        }
 
+        let parse_attempt = serde_json::from_str::<Value>(&acc.args);
+        let value = match parse_attempt {
+            Ok(v) => v,
+            Err(first_err) => {
+                // Cheap repair: many provider streams emit empty for empty
+                // arg sets and otherwise valid JSON. Empty string -> {}.
+                let trimmed = acc.args.trim();
+                if trimmed.is_empty() {
+                    Value::Object(Default::default())
+                } else {
+                    // Try wrapping naked key:value into braces (rare).
+                    let braced = format!("{{{trimmed}}}");
+                    serde_json::from_str::<Value>(&braced).map_err(|repair_err| {
+                        // Audit `tars-provider-src-tool-buffer-1`: keep
+                        // both errors so debugging malformed provider
+                        // JSON has full context.
+                        ProviderError::Parse(format!(
+                            "tool call args parse failed (first: {first_err}; repair: {repair_err}; raw: {})",
+                            crate::http_base::truncate_utf8(&acc.args, 200)
+                        ))
+                    })?
+                }
+            }
+        };
+
+        // Parsing succeeded — now consume the buffer.
+        let acc = self.inflight.remove(&index).expect("we just confirmed presence");
         Ok((acc.id, acc.name, value))
     }
 

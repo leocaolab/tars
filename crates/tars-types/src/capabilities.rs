@@ -30,7 +30,38 @@ pub struct Capabilities {
     pub pricing: Pricing,
 }
 
+/// Validation error for `Capabilities::validate`.
+#[derive(Debug, thiserror::Error)]
+pub enum CapabilityError {
+    #[error("modalities_in must be non-empty")]
+    EmptyModalitiesIn,
+    #[error("modalities_out must be non-empty")]
+    EmptyModalitiesOut,
+    #[error(
+        "supports_structured_output = ToolUseEmulation requires supports_tool_use = true"
+    )]
+    ToolUseEmulationNeedsToolUse,
+}
+
 impl Capabilities {
+    /// Reject internally inconsistent capability descriptors. Cheap;
+    /// call once when a Provider is constructed. Audit findings
+    /// `tars-types-src-capabilities-{9,14}`.
+    pub fn validate(&self) -> Result<(), CapabilityError> {
+        if self.modalities_in.is_empty() {
+            return Err(CapabilityError::EmptyModalitiesIn);
+        }
+        if self.modalities_out.is_empty() {
+            return Err(CapabilityError::EmptyModalitiesOut);
+        }
+        if matches!(self.supports_structured_output, StructuredOutputMode::ToolUseEmulation)
+            && !self.supports_tool_use
+        {
+            return Err(CapabilityError::ToolUseEmulationNeedsToolUse);
+        }
+        Ok(())
+    }
+
     /// Minimal text-only chat with no extras. Useful baseline for tests
     /// and for adapters that intentionally turn features off.
     pub fn text_only_baseline(pricing: Pricing) -> Self {
@@ -99,5 +130,41 @@ mod tests {
         assert!(caps.modalities_in.contains(&Modality::Text));
         assert!(caps.modalities_out.contains(&Modality::Text));
         assert_eq!(caps.modalities_in.len(), 1);
+    }
+
+    #[test]
+    fn validate_rejects_empty_modalities() {
+        let mut caps = Capabilities::text_only_baseline(Pricing::default());
+        caps.modalities_in.clear();
+        assert!(matches!(
+            caps.validate(),
+            Err(CapabilityError::EmptyModalitiesIn)
+        ));
+
+        let mut caps = Capabilities::text_only_baseline(Pricing::default());
+        caps.modalities_out.clear();
+        assert!(matches!(
+            caps.validate(),
+            Err(CapabilityError::EmptyModalitiesOut)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_tool_use_emulation_without_tool_use() {
+        let mut caps = Capabilities::text_only_baseline(Pricing::default());
+        caps.supports_structured_output = StructuredOutputMode::ToolUseEmulation;
+        // supports_tool_use is false from the baseline.
+        assert!(matches!(
+            caps.validate(),
+            Err(CapabilityError::ToolUseEmulationNeedsToolUse)
+        ));
+
+        caps.supports_tool_use = true;
+        assert!(caps.validate().is_ok());
+    }
+
+    #[test]
+    fn baseline_validates_clean() {
+        assert!(Capabilities::text_only_baseline(Pricing::default()).validate().is_ok());
     }
 }

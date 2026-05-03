@@ -94,6 +94,19 @@ impl AuthResolver for BasicAuthResolver {
             Auth::None | Auth::Delegate => Ok(ResolvedAuth::None),
             Auth::Secret { secret } => match secret {
                 SecretRef::Inline { value } => {
+                    // Audit `tars-provider-src-auth-8`: `SecretRef::Inline`
+                    // is documented as test/dev-only but nothing in the
+                    // resolver enforced that. We can't safely refuse it
+                    // (existing tests + Personal-mode workflows pass
+                    // inline keys), but emit a loud one-time warning so
+                    // production deployments notice if it slips through
+                    // a config review. Suppress in test builds where
+                    // it's the expected path.
+                    #[cfg(not(test))]
+                    tracing::warn!(
+                        "auth: resolving SecretRef::Inline credential — intended for test/dev use only; \
+                         use SecretRef::Env or SecretRef::File in production",
+                    );
                     Ok(ResolvedAuth::ApiKey(value.expose().to_string()))
                 }
                 SecretRef::Env { var } => std::env::var(var)

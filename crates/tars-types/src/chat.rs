@@ -171,10 +171,13 @@ pub enum ImageData {
 }
 
 impl ImageData {
-    /// SHA-256 hex digest of the underlying content. For URLs the
-    /// digest is over the URL string itself (we don't fetch); for base64
-    /// it's over the encoded form. Used for cache key construction.
-    pub fn content_hash(&self) -> String {
+    /// SHA-256 hex digest of the *descriptor* — the URL string for
+    /// `Url` or the encoded form for `Base64`. **Does not** fetch the
+    /// remote bytes for `Url`, so two different images served from the
+    /// same URL hash identically. Audit `tars-types-src-chat-15`:
+    /// previously named `content_hash`, which mis-implied the function
+    /// hashed the actual image bytes and risked stale cache hits.
+    pub fn descriptor_hash(&self) -> String {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         match self {
@@ -214,10 +217,10 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_is_stable() {
+    fn descriptor_hash_is_stable_and_only_descriptor() {
         let _ = fake_tenant();
-        let a = ImageData::Url("https://x/y".into()).content_hash();
-        let b = ImageData::Url("https://x/y".into()).content_hash();
+        let a = ImageData::Url("https://x/y".into()).descriptor_hash();
+        let b = ImageData::Url("https://x/y".into()).descriptor_hash();
         assert_eq!(a, b);
         assert_eq!(a.len(), 64);
     }

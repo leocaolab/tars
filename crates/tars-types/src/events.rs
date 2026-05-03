@@ -113,4 +113,67 @@ mod tests {
     fn delta_is_not_terminal() {
         assert!(!ChatEvent::Delta { text: "x".into() }.is_terminal());
     }
+
+    /// Audit `tars-types-src-events-7`: the on-the-wire JSON shape of
+    /// `ChatEvent` is a public contract used by every downstream
+    /// consumer. Round-tripping every variant keeps the
+    /// `tag = "type"`, `rename_all = "snake_case"` attributes from
+    /// drifting silently.
+    #[test]
+    fn every_variant_round_trips_through_json() {
+        let cases: Vec<ChatEvent> = vec![
+            ChatEvent::started("gpt-4o"),
+            ChatEvent::Delta { text: "hi".into() },
+            ChatEvent::ThinkingDelta { text: "...".into() },
+            ChatEvent::ToolCallStart {
+                index: 0,
+                id: "call_1".into(),
+                name: "search".into(),
+            },
+            ChatEvent::ToolCallArgsDelta {
+                index: 0,
+                args_delta: "{\"q\":".into(),
+            },
+            ChatEvent::ToolCallEnd {
+                index: 0,
+                id: "call_1".into(),
+                parsed_args: serde_json::json!({"q": "rust"}),
+            },
+            ChatEvent::UsageProgress {
+                partial: PartialUsage {
+                    input_tokens: 10,
+                    output_tokens: 4,
+                },
+            },
+            ChatEvent::Finished {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ];
+        for original in cases {
+            let v = serde_json::to_value(&original).unwrap();
+            // Every variant must serialize the discriminator under "type"
+            // with snake_case naming.
+            assert!(v.get("type").is_some(), "missing type tag: {v}");
+            let back: ChatEvent = serde_json::from_value(v.clone()).unwrap();
+            // Re-serialize to compare structurally; ChatEvent doesn't
+            // implement PartialEq so we fall back to JSON equality.
+            assert_eq!(
+                serde_json::to_value(&back).unwrap(),
+                v,
+                "round-trip mismatch for {v}",
+            );
+        }
+    }
+
+    #[test]
+    fn type_tag_uses_snake_case() {
+        let v = serde_json::to_value(ChatEvent::ToolCallStart {
+            index: 0,
+            id: "x".into(),
+            name: "y".into(),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "tool_call_start");
+    }
 }

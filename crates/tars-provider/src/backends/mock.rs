@@ -42,11 +42,22 @@ pub struct MockHistory {
     pub requests: Vec<ChatRequest>,
 }
 
+/// Mutable state held under a single mutex so concurrent stream() calls
+/// see a consistent snapshot of (history-after-this-request,
+/// response-at-this-instant). Audit `tars-provider-src-backends-mock-5`:
+/// previously held two separate locks → another thread could swap the
+/// canned response in between the history append and the response read,
+/// producing test flakiness.
+#[derive(Debug)]
+struct MockState {
+    response: CannedResponse,
+    history: MockHistory,
+}
+
 pub struct MockProvider {
     id: ProviderId,
     capabilities: Capabilities,
-    response: Mutex<CannedResponse>,
-    history: Arc<Mutex<MockHistory>>,
+    state: Mutex<MockState>,
 }
 
 impl MockProvider {
@@ -54,23 +65,26 @@ impl MockProvider {
         Arc::new(Self {
             id: id.into(),
             capabilities: Capabilities::text_only_baseline(Pricing::default()),
-            response: Mutex::new(response),
-            history: Arc::new(Mutex::new(MockHistory::default())),
+            state: Mutex::new(MockState {
+                response,
+                history: MockHistory::default(),
+            }),
         })
     }
 
     /// Replace the canned response — useful for multi-step tests that
     /// want to vary behavior between invocations.
     pub fn set_response(&self, r: CannedResponse) {
-        *self.response.lock().unwrap() = r;
+        self.state.lock().unwrap().response = r;
     }
 
-    pub fn history(&self) -> Arc<Mutex<MockHistory>> {
-        self.history.clone()
+    /// Snapshot of the requests recorded so far.
+    pub fn history_snapshot(&self) -> Vec<ChatRequest> {
+        self.state.lock().unwrap().history.requests.clone()
     }
 
     pub fn call_count(&self) -> usize {
-        self.history.lock().unwrap().requests.len()
+        self.state.lock().unwrap().history.requests.len()
     }
 }
 
@@ -89,10 +103,13 @@ impl LlmProvider for MockProvider {
         req: ChatRequest,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        // Record the request.
-        self.history.lock().unwrap().requests.push(req.clone());
-
-        let response = self.response.lock().unwrap().clone();
+        // Atomic: append-history + read-canned-response under one lock
+        // so concurrent callers can't observe a swap mid-operation.
+        let response = {
+            let mut state = self.state.lock().unwrap();
+            state.history.requests.push(req.clone());
+            state.response.clone()
+        };
         match response {
             CannedResponse::Error(msg) => Err(ProviderError::Internal(msg)),
             CannedResponse::Text(text) => {
@@ -168,15 +185,19 @@ mod tests {
 
     #[tokio::test]
     async fn records_call_count() {
+        // Audit `tars-provider-src-backends-mock-23`: previously used
+        // `let _ = ...` and only asserted the count, so this passed
+        // even if every call had errored. Assert success per call.
         let p = MockProvider::new("mock", CannedResponse::text("hi"));
         for _ in 0..3 {
-            let _ = p
+            let r = p
                 .clone()
                 .complete(
                     ChatRequest::user(ModelHint::Explicit("mock-1".into()), "ping"),
                     RequestContext::test_default(),
                 )
                 .await;
+            assert!(r.is_ok(), "complete() unexpectedly errored");
         }
         assert_eq!(p.call_count(), 3);
     }

@@ -177,9 +177,17 @@ impl OpenAiAdapter {
                     let calls: Vec<Value> = tool_calls
                         .iter()
                         .map(|tc| {
-                            // OpenAI demands `arguments` as a JSON-encoded string.
+                            // OpenAI demands `arguments` as a JSON-encoded
+                            // string. `ToolCall::arguments` is documented
+                            // to always be a `Value::Object` (enforced via
+                            // debug_assert in `ToolCall::new`); serializing
+                            // a Value never fails for valid in-memory
+                            // values, so `expect` here is sound. Audit
+                            // `tars-provider-src-backends-openai-1`:
+                            // previously fell back to "{}" on error,
+                            // silently sending wrong args to the model.
                             let args_str = serde_json::to_string(&tc.arguments)
-                                .unwrap_or_else(|_| "{}".into());
+                                .expect("ToolCall.arguments must serialize");
                             json!({
                                 "id": tc.id,
                                 "type": "function",
@@ -295,6 +303,20 @@ impl HttpAdapter for OpenAiAdapter {
             .explicit()
             .ok_or_else(|| ProviderError::InvalidRequest("model must be explicit".into()))?;
 
+        // Audit `tars-provider-src-backends-openai-11`: validate user
+        // messages have non-empty content. OpenAI rejects
+        // `{"role":"user","content":[]}` with a 400 — better to fail
+        // fast with a typed error than waste a round trip.
+        for m in &req.messages {
+            if let Message::User { content } = m {
+                if content.is_empty() {
+                    return Err(ProviderError::InvalidRequest(
+                        "Message::User content must not be empty".into(),
+                    ));
+                }
+            }
+        }
+
         let mut messages: Vec<Value> = Vec::with_capacity(req.messages.len() + 1);
         if let Some(sys) = &req.system {
             messages.push(json!({
@@ -382,7 +404,17 @@ impl HttpAdapter for OpenAiAdapter {
             // implementations). Drain into ToolCallEnd events first so
             // accumulated tool args aren't silently dropped.
             let mut emitted = Vec::new();
-            drain_buffer_into(buf, &mut emitted);
+            drain_buffer_into(buf, &mut emitted)?;
+            // If a finish_reason chunk stashed a stop_reason and the
+            // usage chunk never arrived (compatible servers that don't
+            // honor `stream_options.include_usage`), emit a final
+            // Finished now so the consumer always sees a terminal event.
+            if let Some(stop) = buf.take_pending_stop() {
+                emitted.push(ChatEvent::Finished {
+                    stop_reason: stop,
+                    usage: Usage::default(),
+                });
+            }
             return Ok(emitted);
         }
 
@@ -402,8 +434,14 @@ impl HttpAdapter for OpenAiAdapter {
                 v.get("choices").and_then(|c| c.as_array()).is_none_or(|a| a.is_empty());
             if choices_empty {
                 let usage_struct = parse_openai_usage(usage);
+                // Audit `tars-provider-src-backends-openai-{7,22}`: use
+                // the stop_reason captured by an earlier finish_reason
+                // chunk (typical OpenAI ordering: finish_reason in
+                // chunk N, usage alone in chunk N+1). Default EndTurn
+                // only when no prior chunk gave us anything.
+                let stop_reason = buf.take_pending_stop().unwrap_or(StopReason::EndTurn);
                 out.push(ChatEvent::Finished {
-                    stop_reason: StopReason::EndTurn,
+                    stop_reason,
                     usage: usage_struct,
                 });
                 return Ok(out);
@@ -454,22 +492,37 @@ impl HttpAdapter for OpenAiAdapter {
                         .unwrap_or("")
                         .to_string();
 
-                    if !id.is_empty() || !name.is_empty() {
-                        // Start of a new tool call. OpenAI sends id/name
-                        // exactly once per tool_calls entry, then args
-                        // chunks land in subsequent deltas at the same
-                        // index.
-                        let new_id = if id.is_empty() {
-                            format!("openai-call-{index}")
-                        } else {
-                            id
-                        };
+                    // OpenAI sends id+name exactly once per tool_calls
+                    // entry (the start chunk); subsequent chunks for
+                    // the same `index` carry only `function.arguments`.
+                    // So an `id`-bearing chunk = start; otherwise it's
+                    // an args delta.
+                    if !id.is_empty() {
+                        // Audit `tars-provider-src-backends-openai-10`:
+                        // accepting an empty `name` here propagated
+                        // downstream as a tool call we couldn't dispatch.
+                        // Treat it as a parse error per the OpenAI spec.
+                        if name.is_empty() {
+                            return Err(ProviderError::Parse(format!(
+                                "openai tool_call delta has id `{id}` but missing function.name"
+                            )));
+                        }
                         out.push(ChatEvent::ToolCallStart {
                             index,
-                            id: new_id.clone(),
+                            id: id.clone(),
                             name: name.clone(),
                         });
-                        buf.on_start(index, new_id, name);
+                        buf.on_start(index, id, name);
+                    } else if !name.is_empty() {
+                        // Audit `tars-provider-src-backends-openai-17`:
+                        // previously synthesized an id when the provider
+                        // omitted one. The spec mandates a stable id per
+                        // tool call; inventing one breaks correlation
+                        // with downstream consumers and masks the actual
+                        // wire-format violation.
+                        return Err(ProviderError::Parse(format!(
+                            "openai tool_call delta has function.name `{name}` but missing id"
+                        )));
                     }
                     if let Some(args) = tc
                         .get("function")
@@ -489,7 +542,7 @@ impl HttpAdapter for OpenAiAdapter {
 
             if let Some(reason_str) = choice.get("finish_reason").and_then(|r| r.as_str()) {
                 // Finalize any in-flight tool calls into ToolCallEnd events.
-                drain_buffer_into(buf, &mut out);
+                drain_buffer_into(buf, &mut out)?;
 
                 let stop = match reason_str {
                     "stop" => StopReason::EndTurn,
@@ -498,12 +551,18 @@ impl HttpAdapter for OpenAiAdapter {
                     "content_filter" => StopReason::ContentFilter,
                     _ => StopReason::Other,
                 };
-                let usage = v
-                    .get("usage")
-                    .and_then(|u| u.as_object())
-                    .map(parse_openai_usage)
-                    .unwrap_or_default();
-                out.push(ChatEvent::Finished { stop_reason: stop, usage });
+                // If usage rides along in this chunk, emit Finished now.
+                // Otherwise stash the stop_reason and wait for the
+                // separate usage-only chunk that
+                // `stream_options.include_usage=true` generates.
+                if let Some(usage_obj) = v.get("usage").and_then(|u| u.as_object()) {
+                    out.push(ChatEvent::Finished {
+                        stop_reason: stop,
+                        usage: parse_openai_usage(usage_obj),
+                    });
+                } else {
+                    buf.record_pending_stop(stop);
+                }
             }
         }
 
@@ -568,18 +627,31 @@ fn parse_openai_usage(usage: &serde_json::Map<String, Value>) -> Usage {
 
 /// Drain whatever indices the buffer has into ToolCallEnd events.
 /// Replaces the broken finalization loop in `parse_event`.
-fn drain_buffer_into(buf: &mut ToolCallBuffer, out: &mut Vec<ChatEvent>) {
+///
+/// Audit `tars-provider-src-backends-openai-29`: previously swallowed
+/// finalize errors with `if let Ok(...)`, leaving consumers in an
+/// inconsistent state when args were malformed. Now propagates.
+/// Indices that were never started simply don't show up in the
+/// inflight map and yield a benign `not started` error we filter out.
+fn drain_buffer_into(buf: &mut ToolCallBuffer, out: &mut Vec<ChatEvent>) -> Result<(), ProviderError> {
     // We don't have a public iter on ToolCallBuffer; finalize indices
     // 0..32 (parallel call ceiling we treat as practical max).
     for i in 0..32 {
-        if let Ok((id, _name, parsed)) = buf.finalize(i) {
-            out.push(ChatEvent::ToolCallEnd {
-                index: i,
-                id,
-                parsed_args: parsed,
-            });
+        match buf.finalize(i) {
+            Ok((id, _name, parsed)) => {
+                out.push(ChatEvent::ToolCallEnd {
+                    index: i,
+                    id,
+                    parsed_args: parsed,
+                });
+            }
+            Err(ProviderError::Parse(msg)) if msg.contains("not started") => {
+                // Index was never used in this stream — fine.
+            }
+            Err(e) => return Err(e),
         }
     }
+    Ok(())
 }
 
 fn truncate(s: &str, max: usize) -> String {

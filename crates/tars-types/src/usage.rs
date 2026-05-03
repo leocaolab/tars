@@ -12,13 +12,18 @@ pub struct Usage {
     /// Output tokens (completion + tool args + thinking, depending on provider).
     pub output_tokens: u64,
     /// Tokens served from prefix cache. **Discount accounting only**:
-    /// these are *also* counted in `input_tokens` per Anthropic /
-    /// OpenAI's conventions, so subtracting from `input_tokens` would
-    /// double-count. The `cached_input_tokens` figure represents the
+    /// the canonical contract for this struct is OpenAI-style — the
+    /// figure in `input_tokens` is the *total* prompt size and includes
+    /// `cached_input_tokens` and `cache_creation_tokens`. Provider
+    /// adapters whose wire format reports them disjointly (e.g.
+    /// Anthropic) must normalize at parse time so `cost_for` can apply
+    /// rates uniformly. The `cached_input_tokens` figure represents the
     /// portion that was billed at the discounted rate.
     pub cached_input_tokens: u64,
-    /// Tokens spent on cache *creation* (Anthropic only). These are
-    /// billed at the cache-creation rate (≥ standard input rate).
+    /// Tokens spent on cache *creation* (Anthropic only). Like
+    /// `cached_input_tokens` above, this is treated as a subset of
+    /// `input_tokens` (provider adapters normalize to that convention).
+    /// Billed at the cache-creation rate (≥ standard input rate).
     pub cache_creation_tokens: u64,
     /// Provider-side internal "thinking" tokens, when the provider
     /// distinguishes them from output. Not all providers expose this.
@@ -42,8 +47,15 @@ impl Usage {
         }
     }
 
+    /// Sum of input + output + thinking. Used for context-window budget
+    /// validation. Audit `tars-types-src-usage-26`: previously omitted
+    /// `thinking_tokens`, so requests near the model's context limit could
+    /// look fine to the budget gate and then fail at the provider when
+    /// the provider tallied separately-reported reasoning tokens.
     pub fn total_tokens(&self) -> u64 {
-        self.input_tokens.saturating_add(self.output_tokens)
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.thinking_tokens)
     }
 }
 
@@ -100,13 +112,22 @@ pub struct Pricing {
 
 impl Pricing {
     pub fn cost_for(&self, usage: &Usage) -> CostUsd {
-        // `cached_input_tokens` is *included* in `input_tokens` per
-        // provider convention, so subtract before applying the full
-        // input rate. Same for cache_creation_tokens.
-        let billable_input = usage
-            .input_tokens
-            .saturating_sub(usage.cached_input_tokens)
-            .saturating_sub(usage.cache_creation_tokens);
+        // `cached_input_tokens` and `cache_creation_tokens` are subsets
+        // of `input_tokens` per the documented convention on `Usage`;
+        // subtract before applying the full input rate. The
+        // `saturating_sub` is *only* a safety net — the real invariant
+        // is that the sum can't exceed input_tokens. Audit
+        // `tars-types-src-usage-2`: silent saturation can mask buggy
+        // adapter normalization, so debug-builds assert.
+        let cached_plus_creation = usage
+            .cached_input_tokens
+            .saturating_add(usage.cache_creation_tokens);
+        debug_assert!(
+            cached_plus_creation <= usage.input_tokens,
+            "Usage invariant: cached + creation ({cached_plus_creation}) > input ({})",
+            usage.input_tokens,
+        );
+        let billable_input = usage.input_tokens.saturating_sub(cached_plus_creation);
         let total = (billable_input as f64) * self.input_per_million / 1_000_000.0
             + (usage.output_tokens as f64) * self.output_per_million / 1_000_000.0
             + (usage.cached_input_tokens as f64) * self.cached_input_per_million
