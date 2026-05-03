@@ -13,6 +13,7 @@ workspace = true
 tars-types = { path = "../tars-types" }
 tars-storage = { path = "../tars-storage" }
 tars-pipeline = { path = "../tars-pipeline" }
+tars-tools = { path = "../tars-tools" }
 
 # Async
 tokio.workspace = true
@@ -35,6 +36,8 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
 tempfile = "3"
+async-trait.workspace = true
+futures.workspace = true
 tars-provider = { path = "../tars-provider" }

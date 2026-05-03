@@ -1909,6 +1909,7 @@ dependencies = [
  "tars-pipeline",
  "tars-provider",
  "tars-storage",
+ "tars-tools",
  "tars-types",
  "tempfile",
  "thiserror 1.0.69",

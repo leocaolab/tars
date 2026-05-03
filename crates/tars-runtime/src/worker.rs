@@ -1,41 +1,74 @@
 //! `WorkerAgent` — third concrete default agent (Doc 04 §4.1).
 //!
 //! Executes one [`PlanStep`] and emits a typed
-//! [`AgentMessage::PartialResult`]. Today's first cut is intentionally
-//! a **stub**: the Worker has no tool registry yet (B-9 ships
-//! `tars-tools`), so it can only ask the LLM to describe how it would
-//! perform the step — no real I/O. The Worker still:
+//! [`AgentMessage::PartialResult`]. Today's WorkerAgent comes in two
+//! flavours, sharing the same Agent-trait surface and the same typed
+//! output envelope:
 //!
-//! - exercises the Agent trait + trajectory wiring end-to-end,
-//! - threads refinement suggestions from a previous Critic verdict back
-//!   into the prompt (the Refine loop in `run_task` needs this), and
-//! - emits the same typed [`AgentMessage::PartialResult`] envelope a
-//!   real tool-using Worker will produce later, so downstream code
-//!   (Critic, orchestration loop, replay) doesn't need to change when
-//!   the stub becomes a real Worker.
+//! - **No-tools (stub)** — constructed via [`WorkerAgent::new`]. The
+//!   model is asked to *describe* how it would perform the step.
+//!   Useful for testing the orchestration loop without spinning up
+//!   real I/O.
+//! - **Tool-using** — constructed via [`WorkerAgent::with_tools`].
+//!   The model has a [`ToolRegistry`] available; on each LLM turn it
+//!   may emit tool calls instead of (or alongside) a final answer.
+//!   The Worker dispatches each call via the registry, threads the
+//!   results back into the conversation, and re-prompts until the
+//!   model emits a text-only answer (or hits
+//!   `max_tool_iterations`). The same [`AgentMessage::PartialResult`]
+//!   envelope flows out either way, so downstream code (Critic,
+//!   orchestration loop, replay) doesn't change between stub and
+//!   real.
 //!
 //! ## Wire format
 //!
 //! Same flat-JSON pattern as [`crate::CriticAgent`]: the LLM emits
-//! `{"summary": "...", "confidence": 0.0..1.0}`, we map it to
-//! `AgentMessage::PartialResult`. Schema is enforced via
-//! [`ChatRequest::structured_output`] so providers reject malformed
-//! responses upstream.
+//! `{"summary": "...", "confidence": 0.0..1.0}` once it's ready to
+//! finalise, we map it to `AgentMessage::PartialResult`. Schema is
+//! enforced via [`ChatRequest::structured_output`] so providers
+//! reject malformed responses upstream. Strict-mode + tool calls
+//! coexist: the model is free to emit tool calls (which bypass the
+//! response_format constraint) on any turn, and only the final
+//! text-only answer must conform to the schema.
+//!
+//! ## Trajectory observability — known gap
+//!
+//! When tools are present, one `Agent::execute` call drives **N** LLM
+//! calls internally (one per tool round-trip). The trajectory layer
+//! records this as a single `StepStarted/LlmCallCaptured/StepCompleted`
+//! triple — `LlmCallCaptured.usage` sums across the N calls and
+//! `response_summary` reflects the final text answer. The intermediate
+//! LLM calls and tool dispatches don't get their own events. This is
+//! a real observability loss; it's deferred until a consumer needs
+//! per-call replay (which slots in alongside Backtrack + Saga; the
+//! new event variants would be `LlmSubcallCaptured` + `ToolCallExecuted`).
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use tars_types::{AgentId, ChatRequest, JsonSchema, ModelHint};
+use tars_pipeline::LlmService;
+use tars_tools::{ToolContext, ToolRegistry};
+use tars_types::{
+    AgentId, ChatRequest, ChatResponseBuilder, ContentBlock, JsonSchema, Message, ModelHint,
+    RequestContext,
+};
 
 use crate::agent::{Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult};
 use crate::message::AgentMessage;
 use crate::orchestrator::{Plan, PlanStep};
 
+/// Default safety cap on Worker tool-loop iterations. 8 round-trips
+/// (each LLM call + tool dispatch) is enough headroom for a Worker
+/// to chain a handful of file reads / git lookups / etc., and small
+/// enough that a confused model can't burn through the budget by
+/// looping on the same call indefinitely.
+pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 8;
+
 /// LLM-driven Worker — the agent that actually does the work for one
-/// plan step. See module docs for the stub-vs-real-tool caveat.
+/// plan step. See module docs for stub-vs-tool flavours.
 pub struct WorkerAgent {
     id: AgentId,
     model: String,
@@ -43,9 +76,20 @@ pub struct WorkerAgent {
     /// Surfaces in [`Agent::role`] so a future router can match
     /// `PlanStep::worker_role` → `WorkerAgent` by domain.
     domain: String,
+    /// `Some` for tool-using Workers; `None` for the stub flavour.
+    /// `Arc` so a single registry instance can be shared across many
+    /// Workers (the orchestration loop typically has one registry +
+    /// one Worker per domain).
+    tools: Option<Arc<ToolRegistry>>,
+    /// Cap on tool round-trips per `execute` call. Only consulted
+    /// when `tools.is_some()`. See [`DEFAULT_MAX_TOOL_ITERATIONS`].
+    max_tool_iterations: u32,
 }
 
 impl WorkerAgent {
+    /// Stub Worker — no tools. The LLM is asked to describe how it
+    /// would perform the step. Useful for testing the orchestration
+    /// loop without spinning up real I/O.
     pub fn new(
         id: impl Into<AgentId>,
         model: impl Into<String>,
@@ -55,6 +99,44 @@ impl WorkerAgent {
             id: id.into(),
             model: model.into(),
             domain: domain.into(),
+            tools: None,
+            max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
+        })
+    }
+
+    /// Tool-using Worker. The model gets `registry.to_tool_specs()`
+    /// in `req.tools` and may emit tool calls; the Worker dispatches
+    /// each via the registry and threads results back until the model
+    /// emits a text-only answer (or `max_tool_iterations` fires).
+    ///
+    /// Default iteration cap is [`DEFAULT_MAX_TOOL_ITERATIONS`]; use
+    /// [`Self::with_max_tool_iterations`] to override on the returned
+    /// Arc (one of the rare places we need an Arc-mut pattern; we
+    /// take + rebuild rather than expose interior mutability).
+    pub fn with_tools(
+        id: impl Into<AgentId>,
+        model: impl Into<String>,
+        domain: impl Into<String>,
+        tools: Arc<ToolRegistry>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            id: id.into(),
+            model: model.into(),
+            domain: domain.into(),
+            tools: Some(tools),
+            max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
+        })
+    }
+
+    /// Override the tool-loop iteration cap. Returns a fresh Arc.
+    /// No-op for stub Workers (no tools means no loop).
+    pub fn with_max_tool_iterations(self: Arc<Self>, n: u32) -> Arc<Self> {
+        Arc::new(Self {
+            id: self.id.clone(),
+            model: self.model.clone(),
+            domain: self.domain.clone(),
+            tools: self.tools.clone(),
+            max_tool_iterations: n,
         })
     }
 
@@ -62,6 +144,11 @@ impl WorkerAgent {
     /// to pick a Worker for each [`PlanStep`].
     pub fn domain(&self) -> &str {
         &self.domain
+    }
+
+    /// True iff this Worker has a tool registry attached.
+    pub fn has_tools(&self) -> bool {
+        self.tools.is_some()
     }
 
     /// Typed convenience: build the worker [`ChatRequest`] for `step`,
@@ -114,8 +201,15 @@ impl WorkerAgent {
             .expect("JSON encoding of plan/step is infallible for valid types");
 
         let mut req = ChatRequest::user(ModelHint::Explicit(self.model.clone()), user_text);
-        req.system = Some(WORKER_SYSTEM_PROMPT.to_string());
+        req.system = Some(if self.tools.is_some() {
+            WORKER_SYSTEM_PROMPT_WITH_TOOLS.to_string()
+        } else {
+            WORKER_SYSTEM_PROMPT.to_string()
+        });
         req.structured_output = Some(JsonSchema::strict("WorkerResult", worker_json_schema()));
+        if let Some(registry) = &self.tools {
+            req.tools = registry.to_tool_specs();
+        }
         // Worker output should be deterministic for the same step so
         // cache + replay both work.
         req.temperature = Some(0.0);
@@ -161,12 +255,127 @@ impl Agent for WorkerAgent {
         ctx: AgentContext,
         input: ChatRequest,
     ) -> Result<AgentStepResult, AgentError> {
-        // Pass-through to the shared LLM-call drainer — same shape as
-        // OrchestratorAgent and CriticAgent. The typed parsing happens
-        // in `execute_step` / `parse_worker_response`.
-        crate::agent::drive_llm_call(ctx, input).await
+        // Take the Arc<ToolRegistry> out via clone so the subsequent
+        // `self` move into `drive_with_tools` doesn't conflict with
+        // the borrow used to read `self.tools`.
+        let tools = self.tools.clone();
+        match tools {
+            // Stub Worker — same single-call shape as Orchestrator /
+            // Critic; the typed parsing happens in
+            // `execute_step` / `parse_worker_response`.
+            None => crate::agent::drive_llm_call(ctx, input).await,
+            // Tool-using Worker — drive the multi-call dispatch loop.
+            // See module docs for the trajectory observability tradeoff
+            // (one Agent::execute hides N internal LLM calls).
+            Some(registry) => self.drive_with_tools(ctx, input, registry).await,
+        }
     }
 }
+
+impl WorkerAgent {
+    /// Inner loop for the tool-using flavour. Drains one LLM call at a
+    /// time; if the model emits tool calls, dispatches each via the
+    /// registry, appends the assistant + tool messages to the
+    /// conversation, and loops. Stops on the first text-only response
+    /// or when `max_tool_iterations` fires.
+    ///
+    /// Usage is summed across every internal LLM call so the resulting
+    /// `AgentStepResult.usage` reflects the true cost of the step.
+    async fn drive_with_tools(
+        self: Arc<Self>,
+        ctx: AgentContext,
+        initial_input: ChatRequest,
+        registry: Arc<ToolRegistry>,
+    ) -> Result<AgentStepResult, AgentError> {
+        let mut req = initial_input;
+        let mut total_usage = tars_types::Usage::default();
+        for iteration in 0..self.max_tool_iterations {
+            // One LLM round-trip — same cancel-aware drain shape as
+            // `agent::drive_llm_call`.
+            let response = drain_one_call(&ctx, req.clone()).await?;
+            total_usage = total_usage.merge(response.usage);
+
+            if response.tool_calls.is_empty() {
+                // Final answer — text only. Build the AgentStepResult
+                // and return.
+                let output = AgentOutput::from_response_parts(response.text, vec![]);
+                return Ok(AgentStepResult { output, usage: total_usage });
+            }
+
+            // Tool calls present. Build the next request: append the
+            // assistant's tool-call message, then one Tool message
+            // per dispatched call.
+            let assistant_text = response.text.clone();
+            let assistant_msg = Message::Assistant {
+                content: if assistant_text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![ContentBlock::text(assistant_text)]
+                },
+                tool_calls: response.tool_calls.clone(),
+            };
+            req.messages.push(assistant_msg);
+
+            for call in &response.tool_calls {
+                let tool_ctx = ToolContext {
+                    cancel: ctx.cancel.clone(),
+                    cwd: None,
+                };
+                let tool_msg = registry.dispatch(call, tool_ctx).await;
+                req.messages.push(tool_msg);
+            }
+
+            tracing::debug!(
+                iteration = iteration + 1,
+                tool_calls = response.tool_calls.len(),
+                "worker: dispatched tools, looping",
+            );
+        }
+
+        Err(AgentError::Internal(format!(
+            "worker tool loop hit max_tool_iterations={} without a text-only \
+             response (model kept emitting tool calls)",
+            self.max_tool_iterations,
+        )))
+    }
+}
+
+/// Drain one LLM call to a [`tars_types::ChatResponse`]. Same
+/// cancel-handling pattern as `agent::drive_llm_call` but returns
+/// the full response (we need the tool_calls + usage explicitly,
+/// not flattened into AgentOutput).
+async fn drain_one_call(
+    ctx: &AgentContext,
+    input: ChatRequest,
+) -> Result<tars_types::ChatResponse, AgentError> {
+    let mut req_ctx = RequestContext::test_default();
+    req_ctx.cancel = ctx.cancel.clone();
+
+    let llm: Arc<dyn LlmService> = ctx.llm.clone();
+
+    let stream_result = tokio::select! {
+        biased;
+        _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+        r = llm.call(input, req_ctx) => r,
+    };
+    let mut stream = stream_result?;
+
+    let mut builder = ChatResponseBuilder::new();
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+            ev = stream.next() => ev,
+        };
+        match event {
+            Some(Ok(ev)) => builder.apply(ev),
+            Some(Err(e)) => return Err(AgentError::Provider(e)),
+            None => break,
+        }
+    }
+    Ok(builder.finish())
+}
+
 
 // ── Wire format ────────────────────────────────────────────────────────
 
@@ -219,6 +428,33 @@ Output rules:
   - `confidence`: float in [0.0, 1.0] — how sure you are this addresses
     the step's instruction. 1.0 = certain; 0.5 = unsure but best effort;
     0.0 = couldn't make progress.";
+
+const WORKER_SYSTEM_PROMPT_WITH_TOOLS: &str = "\
+You are a Worker agent. You receive ONE step from a larger plan and execute it.
+
+Your input JSON contains:
+  - `goal`: the original task the Orchestrator was asked to solve.
+  - `step`: the specific step you are executing (`id`, `worker_role`,
+    `instruction`, `depends_on`).
+  - `refinements`: a list of suggestions from a prior Critic review of
+    your previous attempt at this step. Empty on the first attempt.
+    When non-empty, address each suggestion in your new attempt.
+
+You have access to a set of tools. Call them when you need to inspect or \
+manipulate the outside world (read files, fetch git diffs, etc.). The \
+runtime dispatches each call and feeds the result back to you on the \
+next turn. Only emit your final answer when you have what you need.
+
+Output rules:
+  - On any turn, you may either (a) call one or more tools, OR (b) emit \
+    your final JSON answer matching the schema. NOT both.
+  - The final answer JSON: `summary` is a concise (1–3 sentence) \
+    description of what you produced for this step. `confidence` is a \
+    float in [0.0, 1.0] — how sure you are this addresses the step's \
+    instruction.
+  - Don't loop on the same tool call. If a tool returned an error, try \
+    something different or finalise with a low confidence + a summary \
+    explaining the obstacle.";
 
 fn worker_json_schema() -> serde_json::Value {
     serde_json::json!({
