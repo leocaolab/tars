@@ -105,8 +105,18 @@ impl LlmProvider for MockProvider {
     ) -> Result<LlmEventStream, ProviderError> {
         // Atomic: append-history + read-canned-response under one lock
         // so concurrent callers can't observe a swap mid-operation.
+        //
+        // Audit `tars-provider-src-backends-mock-8`: the previous
+        // `lock().unwrap()` would panic the MockProvider permanently
+        // if any prior task panicked while holding the mutex (poison).
+        // For a test-only mock the blast radius is limited, but the
+        // method signature is `Result<_, ProviderError>` — using `?`
+        // semantics here mirrors what the real backends do.
         let response = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|e| ProviderError::Internal(format!("mock state poisoned: {e}")))?;
             state.history.requests.push(req.clone());
             state.response.clone()
         };

@@ -52,22 +52,61 @@ impl HttpProviderExtras {
     }
 
     /// Append both static and env-resolved headers to `target`.
-    /// Bad header names/values are silently skipped.
+    ///
+    /// Audit `tars-types-src-http-extras-1`: invalid header names /
+    /// values used to be silently skipped (a typo in `http_headers`
+    /// would produce zero-effect, no signal). They still don't bring
+    /// down the request — failing here would block every call — but
+    /// each failure now emits a `tracing::warn!` so the operator
+    /// learns about misconfiguration instead of debugging "why isn't
+    /// my X-Project-Hint header showing up upstream".
     pub fn apply_headers(&self, target: &mut HeaderMap) {
         for (k, v) in &self.http_headers {
-            if let (Ok(name), Ok(value)) =
-                (HeaderName::try_from(k), HeaderValue::try_from(v))
-            {
-                target.insert(name, value);
+            match (HeaderName::try_from(k), HeaderValue::try_from(v)) {
+                (Ok(name), Ok(value)) => {
+                    target.insert(name, value);
+                }
+                (Err(e), _) => {
+                    tracing::warn!(
+                        header_name = %k,
+                        error = %e,
+                        "http_extras: skipping header — invalid name",
+                    );
+                }
+                (_, Err(e)) => {
+                    tracing::warn!(
+                        header_name = %k,
+                        error = %e,
+                        "http_extras: skipping header — invalid value",
+                    );
+                }
             }
         }
         for (header, env_var) in &self.env_http_headers {
-            if let Ok(val) = std::env::var(env_var)
-                && !val.trim().is_empty()
-                && let (Ok(name), Ok(value)) =
-                    (HeaderName::try_from(header), HeaderValue::try_from(val))
-            {
-                target.insert(name, value);
+            let val = match std::env::var(env_var) {
+                Ok(v) if !v.trim().is_empty() => v,
+                _ => continue, // env unset / empty / non-UTF8 → skip silently (expected)
+            };
+            match (HeaderName::try_from(header), HeaderValue::try_from(&val)) {
+                (Ok(name), Ok(value)) => {
+                    target.insert(name, value);
+                }
+                (Err(e), _) => {
+                    tracing::warn!(
+                        header_name = %header,
+                        env_var = %env_var,
+                        error = %e,
+                        "http_extras: skipping env header — invalid name",
+                    );
+                }
+                (_, Err(e)) => {
+                    tracing::warn!(
+                        header_name = %header,
+                        env_var = %env_var,
+                        error = %e,
+                        "http_extras: skipping env header — invalid value",
+                    );
+                }
             }
         }
     }

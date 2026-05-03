@@ -60,20 +60,23 @@ pub struct ToolCall {
 impl ToolCall {
     /// Convenience constructor used by tests + adapters.
     ///
-    /// **Debug-builds-only invariant**: `arguments` must be a JSON
-    /// object. Anything else (string, array, bare scalar) violates the
-    /// type's documented contract — production calls into the model
-    /// would emit malformed `tool_calls.arguments` strings. We
-    /// `debug_assert!` rather than panic in release because adapter
-    /// code that constructs many ToolCalls in hot paths shouldn't pay
-    /// for this check on every release-build call. Audit findings
-    /// `tars-types-src-tools-{4,5}`.
+    /// **Runtime invariant**: `arguments` must be a JSON object.
+    /// Anything else (string, array, bare scalar) violates the type's
+    /// documented contract — downstream serialization to OpenAI's
+    /// `tool_calls[].arguments` would emit malformed JSON strings,
+    /// and downstream consumers (Agent layer) trust this invariant
+    /// when indexing into args.
+    ///
+    /// We `assert!` (not `debug_assert!`) because the audit
+    /// (`tars-types-src-tools-3`) flagged debug-only as silent in
+    /// release. The adapter hot-path cost is one `Value::is_object()`
+    /// call (a tag compare), well below noise.
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
         arguments: serde_json::Value,
     ) -> Self {
-        debug_assert!(
+        assert!(
             arguments.is_object(),
             "ToolCall.arguments must be a JSON object (got {:?})",
             arguments

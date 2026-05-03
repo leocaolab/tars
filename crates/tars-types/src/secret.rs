@@ -10,7 +10,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Pointer to where a secret value lives. Resolved (potentially
 /// asynchronously) at use time by an external resolver — Provider
@@ -48,9 +48,28 @@ impl SecretRef {
 /// guarantee. A determined attacker with process memory access can
 /// still read the bytes. The goal is to prevent *accidental* leakage
 /// via the standard formatting machinery.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(transparent)]
+/// `Serialize` is implemented manually to emit `"<redacted>"` rather
+/// than the plaintext — the audit (`tars-types-src-secret-2`) called
+/// out the original `#[serde(transparent)]` derive as the primary
+/// leak path. `Deserialize` stays transparent so config files
+/// (`{value = "sk-…"}`) continue to load. We never round-trip a secret
+/// in this codebase: configs flow read-only from disk through
+/// runtime, and any request/response/cache JSON we emit must not
+/// contain a secret.
+#[derive(Clone)]
 pub struct SecretString(String);
+
+impl Serialize for SecretString {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str("<redacted>")
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretString {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(Self(String::deserialize(d)?))
+    }
+}
 
 impl SecretString {
     pub fn new(value: impl Into<String>) -> Self {
@@ -124,11 +143,32 @@ mod tests {
     }
 
     #[test]
-    fn inline_round_trip_keeps_value() {
+    fn inline_serializes_redacted_not_plaintext() {
+        // Audit `tars-types-src-secret-2`: previous behaviour
+        // serialized the plaintext via #[serde(transparent)]. The
+        // contract now is "Serialize redacts; Deserialize accepts".
         let r = SecretRef::inline("sk-proj-x");
         let v = serde_json::to_value(&r).unwrap();
-        // Inline is the one place plaintext appears on the wire.
-        assert_eq!(v["value"], "sk-proj-x");
+        assert_eq!(v["value"], "<redacted>");
+        assert!(
+            !serde_json::to_string(&r).unwrap().contains("sk-proj-x"),
+            "plaintext must not appear anywhere in the JSON",
+        );
+    }
+
+    #[test]
+    fn inline_deserialize_still_accepts_plaintext() {
+        // Configs on disk look like `{value = "sk-…"}` — the load path
+        // must keep working after the Serialize redaction landed.
+        let r: SecretRef = serde_json::from_value(serde_json::json!({
+            "source": "inline",
+            "value": "sk-proj-x"
+        }))
+        .unwrap();
+        match r {
+            SecretRef::Inline { value } => assert_eq!(value.expose(), "sk-proj-x"),
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

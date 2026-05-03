@@ -109,9 +109,20 @@ impl AuthResolver for BasicAuthResolver {
                     );
                     Ok(ResolvedAuth::ApiKey(value.expose().to_string()))
                 }
-                SecretRef::Env { var } => std::env::var(var)
-                    .map(ResolvedAuth::ApiKey)
-                    .map_err(|_| AuthError::Missing(format!("env {var}"))),
+                SecretRef::Env { var } => match std::env::var(var) {
+                    Ok(v) => Ok(ResolvedAuth::ApiKey(v)),
+                    // Audit `tars-provider-src-auth-1`: VarError has
+                    // two distinct cases — surfacing them separately
+                    // turns "auth doesn't work" into actionable
+                    // diagnostics ("set the env var" vs "the env
+                    // var contains a NUL or non-UTF-8 byte").
+                    Err(std::env::VarError::NotPresent) => {
+                        Err(AuthError::Missing(format!("env var `{var}` is not set")))
+                    }
+                    Err(std::env::VarError::NotUnicode(_)) => Err(AuthError::Internal(
+                        format!("env var `{var}` contains non-UTF-8 bytes"),
+                    )),
+                },
                 SecretRef::File { path } => {
                     let raw = std::fs::read_to_string(path).map_err(|e| {
                         AuthError::Io(format!("reading {}: {e}", path.display()))

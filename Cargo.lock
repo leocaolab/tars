@@ -1895,6 +1895,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio-util",
  "toml",
+ "tracing",
  "url",
 ]
 

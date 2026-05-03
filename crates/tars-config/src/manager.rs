@@ -48,7 +48,7 @@ impl ConfigManager {
         })?;
         let cfg: Config = toml::from_str(&raw).map_err(|e| ConfigError::Parse {
             path: path.clone(),
-            message: e.to_string(),
+            source: Box::new(e),
         })?;
         cfg.validate()
             .map_err(|errors| ConfigError::ValidationFailed { errors })?;
@@ -60,7 +60,7 @@ impl ConfigManager {
     pub fn load_from_str(src: &str) -> Result<Config, ConfigError> {
         let cfg: Config = toml::from_str(src).map_err(|e| ConfigError::Parse {
             path: PathBuf::from("<inline>"),
-            message: e.to_string(),
+            source: Box::new(e),
         })?;
         cfg.validate()
             .map_err(|errors| ConfigError::ValidationFailed { errors })?;

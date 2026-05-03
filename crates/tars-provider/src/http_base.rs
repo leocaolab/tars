@@ -193,20 +193,17 @@ where
 
     let status = response.status();
     if !status.is_success() {
-        // Bounded read so a verbose error body can't OOM us. Use a
-        // UTF-8-safe truncation: `&str[..n]` panics if `n` falls
-        // mid-multibyte-codepoint, and a crafted server response could
-        // weaponise that into a worker-thread panic.
-        // Audit `tars-provider-src-http-base-1`: previously
-        // `unwrap_or_default()` silently swallowed body-read errors
-        // (network drop, non-UTF-8 body). Surface them as a typed
-        // marker so classify_error sees the real situation instead of
-        // an empty string.
-        let text = match response.text().await {
-            Ok(t) => t,
-            Err(e) => format!("<error reading response body: {e}>"),
-        };
-        let trunc = truncate_utf8(&text, 4096);
+        // True bounded read — stream chunks and stop at the cap so a
+        // 1 GB hostile error body can't OOM us. Audit
+        // `tars-provider-src-http-base-1` (round 2): the prior
+        // implementation called `response.text().await`, which reads
+        // the *entire* body before truncating — defeating the whole
+        // point of the cap. Now we bail at `ERROR_BODY_CAP_BYTES` of
+        // bytes received and carry whatever we've got into
+        // `classify_error`. Read errors are surfaced as a marker
+        // (round-1 fix); we keep that.
+        let body = read_bounded_body(response, ERROR_BODY_CAP_BYTES).await;
+        let trunc = truncate_utf8(&body, ERROR_BODY_CAP_BYTES);
         return Err(adapter.classify_error(status, trunc));
     }
 
@@ -241,6 +238,45 @@ where
     };
 
     Ok(Box::pin(stream))
+}
+
+/// Hard cap on how much of an HTTP error body we'll buffer for
+/// `classify_error`. Anything past this is dropped before we even
+/// allocate a `String`. Sized for "diagnostic message + small JSON
+/// error envelope" — provider error responses are typically <1 KB.
+pub(crate) const ERROR_BODY_CAP_BYTES: usize = 8 * 1024;
+
+/// Stream the response body and stop at `cap` bytes. Read errors
+/// surface as a marker string so `classify_error` sees what happened
+/// instead of an empty input. The returned `String` may end on a
+/// non-UTF-8 boundary at the cap; `truncate_utf8` (called by the
+/// caller) walks back to a codepoint boundary.
+async fn read_bounded_body(response: reqwest::Response, cap: usize) -> String {
+    use futures::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buf: Vec<u8> = Vec::with_capacity(cap.min(1024));
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                let remaining = cap.saturating_sub(buf.len());
+                if remaining == 0 {
+                    break;
+                }
+                let take = bytes.len().min(remaining);
+                buf.extend_from_slice(&bytes[..take]);
+                if buf.len() >= cap {
+                    break;
+                }
+            }
+            Err(e) => {
+                return format!(
+                    "<error reading response body after {} bytes: {e}>",
+                    buf.len()
+                );
+            }
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Truncate `s` to at most `max_bytes` while staying on a UTF-8 boundary.
@@ -323,5 +359,40 @@ mod tests {
     fn truncate_utf8_ascii_like_simple_slice() {
         let s: String = "x".repeat(10_000);
         assert_eq!(truncate_utf8(&s, 4096).len(), 4096);
+    }
+
+    /// Audit `tars-provider-src-http-base-2`: round-1 of this finding
+    /// added a marker string for body-read failures but didn't test
+    /// it. Drive a wiremock 500 response with an oversized body and
+    /// assert (a) we don't OOM, (b) the cap actually bounds memory.
+    #[tokio::test]
+    async fn error_body_is_capped_at_cap_bytes() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // 1 MB body — more than 100× the cap.
+        let big_body: String = "X".repeat(1_000_000);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(big_body))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/big", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_server_error());
+
+        let body = read_bounded_body(resp, ERROR_BODY_CAP_BYTES).await;
+        assert!(
+            body.len() <= ERROR_BODY_CAP_BYTES,
+            "body should be capped at {ERROR_BODY_CAP_BYTES} bytes, got {}",
+            body.len(),
+        );
+        assert!(body.starts_with('X'), "should contain the start of the body");
     }
 }

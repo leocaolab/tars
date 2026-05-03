@@ -114,11 +114,15 @@ impl Pricing {
     pub fn cost_for(&self, usage: &Usage) -> CostUsd {
         // `cached_input_tokens` and `cache_creation_tokens` are subsets
         // of `input_tokens` per the documented convention on `Usage`;
-        // subtract before applying the full input rate. The
-        // `saturating_sub` is *only* a safety net — the real invariant
-        // is that the sum can't exceed input_tokens. Audit
-        // `tars-types-src-usage-2`: silent saturation can mask buggy
-        // adapter normalization, so debug-builds assert.
+        // subtract before applying the full input rate.
+        //
+        // Audit `tars-types-src-usage-{1,2}`: the original code only
+        // had `debug_assert!`, which is compiled out in release.
+        // For a cost-correctness invariant that's "silent under-bill
+        // in production" — exactly the failure mode that doesn't
+        // get noticed for months. Now we still `debug_assert` for
+        // CI loudness, AND emit a `tracing::warn` in release so the
+        // saturation event is observable in production logs.
         let cached_plus_creation = usage
             .cached_input_tokens
             .saturating_add(usage.cache_creation_tokens);
@@ -127,6 +131,15 @@ impl Pricing {
             "Usage invariant: cached + creation ({cached_plus_creation}) > input ({})",
             usage.input_tokens,
         );
+        if cached_plus_creation > usage.input_tokens {
+            tracing::warn!(
+                input_tokens = usage.input_tokens,
+                cached_input_tokens = usage.cached_input_tokens,
+                cache_creation_tokens = usage.cache_creation_tokens,
+                "Usage invariant violated: cached + creation > input — billing under-reported. \
+                 Likely an adapter normalization bug; please file an issue.",
+            );
+        }
         let billable_input = usage.input_tokens.saturating_sub(cached_plus_creation);
         let total = (billable_input as f64) * self.input_per_million / 1_000_000.0
             + (usage.output_tokens as f64) * self.output_per_million / 1_000_000.0

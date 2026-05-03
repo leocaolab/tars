@@ -13,8 +13,16 @@ pub enum ConfigError {
         source: std::io::Error,
     },
 
-    #[error("config parse error in {path:?}: {message}")]
-    Parse { path: PathBuf, message: String },
+    /// Audit `tars-config-src-error-1`: original variant stored
+    /// `message: String` and lost the underlying serde / toml error
+    /// chain. Storing the boxed source restores `e.source()` walks
+    /// (anyhow, miette, … all consume that chain to render context).
+    #[error("config parse error in {path:?}: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     /// Cross-section / cross-key validation failure.
     /// `errors` is a flat list — startup prints all of them rather than

@@ -20,17 +20,18 @@ pub mod http_base;
 pub mod provider;
 pub mod registry;
 pub mod tool_buffer;
-pub mod transport;
+// Audit `tars-provider-src-transport-1` + TODO O-1: the `transport`
+// module was a codex-rs-borrowed `HttpTransport` trait with no
+// in-tree call site (every backend goes straight through
+// `HttpProviderBase.client`). The trigger condition O-1 set —
+// "we hit `tars-pipeline` MVP without anyone needing it" — has
+// fired, so the module was deleted on 2026-05-03 (commit follows).
 
 pub use auth::{Auth, AuthResolver, ResolvedAuth, AuthError, BasicAuthResolver, basic};
 pub use http_base::{HttpAdapter, HttpProviderBase, HttpProviderConfig};
 pub use provider::{LlmProvider, LlmEventStream};
 pub use registry::{ProviderRegistry, RegistryError};
 pub use tool_buffer::ToolCallBuffer;
-pub use transport::{
-    arc_reqwest_transport, ByteStream, HttpResponse, HttpTransport, OutboundRequest,
-    ReqwestTransport, StreamResponse,
-};
 
 // Re-export concrete backends at the crate root for ergonomic use.
 pub use backends::anthropic::{AnthropicAdapter, AnthropicProvider, AnthropicProviderBuilder};

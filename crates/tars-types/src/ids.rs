@@ -28,8 +28,22 @@ macro_rules! string_id {
 
         impl $name {
             /// Construct from any string-like value.
+            ///
+            /// Panics on the empty string. ID semantics require a
+            /// non-empty value (see audit `tars-types-src-ids-1`); an
+            /// empty `TenantId` / `SessionId` etc. would propagate
+            /// silently into cache keys, IAM scope checks, and DB
+            /// lookups where it'd manifest as obscure correctness bugs.
+            /// Failing fast at construction is cheaper than chasing
+            /// the symptom three layers down.
             pub fn new(value: impl Into<String>) -> Self {
-                Self(value.into())
+                let v: String = value.into();
+                assert!(
+                    !v.is_empty(),
+                    "{} cannot be empty",
+                    stringify!($name),
+                );
+                Self(v)
             }
 
             /// Borrow the underlying string.
@@ -57,13 +71,13 @@ macro_rules! string_id {
 
         impl From<&str> for $name {
             fn from(value: &str) -> Self {
-                Self(value.to_owned())
+                Self::new(value)
             }
         }
 
         impl From<String> for $name {
             fn from(value: String) -> Self {
-                Self(value)
+                Self::new(value)
             }
         }
 
@@ -110,5 +124,18 @@ mod tests {
     fn debug_includes_type_name() {
         let t = TenantId::new("acme");
         assert_eq!(format!("{:?}", t), "TenantId(\"acme\")");
+    }
+
+    #[test]
+    #[should_panic(expected = "TenantId cannot be empty")]
+    fn empty_id_panics_at_construction() {
+        let _ = TenantId::new("");
+    }
+
+    #[test]
+    #[should_panic(expected = "SessionId cannot be empty")]
+    fn empty_id_via_from_also_panics() {
+        // From<&str> routes through new() so the same guard fires.
+        let _: SessionId = SessionId::from("");
     }
 }
