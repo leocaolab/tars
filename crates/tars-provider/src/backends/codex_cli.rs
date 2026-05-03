@@ -4,8 +4,11 @@
 //! billed CLI, **strip API-billing env vars** before exec'ing the child
 //! so a leaked key can't silently bill the wrong account.
 //!
-//! - Spawns `codex exec --json --model X --sandbox SAFE --ask-for-approval
-//!   never --skip-git-repo-check -` and feeds the prompt on stdin.
+//! - Spawns `codex exec --json --model X --sandbox SAFE
+//!   -c approval_policy="never" --skip-git-repo-check -` and feeds
+//!   the prompt on stdin. (`approval_policy` is set via `-c` config
+//!   override because codex 0.128's `exec` subcommand has no dedicated
+//!   `--ask-for-approval` flag — the older docs are misleading.)
 //! - **Strips** `OPENAI_API_KEY` / `CODEX_API_KEY` /
 //!   `CODEX_AGENT_IDENTITY` (case-insensitive) so codex falls through to
 //!   `~/.codex/auth.json` (ChatGPT OAuth) instead of the API path.
@@ -281,8 +284,13 @@ impl SubprocessLineRunner for RealSubprocessLineRunner {
             .arg(&inv.model)
             .arg("--sandbox")
             .arg(inv.sandbox.as_arg())
-            .arg("--ask-for-approval")
-            .arg("never");
+            // Force non-interactive mode: any approval-required action
+            // (shell exec without sandbox-allowed write, etc.) becomes
+            // an immediate failure returned to the model rather than
+            // a prompt. codex 0.128 has no `--ask-for-approval` flag
+            // — `-c approval_policy="never"` is the supported path.
+            .arg("-c")
+            .arg("approval_policy=\"never\"");
         if inv.skip_git_repo_check {
             cmd.arg("--skip-git-repo-check");
         }

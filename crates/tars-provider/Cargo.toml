@@ -39,3 +39,5 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 wiremock.workspace = true
 serde_json.workspace = true
+which = "6"
+futures.workspace = true
