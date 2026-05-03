@@ -18,9 +18,12 @@
 //! - [`capabilities`]   — Capabilities / StructuredOutputMode / PromptCacheKind
 //! - [`error`]          — ProviderError + ErrorClass
 //! - [`context`]        — RequestContext for cross-layer plumbing
+//! - [`secret`]         — SecretRef + SecretString (redacting wrapper)
+//! - [`auth`]           — Auth specification (None / Delegate / Secret)
 //!
 //! See `docs/01-llm-provider.md` for the full design rationale.
 
+pub mod auth;
 pub mod cache;
 pub mod capabilities;
 pub mod chat;
@@ -32,9 +35,11 @@ pub mod model;
 pub mod principal;
 pub mod response;
 pub mod schema;
+pub mod secret;
 pub mod tools;
 pub mod usage;
 
+pub use auth::Auth;
 pub use cache::{CacheDirective, CacheHitInfo, ProviderCacheHandle};
 pub use capabilities::{
     Capabilities, Modality, PromptCacheKind, StructuredOutputMode,
@@ -51,5 +56,6 @@ pub use model::{ModelHint, ModelTier, ThinkingMode};
 pub use principal::{Principal, PrincipalKind, Scope};
 pub use response::{ChatResponse, ChatResponseBuilder};
 pub use schema::JsonSchema;
+pub use secret::{SecretRef, SecretString};
 pub use tools::{ToolCall, ToolChoice, ToolSpec};
 pub use usage::{CostUsd, Pricing, Usage};

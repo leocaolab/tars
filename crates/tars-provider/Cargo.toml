@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 tars-types = { path = "../tars-types" }
+tars-config = { path = "../tars-config" }
 
 # Async
 tokio.workspace = true

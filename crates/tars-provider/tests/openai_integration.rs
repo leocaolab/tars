@@ -54,7 +54,7 @@ async fn streaming_text_response_decodes_to_events() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = OpenAiProviderBuilder::new("openai_test", Auth::Inline("test-key".into()))
+    let provider = OpenAiProviderBuilder::new("openai_test", Auth::inline("test-key"))
         .base_url(server.uri())
         .build(http, basic());
 
@@ -105,7 +105,7 @@ async fn complete_aggregates_streaming_response() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = OpenAiProviderBuilder::new("openai_test", Auth::Inline("k".into()))
+    let provider = OpenAiProviderBuilder::new("openai_test", Auth::inline("k"))
         .base_url(server.uri())
         .build(http, basic());
 
@@ -135,7 +135,7 @@ async fn http_401_maps_to_auth_error() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = OpenAiProviderBuilder::new("openai_test", Auth::Inline("bad".into()))
+    let provider = OpenAiProviderBuilder::new("openai_test", Auth::inline("bad"))
         .base_url(server.uri())
         .build(http, basic());
 
@@ -164,7 +164,7 @@ async fn http_429_maps_to_rate_limited() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = OpenAiProviderBuilder::new("openai_test", Auth::Inline("k".into()))
+    let provider = OpenAiProviderBuilder::new("openai_test", Auth::inline("k"))
         .base_url(server.uri())
         .build(http, basic());
 
@@ -206,7 +206,7 @@ async fn streaming_tool_call_emits_start_delta_end() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = OpenAiProviderBuilder::new("openai_test", Auth::Inline("k".into()))
+    let provider = OpenAiProviderBuilder::new("openai_test", Auth::inline("k"))
         .base_url(server.uri())
         .build(http, basic());
 

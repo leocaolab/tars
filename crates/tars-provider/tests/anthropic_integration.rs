@@ -73,7 +73,7 @@ async fn streaming_text_response_decodes_to_events() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = AnthropicProviderBuilder::new("ant_test", Auth::Inline("ant-key".into()))
+    let provider = AnthropicProviderBuilder::new("ant_test", Auth::inline("ant-key"))
         .base_url(server.uri())
         .build(http, basic());
 
@@ -152,7 +152,7 @@ async fn streaming_tool_call_assembles_args_from_partial_json() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = AnthropicProviderBuilder::new("ant_test", Auth::Inline("k".into()))
+    let provider = AnthropicProviderBuilder::new("ant_test", Auth::inline("k"))
         .base_url(server.uri())
         .build(http, basic());
 
@@ -224,7 +224,7 @@ async fn thinking_blocks_decode_as_thinking_deltas() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = AnthropicProviderBuilder::new("ant_test", Auth::Inline("k".into()))
+    let provider = AnthropicProviderBuilder::new("ant_test", Auth::inline("k"))
         .base_url(server.uri())
         .build(http, basic());
 
@@ -253,7 +253,7 @@ async fn http_401_maps_to_auth_error() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = AnthropicProviderBuilder::new("ant", Auth::Inline("bad".into()))
+    let provider = AnthropicProviderBuilder::new("ant", Auth::inline("bad"))
         .base_url(server.uri())
         .build(http, basic());
 

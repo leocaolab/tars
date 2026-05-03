@@ -44,7 +44,7 @@ async fn streaming_text_response_decodes_to_events() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = GeminiProviderBuilder::new("gem_test", Auth::Inline("gem-key".into()))
+    let provider = GeminiProviderBuilder::new("gem_test", Auth::inline("gem-key"))
         .base_url(server.uri())
         .build(http, basic());
 
@@ -95,7 +95,7 @@ async fn function_call_decodes_to_tool_call_events() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = GeminiProviderBuilder::new("gem_test", Auth::Inline("k".into()))
+    let provider = GeminiProviderBuilder::new("gem_test", Auth::inline("k"))
         .base_url(server.uri())
         .build(http, basic());
 
@@ -133,7 +133,7 @@ async fn safety_filter_block_returns_content_filtered_error() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = GeminiProviderBuilder::new("gem_test", Auth::Inline("k".into()))
+    let provider = GeminiProviderBuilder::new("gem_test", Auth::inline("k"))
         .base_url(server.uri())
         .build(http, basic());
 
@@ -171,7 +171,7 @@ async fn http_403_maps_to_auth_error() {
         .await;
 
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = GeminiProviderBuilder::new("gem_test", Auth::Inline("bad".into()))
+    let provider = GeminiProviderBuilder::new("gem_test", Auth::inline("bad"))
         .base_url(server.uri())
         .build(http, basic());
 

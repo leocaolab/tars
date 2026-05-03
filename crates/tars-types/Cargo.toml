@@ -21,3 +21,4 @@ reqwest.workspace = true  # for ProviderError::from(reqwest::Error)
 
 [dev-dependencies]
 serde_json.workspace = true
+toml = "0.8"

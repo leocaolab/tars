@@ -34,8 +34,16 @@ pub fn vllm(
     auth_resolver: Arc<dyn AuthResolver>,
 ) -> Arc<dyn LlmProvider> {
     let url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+    // Coerce empty-string inline credential to "no auth" — vLLM by
+    // default doesn't authenticate, and `OpenAI SDK / our adapter
+    // would otherwise try to send `Bearer ` (empty), which some
+    // gateways reject. Mirrors Python `api_key="EMPTY"` substitution.
     let normalized_auth = match auth {
-        Auth::Inline(ref s) if s.is_empty() => Auth::None,
+        Auth::Secret { secret: tars_types::SecretRef::Inline { ref value } }
+            if value.is_empty() =>
+        {
+            Auth::None
+        }
         other => other,
     };
     OpenAiProviderBuilder::new(id, normalized_auth)
@@ -105,6 +113,6 @@ mod tests {
         let http = HttpProviderBase::default_arc().unwrap();
         // Should not panic; the empty inline gets coerced to Auth::None
         // before reaching OpenAiProvider's auth resolution.
-        let _ = vllm("vllm_t", None, Auth::Inline(String::new()), http, basic());
+        let _ = vllm("vllm_t", None, Auth::inline(String::new()), http, basic());
     }
 }

@@ -18,11 +18,13 @@ pub mod auth;
 pub mod backends;
 pub mod http_base;
 pub mod provider;
+pub mod registry;
 pub mod tool_buffer;
 
-pub use auth::{Auth, AuthResolver, ResolvedAuth, AuthError};
+pub use auth::{Auth, AuthResolver, ResolvedAuth, AuthError, BasicAuthResolver, basic};
 pub use http_base::{HttpAdapter, HttpProviderBase, HttpProviderConfig};
 pub use provider::{LlmProvider, LlmEventStream};
+pub use registry::{ProviderRegistry, RegistryError};
 pub use tool_buffer::ToolCallBuffer;
 
 // Re-export concrete backends at the crate root for ergonomic use.
