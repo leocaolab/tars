@@ -97,6 +97,7 @@ string_id!(TrajectoryId, "Trajectory node identifier (Doc 04 §3.1).");
 string_id!(PrincipalId, "Principal (caller identity) identifier.");
 string_id!(ProviderId, "Provider instance identifier (e.g. `openai_main`, `local_qwen`).");
 string_id!(L3HandleId, "Internal handle for an L3 explicit cache (Doc 03 §7).");
+string_id!(AgentId, "Agent instance identifier (Doc 04 §4 — `orchestrator`, `worker:code_review`, etc.).");
 
 #[cfg(test)]
 mod tests {

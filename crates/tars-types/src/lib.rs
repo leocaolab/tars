@@ -51,7 +51,7 @@ pub use error::{ErrorClass, ProviderError};
 pub use events::{ChatChunk, ChatEvent, PartialUsage, StopReason};
 pub use http_extras::HttpProviderExtras;
 pub use ids::{
-    L3HandleId, PrincipalId, ProviderId, SessionId, TaskId, TenantId,
+    AgentId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId, TenantId,
     TraceId, TrajectoryId,
 };
 pub use model::{ModelHint, ModelTier, ThinkingMode};

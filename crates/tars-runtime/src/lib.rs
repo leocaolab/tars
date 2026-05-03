@@ -33,10 +33,14 @@
 //!   (today the trajectory IS its event sequence; the struct view
 //!   is a derived projection we'll add when something consumes it).
 
+mod agent;
 mod error;
 mod event;
 mod runtime;
 
+pub use agent::{
+    Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult, SingleShotAgent,
+};
 pub use error::RuntimeError;
 pub use event::{AgentEvent, StepIdempotencyKey};
-pub use runtime::{LocalRuntime, Runtime};
+pub use runtime::{execute_agent_step, AgentExecutionError, LocalRuntime, Runtime};

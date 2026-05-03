@@ -12,10 +12,13 @@ workspace = true
 [dependencies]
 tars-types = { path = "../tars-types" }
 tars-storage = { path = "../tars-storage" }
+tars-pipeline = { path = "../tars-pipeline" }
 
 # Async
 tokio.workspace = true
+tokio-util.workspace = true
 async-trait.workspace = true
+futures.workspace = true
 
 # Serialization
 serde.workspace = true
@@ -34,3 +37,4 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+tars-provider = { path = "../tars-provider" }

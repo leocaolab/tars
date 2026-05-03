@@ -9,12 +9,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use tars_pipeline::LlmService;
 use tars_storage::EventStore;
-use tars_types::TrajectoryId;
+use tars_types::{ChatRequest, TrajectoryId};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::agent::{Agent, AgentContext, AgentError, AgentStepResult};
 use crate::error::RuntimeError;
-use crate::event::AgentEvent;
+use crate::event::{AgentEvent, StepIdempotencyKey};
 
 /// Top-level runtime facade. Implementors decide how to back the
 /// event store (SQLite for personal mode, Postgres for team mode);
@@ -161,6 +164,149 @@ impl Runtime for LocalRuntime {
     async fn list_trajectories(&self) -> Result<Vec<TrajectoryId>, RuntimeError> {
         Ok(self.event_store.list_trajectories().await?)
     }
+}
+
+/// Drive `agent.execute()` through one trajectory step, with full
+/// event-log wrapping. The pattern is the same one `tars-cli`'s
+/// `run.rs` builds inline today; this function is the
+/// reusable-by-future-orchestrators version.
+///
+/// Lifecycle on the trajectory:
+/// 1. Compute `step_seq = high_water + 1`.
+/// 2. Append `AgentEvent::StepStarted` with idempotency key.
+/// 3. Build `AgentContext`; call `agent.execute(ctx, input)`.
+/// 4. On Ok: append `LlmCallCaptured` (one per step — multi-call
+///    agents come later) + `StepCompleted`, return the result.
+/// 5. On Err: append `StepFailed` with classification, return error.
+///
+/// **Does not** write `TrajectoryStarted` / `TrajectoryCompleted` /
+/// `TrajectoryAbandoned` — those are the orchestrator's concern
+/// (one trajectory may run many steps before completing). Caller is
+/// responsible for closing the trajectory when its work is done.
+///
+/// Trajectory writes that fail get propagated as
+/// [`RuntimeError::Storage`] — unlike the CLI's "best-effort,
+/// degrade silently" pattern, here we're an internal building block
+/// where storage failures matter (the next step's `step_seq` would
+/// be wrong if a `StepStarted` write silently dropped).
+pub async fn execute_agent_step(
+    runtime: &dyn Runtime,
+    traj: &TrajectoryId,
+    llm: Arc<dyn LlmService>,
+    agent: Arc<dyn Agent>,
+    input: ChatRequest,
+    cancel: CancellationToken,
+) -> Result<AgentStepResult, AgentExecutionError> {
+    // 1. step_seq = (count of existing StepStarted events) + 1.
+    //    NOT event high-water + 1 — that conflates "trajectory's
+    //    Nth event" with "trajectory's Nth step", off-by-one'ing the
+    //    very first step (TrajectoryStarted occupies event_seq=1, so
+    //    a fresh trajectory's first step would otherwise come out
+    //    as step_seq=2). Doc 04 §3.2 invariant 3 makes step_seq the
+    //    LOGICAL step identifier; event sequencing is orthogonal.
+    let prior = runtime.replay(traj).await?;
+    let step_seq: u32 = (prior
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::StepStarted { .. }))
+        .count() as u32)
+        .saturating_add(1);
+
+    // 2. StepStarted
+    let input_summary = format!(
+        "agent={} model={} messages={}",
+        agent.id(),
+        input.model.label(),
+        input.messages.len()
+    );
+    let idempotency_key = StepIdempotencyKey::compute(traj, step_seq, &input_summary);
+    runtime
+        .append(
+            traj,
+            AgentEvent::StepStarted {
+                traj: traj.clone(),
+                step_seq,
+                agent: agent.id().to_string(),
+                idempotency_key,
+                input_summary,
+            },
+        )
+        .await
+        .map_err(AgentExecutionError::Runtime)?;
+
+    // 3. agent.execute()
+    let ctx = AgentContext { trajectory_id: traj.clone(), step_seq, llm, cancel };
+    let provider_for_log = guess_provider_id(&input);
+    let result = agent.clone().execute(ctx, input).await;
+
+    // 4 / 5. log outcome
+    match result {
+        Ok(step_result) => {
+            runtime
+                .append(
+                    traj,
+                    AgentEvent::LlmCallCaptured {
+                        traj: traj.clone(),
+                        step_seq,
+                        provider: provider_for_log.clone(),
+                        prompt_summary: format!("agent={}", agent.id()),
+                        response_summary: step_result.output.summary(200),
+                        usage: step_result.usage,
+                    },
+                )
+                .await
+                .map_err(AgentExecutionError::Runtime)?;
+            runtime
+                .append(
+                    traj,
+                    AgentEvent::StepCompleted {
+                        traj: traj.clone(),
+                        step_seq,
+                        output_summary: step_result.output.summary(200),
+                        usage: step_result.usage,
+                    },
+                )
+                .await
+                .map_err(AgentExecutionError::Runtime)?;
+            Ok(step_result)
+        }
+        Err(agent_err) => {
+            let classification = agent_err.classification().to_string();
+            runtime
+                .append(
+                    traj,
+                    AgentEvent::StepFailed {
+                        traj: traj.clone(),
+                        step_seq,
+                        error: format!("{agent_err}"),
+                        classification,
+                    },
+                )
+                .await
+                .map_err(AgentExecutionError::Runtime)?;
+            Err(AgentExecutionError::Agent(agent_err))
+        }
+    }
+}
+
+/// Best-effort: stamp the LlmCallCaptured event with which provider
+/// was targeted. Today every consumer passes `ModelHint::Explicit`,
+/// and the provider id ≈ "the model name" at this layer (the
+/// pipeline's RoutingService picks the actual provider). When
+/// Routing surfaces "which provider actually answered" through the
+/// stream, this becomes the real value; until then it's a label.
+fn guess_provider_id(req: &ChatRequest) -> tars_types::ProviderId {
+    tars_types::ProviderId::new(req.model.label())
+}
+
+/// Errors that escape from [`execute_agent_step`]. Splits Agent
+/// failures (the model said no, the prompt was malformed) from
+/// Runtime failures (the event store is down).
+#[derive(Debug, thiserror::Error)]
+pub enum AgentExecutionError {
+    #[error("agent: {0}")]
+    Agent(#[from] AgentError),
+    #[error("runtime: {0}")]
+    Runtime(#[from] RuntimeError),
 }
 
 #[cfg(test)]

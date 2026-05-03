@@ -1901,14 +1901,18 @@ name = "tars-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "serde",
  "serde_json",
  "sha2",
+ "tars-pipeline",
+ "tars-provider",
  "tars-storage",
  "tars-types",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
