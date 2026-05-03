@@ -7,6 +7,7 @@ members = [
     "crates/tars-pipeline",
     "crates/tars-cache",
     "crates/tars-melt",
+    "crates/tars-storage",
     "crates/tars-cli",
 ]
 

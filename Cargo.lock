@@ -1894,6 +1894,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tars-storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tars-types",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tars-types"
 version = "0.1.0"
 dependencies = [
