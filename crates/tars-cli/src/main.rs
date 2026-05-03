@@ -20,6 +20,7 @@ mod config_loader;
 mod dispatch;
 mod event_store;
 mod plan;
+mod probe;
 mod run;
 mod run_task;
 mod trajectory;
@@ -54,6 +55,10 @@ enum Command {
     Plan(plan::PlanArgs),
     /// Drive the multi-step Orchestrator → Worker → Critic loop end-to-end.
     RunTask(run_task::RunTaskArgs),
+    /// Sanity-check a CLI provider (`claude_cli` / `gemini_cli` / `codex_cli`) — sends
+    /// a fixed "say hi" prompt and dumps every event so you can see what the
+    /// subprocess actually returns.
+    Probe(probe::ProbeArgs),
     /// Inspect the trajectory event log written by `tars run` / `tars plan` / `tars run-task`.
     Trajectory(trajectory::TrajectoryArgs),
 }
@@ -73,6 +78,7 @@ async fn main() -> ExitCode {
         Command::Run(args) => run::execute(args, cli.config).await,
         Command::Plan(args) => plan::execute(args, cli.config).await,
         Command::RunTask(args) => run_task::execute(args, cli.config).await,
+        Command::Probe(args) => probe::execute(args, cli.config).await,
         Command::Trajectory(args) => trajectory::execute(args).await,
     };
 
