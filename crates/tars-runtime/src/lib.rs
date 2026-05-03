@@ -36,6 +36,7 @@
 mod agent;
 mod error;
 mod event;
+mod orchestrator;
 mod runtime;
 
 pub use agent::{
@@ -43,4 +44,5 @@ pub use agent::{
 };
 pub use error::RuntimeError;
 pub use event::{AgentEvent, StepIdempotencyKey};
+pub use orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep};
 pub use runtime::{execute_agent_step, AgentExecutionError, LocalRuntime, Runtime};

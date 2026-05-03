@@ -240,44 +240,62 @@ impl Agent for SingleShotAgent {
         ctx: AgentContext,
         input: ChatRequest,
     ) -> Result<AgentStepResult, AgentError> {
-        // Shape an LLM RequestContext from what AgentContext gives us.
-        // IAM / principal / tenant come once tars-security exists; for
-        // now we use the test default and inherit cancel.
-        let mut req_ctx = RequestContext::test_default();
-        req_ctx.cancel = ctx.cancel.clone();
+        drive_llm_call(ctx, input).await
+    }
+}
 
-        let llm = ctx.llm.clone();
+/// Shared helper: drive one LLM call to completion through `ctx.llm`,
+/// drain the stream, return the result as [`AgentStepResult`].
+///
+/// `pub(crate)` so concrete agents whose contract is "wrap one LLM
+/// call" (today: [`SingleShotAgent`], [`crate::OrchestratorAgent`])
+/// can delegate without duplicating the cancel-aware drain. Agents
+/// that do something more complex (multi-call, tool-loop, planner
+/// with self-critique) build their own loops on top.
+///
+/// Cancellation: races `ctx.cancel.cancelled()` against
+/// (a) the LLM stream open AND
+/// (b) every event poll
+/// so a Drop'd parent doesn't leave the subprocess / HTTP connection
+/// hanging.
+pub(crate) async fn drive_llm_call(
+    ctx: AgentContext,
+    input: ChatRequest,
+) -> Result<AgentStepResult, AgentError> {
+    // Shape an LLM RequestContext from what AgentContext gives us.
+    // IAM / principal / tenant come once tars-security exists; for
+    // now we use the test default and inherit cancel.
+    let mut req_ctx = RequestContext::test_default();
+    req_ctx.cancel = ctx.cancel.clone();
 
-        // Race the LLM open against cancel — fast-fail if cancelled
-        // before the provider even gets the request.
-        let stream_result = tokio::select! {
+    let llm = ctx.llm.clone();
+
+    // Race the LLM open against cancel — fast-fail if cancelled
+    // before the provider even gets the request.
+    let stream_result = tokio::select! {
+        biased;
+        _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+        r = llm.call(input, req_ctx) => r,
+    };
+    let mut stream = stream_result?;
+
+    let mut builder = ChatResponseBuilder::new();
+    loop {
+        let event = tokio::select! {
             biased;
             _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
-            r = llm.call(input, req_ctx) => r,
+            ev = stream.next() => ev,
         };
-        let mut stream = stream_result?;
-
-        let mut builder = ChatResponseBuilder::new();
-        loop {
-            let event = tokio::select! {
-                biased;
-                _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
-                ev = stream.next() => ev,
-            };
-            match event {
-                Some(Ok(ev)) => builder.apply(ev),
-                Some(Err(e)) => return Err(AgentError::Provider(e)),
-                None => break,
-            }
+        match event {
+            Some(Ok(ev)) => builder.apply(ev),
+            Some(Err(e)) => return Err(AgentError::Provider(e)),
+            None => break,
         }
-        let response = builder.finish();
-
-        let output = AgentOutput::from_response_parts(
-            response.text,
-            response.tool_calls,
-        );
-        Ok(AgentStepResult { output, usage: response.usage })
     }
+    let response = builder.finish();
+
+    let output = AgentOutput::from_response_parts(response.text, response.tool_calls);
+    Ok(AgentStepResult { output, usage: response.usage })
 }
 
 #[cfg(test)]
