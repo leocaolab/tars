@@ -1,0 +1,37 @@
+[package]
+name = "tars-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "TARS Runtime CLI — `tars run`, `tars config`, etc."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tars"
+path = "src/main.rs"
+
+[dependencies]
+tars-types = { path = "../tars-types" }
+tars-config = { path = "../tars-config" }
+tars-provider = { path = "../tars-provider" }
+tars-pipeline = { path = "../tars-pipeline" }
+
+# Async
+tokio.workspace = true
+futures.workspace = true
+
+# CLI
+clap.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde_json.workspace = true

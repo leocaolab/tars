@@ -5,6 +5,7 @@ members = [
     "crates/tars-config",
     "crates/tars-provider",
     "crates/tars-pipeline",
+    "crates/tars-cli",
 ]
 
 [workspace.package]
@@ -41,6 +42,12 @@ thiserror = "1"
 
 # Tracing (instrumentation only — full MELT stack later)
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+anyhow = "1"
+dirs = "5"
 
 # Time
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
