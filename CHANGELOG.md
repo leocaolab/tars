@@ -37,6 +37,37 @@ ContextStore + ContextCompactor, PromptBuilder, Backtrack + Saga,
 `tars trajectory replay`. None of these block the M3 acceptance
 criteria; they're enhancements to a fully functional baseline.
 
+### Audit pin: `system_prompt_hash` in `LlmCallCaptured` (`8b60ecc`)
+
+L-1 enterprise follow-on. Given the trajectory log alone, an
+external auditor can now independently verify "this LLM call used
+SHA256(...) as its system prompt", then match that hash against
+the prompt source shipped in the binary (e.g. `sha256sum read_file.txt`
+at the relevant git revision).
+
+- New field: `AgentEvent::LlmCallCaptured::system_prompt_hash:
+  Option<String>` (`#[serde(default)]` for migration safety — old
+  rows without the field deserialise as `None`).
+- New helper: `tars_runtime::event::hash_system_prompt(Option<&str>)
+  -> Option<String>`. Plain SHA256 hex of the bytes, no version
+  prefix → trivial external verification.
+- `execute_agent_step` snapshots the hash from `req.system` before
+  the request moves into `agent.execute`.
+- `None` means no system prompt was sent; distinct from
+  `Some(sha256(""))` (system prompt present but empty) — different
+  audit fact.
+- Scope: hashes ONLY the system prompt, not the full request
+  fingerprint (tools / structured_output / user turns). System
+  prompt is the highest-value audit target — it's the model's
+  standing instructions.
+- Coverage: `tars run-task` (multi-step trajectories) pins every
+  LLM call. `tars run` (single-call path) leaves the field `None`
+  — threading the system prompt through `TrajectoryLogger` is a
+  separate small refactor.
+- 8 new unit tests pin determinism, format (64-char lowercase hex),
+  none-vs-empty distinction, external SHA256 match, serde
+  round-trip, and migration safety for old payloads.
+
 ### opencode-borrow P1 wave: L-1 + L-3 + L-4 (`7290e27` / `c5d8e5d`)
 
 First three `defer > delete > implement` items from the opencode
