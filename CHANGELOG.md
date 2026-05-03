@@ -37,6 +37,48 @@ ContextStore + ContextCompactor, PromptBuilder, Backtrack + Saga,
 `tars trajectory replay`. None of these block the M3 acceptance
 criteria; they're enhancements to a fully functional baseline.
 
+### Audit fixes — round 4 (`57c893d`)
+
+A.R.C. run `1d8e3308` against `148cda5`. Ergonomics + actionability
+fixes across 7 files:
+
+- **tars-cache/error.rs**: explicit test that `CacheError::Serialize`
+  is NOT classified as `is_not_cacheable` (a refactor of the helper
+  could silently misclassify it without coverage).
+- **tars-config/error.rs + manager.rs**: `ValidationError` gets the
+  `thiserror::Error` derive (cleaner Display via `#[error("...")]`,
+  drops the hand-rolled fmt impl). New `ConfigError::validation_failed`
+  ctor with `debug_assert` against an empty error list — prevents
+  the "config validation failed (0)" footgun.
+- **tars-config/builtin.rs**: better panic messages in tests
+  (expect/got context instead of bare `panic!`); borrow on match
+  arms to avoid moves before formatted-panic branches.
+- **tars-provider/auth.rs**: empty/whitespace env vars + empty
+  credential files now surface as `AuthError::Missing` instead of
+  becoming a mysterious downstream 401.
+- **tars-types/context.rs**: split `is_deadline_exceeded` out from
+  `is_cancelled`, but `is_cancelled` now ORs with it so deadline
+  expiration cancels in-flight requests cleanly. Callers wanting to
+  distinguish caller-cancel from hard timeout get the separate
+  accessor.
+- **tars-pipeline/cache.rs**: cache-write failure log now includes
+  the cache key's `debug_label` so warnings are actionable.
+
+### `PromptBuilder` extraction (`8fdeed1`)
+
+By the end of M3 four agents (Orchestrator + Critic + WorkerStub +
+WorkerTools) had hand-rolled the same six lines: `ChatRequest::user`
++ system prompt + structured_output + `temperature=0.0` + optional
+`tools`. Trigger-4 reached → extracted to `PromptBuilder` (fluent
+recipe builder), 7 unit tests + all 60+ existing agent tests still
+green.
+
+What this is **not**: Doc 04 §6's full block-composition
+PromptBuilder (persona + role + tool-doc + format-rules as separate
+typed blocks). No agent today has multi-source prompts; the block
+variant slots in once a second persona ships (probably alongside
+multi-tenant work in M6).
+
 ### WorkerAgent + tools — stub becomes real (`148cda5`)
 
 Wires the new `tars-tools` crate into WorkerAgent. The stub still
@@ -108,6 +150,23 @@ plumbing (`ToolSpec` / `ToolCall` / `Message::Tool`) already lived in
 - 19 unit tests covering trait basics, registry register/get/names/
   dispatch, ReadFileTool happy + jail + size cap + binary + cancel +
   invalid args + missing file paths.
+
+### `tars run-task --tools` flag (`87845aa`)
+
+Capstone on M3. Wires `fs.read_file` (jailed to cwd by default) into
+the CLI's WorkerAgent so `tars run-task -g "summarise the README in
+this repo" --tools` actually drives a real tool-using triad — no
+Rust call-site needed.
+
+- `--tools` enables the default safe set (today: `fs.read_file` only;
+  read-only ones like `fs.list_dir` / `git.fetch_pr_diff` /
+  `web.fetch` will join as they ship).
+- `--tools-root <PATH>` overrides the jail root (default: process cwd).
+- Side-effecting tools (`fs.write_file`, `shell.exec`) won't join the
+  default set — they'll get explicit opt-in flags so the safe baseline
+  stays safe.
+- Stderr prints the enabled tool list + jail root before any prompt
+  fires.
 
 ### `tars run-task <goal>` CLI subcommand (`959be20`)
 
