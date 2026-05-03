@@ -16,6 +16,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tars_melt::TelemetryConfig;
 
+mod bench;
 mod config_loader;
 mod dispatch;
 mod event_store;
@@ -59,6 +60,9 @@ enum Command {
     /// a fixed "say hi" prompt and dumps every event so you can see what the
     /// subprocess actually returns.
     Probe(probe::ProbeArgs),
+    /// Benchmark a provider — N iterations, reports TTFB / total / decode tok/s
+    /// as mean / p50 / p99. Useful for comparing local model throughput.
+    Bench(bench::BenchArgs),
     /// Inspect the trajectory event log written by `tars run` / `tars plan` / `tars run-task`.
     Trajectory(trajectory::TrajectoryArgs),
 }
@@ -79,6 +83,7 @@ async fn main() -> ExitCode {
         Command::Plan(args) => plan::execute(args, cli.config).await,
         Command::RunTask(args) => run_task::execute(args, cli.config).await,
         Command::Probe(args) => probe::execute(args, cli.config).await,
+        Command::Bench(args) => bench::execute(args, cli.config).await,
         Command::Trajectory(args) => trajectory::execute(args).await,
     };
 
