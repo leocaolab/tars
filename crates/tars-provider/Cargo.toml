@@ -1,0 +1,39 @@
+[package]
+name = "tars-provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LLM Provider trait + HTTP/CLI/embedded backends (Doc 01)"
+
+[lints]
+workspace = true
+
+[dependencies]
+tars-types = { path = "../tars-types" }
+
+# Async
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+pin-project-lite.workspace = true
+
+# Serde
+serde.workspace = true
+serde_json.workspace = true
+
+# HTTP / SSE
+reqwest.workspace = true
+eventsource-stream.workspace = true
+url.workspace = true
+
+# Errors / tracing
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+wiremock.workspace = true
+serde_json.workspace = true

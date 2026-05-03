@@ -1,0 +1,23 @@
+[package]
+name = "tars-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared core types for TARS Runtime (Doc 01 §4)"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+url.workspace = true
+tokio-util.workspace = true
+reqwest.workspace = true  # for ProviderError::from(reqwest::Error)
+
+[dev-dependencies]
+serde_json.workspace = true
