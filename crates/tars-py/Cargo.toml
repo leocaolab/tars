@@ -24,6 +24,12 @@ tars-types = { path = "../tars-types" }
 tars-config = { path = "../tars-config" }
 tars-provider = { path = "../tars-provider" }
 tars-pipeline = { path = "../tars-pipeline" }
+tars-cache = { path = "../tars-cache" }
+
+# Async — process-wide tokio runtime owned by tars-py for blocking
+# Python `complete()` calls onto async LlmService.call.
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+futures.workspace = true
 
 # PyO3 with the abi3 feature so a single wheel works across multiple
 # Python versions (3.10+). The "extension-module" feature suppresses

@@ -2025,12 +2025,15 @@ dependencies = [
 name = "tars-py"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "pyo3",
+ "tars-cache",
  "tars-config",
  "tars-pipeline",
  "tars-provider",
  "tars-types",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 

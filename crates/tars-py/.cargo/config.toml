@@ -1,0 +1,23 @@
+# Per-crate linker config so plain `cargo build` / `cargo test` of the
+# tars-py cdylib don't fail with undefined Python symbols. maturin
+# sets these via env vars when it builds, but a plain cargo invocation
+# (e.g. workspace-wide `cargo test --workspace`, or VS Code's
+# rust-analyzer build-on-save) doesn't go through maturin and would
+# otherwise hit a linker error on the `_Py_*` symbols.
+#
+# `dynamic_lookup` (macOS) / `--unresolved-symbols=ignore-all` (Linux)
+# tells the linker "leave these symbols for the dynamic loader to
+# resolve at import time" — which is exactly what happens when Python
+# loads the .so.
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--unresolved-symbols=ignore-all"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--unresolved-symbols=ignore-all"]

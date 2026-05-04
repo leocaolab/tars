@@ -1,9 +1,30 @@
 """TARS — Rust-backed multi-provider LLM runtime exposed as a Python package.
 
-This is the public surface; the ``tars._tars_py`` submodule is the
-compiled extension and is considered private.
+Three layered surfaces:
+
+- ``Provider`` — raw backend, no middleware. Use when you want to manage
+  cache / retry / circuit breaker yourself in Python.
+- ``Pipeline`` — middleware-wrapped backend (cache + retry + telemetry
+  engaged automatically). The common case for production use.
+- ``run_task`` (deferred to a future commit) — full agent runtime
+  (Orchestrator → Worker → Critic) exposed as a single function call.
+
+The ``tars._tars_py`` submodule is the compiled extension and is
+considered private.
 """
 
-from tars._tars_py import version
+from tars._tars_py import (
+    Pipeline,
+    Provider,
+    Response,
+    Usage,
+    version,
+)
 
-__all__ = ["version"]
+__all__ = [
+    "Pipeline",
+    "Provider",
+    "Response",
+    "Usage",
+    "version",
+]

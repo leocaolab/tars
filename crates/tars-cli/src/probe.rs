@@ -69,6 +69,13 @@ pub struct ProbeArgs {
     /// the model can answer cheaply.
     #[arg(short, long)]
     pub prompt: Option<String>,
+
+    /// Cap output tokens. `None` = let the server decide (most
+    /// servers default to 512-1024). Useful when probing for code
+    /// generation: pass a higher cap so the model isn't truncated
+    /// mid-answer.
+    #[arg(long)]
+    pub max_tokens: Option<u32>,
 }
 
 const DEFAULT_PROMPT: &str = "Say exactly: hello from your provider. Nothing else.";
@@ -103,7 +110,8 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
         )
     })?;
 
-    let req = ChatRequest::user(ModelHint::Explicit(model.clone()), prompt);
+    let mut req = ChatRequest::user(ModelHint::Explicit(model.clone()), prompt);
+    req.max_output_tokens = args.max_tokens;
 
     eprintln!(
         "── tars probe {} (model={model}) ──",
