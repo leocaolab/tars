@@ -71,9 +71,12 @@ pub struct BenchArgs {
     pub repeat: u32,
 
     /// Number of warmup iterations whose timings are discarded.
-    /// Default 1 — covers the cold-cache / first-token-of-session
-    /// latency that's not representative of steady-state throughput.
-    #[arg(short, long, default_value_t = 1)]
+    /// Default 2 — local model servers (LM Studio / llama.cpp / mlx)
+    /// often need a couple of cold-load + first-token-of-session
+    /// passes before steady state. Cloud APIs only really need 1.
+    /// Iters with `out=0` (model still loading; see warning in
+    /// summary) are also excluded from stats automatically.
+    #[arg(short, long, default_value_t = 2)]
     pub warmup: u32,
 
     /// Cap output tokens per iteration. Capping makes cross-model
@@ -249,14 +252,33 @@ fn print_summary(provider_id: &str, model: &str, samples: &[Sample]) {
         return;
     }
 
-    let n = samples.len();
+    // Anomalous iters: zero generated tokens despite having spent
+    // real wall time. Almost always means LM Studio (or another
+    // local server) was still loading the model on this iter and
+    // returned an empty response. Including them tanks the mean.
+    let anomalous = samples.iter().filter(|s| s.generated_tokens() == 0).count();
+    let valid: Vec<&Sample> =
+        samples.iter().filter(|s| s.generated_tokens() > 0).collect();
+
+    if valid.is_empty() {
+        println!();
+        println!("── stats ── (provider={provider_id}, model={model})");
+        println!(
+            "  ALL {} iterations had 0 generated tokens — model probably never loaded.",
+            samples.len(),
+        );
+        println!("  Try bumping --warmup or check the server logs.");
+        return;
+    }
+
+    let n = valid.len();
     let mut ttfbs_ms: Vec<f64> =
-        samples.iter().map(|s| s.ttfb.as_secs_f64() * 1000.0).collect();
-    let mut totals_s: Vec<f64> = samples.iter().map(|s| s.total.as_secs_f64()).collect();
-    let mut decodes: Vec<f64> = samples.iter().map(Sample::decode_tok_per_sec).collect();
-    let mut outs: Vec<u64> = samples.iter().map(|s| s.out_tokens).collect();
-    let mut ins: Vec<u64> = samples.iter().map(|s| s.in_tokens).collect();
-    let thinking_total: u64 = samples.iter().map(|s| s.thinking_tokens).sum();
+        valid.iter().map(|s| s.ttfb.as_secs_f64() * 1000.0).collect();
+    let mut totals_s: Vec<f64> = valid.iter().map(|s| s.total.as_secs_f64()).collect();
+    let mut decodes: Vec<f64> = valid.iter().map(|s| s.decode_tok_per_sec()).collect();
+    let mut outs: Vec<u64> = valid.iter().map(|s| s.out_tokens).collect();
+    let mut ins: Vec<u64> = valid.iter().map(|s| s.in_tokens).collect();
+    let thinking_total: u64 = valid.iter().map(|s| s.thinking_tokens).sum();
 
     ttfbs_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
     totals_s.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -274,7 +296,17 @@ fn print_summary(provider_id: &str, model: &str, samples: &[Sample]) {
     };
 
     println!();
-    println!("── stats ── (provider={provider_id}, model={model}, n={n})");
+    if anomalous > 0 {
+        println!(
+            "── stats ── (provider={provider_id}, model={model}, n={n} valid + {anomalous} skipped)",
+        );
+        println!(
+            "  ⚠  {anomalous} iter(s) had 0 generated tokens (model still loading?) — \
+             excluded from stats. Bump --warmup to absorb them.",
+        );
+    } else {
+        println!("── stats ── (provider={provider_id}, model={model}, n={n})");
+    }
     println!(
         "  TTFB     mean={:>7.0}ms   p50={:>7.0}ms   p99={:>7.0}ms",
         mean_f(&ttfbs_ms),
