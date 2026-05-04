@@ -226,3 +226,20 @@ Cargo.lock.bak
 # Gemini CLI local data
 .arc/
 
+# === Secrets / live config (extra belt-and-suspenders) ===
+# .env is already covered above via the Python "Environments" block.
+# Add explicit patterns for TARS-specific files that often carry real
+# API keys so they can't accidentally land in commits even if dropped
+# at the repo root or inside a crate dir.
+secrets.toml
+**/secrets.toml
+api_keys.toml
+**/api_keys.toml
+.env.local
+*.env.local
+# Local TARS user config (one-off probe / bench setups; commonly hold
+# real keys). The shipped tars-config docs use plain `config.toml` for
+# the canonical example, so be specific: only `.local.toml` is ignored.
+config.local.toml
+**/config.local.toml
+
