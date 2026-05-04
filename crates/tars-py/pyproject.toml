@@ -1,0 +1,44 @@
+# maturin build config for the tars Python package.
+#
+# Build (one-time per env):
+#   pip install maturin    # or `uv tool install maturin`
+#
+# Build + install into current env (development):
+#   maturin develop --release
+#
+# Build a redistributable wheel:
+#   maturin build --release           # → target/wheels/*.whl
+#
+# The compiled extension is named `tars_py` (matches Cargo.toml [lib]
+# name + #[pymodule] symbol) but published as the `tars` package via
+# the module-name setting below — so end-user code is `import tars`.
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "tars"
+version = "0.1.0"
+description = "TARS — Rust-backed multi-provider LLM runtime + agent loop, exposed as a Python package."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.urls]
+Repository = "https://github.com/moomoo-tech/tars"
+
+[tool.maturin]
+# `tars_py` is the cdylib that cargo produces; we publish it as
+# `tars` so consumers write `import tars` not `import tars_py`.
+module-name = "tars._tars_py"
+python-source = "python"
+features = ["pyo3/extension-module"]
+# abi3-py310 → one wheel works on 3.10/3.11/3.12/3.13 without rebuild.

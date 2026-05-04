@@ -1,0 +1,35 @@
+[package]
+name = "tars-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Python bindings for tars — drop-in replacement for ARC's Python LLMClient + future agent runtime."
+
+# `cdylib` produces the .so/.pyd that Python imports.
+# `rlib` so other Rust crates in the workspace can use it (test harness etc).
+[lib]
+# Must match the #[pymodule] fn name (which becomes PyInit_<name>)
+# AND the leading underscore in pyproject.toml's `module-name =
+# "tars._tars_py"`. Python imports as `tars._tars_py`; the public
+# `tars` namespace re-exports via python/tars/__init__.py.
+name = "_tars_py"
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+tars-types = { path = "../tars-types" }
+tars-config = { path = "../tars-config" }
+tars-provider = { path = "../tars-provider" }
+tars-pipeline = { path = "../tars-pipeline" }
+
+# PyO3 with the abi3 feature so a single wheel works across multiple
+# Python versions (3.10+). The "extension-module" feature suppresses
+# Python's symbols-being-undefined check during cargo build.
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+
+# Errors / tracing
+thiserror.workspace = true
+tracing.workspace = true

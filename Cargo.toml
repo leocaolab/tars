@@ -11,6 +11,24 @@ members = [
     "crates/tars-runtime",
     "crates/tars-tools",
     "crates/tars-cli",
+    "crates/tars-py",
+]
+# tars-py is a PyO3 cdylib — `cargo build` can't link it without a
+# Python interpreter on the link line. Exclude from default builds so
+# `cargo build --workspace` / `cargo test --workspace` keep working;
+# build it explicitly via `maturin develop` / `maturin build` from
+# inside the crate dir.
+default-members = [
+    "crates/tars-types",
+    "crates/tars-config",
+    "crates/tars-provider",
+    "crates/tars-pipeline",
+    "crates/tars-cache",
+    "crates/tars-melt",
+    "crates/tars-storage",
+    "crates/tars-runtime",
+    "crates/tars-tools",
+    "crates/tars-cli",
 ]
 
 [workspace.package]
