@@ -75,6 +75,15 @@ pub struct BenchArgs {
     /// latency that's not representative of steady-state throughput.
     #[arg(short, long, default_value_t = 1)]
     pub warmup: u32,
+
+    /// Cap output tokens per iteration. Capping makes cross-model
+    /// comparison fair (different models pick different output
+    /// lengths for the same prompt; capping forces "how fast does
+    /// each model generate the same N tokens?") AND keeps each iter
+    /// fast for local-model bench loops. `None` lets the model
+    /// decide.
+    #[arg(long, default_value_t = 100)]
+    pub max_tokens: u32,
 }
 
 #[derive(Debug)]
@@ -87,17 +96,28 @@ struct Sample {
 }
 
 impl Sample {
-    /// Decode tokens-per-second: output tokens divided by the time
-    /// AFTER the first byte. Excludes connection / queue / first-
-    /// token latency so this is the model's pure generation speed.
-    /// Returns 0.0 when output is empty (avoid div-by-zero spam).
+    /// Total tokens generated across both channels (visible + reasoning).
+    /// Used as the numerator for decode rate so reasoning models like
+    /// Qwen3-thinking / DeepSeek-R1 / o1 don't appear "0 tok/s" just
+    /// because they put output in `reasoning_content` rather than
+    /// `content`.
+    fn generated_tokens(&self) -> u64 {
+        self.out_tokens.saturating_add(self.thinking_tokens)
+    }
+
+    /// Decode tokens-per-second: total generated tokens (visible +
+    /// reasoning) divided by the time AFTER the first generated
+    /// token arrives. Excludes connection / queue / first-token
+    /// latency so this is the model's pure generation speed. Returns
+    /// 0.0 when no tokens were generated (avoid div-by-zero spam).
     fn decode_tok_per_sec(&self) -> f64 {
         let decode_time = self.total.saturating_sub(self.ttfb);
         let secs = decode_time.as_secs_f64();
-        if self.out_tokens == 0 || secs <= 0.0 {
+        let total_gen = self.generated_tokens();
+        if total_gen == 0 || secs <= 0.0 {
             return 0.0;
         }
-        self.out_tokens as f64 / secs
+        total_gen as f64 / secs
     }
 }
 
@@ -128,9 +148,10 @@ pub async fn execute(args: BenchArgs, config_path: Option<PathBuf>) -> Result<()
     })?;
 
     eprintln!(
-        "── tars bench {} (model={model}, prompt={} chars, {} warmup + {} measured) ──",
+        "── tars bench {} (model={model}, prompt={} chars, max_tokens={}, {} warmup + {} measured) ──",
         args.provider,
         prompt.chars().count(),
+        args.max_tokens,
         args.warmup,
         args.repeat,
     );
@@ -140,7 +161,7 @@ pub async fn execute(args: BenchArgs, config_path: Option<PathBuf>) -> Result<()
     // first-token-of-session warmup.
     for i in 0..args.warmup {
         eprint!("  warmup {}/{}  ", i + 1, args.warmup);
-        match run_one(provider.clone(), &model, prompt).await {
+        match run_one(provider.clone(), &model, prompt, args.max_tokens).await {
             Ok(s) => eprintln!(
                 "ttfb={:>6.0}ms  total={:>6.2}s  out={}  decode={:>5.1} tok/s",
                 s.ttfb.as_secs_f64() * 1000.0,
@@ -158,7 +179,7 @@ pub async fn execute(args: BenchArgs, config_path: Option<PathBuf>) -> Result<()
     let mut samples: Vec<Sample> = Vec::with_capacity(args.repeat as usize);
     for i in 0..args.repeat {
         eprint!("  iter   {}/{}  ", i + 1, args.repeat);
-        let s = run_one(provider.clone(), &model, prompt)
+        let s = run_one(provider.clone(), &model, prompt, args.max_tokens)
             .await
             .with_context(|| format!("iteration {} failed", i + 1))?;
         eprintln!(
@@ -179,8 +200,10 @@ async fn run_one(
     provider: Arc<dyn tars_provider::LlmProvider>,
     model: &str,
     prompt: &str,
+    max_tokens: u32,
 ) -> Result<Sample> {
-    let req = ChatRequest::user(ModelHint::Explicit(model.into()), prompt);
+    let mut req = ChatRequest::user(ModelHint::Explicit(model.into()), prompt);
+    req.max_output_tokens = Some(max_tokens);
     let started_at = Instant::now();
     let mut stream = Arc::clone(&provider)
         .stream(req, RequestContext::test_default())
@@ -192,7 +215,13 @@ async fn run_one(
     while let Some(ev) = stream.next().await {
         let ev = ev.context("stream item errored")?;
         match ev {
-            ChatEvent::Delta { .. } if ttfb.is_none() => {
+            // TTFB = first generated token (visible OR reasoning).
+            // Reasoning-only output streams (o1 / DeepSeek-R1 in
+            // some configs) would otherwise never fire a Delta and
+            // TTFB would falsely fall back to total.
+            ChatEvent::Delta { .. } | ChatEvent::ThinkingDelta { .. }
+                if ttfb.is_none() =>
+            {
                 ttfb = Some(started_at.elapsed());
             }
             ChatEvent::Finished { usage, .. } => {

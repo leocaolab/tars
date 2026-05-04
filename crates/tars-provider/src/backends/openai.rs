@@ -465,6 +465,18 @@ impl HttpAdapter for OpenAiAdapter {
 
         for choice in choices {
             let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
+            // Reasoning channel — emitted as a separate field by o1 /
+            // DeepSeek-R1 / Qwen3-thinking / many LM Studio models.
+            // Surface as ThinkingDelta so consumers can route it to
+            // a separate display channel and our Usage's
+            // thinking_tokens accumulator picks it up. Ordering: most
+            // models emit reasoning BEFORE content per chunk, so emit
+            // ThinkingDelta first when both are present.
+            if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str())
+                && !reasoning.is_empty()
+            {
+                out.push(ChatEvent::ThinkingDelta { text: reasoning.to_string() });
+            }
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                 if !content.is_empty() {
                     out.push(ChatEvent::Delta { text: content.to_string() });
