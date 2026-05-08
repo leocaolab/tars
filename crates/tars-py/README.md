@@ -53,7 +53,7 @@ def must_be_json(req, resp):
         json.loads(resp["text"])
         return tars.Pass()
     except ValueError as e:
-        return tars.Reject(reason=f"not JSON: {e}", retriable=False)
+        return tars.Reject(reason=f"not JSON: {e}")
 
 def strip_pii(req, resp):
     cleaned = resp["text"].replace(USER_EMAIL, "[REDACTED]")
@@ -67,9 +67,11 @@ p = tars.Pipeline.from_default(
     ],
 )
 
-# Reject(retriable=False) → TarsProviderError(kind="validation_failed",
-#                                              is_retriable=False)
-# Reject(retriable=True)  → triggers Retry middleware (re-asks the model)
+# tars.Reject(...) → TarsProviderError(kind="validation_failed",
+#                                       is_retriable=False)
+# Always Permanent (W4 cut the retriable flag). RetryMiddleware does
+# not retry on validation failures — caller handles model resampling
+# at their own layer with prompt variation.
 ```
 
 A buggy validator that raises a Python exception is caught by the
