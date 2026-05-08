@@ -12,7 +12,7 @@
 //! - [`tool_buffer`] — accumulates streaming tool calls (Doc 01 §8.1)
 //! - [`backends`] — concrete provider implementations
 //!
-//! See `docs/01-llm-provider.md`.
+//! See `docs/architecture/01-llm-provider.md`.
 
 pub mod auth;
 pub mod backends;

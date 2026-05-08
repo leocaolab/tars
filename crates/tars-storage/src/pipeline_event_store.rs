@@ -1,6 +1,6 @@
 //! [`PipelineEventStore`] — durable stream of one event per
 //! `Pipeline.call` boundary. See
-//! [Doc 17](../../../docs/17-pipeline-event-store.md).
+//! [Doc 17](../../../docs/architecture/17-pipeline-event-store.md).
 //!
 //! Distinct from [`crate::EventStore`] (trajectory event log, keyed
 //! by `TrajectoryId`). Different access patterns: this trait queries

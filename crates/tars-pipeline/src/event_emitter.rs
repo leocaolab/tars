@@ -1,6 +1,6 @@
 //! `EventEmitterMiddleware` — emits one `LlmCallFinished` per
 //! `Pipeline.call` boundary to a `PipelineEventStore` + `BodyStore`.
-//! See [Doc 17 §8](../../docs/17-pipeline-event-store.md).
+//! See [Doc 17 §8](../../docs/architecture/17-pipeline-event-store.md).
 //!
 //! Position in the onion: **outermost layer** (added FIRST to the
 //! builder so it ends up wrapping everything else). Reads telemetry +

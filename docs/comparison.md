@@ -200,7 +200,7 @@ Concrete signals:
 - You serve multiple customers and **tenant isolation is a contractual obligation** (HIPAA, SOC 2, vendor lock concerns).
 - You need to **debug a tool-loop failure** weeks after it happened and you want the full trajectory recoverable from event log.
 - You want to **swap providers** (Anthropic → vLLM-on-NIM → MLX local) without changing call sites or losing observability fidelity.
-- You're building **agent-quality evaluation pipelines** (NVIDIA's Agentic Apps team's "ways to stand out" — see [Doc 16](./16-evaluation-framework.md)) and need a runtime that emits typed events you can replay against.
+- You're building **agent-quality evaluation pipelines** (NVIDIA's Agentic Apps team's "ways to stand out" — see [Doc 16](./architecture/16-evaluation-framework.md)) and need a runtime that emits typed events you can replay against.
 - You're hitting **cost runaway** with a Python framework and need budget enforcement that's structurally hard to bypass.
 - You're allergic to **stringly-typed errors** from your runtime layer.
 

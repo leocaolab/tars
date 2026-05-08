@@ -1,6 +1,6 @@
 //! [`ContentRef`] — opaque, tenant-scoped handle to a body stored in
 //! some `BodyStore` (defined in `tars-storage`). See
-//! [Doc 17 §6](../../../docs/17-pipeline-event-store.md) for the full
+//! [Doc 17 §6](../../../docs/architecture/17-pipeline-event-store.md) for the full
 //! design + tenant-isolation rationale.
 //!
 //! Self-contained — carries `tenant_id` so callers can't accidentally

@@ -4,7 +4,7 @@
 //! Pipeline-internal types). The data types here are what flow
 //! between caller code and the validator chain — they need to be
 //! constructible / inspectable without taking a `tars-pipeline`
-//! dependency. See [Doc 15 — Output Validation](../../../docs/15-output-validation.md).
+//! dependency. See [Doc 15 — Output Validation](../../../docs/architecture/15-output-validation.md).
 //!
 //! Threaded through:
 //!

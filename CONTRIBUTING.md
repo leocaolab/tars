@@ -79,8 +79,8 @@ deviate from those, so keep the pins matching.
 
 ## Repo conventions
 
-- **17 design docs** in `docs/00-overview.md` through
-  `docs/17-pipeline-event-store.md` are the source of truth for
+- **17 design docs** in `docs/architecture/00-overview.md` through
+  `docs/architecture/17-pipeline-event-store.md` are the source of truth for
   *why* the code is shaped the way it is. Read the relevant doc
   before touching a layer.
 - **Trigger-or-delete contracts** in `TODO.md` mark deferred work
@@ -99,7 +99,7 @@ deviate from those, so keep the pins matching.
 For non-trivial changes, the typical path is:
 
 1. **Open an issue** describing the problem (not the solution)
-2. **Sketch a design** in the issue or as a `docs/NN-...md` draft
+2. **Sketch a design** in the issue or as a `docs/architecture/NN-...md` draft
 3. **Get review** from a maintainer before writing code
 4. **Implement** with tests
 5. **CHANGELOG entry** + relevant doc update

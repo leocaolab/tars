@@ -21,7 +21,7 @@
 //! - [`secret`]         — SecretRef + SecretString (redacting wrapper)
 //! - [`auth`]           — Auth specification (None / Delegate / Secret)
 //!
-//! See `docs/01-llm-provider.md` for the full design rationale.
+//! See `docs/architecture/01-llm-provider.md` for the full design rationale.
 
 pub mod auth;
 pub mod cache;

@@ -199,7 +199,7 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **如果你需要"跨 pipeline 跨 call 聚合 metric"** → 用 B-20 的 OnlineEvaluatorRunner，不是 CallObserver。
 
 ### B-20. Output Validation + Evaluation Framework — ⭐ 优先级最高（M9）
-- **设计文档**: [Doc 15 — Output Validation](./docs/15-output-validation.md) + [Doc 16 — Evaluation Framework](./docs/16-evaluation-framework.md)
+- **设计文档**: [Doc 15 — Output Validation](./docs/architecture/15-output-validation.md) + [Doc 16 — Evaluation Framework](./docs/architecture/16-evaluation-framework.md)
 - **拆分**(2026-05-05 review 后调整,3-wave 降低 PyO3 单点风险):
   - **Wave 1 (Rust-only Validator framework)** — ✅ shipped 2026-05-07. `OutputValidator` trait + `ValidationOutcome` enum + `ProviderError::ValidationFailed` + 3 built-in validators (JsonShape / NotEmpty / MaxLength) + `ValidationMiddleware` + `Response.validation_summary` 字段 + `RequestContext.validation_outcome` 侧信道 + 17 单元测试。详见 CHANGELOG B-20 W1 段。
   - **Wave 2 (PyO3 binding)** — ✅ shipped 2026-05-08. Python validators 通过 `[(name, callable), ...]` 挂到 `Pipeline.{from_default,from_config,from_str}`。`PyValidatorAdapter` 把 Python callback 桥接成 Rust `OutputValidator` trait；4 个 outcome pyclasses (`tars.Pass / Reject / FilterText / Annotate`)。Buggy validator (raise / wrong return type) 自动 catch 成 permanent `ValidationFailed` — worker 不会被 user-side bug 打死。17 个 pytest in `crates/tars-py/python/tests/test_validators.py`。详见 CHANGELOG B-20 W2 段。
@@ -439,7 +439,7 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 
 ## Doc 01 — LLM Provider gap items
 
-Audit run 2026-05-03 against `docs/01-llm-provider.md`. Code currently implements ~85% of the doc surface (HTTP + CLI + capability + tool-call + structured-output + cache directive + error model + registry are all in). What's still missing:
+Audit run 2026-05-03 against `docs/architecture/01-llm-provider.md`. Code currently implements ~85% of the doc surface (HTTP + CLI + capability + tool-call + structured-output + cache directive + error model + registry are all in). What's still missing:
 
 > **Vocabulary in this section** — drawn from the `defer > delete > implement` lifecycle:
 >

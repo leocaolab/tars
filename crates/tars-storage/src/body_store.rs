@@ -1,6 +1,6 @@
 //! [`BodyStore`] — tenant-scoped CAS for ChatRequest / ChatResponse
 //! bodies referenced from `PipelineEvent`. See
-//! [Doc 17 §6.1](../../../docs/17-pipeline-event-store.md).
+//! [Doc 17 §6.1](../../../docs/architecture/17-pipeline-event-store.md).
 //!
 //! `BodyStore::fetch(&ContentRef)` resolves bodies; `ContentRef`
 //! itself carries `tenant_id`, so the store can't be tricked into

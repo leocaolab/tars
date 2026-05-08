@@ -1,4 +1,4 @@
-//! Output-validation middleware. See [Doc 15](../../docs/15-output-validation.md).
+//! Output-validation middleware. See [Doc 15](../../docs/architecture/15-output-validation.md).
 //!
 //! Position in the onion (W4 final): **outside Cache, outside Retry,
 //! inside Telemetry**. Onion order:

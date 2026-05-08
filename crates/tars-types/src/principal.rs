@@ -1,4 +1,4 @@
-//! Caller identity. See `docs/10-security-model.md` §4.
+//! Caller identity. See `docs/architecture/10-security-model.md` §4.
 //!
 //! `Principal` is the *who*; `Scope` is the *what they can do*.
 //! Provider layer doesn't enforce these — that's the Pipeline IAM

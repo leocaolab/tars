@@ -1,5 +1,12 @@
 # 文档 14 — 实施路径 / Migration Strategy
 
+> **Note**: This roadmap reflects priorities at the time of writing.
+> Actual milestone order may shift as we learn from production usage
+> and feedback. M8-M14 sections describe the design ahead — see
+> [CHANGELOG.md](../../CHANGELOG.md) for what's actually shipped, and
+> [TODO.md](../../TODO.md) §"Roadmap status" for the current
+> per-milestone state. Plan, not commitment.
+
 > 范围：从当前状态 (设计完成,代码极少) 到 v1.0 可发布的具体实施规划——里程碑、依赖、风险、决策点、资源估算。
 >
 > 上下文：本文档是 Doc 00 §8.2 的展开,把 9 个 milestone 拆成可执行的 deliverable 与 acceptance criteria。

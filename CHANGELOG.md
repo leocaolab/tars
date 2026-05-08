@@ -322,7 +322,7 @@ Shipped: typed pyclass as the single source of truth.
 
 ### B-20 Wave 1 — Rust-only Validator framework (`<unreleased>`)
 
-Implements [Doc 15 — Output Validation](./docs/15-output-validation.md)
+Implements [Doc 15 — Output Validation](./docs/architecture/15-output-validation.md)
 Wave 1 (Rust side; PyO3 binding lands in W2). After-call validators
 run between Retry and Provider; rejections surface as
 `ProviderError::ValidationFailed` and bubble through normal
@@ -484,7 +484,7 @@ the new contract (no longer `#[ignore]`'d):
 
 ### B-20.W3 enabler — pipeline event store + body store + EventEmitter (`<unreleased>`)
 
-Phase 1 of [Doc 17](./docs/17-pipeline-event-store.md) — durable
+Phase 1 of [Doc 17](./docs/architecture/17-pipeline-event-store.md) — durable
 substrate the W3 main body needs. After this commit every
 `Pipeline.complete()` configured with `event_store_dir` lands one
 `LlmCallFinished` row per call into a SQLite event store; request +

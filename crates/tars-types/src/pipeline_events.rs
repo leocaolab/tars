@@ -1,5 +1,5 @@
 //! Pipeline-level event types — one event per `Pipeline.call` boundary.
-//! See [Doc 17](../../../docs/17-pipeline-event-store.md).
+//! See [Doc 17](../../../docs/architecture/17-pipeline-event-store.md).
 //!
 //! Distinct from `crate::events::ChatEvent` (streaming-token contract,
 //! per-token granularity) and from `tars-runtime`'s `AgentEvent`
