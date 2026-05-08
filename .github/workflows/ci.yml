@@ -1,0 +1,89 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Pin a recent stable Rust so contributor toolchain drift doesn't
+  # break the workspace. Keep aligned with `Cargo.toml#rust-version`.
+  RUST_TOOLCHAIN: stable
+
+jobs:
+  rust:
+    name: rust ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      # Skip tars-py here — it links libpython at test time, which
+      # this image doesn't satisfy without extra setup. Coverage
+      # for tars-py lives in the dedicated `python` job below.
+      - name: cargo test (workspace minus tars-py)
+        run: cargo test --workspace --exclude tars-py --no-fail-fast
+
+      - name: cargo clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  python:
+    name: tars-py wheel + pytest
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install maturin + pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install maturin pytest
+
+      - name: maturin build (release wheel)
+        working-directory: crates/tars-py
+        run: maturin build --release --out ../../target/wheels
+
+      - name: pip install built wheel
+        run: pip install --force-reinstall target/wheels/tars-*.whl
+
+      # Run the subset of pytest that doesn't require a local LLM
+      # provider — the validator + event-store integration tests
+      # under `python/tests` mostly need `qwen_coder_local` running on
+      # 127.0.0.1:1234, which CI doesn't provide. The class-export +
+      # construction-error tests are pure-API and run cleanly.
+      - name: pytest (provider-free subset)
+        run: |
+          pytest crates/tars-py/python/tests \
+            -q \
+            -k 'outcome_classes or pass_construct or reject_fields or filter_text or annotate_metrics or annotate_default or no_retriable_kwarg or must_be_tuple or tuple_must_be_pair' \
+            --no-header
