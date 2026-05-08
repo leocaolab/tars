@@ -1934,6 +1934,7 @@ name = "tars-cli"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "dirs",
  "futures",

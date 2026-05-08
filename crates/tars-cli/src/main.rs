@@ -20,6 +20,7 @@ mod bench;
 mod config_loader;
 mod dispatch;
 mod event_store;
+mod events;
 mod init;
 mod plan;
 mod probe;
@@ -69,6 +70,11 @@ enum Command {
     /// Bootstrap a starter user-level config at `~/.tars/config.toml`.
     /// Idempotent (`--force` to overwrite). New users run this first.
     Init(init::InitArgs),
+    /// Inspect the **pipeline event store** (LLM call records written
+    /// by `EventEmitterMiddleware`). Distinct from `tars trajectory`,
+    /// which reads agent-decision events.
+    #[command(subcommand_value_name = "COMMAND")]
+    Events(events::EventsArgs),
 }
 
 #[tokio::main]
@@ -103,6 +109,7 @@ async fn main() -> ExitCode {
         Command::Bench(_) => "bench",
         Command::Trajectory(_) => "trajectory",
         Command::Init(_) => "init",
+        Command::Events(_) => "events",
     };
 
     let result: Result<()> = match cli.command {
@@ -135,6 +142,18 @@ async fn main() -> ExitCode {
                 );
             }
             init::execute(args).await
+        }
+        Command::Events(args) => {
+            // `--config` is unused — `events` operates on the pipeline
+            // event store sqlite file (see `--store-dir` /
+            // TARS_EVENT_STORE_DIR), not on a TARS config.
+            if cli.config.is_some() {
+                tracing::warn!(
+                    "--config is ignored by `tars events` \
+                     (use --store-dir / TARS_EVENT_STORE_DIR instead)"
+                );
+            }
+            events::execute(args).await
         }
     };
 

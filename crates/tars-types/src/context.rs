@@ -41,6 +41,14 @@ pub struct RequestContext {
     /// one, or substitutes `summary` onto the response builder.
     /// See [`crate::validation::SharedValidationOutcome`].
     pub validation_outcome: SharedValidationOutcome,
+    /// Free-form cohort tags. Propagated to `PipelineEvent.tags` so
+    /// SQL rollups can `WHERE 'dogfood_2026_05_08' = ANY(tags)`.
+    /// LangSmith borrow — see Doc 17 §4 (cohort).
+    ///
+    /// Caller convenience: [`RequestContext::with_tags`] returns a
+    /// new context with these set; usually called once at session /
+    /// batch entry, propagated unchanged through the call.
+    pub tags: Vec<String>,
 }
 
 impl RequestContext {
@@ -57,7 +65,20 @@ impl RequestContext {
             attributes: Arc::new(RwLock::new(HashMap::new())),
             telemetry: new_shared_telemetry(),
             validation_outcome: new_shared_validation_outcome(),
+            tags: Vec::new(),
         }
+    }
+
+    /// Return a new context with `tags` set. Convenience for batch
+    /// runners: build one `ctx` then call `.with_tags(["batch_X"])`
+    /// before each request.
+    pub fn with_tags<S, I>(mut self, tags: I) -> Self
+    where
+        S: Into<String>,
+        I: IntoIterator<Item = S>,
+    {
+        self.tags = tags.into_iter().map(Into::into).collect();
+        self
     }
 
     pub fn is_cancelled(&self) -> bool {

@@ -482,6 +482,90 @@ the new contract (no longer `#[ignore]`'d):
   `telemetry.layers` includes `"validation"`, proving the chain
   ran on hit.
 
+### B-20.W3 enabler — pipeline event store + body store + EventEmitter (`<unreleased>`)
+
+Phase 1 of [Doc 17](./docs/17-pipeline-event-store.md) — durable
+substrate the W3 main body needs. After this commit every
+`Pipeline.complete()` configured with `event_store_dir` lands one
+`LlmCallFinished` row per call into a SQLite event store; request +
+response bodies go to a separate tenant-scoped CAS body store.
+
+- **`tars-types::PipelineEvent`** — `LlmCallFinished` /
+  `EvaluationScored` / `Other` catchall variants. `#[non_exhaustive]`
+  + `#[serde(default)]` on new fields + `Other(serde_json::Value)`
+  catchall = three layers of forward-compat. Inline scalars
+  (model / provider / fingerprint / has_tools / temperature /
+  telemetry / validation_summary / tags / result) make 99% of
+  cohort-rollup queries hit the event row only; bodies live behind
+  `request_ref` / `response_ref` `ContentRef` pointers.
+- **`tars-types::ContentRef`** — opaque, tenant-scoped body handle.
+  `ContentRef::from_body(tenant, bytes)` computes sha256(bytes) and
+  stores it alongside `tenant_id`. **Cross-tenant body dedup
+  forbidden** per Doc 06 §1; same body bytes from two tenants get
+  two distinct refs (different store keys). Within-tenant dedup
+  still happens — most savings come from re-asking the same prompt
+  within a tenant anyway.
+- **`tars-storage::PipelineEventStore`** — new trait, distinct from
+  the existing `EventStore` (trajectory). Q1 in Doc 17 chose two
+  independent traits over a generic `EventStore<E>` because access
+  patterns are too divergent (trajectory is keyed by
+  `TrajectoryId`, pipeline events by tenant + time + tags). Methods:
+  `append` / `query` (filter by tenant + time range) / `purge_before`
+  / `purge_tenant`. `subscribe()` deferred to Phase 2.
+- **`tars-storage::BodyStore`** — new trait + `SqliteBodyStore`
+  impl. `INSERT OR IGNORE` makes `put` idempotent CAS. `purge_*`
+  ops are first-class trait methods so v2 backends (codex-style
+  date-partitioned sqlite-per-day, S3 + lifecycle rules, postgres
+  bytea) can implement retention as physical operations rather than
+  full-table scans (Doc 17 Q9).
+- **`tars-pipeline::EventEmitterMiddleware`** — outermost layer
+  (added FIRST to the builder, wraps everything else). Drains the
+  stream, builds `ChatResponse`, fires the event + bodies in a
+  `tokio::spawn`'d task. Caller's response path doesn't block on
+  storage I/O. Failure path emits `LlmCallFinished{result:
+  Error{kind}}` with `response_ref: None`. Q2 in Doc 17 chose this
+  as a separate layer rather than folding into Telemetry.
+- **`tars-py`** — `Pipeline.from_default(..., event_store_dir="...")`
+  / `from_config` / `from_str` all accept the new kwarg. Opens both
+  `pipeline_events.db` + `bodies.db` under the dir; creates the dir
+  if missing. Omitting the kwarg = no event store wired, backwards-
+  compatible with existing callers.
+- **`Pipeline.complete(..., tags=[...])`** + `RequestContext::with_tags(...)` —
+  free-form cohort tags propagate from caller to
+  `PipelineEvent.tags`. Cohort SQL: `WHERE 'dogfood_2026_05_08' =
+  ANY(tags)`. LangSmith borrow.
+- **`tars events` CLI** — `tars events list [--tenant X] [--since 1d]
+  [--tag T] [--limit N]` for one-line-per-event summaries; `tars
+  events show <event_id> [--with-bodies]` for full payload + body
+  fetch. Diagnostic tool; replaces hand-rolling `sqlite3` queries
+  during dogfood prep.
+- **`PersistenceMode { Limited, Extended }`** — defined in
+  `tars-types`; trait point in place but actual mode-switching logic
+  is Phase 2. Default `Limited` (current behaviour). Codex-rs
+  borrow.
+- **codex-rs borrows in this commit**: `Other` catchall variant
+  pattern (5 years of versionless schema evolution rest on it),
+  `EventPersistenceMode::{Limited, Extended}` dial,
+  date-partitioned-storage trait shape (purge_before / purge_tenant
+  in the trait so backends can do `rmdir` not full-DELETE).
+- **What's deliberately NOT in Phase 1**: `EventStore::subscribe()`
+  (live consumer for OnlineEvaluatorRunner), the runner itself,
+  per-tag rate sampling, `OnDimDrop` watchdog. All move to Phase 2
+  or — based on arc 2026-05-08 dogfood-prep feedback — get
+  re-evaluated against "is this just batch SQL + cron?" before being
+  built.
+
+Tests: 21 new cargo tests across content_ref / pipeline_events /
+body_store / pipeline_event_store / event_emitter; 7 new pytest
+covering event-store integration + tags propagation + dir-creation
+edge cases. cargo + clippy clean (`-D warnings`).
+
+Driven by: arc 2026-05-08 W3 main-body prep; tags surface
+specifically promoted from "nice-to-have" to "today blocker" once
+arc reported they were running cloud + local + smoke batches into
+the same `pipeline_events.db` and using `provider_id` + timestamp as
+a coarse cohort proxy.
+
 ### B-20 v3 — Python `Response.validation_summary` getter (`<unreleased>`)
 
 Rust `ChatResponse.validation_summary: ValidationSummary` was already

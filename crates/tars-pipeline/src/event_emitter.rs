@@ -84,6 +84,7 @@ impl LlmService for EventEmitterService {
         let tenant_id = ctx.tenant_id.clone();
         let session_id = Some(ctx.session_id.clone());
         let trace_id = Some(ctx.trace_id.clone());
+        let tags = ctx.tags.clone();
 
         // Capture inline request properties before moving into inner.
         // `provider_id` is set by `ProviderService` onto telemetry; we
@@ -148,6 +149,7 @@ impl LlmService for EventEmitterService {
                         max_output_tokens,
                         telemetry_handle,
                         validation_handle,
+                        tags,
                     },
                 );
                 Ok(Box::pin(observed))
@@ -177,6 +179,7 @@ impl LlmService for EventEmitterService {
                         max_output_tokens,
                         telemetry_handle,
                         validation_handle,
+                        tags,
                     },
                 );
                 tokio::spawn(async move {
@@ -209,6 +212,7 @@ struct StreamCtx {
     max_output_tokens: Option<u32>,
     telemetry_handle: tars_types::SharedTelemetry,
     validation_handle: tars_types::SharedValidationOutcome,
+    tags: Vec<String>,
 }
 
 struct EventInputs {
@@ -231,6 +235,7 @@ struct EventInputs {
     max_output_tokens: Option<u32>,
     telemetry_handle: tars_types::SharedTelemetry,
     validation_handle: tars_types::SharedValidationOutcome,
+    tags: Vec<String>,
 }
 
 /// Build the `LlmCallFinished` from end-of-call data. Pure — no I/O
@@ -282,9 +287,7 @@ fn build_event(i: EventInputs) -> LlmCallFinished {
         telemetry,
         validation_summary,
         result: i.result,
-        // Tags surface lands with `RequestContext::with_tags` —
-        // tracked separately. v1 emits empty.
-        tags: Vec::new(),
+        tags: i.tags,
     }
 }
 
@@ -396,6 +399,7 @@ fn wrap_stream_for_emit(
             max_output_tokens: sc.max_output_tokens,
             telemetry_handle: sc.telemetry_handle,
             validation_handle: sc.validation_handle,
+            tags: sc.tags,
         });
 
         tokio::spawn(async move {

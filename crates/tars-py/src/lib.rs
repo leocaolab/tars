@@ -412,6 +412,7 @@ impl Provider {
         thinking = None,
         response_schema = None,
         response_schema_strict = true,
+        tags = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn complete(
@@ -426,6 +427,7 @@ impl Provider {
         thinking: Option<bool>,
         response_schema: Option<Bound<'_, PyDict>>,
         response_schema_strict: bool,
+        tags: Option<Vec<String>>,
     ) -> PyResult<Response> {
         let req = build_request(
             model,
@@ -438,7 +440,7 @@ impl Provider {
             response_schema,
             response_schema_strict,
         )?;
-        run_complete(py, self.inner.clone(), req)
+        run_complete_tagged(py, self.inner.clone(), req, tags.unwrap_or_default())
     }
 }
 
@@ -651,6 +653,7 @@ impl Pipeline {
         thinking = None,
         response_schema = None,
         response_schema_strict = true,
+        tags = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn complete(
@@ -665,6 +668,7 @@ impl Pipeline {
         thinking: Option<bool>,
         response_schema: Option<Bound<'_, PyDict>>,
         response_schema_strict: bool,
+        tags: Option<Vec<String>>,
     ) -> PyResult<Response> {
         let req = build_request(
             model,
@@ -677,7 +681,7 @@ impl Pipeline {
             response_schema,
             response_schema_strict,
         )?;
-        run_complete(py, self.inner.clone(), req)
+        run_complete_tagged(py, self.inner.clone(), req, tags.unwrap_or_default())
     }
 
     /// Pre-flight check: would this Pipeline's underlying provider
@@ -1285,12 +1289,16 @@ fn message_from_py(item: &Bound<'_, PyAny>) -> PyResult<Message> {
     }
 }
 
-/// Drain the LLM stream into a [`Response`]. Releases the GIL while
-/// waiting on the async runtime so other Python threads keep working.
-fn run_complete(
+/// Drain the LLM stream into a [`Response`]. Stamps `tags` onto
+/// `RequestContext.tags` — propagated to `PipelineEvent.tags` for
+/// SQL rollups (`WHERE 'dogfood_X' = ANY(tags)`). Pass empty `tags`
+/// for the no-cohort path. Releases the GIL while waiting on the
+/// async runtime so other Python threads keep working.
+fn run_complete_tagged(
     py: Python<'_>,
     svc: Arc<dyn LlmService>,
     req: ChatRequest,
+    tags: Vec<String>,
 ) -> PyResult<Response> {
     py.allow_threads(|| {
         TOKIO.block_on(async move {
@@ -1299,7 +1307,7 @@ fn run_complete(
             // survives the move into the middleware chain. Middleware
             // writes through the same Arc; we read it back after
             // stream drain.
-            let ctx = RequestContext::test_default();
+            let ctx = RequestContext::test_default().with_tags(tags);
             let telemetry_handle = ctx.telemetry.clone();
             let validation_handle = ctx.validation_outcome.clone();
 

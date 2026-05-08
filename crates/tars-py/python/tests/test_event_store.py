@@ -128,6 +128,46 @@ def test_event_store_dir_omitted_does_not_create_files(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
+def test_tags_propagate_to_event(tmp_path):
+    """Cohort tags passed via Pipeline.complete(tags=[...]) land on
+    the persisted event row. Enables `WHERE 'X' IN tags` SQL rollups."""
+    p = tars.Pipeline.from_default(PROVIDER_ID, event_store_dir=str(tmp_path))
+    p.complete(
+        model=MODEL,
+        user="hi",
+        max_output_tokens=10,
+        tags=["dogfood_2026_05_08", "tier_1_validators"],
+    )
+
+    import time
+    time.sleep(0.2)
+
+    db = tmp_path / "pipeline_events.db"
+    with sqlite3.connect(db) as conn:
+        (payload_blob,) = conn.execute(
+            "SELECT payload_json FROM pipeline_events LIMIT 1"
+        ).fetchone()
+    payload = json.loads(payload_blob)
+    assert payload["tags"] == ["dogfood_2026_05_08", "tier_1_validators"]
+
+
+def test_tags_default_empty(tmp_path):
+    """Omitting tags = empty list on the event, not missing key."""
+    p = tars.Pipeline.from_default(PROVIDER_ID, event_store_dir=str(tmp_path))
+    p.complete(model=MODEL, user="hi", max_output_tokens=5)
+
+    import time
+    time.sleep(0.2)
+
+    db = tmp_path / "pipeline_events.db"
+    with sqlite3.connect(db) as conn:
+        (payload_blob,) = conn.execute(
+            "SELECT payload_json FROM pipeline_events LIMIT 1"
+        ).fetchone()
+    payload = json.loads(payload_blob)
+    assert payload["tags"] == []
+
+
 def test_event_store_dir_creates_dir_if_missing(tmp_path):
     """Caller may pass a path that doesn't exist yet — middleware
     creates the directory, doesn't fail at construction time."""

@@ -23,7 +23,7 @@ TODO scan to answer.
 | M6 Multi-tenant + Server | ❌ not started        | tars-security / HTTP+gRPC server / Auth/IAM/Budget/Guard middleware all blocked here. |
 | M7 Web frontends | ❌ not started                | tui-shape outlined as B-19 (build-our-own, not fork-codex). |
 | M8 Python bindings (`tars-py`) | 🟢 in progress      | Stages 1-4 + B-31 + B-20 W1+W2+W4 + v3 shipped. Remaining: B-20 v2 (typed Reject reasons), Pipeline.builder Python surface (B-6c). |
-| M9 Output Validation + Eval | 🟡 W1+W2+W4+v3 shipped, W3 not | W3 = Doc 16 evaluator framework (`Evaluator`/`AsyncEvaluator` traits + `OnlineEvaluatorRunner` + Built-in evaluators + tars-py `tars.eval.Evaluator`). Not started; needs `EventStore` exposed at Pipeline layer first. |
+| M9 Output Validation + Eval | 🟡 W1+W2+W4+v3 shipped, W3 enabler shipped, W3 main pending | W3 enabler (Doc 17 Phase 1 — pipeline event store + body store + EventEmitter + `tars events` CLI + cohort tags) shipped 2026-05-08. W3 main body re-scoped per arc 2026-05-08: original "Rust evaluator runner + trait + sampler + subscription" is overengineered for arc's batch-mode use cases; revised plan = 30-line `tars.eval.write_score` Python helper + caller writes evaluator scripts as cron / CI / notebook against the event store. Online monitoring (recall drop alerts, context-saturation correlation) belongs in a separate Doc 19 / B-21 OTel exporter, not the evaluator path. |
 
 ### `tars-pipeline` specifically
 

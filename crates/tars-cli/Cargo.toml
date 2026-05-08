@@ -35,6 +35,9 @@ clap.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 
+# `tars events list` timestamp formatting
+chrono.workspace = true
+
 # Logging
 tracing.workspace = true
 
