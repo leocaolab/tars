@@ -128,6 +128,13 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - From audit `65be2621` (context-1). `tenant_id` / `principal_id` / `trace_id` are public + mutable, so production code holding `&mut RequestContext` could rotate them mid-request. Audit was disputed (test code in `tars-cache` legitimately mutates `tenant_id` to construct cross-tenant scenarios; locking down to private + setters touches 50+ call sites for marginal real safety) — but the dispute holds only **until M6 multi-tenant runtime exists**.
 - **Trigger**: M6 — when there's a real security boundary the field mutability could cross.
 
+### A-7. CI: `actions/checkout@v4` runs on Node.js 20 (deprecated)
+- GitHub Actions surfaced a deprecation notice on the first CI run (2026-05-08, run `25564043448`). `actions/checkout@v4` and `actions/setup-python@v5` both run on Node.js 20; the runner forces Node.js 24 by default starting **2026-09-02**, with Node.js 20 fully removed on **2026-09-16**.
+- **Why deferred**: ~4 months of buffer; current builds are green and the deprecation is non-blocking until the cutover. Bumping to a non-default action version preemptively risks pulling in unrelated breaking changes from the action's own ecosystem.
+- **Trigger**: GitHub announces a v5 of `actions/checkout` (or whichever version they ship for Node 24). Bump the workflow's `uses:` line then. Verify CI still green.
+- **Where**: `.github/workflows/ci.yml` — `actions/checkout@v4` (4 occurrences) and `actions/setup-python@v5` (1 occurrence).
+- **Cost**: ~5 min if the new version is drop-in.
+
 ---
 
 ## Real backlog (not overengineering)
