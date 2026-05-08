@@ -475,6 +475,7 @@ impl Pipeline {
         id: String,
         provider: Arc<dyn LlmProvider>,
         validators: Vec<Box<dyn tars_pipeline::OutputValidator>>,
+        event_stores: Option<EventStorePair>,
     ) -> Self {
         let capabilities_full = provider.capabilities().clone();
         let capabilities_summary = CapabilitiesSummary::from(&capabilities_full);
@@ -483,15 +484,24 @@ impl Pipeline {
         let cache_registry = tars_cache::MemoryCacheRegistry::default_arc();
         let cache_factory = CacheKeyFactory::new(1);
 
-        // Onion (W4 — see Doc 15 §2):
-        //   Telemetry → Validation → Cache → Retry → Provider
+        // Onion (W4 — see Doc 15 §2 + Doc 17 §8):
+        //   EventEmitter? → Telemetry → Validation → Cache → Retry → Provider
         //
         // Builder records outer→inner; Validation must sit OUTSIDE Cache
         // so that (1) Cache stores raw Provider events, not post-Filter
         // events, and (2) cache hits still flow through Validation
         // (validators are pure, rerun is cheap). ValidationFailed is
         // always Permanent — RetryMiddleware does NOT retry on it.
-        let mut builder = RsPipeline::builder(provider).layer(TelemetryMiddleware::new());
+        // EventEmitter is the outermost layer when configured so it
+        // sees the complete telemetry / validation_summary picture.
+        let mut builder = RsPipeline::builder(provider);
+        if let Some(EventStorePair { events, bodies }) = event_stores.as_ref() {
+            builder = builder.layer(tars_pipeline::EventEmitterMiddleware::new(
+                events.clone(),
+                bodies.clone(),
+            ));
+        }
+        builder = builder.layer(TelemetryMiddleware::new());
         if !validators.is_empty() {
             builder = builder.layer(tars_pipeline::ValidationMiddleware::new(validators));
         }
@@ -511,6 +521,40 @@ impl Pipeline {
     }
 }
 
+/// Bundle of stores wired into `EventEmitterMiddleware`. Constructed
+/// from a directory path on the Python side; opens both files
+/// underneath.
+#[derive(Clone)]
+pub(crate) struct EventStorePair {
+    pub events: Arc<dyn tars_storage::PipelineEventStore>,
+    pub bodies: Arc<dyn tars_storage::BodyStore>,
+}
+
+impl EventStorePair {
+    /// Open both stores under `dir`. Creates the directory if missing.
+    /// Files: `{dir}/pipeline_events.db`, `{dir}/bodies.db`.
+    fn open_in_dir(dir: &str) -> PyResult<Self> {
+        let dir_path = std::path::PathBuf::from(dir);
+        if !dir_path.exists() {
+            std::fs::create_dir_all(&dir_path)
+                .map_err(|e| runtime_to_py("create event store dir", e))?;
+        }
+        let events_path = dir_path.join("pipeline_events.db");
+        let bodies_path = dir_path.join("bodies.db");
+
+        let events: Arc<dyn tars_storage::PipelineEventStore> =
+            tars_storage::SqlitePipelineEventStore::open(
+                tars_storage::SqlitePipelineEventStoreConfig::new(events_path),
+            )
+            .map_err(|e| runtime_to_py("open pipeline event store", e))?;
+        let bodies: Arc<dyn tars_storage::BodyStore> = tars_storage::SqliteBodyStore::open(
+            tars_storage::SqliteBodyStoreConfig::new(bodies_path),
+        )
+        .map_err(|e| runtime_to_py("open body store", e))?;
+        Ok(Self { events, bodies })
+    }
+}
+
 #[pymethods]
 impl Pipeline {
     /// Construct a Pipeline from a TARS TOML config file.
@@ -522,46 +566,53 @@ impl Pipeline {
     /// `(req: dict, resp: dict) -> Pass | Reject | FilterText | Annotate`.
     /// See `tars.validation` module docs.
     #[staticmethod]
-    #[pyo3(signature = (path, provider_id, *, validators = None))]
+    #[pyo3(signature = (path, provider_id, *, validators = None, event_store_dir = None))]
     fn from_config(
         path: String,
         provider_id: String,
         validators: Option<Bound<'_, PyList>>,
+        event_store_dir: Option<String>,
     ) -> PyResult<Self> {
         let provider = build_provider(&path, &provider_id)?;
         let validators = validation::build_validator_list(validators)?;
-        Ok(Self::from_provider(provider_id, provider, validators))
+        let stores = event_store_dir.as_deref().map(EventStorePair::open_in_dir).transpose()?;
+        Ok(Self::from_provider(provider_id, provider, validators, stores))
     }
 
     /// Construct a Pipeline from inline TOML text. Equivalent to
     /// `from_config` but skips the round-trip through a tmpfile.
-    /// See `from_config` for the `validators` kwarg.
+    /// See `from_config` for the `validators` and `event_store_dir`
+    /// kwargs.
     #[staticmethod]
-    #[pyo3(signature = (toml_text, provider_id, *, validators = None))]
+    #[pyo3(signature = (toml_text, provider_id, *, validators = None, event_store_dir = None))]
     fn from_str(
         toml_text: &str,
         provider_id: String,
         validators: Option<Bound<'_, PyList>>,
+        event_store_dir: Option<String>,
     ) -> PyResult<Self> {
         let provider = build_provider_from_str(toml_text, &provider_id)?;
         let validators = validation::build_validator_list(validators)?;
-        Ok(Self::from_provider(provider_id, provider, validators))
+        let stores = event_store_dir.as_deref().map(EventStorePair::open_in_dir).transpose()?;
+        Ok(Self::from_provider(provider_id, provider, validators, stores))
     }
 
     /// Construct a Pipeline from the default user-level config at
     /// `~/.tars/config.toml`. Raises `TarsConfigError` if the file is
     /// missing — run `tars init` to bootstrap one. See `from_config`
-    /// for the `validators` kwarg.
+    /// for the `validators` + `event_store_dir` kwargs.
     #[staticmethod]
-    #[pyo3(signature = (provider_id, *, validators = None))]
+    #[pyo3(signature = (provider_id, *, validators = None, event_store_dir = None))]
     fn from_default(
         provider_id: String,
         validators: Option<Bound<'_, PyList>>,
+        event_store_dir: Option<String>,
     ) -> PyResult<Self> {
         let path = resolve_default_config_path()?;
         let provider = build_provider(&path, &provider_id)?;
         let validators = validation::build_validator_list(validators)?;
-        Ok(Self::from_provider(provider_id, provider, validators))
+        let stores = event_store_dir.as_deref().map(EventStorePair::open_in_dir).transpose()?;
+        Ok(Self::from_provider(provider_id, provider, validators, stores))
     }
 
     #[getter]

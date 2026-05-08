@@ -197,27 +197,12 @@ impl LlmService for RetryService {
 }
 
 /// Snake-case kind tag matching `tars-py`'s `TarsProviderError.kind`
-/// scheme so the telemetry kind strings are consistent across all the
-/// surfaces (Rust logs, Python catch blocks, telemetry attributes).
+/// Wrapper around [`ProviderError::kind`] kept for call-site clarity
+/// and so a future `provider_error_kind` divergence (if it ever needs
+/// to differ from the canonical kind string) doesn't have to update
+/// every callsite.
 fn provider_error_kind(err: &ProviderError) -> &'static str {
-    use ProviderError::*;
-    match err {
-        Auth(_) => "auth",
-        RateLimited { .. } => "rate_limited",
-        BudgetExceeded => "budget_exceeded",
-        InvalidRequest(_) => "invalid_request",
-        ContentFiltered { .. } => "content_filtered",
-        ContextTooLong { .. } => "context_too_long",
-        ModelOverloaded => "model_overloaded",
-        CircuitOpen { .. } => "circuit_open",
-        Network(_) => "network",
-        Parse(_) => "parse",
-        CliSubprocessDied { .. } => "cli_subprocess_died",
-        UnknownTool { .. } => "unknown_tool",
-        NoCompatibleCandidate { .. } => "no_compatible_candidate",
-        ValidationFailed { .. } => "validation_failed",
-        Internal(_) => "internal",
-    }
+    err.kind()
 }
 
 #[cfg(test)]

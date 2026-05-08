@@ -154,6 +154,32 @@ impl ProviderError {
             _ => None,
         }
     }
+
+    /// Variant name in snake_case. Stable wire format used across
+    /// surfaces: telemetry `RetryAttempt.error_kind`,
+    /// `TarsProviderError.kind` on the Python side, `CallResult::Error
+    /// { kind }` on `LlmCallFinished`. Centralised here so all
+    /// consumers see the same string for the same variant.
+    pub fn kind(&self) -> &'static str {
+        use ProviderError::*;
+        match self {
+            Auth(_) => "auth",
+            RateLimited { .. } => "rate_limited",
+            BudgetExceeded => "budget_exceeded",
+            InvalidRequest(_) => "invalid_request",
+            ContentFiltered { .. } => "content_filtered",
+            ContextTooLong { .. } => "context_too_long",
+            ModelOverloaded => "model_overloaded",
+            CircuitOpen { .. } => "circuit_open",
+            Network(_) => "network",
+            Parse(_) => "parse",
+            CliSubprocessDied { .. } => "cli_subprocess_died",
+            UnknownTool { .. } => "unknown_tool",
+            NoCompatibleCandidate { .. } => "no_compatible_candidate",
+            ValidationFailed { .. } => "validation_failed",
+            Internal(_) => "internal",
+        }
+    }
 }
 
 impl From<reqwest::Error> for ProviderError {

@@ -19,6 +19,7 @@ sha2.workspace = true
 url.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true  # for ProviderError::from(reqwest::Error)
+uuid.workspace = true     # PipelineEvent.event_id (B-20 W3 enabler)
 
 [dev-dependencies]
 serde_json.workspace = true

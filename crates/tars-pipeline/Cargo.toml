@@ -13,6 +13,7 @@ workspace = true
 tars-types = { path = "../tars-types" }
 tars-provider = { path = "../tars-provider" }
 tars-cache = { path = "../tars-cache" }
+tars-storage = { path = "../tars-storage" }
 
 # Async
 tokio.workspace = true
@@ -27,6 +28,11 @@ tracing.workspace = true
 
 # Cache policy serialization (read from RequestContext.attributes)
 serde_json.workspace = true
+
+# EventEmitterMiddleware (B-20.W3 enabler)
+sha2.workspace = true
+bytes.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

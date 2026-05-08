@@ -161,24 +161,7 @@ fn compat_reason_detail(
 }
 
 fn provider_kind(err: &ProviderError) -> &'static str {
-    use ProviderError::*;
-    match err {
-        Auth(_) => "auth",
-        RateLimited { .. } => "rate_limited",
-        BudgetExceeded => "budget_exceeded",
-        InvalidRequest(_) => "invalid_request",
-        ContentFiltered { .. } => "content_filtered",
-        ContextTooLong { .. } => "context_too_long",
-        ModelOverloaded => "model_overloaded",
-        CircuitOpen { .. } => "circuit_open",
-        Network(_) => "network",
-        Parse(_) => "parse",
-        CliSubprocessDied { .. } => "cli_subprocess_died",
-        UnknownTool { .. } => "unknown_tool",
-        NoCompatibleCandidate { .. } => "no_compatible_candidate",
-        ValidationFailed { .. } => "validation_failed",
-        Internal(_) => "internal",
-    }
+    err.kind()
 }
 
 /// Register all exception classes in the Python module so callers can

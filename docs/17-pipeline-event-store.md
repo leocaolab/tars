@@ -268,18 +268,23 @@ overkill for v1.
 
 **Phase 1 — Enabler** (target: this week, blocks W3 main body):
 1. `ContentRef` struct in `tars-types`.
-2. `PipelineEvent` enum + `LlmCallFinished` struct in `tars-types`.
-   `EvaluationScored` defined but not yet emitted.
+2. `PipelineEvent` enum (`LlmCallFinished` / `EvaluationScored` /
+   `Other` catchall) + supporting structs (`CallResult`,
+   `PersistenceMode`) in `tars-types`. `EvaluationScored` defined but
+   not yet emitted (Phase 2).
 3. `BodyStore` trait + `SqliteBodyStore` impl in `tars-storage`.
-4. `EventStore<E>` generalised over event type in `tars-storage`
-   (existing `EventStore` becomes `EventStore<AgentEvent>`).
+4. `PipelineEventStore` trait + `SqlitePipelineEventStore` impl in
+   `tars-storage`. **Existing `EventStore` (trajectory) stays
+   unchanged** — Q1 decided two independent traits, not generic.
+   Internal `SqliteEventStoreCore` may share scaffolding between the
+   two impls.
 5. `EventEmitterMiddleware` in `tars-pipeline`. Emits
-   `LlmCallFinished` post-call.
+   `LlmCallFinished` post-call. Outermost layer (before Telemetry).
 6. `Pipeline.with_event_store(...)` builder method on
    `tars-py::Pipeline` and the Rust builder.
 7. Integration test: drive `Pipeline.call`, assert event landed in
-   `SqliteEventStore` with expected fields + body fetchable from
-   `SqliteBodyStore`.
+   `SqlitePipelineEventStore` with expected fields + body fetchable
+   from `SqliteBodyStore`.
 
 **Phase 2 — Subscription / OnlineEvaluatorRunner** (W3 main body):
 8. `EventStore::subscribe()` API → stream of `PipelineEvent`.
@@ -303,8 +308,8 @@ Tagged with the decision needed.
 
 | # | Question | Default if undecided |
 |---|----------|----------------------|
-| Q1 | Is `EventStore<E>` actually generic, or two independent traits? | Generic. Saves duplication; one type param on existing trajectory call sites. |
-| Q2 | Place `EventEmitterMiddleware` outside Telemetry, or fold into it? | Separate layer (single responsibility; lifecycle differs — telemetry is in-mem accumulator, event is durable async write). |
+| Q1 | Is `EventStore<E>` actually generic, or two independent traits? | **Decided 2026-05-08: two independent traits**. Existing `EventStore` (trajectory, keyed by `TrajectoryId`) stays unchanged. New `PipelineEventStore` trait with `query(time_range, tenant, tags)` / `subscribe()` / `purge_before(cutoff)` / `purge_tenant(id)`. Underlying SQLite scaffolding shared via internal `SqliteEventStoreCore`. Reasons: existing trait is deliberately `dyn`-friendly + JSON-at-boundary, generic over E breaks the first; access patterns are too divergent for one trait (only `append` would actually be shared). |
+| Q2 | Place `EventEmitterMiddleware` outside Telemetry, or fold into it? | **Decided 2026-05-08: separate layer**. Single responsibility; lifecycle differs — telemetry is in-mem accumulator dropped at call end, event is durable async write. |
 | Q3 | `request_fingerprint` algorithm — what's in the canonicalised body? | model + messages + tools (sorted) + temperature + max_tokens + response_schema. **Not** in fingerprint: tenant_id, IAM scopes, request_id, trace_id (those go in cache key but are tenant-scoping concerns not semantic ones). |
 | Q4 | `EvaluationScored.score: f64` flat, or richer typed `Score { dim, value }`? | Flat `f64` for v1; `dim: String` already separable via `evaluator_name`. Punt typed scoring until a 2-dim evaluator ships. |
 | Q5 | `ContentRef` body store + cache-registry body store: same physical store or separate? | Same. Both are "tenant-scoped CAS by sha256(tenant + body)"; deduping the implementation removes a class of "which one am I writing to" bugs. |

@@ -23,6 +23,12 @@ serde_json.workspace = true
 # Persistence
 rusqlite.workspace = true
 
+# Body bytes for BodyStore (B-20.W3 enabler)
+bytes.workspace = true
+
+# Event UUIDs in PipelineEventStore queries
+uuid.workspace = true
+
 # XDG path resolution for default file locations
 dirs.workspace = true
 

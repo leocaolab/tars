@@ -59,6 +59,9 @@ impl LlmService for ProviderService {
         // wall time across the whole call.
         if let Ok(mut t) = ctx.telemetry.lock() {
             t.layers.push("provider".into());
+            // Stamp the provider id so outer middleware (event emitter)
+            // can record which provider actually ran post-routing.
+            t.provider_id = Some(self.provider.id().as_ref().to_string());
         }
         let started = std::time::Instant::now();
         let telemetry = ctx.telemetry.clone();

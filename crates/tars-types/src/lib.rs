@@ -27,12 +27,14 @@ pub mod auth;
 pub mod cache;
 pub mod capabilities;
 pub mod chat;
+pub mod content_ref;
 pub mod context;
 pub mod error;
 pub mod events;
 pub mod http_extras;
 pub mod ids;
 pub mod model;
+pub mod pipeline_events;
 pub mod principal;
 pub mod response;
 pub mod schema;
@@ -51,6 +53,7 @@ pub use chat::{
     CapabilityRequirements, ChatRequest, CompatibilityCheck, CompatibilityReason, ContentBlock,
     ImageData, Message,
 };
+pub use content_ref::ContentRef;
 pub use context::{CancellationToken, RequestContext};
 pub use error::{ErrorClass, ProviderError};
 pub use events::{ChatChunk, ChatEvent, PartialUsage, StopReason};
@@ -60,6 +63,9 @@ pub use ids::{
     TraceId, TrajectoryId,
 };
 pub use model::{ModelHint, ModelTier, ThinkingMode};
+pub use pipeline_events::{
+    CallResult, EvaluationScored, LlmCallFinished, PersistenceMode, PipelineEvent,
+};
 pub use principal::{Principal, PrincipalKind, Scope};
 pub use response::{ChatResponse, ChatResponseBuilder};
 pub use schema::JsonSchema;
