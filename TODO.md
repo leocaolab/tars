@@ -206,20 +206,22 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **依赖**: 无。
 - **由来**: arc 2026-05-08 反馈，详见 conversation log。
 
-### B-20.W4. Cache × Filter validator silent corruption fix — ⚠️ 真 bug (~半天)
-- **bug**: `ValidationMiddleware` 在 Filter 改写 response 后 re-emit post-Filter events (`tars-pipeline/src/validation.rs:225-232`)，因为 onion 顺序是 `Telemetry → CacheLookup → Retry → Validation → Provider`，Cache 看到的是 ValidationMiddleware re-emit 之后的 stream。**任何 Filter validator + Cache 同时存在 → cache 存的就是 post-Filter 版本，不是设计意图的 raw。**
+### B-20.W4. Cache × Validator interaction fix — ⚠️ 真 bug，结构性改动 (1-2 d)
+- **failing regression tests 已锁定 (commit `ce6aa95+`)**: `b20_w4_cache_stores_raw_not_post_filter` + `b20_w4_cache_hit_reruns_validator_chain` 在 `tars-pipeline/src/validation/tests.rs`，标了 `#[ignore]`。`cargo test -- --ignored` 验证两条都 fail。W4 fix 删 `#[ignore]` 同时改代码 → 两条变绿。
+- **bug 1 (cache 存 post-Filter)**: `ValidationMiddleware` 在 Filter 改写 response 后 re-emit post-Filter events (`tars-pipeline/src/validation.rs:225-232`)，Cache 看到的是 ValidationMiddleware re-emit 之后的 stream，于是 cache 存 post-Filter。test 1 断言 cache 应存 raw "hello world"，实际是 "hello"。
+- **bug 2 (cache hit 不跑 validator)**: 当前 onion 顺序 `Telemetry → CacheLookup → Retry → Validation → Provider`，Cache 在 Validation 外层。Cache hit 直接短路返回 cached events，**Validation 根本不被调用**。test 2 断言第二次（hit）`telemetry.layers` 含 `"validation"`，实际不含。这条比 bug 1 严重 — W1 doc §2 "validators rerun on hit" 跟 onion 不兼容。
 - **后果**:
-  - multi-caller 不同 validator 链共享同一 Pipeline + cache: 第二个 caller cache hit 拿到的是第一个 caller filter 过的内容 — silent corruption。
-  - 单 validator 链情况下: cache 永远拿不回 raw response，"换 validator 配置 cache 仍有效" 这条 W1 设计契约破。
-  - W1 doc 写的 "Cache stores raw Response (pre-validation)" 与实现不一致 — arc 之前是按 doc 设计架构的，所以 Tier 1 #1 落地前必须修。
-- **fix shape (一行级修改 — side-channel 已经在了)**:
-  - `ValidationMiddleware::call` 始终 re-emit `events_held` (raw events，line 234 那条 branch)，去掉 line 225 的 `if filtered_any { ... }` 分支。
-  - Filter 后的 response 已经通过 `rec.filtered_response = Some(response.clone())` (line 217) 走 side-channel publish 给 outer caller。outer caller (tars-py 的 `run_complete`) 已经在用这个 side channel — 让它优先用 side-channel 的 filtered version 替代从 stream rebuild 的 response。
-  - 配套 unit test: 加一个 "Filter + Cache" 组合 test — 第一次调 cache miss、第二次调 cache hit，断言两次的 raw cached events 一致 (post-Filter 不能漏进 cache)。
-- **预估**: ~半天。修改 ≤20 行 + 新加 1 个 integration test。
-- **Trigger**: arc Tier 1 #1 (snippet validator) ship 之前必须修，否则 arc dogfood 第一天就踩。
+  - multi-caller 不同 validator 链共享同一 Pipeline + cache: 第二个 caller cache hit 拿到的是第一个 caller filter 过的内容，且新 validator 链不会跑 — silent corruption。
+  - 单 validator 链情况下: cache 永远拿不回 raw；换 validator 配置后 hit 仍返回老 cached payload + 不重跑新 validator → 配置改动等于隐性 SemVer break。
+  - W1 doc §2 "Cache stores raw Response (pre-validation), validators rerun on hit" 与实现两条都不一致。
+- **fix 选项 (须选一)**:
+  - **A. 改 onion 顺序**（推荐）: 移到 `Telemetry → Validation → CacheLookup → Retry → Provider`。Validation 在 Cache 外面 → cache hit 仍走 Validation。同时 ValidationMiddleware 不再需要 re-emit raw vs filtered 分支（Cache 看不到 Validation 输出）。代价: `ValidationFailed{retriable:true}` 不再触发 `RetryMiddleware`（Validation 在 Retry 外）。要么把 retry 逻辑挪进 ValidationMiddleware 自己，要么接受 "validation-driven retry 不存在" 的语义（更干净）。改动: 调 PipelineBuilder 调用顺序 (~3 处 caller)、调 Doc 02 onion 图 + Doc 15 §2、删 ValidationMiddleware 里的 `filtered_any` re-emit 分支、删现有"validation 从 cache hit replay drain"那段注释。
+  - **B. 维持 onion + 仅修 re-emit**: 让 ValidationMiddleware 始终 re-emit `events_held`(raw)。**只修 bug 1，不修 bug 2** — cache hit 仍跳过 validator。doc 必须明写 "validators only run on cache miss" 这条限制。代价低但 W1 设计契约的 "rerun on hit" 永远做不到。
+  - 选 A — Tier 1 落地前必须解决 multi-chain 安全；B 把"caller 必须保证 cache 命名空间隔离"的负担推给 arc，又得在每个 consumer 重复一次。
+- **预估**: 选 A → 1-2 天（onion 改动 + 5 处 doc 同步 + retry 语义决定 + 验证 W1 17 个 unit test 仍通过）。选 B → 半天。
+- **Trigger**: arc Tier 1 #1 (snippet validator) ship 之前必须修。
 - **依赖**: 无。
-- **由来**: arc 2026-05-08 raised "single-validator-chain assumption" flag → tars 端 audit (本次 conversation) 发现是真 bug 不是 doc-only 收紧问题。
+- **由来**: arc 2026-05-08 raised "single-validator-chain assumption" flag → tars 端 audit + 写 failing test 发现实际 bug 比 audit 想的严重一层（不止"chain 不一致 corruption"，是"任何 Filter + Cache 共存 + Cache hit 不验证"）。
 
 ### B-19. `tars-tui` — interactive terminal UI (path C: build-our-own, not fork-codex)
 - **Where**: New crate `crates/tars-tui/` (doesn't exist yet). Consumer of `tars-runtime::Session` + `tars-pipeline::Pipeline`. ratatui-based.

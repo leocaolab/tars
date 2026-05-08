@@ -325,6 +325,163 @@ async fn validation_empty_chain_passes_through_without_drain() {
     assert!(rec.filtered_response.is_none());
 }
 
+// ── B-20.W4 — Cache × Filter validator interaction (regression gate) ───
+//
+// Doc 15 §2 contract: cache stores raw Response (pre-Filter); cache hits
+// re-run validators. Implementation has a known bug: ValidationMiddleware
+// re-emits post-Filter events when a Filter outcome rewrites the response
+// (validation.rs:225-232), and the current Pipeline onion order is
+// Telemetry → CacheLookup → Retry → Validation → Provider — Cache wraps
+// Validation, so it sees the post-Filter stream and stores post-Filter.
+//
+// These two tests pin the contract:
+//   1. cached events == raw provider events (pre-Filter)
+//   2. cache hit re-runs the validator chain
+//
+// Both expected to FAIL on current main; B-20.W4 fix makes them pass.
+
+#[tokio::test]
+#[ignore = "B-20.W4 — known failure on current main; fix removes #[ignore]"]
+async fn b20_w4_cache_stores_raw_not_post_filter() {
+    use tars_cache::{CacheKeyFactory, CachePolicy, CacheRegistry, MemoryCacheRegistry};
+    use tars_types::{ChatResponseBuilder, ProviderId};
+
+    use crate::cache::CacheLookupMiddleware;
+
+    // Provider returns "hello world" (raw). MaxLength filter truncates
+    // to 5 chars → caller sees "hello". Cache, sitting OUTSIDE Validation
+    // in the real Pipeline, must still store the raw "hello world" per
+    // Doc 15 §2 — otherwise multi-caller cache sharing produces silent
+    // corruption and changing validator config across runs becomes a
+    // cache-invalidating change (also a SemVer-break risk).
+    let registry: Arc<dyn CacheRegistry> = MemoryCacheRegistry::default_arc();
+    let mock = MockProvider::new("mock_origin", CannedResponse::text("hello world"));
+    let provider_service: Arc<dyn LlmService> = ProviderService::new(mock);
+
+    // Validation INNER, Cache OUTER — same order as production
+    // (PipelineBuilder::layer records outer→inner; we reproduce that
+    // shape directly here without a full Pipeline so we can poke the
+    // cache registry afterwards).
+    let validation = ValidationMiddleware::new(vec![
+        Box::new(MaxLengthValidator::truncate_above(5)),
+    ])
+    .wrap(provider_service);
+
+    let factory = CacheKeyFactory::new(1);
+    let cache_mw = CacheLookupMiddleware::new(
+        registry.clone(),
+        factory.clone(),
+        ProviderId::new("mock_origin"),
+    );
+    let pipeline_svc = cache_mw.wrap(validation);
+
+    // Cacheable request: explicit model + temperature=0.
+    let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "say hi");
+    req.temperature = Some(0.0);
+
+    // Drive the call — caller-visible response is "hello" (filtered).
+    let ctx = RequestContext::test_default();
+    let stream = pipeline_svc
+        .clone()
+        .call(req.clone(), ctx.clone())
+        .await
+        .expect("ok");
+    let events = drain(stream).await;
+    let mut visible = ChatResponseBuilder::new();
+    for ev in &events {
+        visible.apply(ev.clone());
+    }
+    let visible = visible.finish();
+    assert_eq!(
+        visible.text, "hello",
+        "caller should see post-Filter; if this fails the test setup is wrong, not the bug"
+    );
+
+    // Read the cache directly. Per Doc 15 §2 it must hold the RAW
+    // pre-Filter response — i.e. "hello world". Currently the
+    // ValidationMiddleware re-emit-on-Filter path leaks post-Filter
+    // events into the cache.
+    let key = factory.compute(&req, &ctx).expect("cacheable");
+    let policy = CachePolicy::default();
+    let cached = registry
+        .lookup(&key, &policy)
+        .await
+        .expect("lookup ok")
+        .expect("cache should be populated after first call");
+
+    assert_eq!(
+        cached.response.text, "hello world",
+        "B-20.W4 regression: cache stored post-Filter response. \
+         Doc 15 §2 contract: cache must store raw Response. \
+         Cause: ValidationMiddleware re-emits post-Filter events when \
+         filtered_any=true (validation.rs:225-232). Fix: always re-emit \
+         events_held (raw); Filter outcome already publishes via \
+         rec.filtered_response side-channel."
+    );
+}
+
+#[tokio::test]
+#[ignore = "B-20.W4 — known failure on current main; fix removes #[ignore]"]
+async fn b20_w4_cache_hit_reruns_validator_chain() {
+    use tars_cache::{CacheKeyFactory, MemoryCacheRegistry};
+    use tars_types::ProviderId;
+
+    use crate::cache::CacheLookupMiddleware;
+
+    // Doc 15 §2 contract: validators are pure → cheap to rerun → cache
+    // hits MUST rerun the chain. Today the onion order has Cache OUTSIDE
+    // Validation, so Cache short-circuits before reaching Validation:
+    // hits skip validators entirely and the layer trace lacks
+    // "validation" on the second call. Asserting the contract here.
+    let registry: Arc<dyn tars_cache::CacheRegistry> = MemoryCacheRegistry::default_arc();
+    let mock = MockProvider::new("mock_origin", CannedResponse::text("hi"));
+    let provider_service: Arc<dyn LlmService> = ProviderService::new(mock);
+
+    let validation = ValidationMiddleware::new(vec![Box::new(NotEmptyValidator::new())])
+        .wrap(provider_service);
+    let factory = CacheKeyFactory::new(1);
+    let cache_mw = CacheLookupMiddleware::new(
+        registry,
+        factory,
+        ProviderId::new("mock_origin"),
+    );
+    let svc = cache_mw.wrap(validation);
+
+    let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "p");
+    req.temperature = Some(0.0);
+
+    // First call — cache miss, validation runs.
+    let ctx1 = RequestContext::test_default();
+    let _ = drain(
+        svc.clone()
+            .call(req.clone(), ctx1.clone())
+            .await
+            .expect("ok"),
+    )
+    .await;
+    assert!(
+        ctx1.telemetry.lock().unwrap().layers.iter().any(|l| l == "validation"),
+        "validation must run on cache miss (sanity)"
+    );
+
+    // Second call — cache hit. Per contract, validation must still run.
+    let ctx2 = RequestContext::test_default();
+    let _ = drain(
+        svc.clone()
+            .call(req, ctx2.clone())
+            .await
+            .expect("ok"),
+    )
+    .await;
+    assert!(
+        ctx2.telemetry.lock().unwrap().layers.iter().any(|l| l == "validation"),
+        "B-20.W4 regression: cache hit short-circuits before Validation. \
+         Doc 15 §2 contract requires validators rerun on hit (pure → cheap). \
+         Current onion: Telemetry → CacheLookup → Retry → Validation → Provider. \
+         Fix likely requires moving ValidationMiddleware OUTSIDE CacheLookup."
+    );
+}
+
 // ── Layer trace ───────────────────────────────────────────────────────
 
 #[tokio::test]
