@@ -6,6 +6,45 @@ Forward-looking list. Each entry: **what** to do, **why** it's deferred (not "sh
 
 ---
 
+## Roadmap status — at a glance (2026-05-08)
+
+Per Doc 14's milestone breakdown. Not authoritative — CHANGELOG is —
+but kept current enough that "is X done?" doesn't require a 2,000-line
+TODO scan to answer.
+
+| Milestone        | Status                       | Notes |
+|------------------|------------------------------|---|
+| M0 Foundation    | ✅ shipped                    | tars-types / config / storage / melt / cache (L1) |
+| M1 Single path   | ✅ shipped                    | tars-provider (8 backends) + Telemetry/Retry/CacheLookup middleware |
+| M2 Multi-prov + Routing | ✅ shipped (M2 scope)  | Routing (Static + Tier) + CircuitBreaker + B-31 capability pre-flight. CostPolicy / LatencyPolicy / Ensemble deferred to M5 (need metrics infra) — not M2 blockers. |
+| M3 Agent Runtime | ✅ shipped                    | Session / Turn / TurnGuard / WorkerAgent + Critic + run_task — see B-4 for *enhancements* on top of working baseline. |
+| M4 Tools         | ✅ shipped                    | Tool trait + ToolRegistry + fs.read_file / fs.list_dir + MCP integration. fs.write_file gated on Backtrack/Saga (B-4). |
+| M5 CLI/MELT      | 🟡 partial                   | tars-cli (init / probe / bench / plan / run / run-task / trajectory) shipped. Per-provider runtime metrics infra (B-8) NOT shipped — blocks Cost/Latency/Ensemble routing. |
+| M6 Multi-tenant + Server | ❌ not started        | tars-security / HTTP+gRPC server / Auth/IAM/Budget/Guard middleware all blocked here. |
+| M7 Web frontends | ❌ not started                | tui-shape outlined as B-19 (build-our-own, not fork-codex). |
+| M8 Python bindings (`tars-py`) | 🟢 in progress      | Stages 1-4 + B-31 + B-20 W1+W2+W4 + v3 shipped. Remaining: B-20 v2 (typed Reject reasons), Pipeline.builder Python surface (B-6c). |
+| M9 Output Validation + Eval | 🟡 W1+W2+W4+v3 shipped, W3 not | W3 = Doc 16 evaluator framework (`Evaluator`/`AsyncEvaluator` traits + `OnlineEvaluatorRunner` + Built-in evaluators + tars-py `tars.eval.Evaluator`). Not started; needs `EventStore` exposed at Pipeline layer first. |
+
+### `tars-pipeline` specifically
+
+**M2 deliverables done.** What's missing in the Doc 02 10-layer onion is
+NOT a pipeline-crate gap — every missing layer is blocked on a different
+crate that hasn't shipped:
+
+| Missing layer            | Blocked on                                       | Unlocks at |
+|--------------------------|--------------------------------------------------|---|
+| Auth / IAM middleware    | `tars-security` crate                            | M6 |
+| Budget middleware        | `tars-storage` KVStore (B-7)                     | M0+ patchback |
+| PromptGuard middleware   | `tars-tools` + ONNX classifier                   | D-4 (frozen — needs trigger) |
+| L3 cache hooks (create/extend) | `ExplicitCacheProvider` (D-1)              | D-1 |
+| CostPolicy / LatencyPolicy / EnsemblePolicy routing | per-provider metrics infra (B-8) | M5 |
+
+Pipeline's trait + builder surface are stable; new layers ship as
+`.layer(NewMiddleware)` one-liners on top. **No pipeline-internal
+roadmap items pending.**
+
+---
+
 ## Overengineering — defer-and-revisit list
 
 These were called out in the self-review on 2026-05-03. Decision: **keep** for now (rip-them-out cost > carry cost in the short term), but each has a trigger condition. When the trigger fires we either commit to the abstraction or delete it.
