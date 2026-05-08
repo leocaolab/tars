@@ -75,6 +75,11 @@ backend dependency).
 pub enum PipelineEvent {
     LlmCallFinished(LlmCallFinished),
     EvaluationScored(EvaluationScored),
+    /// Catchall for forward-compat — old readers deserialise unknown
+    /// variants into `Other` instead of failing the whole record.
+    /// Borrowed from codex-rs `ResponseItem::Other` pattern (5 years
+    /// of versionless schema evolution rests on this).
+    Other(serde_json::Value),
 }
 
 pub struct LlmCallFinished {
@@ -161,6 +166,42 @@ tenant-agnostic on purpose — it's a 32-byte hash with no body
 recoverable, used for "this prompt template appeared 10000 times
 across tenants" rollups. Fingerprint ≠ body pointer.
 
+## 6.1 BodyStore physical layout (codex-rs borrow)
+
+`BodyStore` is a trait. v1 impl is single-table SQLite; trait shape
+keeps room for codex-rs's date-partitioned strategy as v2:
+
+```rust
+#[async_trait]
+pub trait BodyStore: Send + Sync {
+    async fn put(&self, r: &ContentRef, bytes: Bytes) -> Result<()>;
+    async fn fetch(&self, r: &ContentRef) -> Result<Bytes>;
+
+    /// Drop all bodies older than `cutoff`. Implementations CAN do
+    /// this efficiently (codex-style YYYY/MM/DD dirs → `rm -rf`)
+    /// or with `DELETE WHERE created_at < ?`. The trait commits to
+    /// the operation existing, not to its cost.
+    async fn purge_before(&self, cutoff: SystemTime) -> Result<u64>;
+
+    /// Drop a tenant's entire body footprint — required for
+    /// tenant-delete compliance. Implementations MUST partition by
+    /// tenant_id internally so this is O(tenant) not O(all bodies).
+    async fn purge_tenant(&self, tenant_id: &TenantId) -> Result<u64>;
+}
+```
+
+The `purge_*` methods exist in the trait so v2 backends (date-partitioned
+sqlite-per-day, S3 with lifecycle rules, postgres bytea with index)
+can implement retention as physical operations rather than full-table
+scans. Codex's `~/.codex/sessions/YYYY/MM/DD/...` shows the value:
+"delete all bodies older than 7d" becomes `rmdir` instead of a
+multi-million-row DELETE.
+
+v1 impl: single SQLite table with `(tenant_id, body_hash)` PK,
+`created_at` index. `purge_before` runs `DELETE WHERE created_at < ?`.
+Acceptable until body store hits ~100M rows; v2 partitioning kicks
+in by then.
+
 ## 7. Where things live (crate placement)
 
 ```
@@ -194,6 +235,34 @@ touch the schema or anything that imports it.
   open (`AlwaysEmit` impl ships); per-tag rate limiting belongs to
   `OnlineEvaluatorRunner`'s scheduling, not the event-emit path —
   metric rollups need full samples.
+
+### 8.1 PersistenceMode (codex-rs borrow)
+
+Two modes, per-tenant configurable, default `Limited`:
+
+```rust
+pub enum PersistenceMode {
+    /// Default. Inline scalars + ContentRef bodies. Sufficient for
+    /// metric rollups, cohort filtering, regression gates.
+    Limited,
+
+    /// Extended debug detail: per-attempt retry payloads, raw stream
+    /// timing, intermediate tool-call args/results. Storage cost
+    /// ~5-10x Limited. Tenant opts in for debugging windows.
+    Extended,
+}
+```
+
+`PersistenceMode` is **about what's persisted, not how much** — distinct
+from sampling. Sampling decides "do we emit this call's event at all";
+mode decides "if we emit, how much detail goes in." Both compose:
+default tenant gets `Always` × `Limited`; debug-window tenant gets
+`Always` × `Extended`; high-QPS prod gets `Rate(0.01)` × `Limited`.
+
+Borrowed from codex-rs `EventPersistenceMode::{Limited, Extended}`
+(`recorder.rs` policy module). Same intuition: most consumers want a
+small dial, "everything OR essentials"; finer field-level control is
+overkill for v1.
 
 ## 9. Roadmap (phased)
 
@@ -241,7 +310,8 @@ Tagged with the decision needed.
 | Q5 | `ContentRef` body store + cache-registry body store: same physical store or separate? | Same. Both are "tenant-scoped CAS by sha256(tenant + body)"; deduping the implementation removes a class of "which one am I writing to" bugs. |
 | Q6 | Failed-call event has `response_ref: None` — does it also store the `ProviderError` chain detail? | `result: CallResult::Error { kind }` + `telemetry.retry_attempts` cover the patterns evaluators want. Full error chain only in the per-attempt log line, not the event. |
 | Q7 | TTL defaults — 90d events / 7d bodies — per-tenant override at what layer? | `tars-config` `[tenant.{id}.retention]` block; absent = global default. Implementation deferred to M6 multi-tenant. |
-| Q8 | Schema versioning — bump `LlmCallFinished` adding a field — back-compat? | `#[serde(default)]` on every new field, `#[non_exhaustive]` on the enum. Old readers see new events with default values; old events deserialise into new readers fine. No explicit version field until a breaking change forces one. |
+| Q8 | Schema versioning — bump `LlmCallFinished` adding a field — back-compat? | `#[serde(default)]` on every new field, `#[non_exhaustive]` enum, **plus `Other(serde_json::Value)` catchall variant** (codex-rs borrow — old readers don't fail on unknown variants). No explicit version field until a breaking change forces one. |
+| Q9 | `BodyStore` v1 physical layout — single SQLite table, date-partitioned, or pluggable? | Pluggable trait. v1 impl is single-table SQLite (simplest); trait commits to `purge_before` / `purge_tenant` ops so v2 (codex-style date-partitioned sqlite-per-day or S3 + lifecycle rules) can replace without consumer changes. |
 
 Most defaults are safe to ship as Phase 1 lands; Q1 and Q2 are the
 two needing explicit sign-off before enabler implementation starts.
