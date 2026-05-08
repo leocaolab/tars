@@ -37,7 +37,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 authors = ["TARS Team"]
-repository = "https://github.com/moomoo-tech/tars"
+repository = "https://github.com/leocaolab/tars"
 
 [workspace.dependencies]
 # Async runtime

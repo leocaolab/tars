@@ -1,6 +1,6 @@
 # TARS — Multi-Agent LLM Runtime
 
-[![ci](https://github.com/moomoo-tech/tars/actions/workflows/ci.yml/badge.svg)](https://github.com/moomoo-tech/tars/actions/workflows/ci.yml)
+[![ci](https://github.com/leocaolab/tars/actions/workflows/ci.yml/badge.svg)](https://github.com/leocaolab/tars/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](./rust-toolchain.toml)
 
@@ -40,7 +40,7 @@ See [docs/comparison.md](./docs/comparison.md) for head-to-head positioning.
 
 ```bash
 # Python (M8 in progress)
-git clone https://github.com/moomoo-tech/tars.git
+git clone https://github.com/leocaolab/tars.git
 cd tars/crates/tars-py
 maturin develop --release
 

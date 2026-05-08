@@ -235,4 +235,4 @@ Particular asks:
 - **Storage backends** beyond SQLite/Postgres (DynamoDB, Spanner, etc.).
 - **Tracing exporters** beyond stdout (OTLP, Datadog, Honeycomb adapters).
 
-Reach: [github.com/moomoo-tech/tars](https://github.com/moomoo-tech/tars).
+Reach: [github.com/leocaolab/tars](https://github.com/leocaolab/tars).

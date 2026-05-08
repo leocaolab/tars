@@ -33,7 +33,7 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/moomoo-tech/tars"
+Repository = "https://github.com/leocaolab/tars"
 
 [tool.maturin]
 # `tars_py` is the cdylib that cargo produces; we publish it as

@@ -2,7 +2,7 @@
 
 Rust-backed multi-provider LLM runtime exposed as a Python package.
 
-This is the Python binding for [TARS](https://github.com/moomoo-tech/tars). The compiled extension wraps TARS's middleware pipeline (cache, retry, telemetry, validation) so Python code can use one Rust-backed handle for any provider — `claude` / `openai` / `gemini` / `vllm` / `mlx` / `llamacpp` / `claude_cli` / `gemini_cli` / `codex_cli`.
+This is the Python binding for [TARS](https://github.com/leocaolab/tars). The compiled extension wraps TARS's middleware pipeline (cache, retry, telemetry, validation) so Python code can use one Rust-backed handle for any provider — `claude` / `openai` / `gemini` / `vllm` / `mlx` / `llamacpp` / `claude_cli` / `gemini_cli` / `codex_cli`.
 
 ## Build
 

@@ -38,7 +38,7 @@ What you get without writing it yourself:
 ### Python
 
 ```bash
-git clone https://github.com/moomoo-tech/tars.git
+git clone https://github.com/leocaolab/tars.git
 cd tars/crates/tars-py
 maturin develop --release
 ```
@@ -52,9 +52,9 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-tars-pipeline = { git = "https://github.com/moomoo-tech/tars.git", tag = "v0.2.0" }
-tars-provider = { git = "https://github.com/moomoo-tech/tars.git", tag = "v0.2.0" }
-tars-types    = { git = "https://github.com/moomoo-tech/tars.git", tag = "v0.2.0" }
+tars-pipeline = { git = "https://github.com/leocaolab/tars.git", tag = "v0.2.0" }
+tars-provider = { git = "https://github.com/leocaolab/tars.git", tag = "v0.2.0" }
+tars-types    = { git = "https://github.com/leocaolab/tars.git", tag = "v0.2.0" }
 ```
 
 (Pre-1.0: pin to a specific tag. Each minor version may break.)
