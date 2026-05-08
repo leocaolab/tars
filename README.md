@@ -8,6 +8,10 @@
 >
 > Track the [Releases page](../../releases) for the v1.0 announcement, which will include a stability commitment, migration guide, and a proper README rewrite for a broader audience. Until then, expect breaking API changes between minor versions, and don't put TARS on a critical production path unless you're prepared to follow `main` closely.
 
+> **How this came together**
+>
+> TARS landed as a focused Pre-1.0 sprint — the goal was to establish a complete architectural baseline (8 providers, middleware pipeline, output validation, per-call observability, multi-turn session, agent runtime) and validate it against a real downstream consumer (dogfooded in production) before any broader announcement. **Documentation is design-ahead in places** — the 17 design docs describe the full target shape; the [Status block below](#tars--multi-agent-llm-runtime) and [CHANGELOG.md](./CHANGELOG.md) are authoritative for what's actually shipped vs. designed. If you spot a doc that describes a layer not yet in `crates/`, that's expected — design first, then build, then `<unreleased>` → release.
+
 > **Status (2026-05, v0.2.0):** M0–M7 shipped (types / config / provider / pipeline / cache / runtime / tools). M8 (`tars-py`) in progress — `Provider`, `Pipeline`, `Session`, `CapabilityRequirements`, `CompatibilityResult`, and Python output validators (Pass / Reject / FilterText / Annotate) all exposed. Workspace builds clean on stable Rust 1.85+ with `cargo clippy -Dwarnings` green. See [CHANGELOG.md](./CHANGELOG.md) for per-milestone shipped detail.
 
 ---
