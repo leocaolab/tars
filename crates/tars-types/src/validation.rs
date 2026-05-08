@@ -49,14 +49,19 @@ pub enum ValidationOutcome {
     },
 
     /// Validator considers the response unacceptable. Surfaces as
-    /// `ProviderError::ValidationFailed`; existing
-    /// [`crate::error::RetryMiddleware`] decides whether to retry
-    /// based on the `retriable` flag (true → Retriable class, false
-    /// → Permanent).
-    Reject {
-        reason: String,
-        retriable: bool,
-    },
+    /// `ProviderError::ValidationFailed` — always classified as
+    /// `ErrorClass::Permanent`, never triggers `RetryMiddleware`.
+    ///
+    /// **Why no `retriable` flag**: the W1 design carried an
+    /// `retriable: bool` to let validators ask for a model resample.
+    /// Real consumers (arc 2026-05-08 dogfood) all wire validators
+    /// as Filter (drop bad findings, keep batch) and never use the
+    /// retry path — same prompt → same model → same output, model
+    /// retry on validation failure is a near-pure gamble. Cutting
+    /// the field shrinks the surface and removes the temptation.
+    /// Callers that genuinely need to re-ask the model should do so
+    /// at their own layer with explicit prompt variation.
+    Reject { reason: String },
 
     /// Response unchanged, but the validator wants to record per-call
     /// metrics. Propagates into [`ValidationSummary::outcomes`].

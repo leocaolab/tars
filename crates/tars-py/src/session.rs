@@ -359,6 +359,7 @@ fn chat_response_to_py(
             pipeline_total_ms: telemetry_acc.pipeline_total_ms,
             layers: telemetry_acc.layers,
         },
+        validation_summary: crate::validation_summary_to_py(resp.validation_summary),
     }
 }
 

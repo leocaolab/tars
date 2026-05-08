@@ -102,10 +102,10 @@ impl Usage {
 }
 
 /// One completed LLM call's response. Always has `.text` (possibly
-/// empty), `.usage`, `.stop_reason`, and `.telemetry`. `.thinking` is
-/// only set for reasoning-capable models that emitted reasoning tokens
-/// via the OpenAI `reasoning_content` channel (o1 / DeepSeek-R1 /
-/// Qwen3-thinking / etc.).
+/// empty), `.usage`, `.stop_reason`, `.telemetry`, and
+/// `.validation_summary`. `.thinking` is only set for reasoning-capable
+/// models that emitted reasoning tokens via the OpenAI
+/// `reasoning_content` channel (o1 / DeepSeek-R1 / Qwen3-thinking / etc.).
 #[pyclass(frozen, get_all)]
 #[derive(Clone, Debug)]
 pub(crate) struct Response {
@@ -118,18 +118,102 @@ pub(crate) struct Response {
     /// Per-call observability data: cache hit, retry attempts,
     /// per-layer latency, layer trace. See `Telemetry` class.
     pub(crate) telemetry: Telemetry,
+    /// Per-validator outcomes for this call. Empty when no validators
+    /// ran (caller didn't pass `validators=` or empty list). See
+    /// `ValidationSummary` class.
+    pub(crate) validation_summary: ValidationSummary,
 }
 
 #[pymethods]
 impl Response {
     fn __repr__(&self) -> String {
         format!(
-            "Response(text={:?}, stop_reason={:?}, usage={}, telemetry={})",
+            "Response(text={:?}, stop_reason={:?}, usage={}, telemetry={}, validation_summary={})",
             truncate_for_repr(&self.text, 60),
             self.stop_reason,
             self.usage.__repr__(),
             self.telemetry.__repr__(),
+            self.validation_summary.__repr__(),
         )
+    }
+}
+
+/// Aggregated record of all validators that ran during one
+/// `Pipeline.complete` call. Populated by `ValidationMiddleware`;
+/// stays empty when the Pipeline has no validators attached.
+///
+/// Fields:
+///
+/// - `validators_run: list[str]` — names of validators that ran, in
+///   registration order. Captures the chain shape (BTreeMap-keyed
+///   `outcomes` doesn't preserve order).
+/// - `outcomes: dict[str, dict]` — keyed by validator name. Each
+///   value is one of:
+///     - `{"outcome": "pass"}`
+///     - `{"outcome": "filter", "dropped": [...]}`
+///     - `{"outcome": "annotate", "metrics": {...}}`
+///   Reject doesn't appear here — Reject short-circuits into a
+///   `TarsProviderError(kind="validation_failed")` and there's no
+///   Response object to attach a summary to.
+/// - `total_wall_ms: int` — wall time spent in ValidationMiddleware
+///   for this call.
+#[pyclass(frozen, name = "ValidationSummary")]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ValidationSummary {
+    #[pyo3(get)]
+    pub(crate) validators_run: Vec<String>,
+    /// Stored as `serde_json::Value` (Python-convertibility on
+    /// `serde_json::Value` doesn't exist). Exposed via the `outcomes`
+    /// getter, which converts on demand.
+    pub(crate) outcomes_json: serde_json::Value,
+    #[pyo3(get)]
+    pub(crate) total_wall_ms: u64,
+}
+
+#[pymethods]
+impl ValidationSummary {
+    #[getter]
+    fn outcomes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let json_mod = py.import("json")?;
+        let s = serde_json::to_string(&self.outcomes_json)
+            .unwrap_or_else(|_| "{}".into());
+        let obj = json_mod.call_method1("loads", (s,))?;
+        obj.downcast_into::<pyo3::types::PyDict>().map_err(PyErr::from)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ValidationSummary(validators_run={:?}, total_wall_ms={})",
+            self.validators_run, self.total_wall_ms
+        )
+    }
+}
+
+/// Convert a typed `tars_types::ValidationSummary` into the
+/// Python-facing pyclass shape.
+pub(crate) fn validation_summary_to_py(
+    s: tars_types::ValidationSummary,
+) -> ValidationSummary {
+    let mut outcomes = serde_json::Map::new();
+    for (name, oc) in s.outcomes {
+        let val = match oc {
+            tars_types::OutcomeSummary::Pass => serde_json::json!({"outcome": "pass"}),
+            tars_types::OutcomeSummary::Filter { dropped } => {
+                serde_json::json!({"outcome": "filter", "dropped": dropped})
+            }
+            tars_types::OutcomeSummary::Annotate { metrics } => {
+                serde_json::json!({"outcome": "annotate", "metrics": metrics})
+            }
+            // `#[non_exhaustive]` — surface unknown variant names to
+            // the caller rather than panic.
+            _ => serde_json::json!({"outcome": "unknown"}),
+        };
+        outcomes.insert(name, val);
+    }
+    ValidationSummary {
+        validators_run: s.validators_run,
+        outcomes_json: serde_json::Value::Object(outcomes),
+        total_wall_ms: s.total_wall_ms,
     }
 }
 
@@ -399,23 +483,26 @@ impl Pipeline {
         let cache_registry = tars_cache::MemoryCacheRegistry::default_arc();
         let cache_factory = CacheKeyFactory::new(1);
 
-        // Build the layer stack. Validation is added LAST to the
-        // builder, which makes it the INNERMOST wrapper (closest to
-        // Provider) — that's the position Doc 15 §2 requires so
-        // ValidationFailed{retriable:true} bubbles up into the outer
-        // RetryMiddleware.
-        let mut builder = RsPipeline::builder(provider)
-            .layer(TelemetryMiddleware::new())
+        // Onion (W4 — see Doc 15 §2):
+        //   Telemetry → Validation → Cache → Retry → Provider
+        //
+        // Builder records outer→inner; Validation must sit OUTSIDE Cache
+        // so that (1) Cache stores raw Provider events, not post-Filter
+        // events, and (2) cache hits still flow through Validation
+        // (validators are pure, rerun is cheap). ValidationFailed is
+        // always Permanent — RetryMiddleware does NOT retry on it.
+        let mut builder = RsPipeline::builder(provider).layer(TelemetryMiddleware::new());
+        if !validators.is_empty() {
+            builder = builder.layer(tars_pipeline::ValidationMiddleware::new(validators));
+        }
+        let pipeline = builder
             .layer(CacheLookupMiddleware::new(
                 cache_registry,
                 cache_factory,
                 cache_origin,
             ))
-            .layer(RetryMiddleware::default());
-        if !validators.is_empty() {
-            builder = builder.layer(tars_pipeline::ValidationMiddleware::new(validators));
-        }
-        let pipeline = builder.build();
+            .layer(RetryMiddleware::default())
+            .build();
 
         let layer_names: Vec<String> =
             pipeline.layer_names().iter().map(|s| s.to_string()).collect();
@@ -1163,6 +1250,7 @@ fn run_complete(
             // stream drain.
             let ctx = RequestContext::test_default();
             let telemetry_handle = ctx.telemetry.clone();
+            let validation_handle = ctx.validation_outcome.clone();
 
             let mut stream = svc.call(req, ctx).await.map_err(provider_to_py)?;
             let mut builder = ChatResponseBuilder::new();
@@ -1170,9 +1258,20 @@ fn run_complete(
                 let ev = ev.map_err(provider_to_py)?;
                 builder.apply(ev);
             }
-            let resp = builder.finish();
+            let mut resp = builder.finish();
+
+            // ValidationMiddleware (when present) publishes its
+            // post-Filter response + summary on the side-channel; prefer
+            // that over the stream-rebuild so `validation_summary` is
+            // populated and any Filter outcome is reflected.
+            if let Ok(rec) = validation_handle.lock() {
+                if let Some(filtered) = &rec.filtered_response {
+                    resp = filtered.clone();
+                }
+            }
 
             let telemetry = read_telemetry(&telemetry_handle);
+            let validation_summary = validation_summary_to_py(resp.validation_summary.clone());
 
             Ok(Response {
                 text: resp.text,
@@ -1189,6 +1288,7 @@ fn run_complete(
                     .map(|r| stop_reason_str(&r).to_string())
                     .unwrap_or_else(|| "none".to_string()),
                 telemetry,
+                validation_summary,
             })
         })
     })
@@ -1261,6 +1361,7 @@ fn _tars_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Response>()?;
     m.add_class::<Usage>()?;
     m.add_class::<Telemetry>()?;
+    m.add_class::<ValidationSummary>()?;
     m.add_class::<RetryAttemptPy>()?;
     m.add_class::<CompatibilityResult>()?;
     m.add_class::<CompatibilityReasonPy>()?;

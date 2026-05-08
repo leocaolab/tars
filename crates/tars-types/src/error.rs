@@ -97,24 +97,16 @@ pub enum ProviderError {
     },
 
     /// `ValidationMiddleware` rejected the response from an
-    /// `OutputValidator::Reject` outcome. `validator` is the
-    /// `OutputValidator::name()` of the rejecter; `reason` is
-    /// the `Reject.reason` payload; `retriable` flips the error
-    /// class so [`RetryMiddleware`] either retries (Retriable) or
-    /// gives up (Permanent).
-    ///
-    /// **Why retriable matters**: validation rejections fall on a
-    /// spectrum. "Output is valid JSON but the model wandered off
-    /// topic" → retriable (sample again, model is non-deterministic).
-    /// "Output's structured-tag set has fields the rubric doesn't
-    /// allow" → permanent (no retry will help; caller's prompt or
-    /// rubric needs fixing). Validator implementation decides
-    /// per-rejection.
+    /// `OutputValidator::Reject` outcome. Always classified as
+    /// `ErrorClass::Permanent` — `RetryMiddleware` never retries on
+    /// validation failures (same prompt → same output; model retry
+    /// is a gamble that doesn't belong inside the runtime). Callers
+    /// that need to re-ask the model with prompt variation should
+    /// catch `ValidationFailed` at their own layer.
     #[error("validation failed: {validator}: {reason}")]
     ValidationFailed {
         validator: String,
         reason: String,
-        retriable: bool,
     },
 
     /// Catch-all for adapter bugs. Should be rare.
@@ -140,12 +132,11 @@ impl ProviderError {
             RateLimited { .. } | ModelOverloaded | Network(_) | CircuitOpen { .. } => {
                 ErrorClass::Retriable
             }
-            ValidationFailed { retriable: true, .. } => ErrorClass::Retriable,
             Auth(_) | InvalidRequest(_) | ContextTooLong { .. }
             | ContentFiltered { .. } | BudgetExceeded
             | UnknownTool { .. }
             | NoCompatibleCandidate { .. }
-            | ValidationFailed { retriable: false, .. } => ErrorClass::Permanent,
+            | ValidationFailed { .. } => ErrorClass::Permanent,
             Parse(_) | Internal(_) | CliSubprocessDied { .. } => {
                 ErrorClass::MaybeRetriable
             }

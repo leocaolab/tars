@@ -402,6 +402,111 @@ who wants force-fresh on validation fail uses an explicit
 `skip_cache=True` kwarg (future). Eliminates cache-poisoning
 worry while keeping the trait contract clean.
 
+> **Note (W4, 2026-05-08)**: this contract was **not actually
+> honored by W1's implementation** — `ValidationMiddleware` sat
+> *inside* Cache in the onion, so Cache stored post-Filter events
+> and cache hits short-circuited before Validation. arc raised the
+> "single-validator-chain assumption" flag during 2026-05-08 dogfood
+> prep; tars-side audit + failing regression tests confirmed the
+> deeper bug. **Now correctly enforced after W4 below**: Validation
+> moved OUTSIDE Cache.
+
+### B-20 Wave 2 — PyO3 validator binding (`<unreleased>`)
+
+Python validators attach as `[(name, callable), ...]` to
+`Pipeline.{from_default,from_config,from_str}`. `PyValidatorAdapter`
+bridges Python callbacks into the Rust `OutputValidator` trait;
+`build_req_dict` / `build_resp_dict` flatten ChatRequest/ChatResponse
+to plain dicts so the callable surface is `(req: dict, resp: dict)
+→ outcome`. Four outcome pyclasses: `tars.Pass`, `tars.Reject`,
+`tars.FilterText`, `tars.Annotate`.
+
+Robustness contract: a buggy validator (raises a Python exception,
+returns the wrong type) is caught by the adapter and translated
+into `ValidationFailed` (always Permanent — see W4) with a clear
+message. The worker is never crashed by user-side bugs.
+
+17 pytest tests in `crates/tars-py/python/tests/test_validators.py`
+exercise the eight smoke scenarios (outcome class introspection,
+pass-through, reject, filter chain, buggy validator handling, etc.)
+plus construction-error guards (validators must be tuples, tuples
+must be 2-element).
+
+### B-20 Wave 4 — Cache × Validator interaction fix (A2 path) (`<unreleased>`)
+
+Followup to W1. Two bugs surfaced when arc 2026-05-08 dogfood prep
+flagged a "single-validator-chain assumption" concern; tars-side
+audit + failing regression tests confirmed both:
+
+1. `ValidationMiddleware` re-emitted post-Filter events on the
+   stream when a Filter outcome rewrote the response. The W1 onion
+   put Validation *inside* Cache, so Cache saw and stored the
+   post-Filter version — directly contradicting Doc 15 §2's
+   "cache stores raw" contract.
+2. Cache hits short-circuited before reaching Validation, so the
+   "validators rerun on hit" half of the contract was also broken.
+   This wasn't fixable by changing re-emit logic alone — fundamental
+   onion-order issue.
+
+**Fix — A2 path**: chosen after consulting arc on real consumer
+needs (zero use cases for `Reject(retriable=True)` model resample;
+all validators are deterministic Filter chains).
+
+- **Onion order**: `Telemetry → Validation → Cache → Retry → Provider`.
+  Validation now sits OUTSIDE Cache. Cache sees raw Provider events
+  (Validation's filtered re-emit is downstream of where Cache reads).
+  Cache hits flow through Validation on the way back to the caller —
+  validators rerun on every call, hit or miss.
+- **`Reject{retriable: bool}` removed**: cut from
+  `ValidationOutcome::Reject`, `ProviderError::ValidationFailed`,
+  and `tars.Reject(...)`. `ValidationFailed` is always
+  `ErrorClass::Permanent`. RetryMiddleware never retries on
+  validation failures. Callers needing model resample do so at
+  their own layer with explicit prompt variation. Cuts surface,
+  removes the temptation to relitigate same-prompt model retries.
+- **`PipelineBuilder` callers updated** (`tars-py/src/lib.rs::Pipeline::from_provider`).
+  `RetryMiddleware` arm for `validation_failed` retained for
+  diagnostics (the kind still surfaces via `TarsProviderError.kind`)
+  but never matches the Retriable class predicate.
+- **Built-in validator builders**: dropped `JsonShapeValidator::with_retriable`
+  and `NotEmptyValidator::with_retriable`; `MaxLengthValidator::OnExceed::Reject`
+  no longer carries a `retriable` field.
+
+Two regression tests in `tars-pipeline/src/validation/tests.rs` pin
+the new contract (no longer `#[ignore]`'d):
+
+- `b20_w4_cache_stores_raw_not_post_filter` — direct cache registry
+  inspection: with Validation OUTSIDE Cache, cached `response.text`
+  is the raw provider output, not the filtered version.
+- `b20_w4_cache_hit_reruns_validator_chain` — second call's
+  `telemetry.layers` includes `"validation"`, proving the chain
+  ran on hit.
+
+### B-20 v3 — Python `Response.validation_summary` getter (`<unreleased>`)
+
+Rust `ChatResponse.validation_summary: ValidationSummary` was already
+populated by `ValidationMiddleware` since W1; this exposes it on the
+Python `Response` pyclass so callers can pull per-validator outcomes
+for dogfood reports + regression gating.
+
+- **`tars.ValidationSummary`** — new frozen pyclass with fields:
+  `validators_run: list[str]` (registration-order chain shape),
+  `outcomes: dict[str, dict]` (keyed by validator name, with
+  `{"outcome": "pass"|"filter"|"annotate", "dropped"?: list[str],
+  "metrics"?: dict}`), `total_wall_ms: int`. `Reject` outcomes are
+  absent — they short-circuit into `TarsProviderError`.
+- Empty when no validators ran (caller didn't pass `validators=` or
+  passed an empty list).
+
+3 new pytest tests cover Filter dropped-list propagation, the
+no-validators empty case, and class export.
+
+> Driven by arc's dogfood report regression gate: without a
+> structured `validation_summary` Python callers had no
+> cross-run-comparable view of "the snippet validator dropped 3 of 19
+> findings". `r.telemetry.layers` told them *whether* validation
+> ran, not *what* it did.
+
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 
 B-15 in TODO. Adds a `.telemetry` field on every `Response` carrying

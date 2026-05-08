@@ -16,32 +16,20 @@ use super::OutputValidator;
 
 // ── JsonShapeValidator ───────────────────────────────────────────────
 
-/// Validates that `response.text` parses as JSON (and optionally
-/// matches a schema). On parse failure or schema mismatch, surfaces
-/// `Reject`. Use as the first validator in a chain when downstream
-/// validators assume JSON output.
+/// Validates that `response.text` parses as JSON. On parse failure,
+/// surfaces `Reject`. Use as the first validator in a chain when
+/// downstream validators assume JSON output.
 ///
-/// **Schema validation is shape-only** — we use `serde_json` parsing
-/// for v1 and don't pull a full JSON Schema crate; the schema parameter
-/// here is reserved as a placeholder for B-20 W2 / W3 enrichment when
-/// `jsonschema` crate gets added.
-///
-/// `retriable=true` because parse failures are commonly model
-/// non-determinism (skipped a quote, missed a comma) — re-sampling
-/// often produces a clean output. Caller can override via
-/// `with_retriable(false)` for permanent-shape rejections (caller's
-/// schema is wrong).
+/// **Schema validation is shape-only** — v1 uses `serde_json` parsing
+/// and doesn't pull a full JSON Schema crate. Future enrichment in
+/// B-20.v2 (typed reasons) when the `jsonschema` crate gets added.
 pub struct JsonShapeValidator {
     name: String,
-    retriable_on_fail: bool,
 }
 
 impl Default for JsonShapeValidator {
     fn default() -> Self {
-        Self {
-            name: "json_shape".into(),
-            retriable_on_fail: true,
-        }
+        Self { name: "json_shape".into() }
     }
 }
 
@@ -54,15 +42,6 @@ impl JsonShapeValidator {
     /// `ValidationSummary.outcomes`).
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
-        self
-    }
-
-    /// Whether to flag rejections as retriable. Default: true (model
-    /// non-determinism). Set false when caller knows a clean re-sample
-    /// won't help (e.g. response_schema was set but the request
-    /// shape was malformed).
-    pub fn with_retriable(mut self, retriable: bool) -> Self {
-        self.retriable_on_fail = retriable;
         self
     }
 }
@@ -84,7 +63,6 @@ impl OutputValidator for JsonShapeValidator {
             Ok(_) => ValidationOutcome::Pass,
             Err(e) => ValidationOutcome::Reject {
                 reason: format!("response.text is not valid JSON: {e}"),
-                retriable: self.retriable_on_fail,
             },
         }
     }
@@ -99,7 +77,6 @@ impl OutputValidator for JsonShapeValidator {
 pub struct NotEmptyValidator {
     name: String,
     field: ResponseField,
-    retriable_on_fail: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,11 +89,7 @@ pub enum ResponseField {
 
 impl Default for NotEmptyValidator {
     fn default() -> Self {
-        Self {
-            name: "not_empty".into(),
-            field: ResponseField::Text,
-            retriable_on_fail: true,
-        }
+        Self { name: "not_empty".into(), field: ResponseField::Text }
     }
 }
 
@@ -126,19 +99,11 @@ impl NotEmptyValidator {
     }
 
     pub fn for_field(field: ResponseField) -> Self {
-        Self {
-            field,
-            ..Self::default()
-        }
+        Self { field, ..Self::default() }
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
-        self
-    }
-
-    pub fn with_retriable(mut self, retriable: bool) -> Self {
-        self.retriable_on_fail = retriable;
         self
     }
 }
@@ -156,7 +121,6 @@ impl OutputValidator for NotEmptyValidator {
         if s.trim().is_empty() {
             ValidationOutcome::Reject {
                 reason: format!("response.{} is empty", field_label(self.field)),
-                retriable: self.retriable_on_fail,
             }
         } else {
             ValidationOutcome::Pass
@@ -174,13 +138,12 @@ fn field_label(f: ResponseField) -> &'static str {
 // ── MaxLengthValidator ───────────────────────────────────────────────
 
 /// Validates that a response field doesn't exceed a configured length
-/// in characters. Two modes: `Reject` (fail the call, RetryMiddleware
-/// may re-sample with a tighter budget) or `Filter` (truncate
-/// in-place, downstream sees the shorter version + a `dropped` audit
-/// note). Useful for defending against runaway generation, prompt
-/// injection causing model to dump training data, or budget-bound
-/// caller (chat UI, downstream parser) that can't tolerate huge
-/// inputs.
+/// in characters. Two modes: `Reject` (fail the call permanently) or
+/// `Filter` (truncate in-place, downstream sees the shorter version +
+/// a `dropped` audit note). Useful for defending against runaway
+/// generation, prompt injection causing model to dump training data,
+/// or budget-bound callers (chat UI, downstream parser) that can't
+/// tolerate huge inputs.
 pub struct MaxLengthValidator {
     name: String,
     field: ResponseField,
@@ -190,8 +153,9 @@ pub struct MaxLengthValidator {
 
 #[derive(Debug, Clone, Copy)]
 pub enum OnExceed {
-    /// Reject the response. Caller / RetryMiddleware decides next.
-    Reject { retriable: bool },
+    /// Reject the response permanently — `ValidationFailed` always
+    /// surfaces as `ErrorClass::Permanent`; no retry.
+    Reject,
     /// Truncate the field in-place to `max_chars`. Subsequent
     /// validators see the truncated response. The dropped tail's
     /// length is recorded in the `Filter.dropped` audit list.
@@ -205,7 +169,7 @@ impl MaxLengthValidator {
             name: "max_length".into(),
             field: ResponseField::Text,
             max_chars,
-            on_exceed: OnExceed::Reject { retriable: false },
+            on_exceed: OnExceed::Reject,
         }
     }
 
@@ -245,13 +209,12 @@ impl OutputValidator for MaxLengthValidator {
             return ValidationOutcome::Pass;
         }
         match self.on_exceed {
-            OnExceed::Reject { retriable } => ValidationOutcome::Reject {
+            OnExceed::Reject => ValidationOutcome::Reject {
                 reason: format!(
                     "response.{} length={len} exceeds max_chars={}",
                     field_label(self.field),
                     self.max_chars
                 ),
-                retriable,
             },
             OnExceed::Truncate => {
                 let mut new_resp = resp.clone();

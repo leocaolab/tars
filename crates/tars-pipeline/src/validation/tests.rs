@@ -53,20 +53,9 @@ fn json_shape_rejects_broken_json() {
     let v = JsonShapeValidator::new();
     let r = resp_with_text(r#"{"missing": "comma" "next": 1}"#);
     match v.validate(&fake_req(), &r) {
-        ValidationOutcome::Reject { reason, retriable } => {
+        ValidationOutcome::Reject { reason } => {
             assert!(reason.contains("not valid JSON"));
-            assert!(retriable, "default is retriable=true");
         }
-        _ => panic!("expected Reject"),
-    }
-}
-
-#[test]
-fn json_shape_with_retriable_false_rejects_permanent() {
-    let v = JsonShapeValidator::new().with_retriable(false);
-    let r = resp_with_text("not json at all");
-    match v.validate(&fake_req(), &r) {
-        ValidationOutcome::Reject { retriable, .. } => assert!(!retriable),
         _ => panic!("expected Reject"),
     }
 }
@@ -196,13 +185,14 @@ async fn validation_reject_surfaces_validation_failed_error() {
     let result = svc.call(fake_req(), RequestContext::test_default()).await;
     match result {
         Ok(_) => panic!("expected Err, got Ok stream"),
-        Err(ProviderError::ValidationFailed {
-            validator,
-            retriable,
-            ..
-        }) => {
+        Err(ProviderError::ValidationFailed { validator, .. }) => {
             assert_eq!(validator, "not_empty");
-            assert!(retriable, "NotEmpty default is retriable");
+            // ValidationFailed is always Permanent (W4 — no retriable flag).
+            let err = ProviderError::ValidationFailed {
+                validator: "not_empty".into(),
+                reason: "x".into(),
+            };
+            assert_eq!(err.class(), tars_types::error::ErrorClass::Permanent);
         }
         Err(e) => panic!("expected ValidationFailed, got: {e:?}"),
     }
@@ -325,23 +315,19 @@ async fn validation_empty_chain_passes_through_without_drain() {
     assert!(rec.filtered_response.is_none());
 }
 
-// ── B-20.W4 — Cache × Filter validator interaction (regression gate) ───
+// ── B-20.W4 — Cache × Validator interaction contract (regression gate) ──
 //
-// Doc 15 §2 contract: cache stores raw Response (pre-Filter); cache hits
-// re-run validators. Implementation has a known bug: ValidationMiddleware
-// re-emits post-Filter events when a Filter outcome rewrites the response
-// (validation.rs:225-232), and the current Pipeline onion order is
-// Telemetry → CacheLookup → Retry → Validation → Provider — Cache wraps
-// Validation, so it sees the post-Filter stream and stores post-Filter.
+// W4 (2026-05-08) moved Validation OUTSIDE Cache. New onion:
+//   Telemetry → Validation → Cache → Retry → Provider
 //
-// These two tests pin the contract:
-//   1. cached events == raw provider events (pre-Filter)
+// Doc 15 §2 contract these tests pin:
+//   1. cache stores raw Provider events (pre-Filter)
 //   2. cache hit re-runs the validator chain
 //
-// Both expected to FAIL on current main; B-20.W4 fix makes them pass.
+// Test wiring uses the same outer→inner order as production: build
+// Cache around the Provider, then wrap Validation around Cache.
 
 #[tokio::test]
-#[ignore = "B-20.W4 — known failure on current main; fix removes #[ignore]"]
 async fn b20_w4_cache_stores_raw_not_post_filter() {
     use tars_cache::{CacheKeyFactory, CachePolicy, CacheRegistry, MemoryCacheRegistry};
     use tars_types::{ChatResponseBuilder, ProviderId};
@@ -358,22 +344,21 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
     let mock = MockProvider::new("mock_origin", CannedResponse::text("hello world"));
     let provider_service: Arc<dyn LlmService> = ProviderService::new(mock);
 
-    // Validation INNER, Cache OUTER — same order as production
-    // (PipelineBuilder::layer records outer→inner; we reproduce that
-    // shape directly here without a full Pipeline so we can poke the
-    // cache registry afterwards).
-    let validation = ValidationMiddleware::new(vec![
-        Box::new(MaxLengthValidator::truncate_above(5)),
-    ])
-    .wrap(provider_service);
-
+    // Production onion (W4): Validation OUTSIDE Cache. Cache wraps the
+    // provider; Validation wraps Cache. Cache sees raw provider events,
+    // not the post-Filter version Validation re-emits to its caller.
     let factory = CacheKeyFactory::new(1);
-    let cache_mw = CacheLookupMiddleware::new(
+    let cache_wrapped = CacheLookupMiddleware::new(
         registry.clone(),
         factory.clone(),
         ProviderId::new("mock_origin"),
-    );
-    let pipeline_svc = cache_mw.wrap(validation);
+    )
+    .wrap(provider_service);
+
+    let pipeline_svc = ValidationMiddleware::new(vec![
+        Box::new(MaxLengthValidator::truncate_above(5)),
+    ])
+    .wrap(cache_wrapped);
 
     // Cacheable request: explicit model + temperature=0.
     let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "say hi");
@@ -411,17 +396,15 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
 
     assert_eq!(
         cached.response.text, "hello world",
-        "B-20.W4 regression: cache stored post-Filter response. \
-         Doc 15 §2 contract: cache must store raw Response. \
-         Cause: ValidationMiddleware re-emits post-Filter events when \
-         filtered_any=true (validation.rs:225-232). Fix: always re-emit \
-         events_held (raw); Filter outcome already publishes via \
-         rec.filtered_response side-channel."
+        "B-20.W4 contract: with Validation OUTSIDE Cache (W4 onion), \
+         Cache must store raw Provider events. Multi-caller cache \
+         sharing across distinct validator chains depends on this; \
+         changing validator config on a Pipeline must not invalidate \
+         cache."
     );
 }
 
 #[tokio::test]
-#[ignore = "B-20.W4 — known failure on current main; fix removes #[ignore]"]
 async fn b20_w4_cache_hit_reruns_validator_chain() {
     use tars_cache::{CacheKeyFactory, MemoryCacheRegistry};
     use tars_types::ProviderId;
@@ -429,23 +412,24 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
     use crate::cache::CacheLookupMiddleware;
 
     // Doc 15 §2 contract: validators are pure → cheap to rerun → cache
-    // hits MUST rerun the chain. Today the onion order has Cache OUTSIDE
-    // Validation, so Cache short-circuits before reaching Validation:
-    // hits skip validators entirely and the layer trace lacks
-    // "validation" on the second call. Asserting the contract here.
+    // hits MUST rerun the chain. With W4's onion (Validation OUTSIDE
+    // Cache), Validation always runs — hit or miss — because Cache's
+    // short-circuit only short-circuits Cache and below, not the layers
+    // wrapping it.
     let registry: Arc<dyn tars_cache::CacheRegistry> = MemoryCacheRegistry::default_arc();
     let mock = MockProvider::new("mock_origin", CannedResponse::text("hi"));
     let provider_service: Arc<dyn LlmService> = ProviderService::new(mock);
 
-    let validation = ValidationMiddleware::new(vec![Box::new(NotEmptyValidator::new())])
-        .wrap(provider_service);
     let factory = CacheKeyFactory::new(1);
-    let cache_mw = CacheLookupMiddleware::new(
+    let cache_wrapped = CacheLookupMiddleware::new(
         registry,
         factory,
         ProviderId::new("mock_origin"),
-    );
-    let svc = cache_mw.wrap(validation);
+    )
+    .wrap(provider_service);
+
+    let svc = ValidationMiddleware::new(vec![Box::new(NotEmptyValidator::new())])
+        .wrap(cache_wrapped);
 
     let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "p");
     req.temperature = Some(0.0);
@@ -475,10 +459,9 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
     .await;
     assert!(
         ctx2.telemetry.lock().unwrap().layers.iter().any(|l| l == "validation"),
-        "B-20.W4 regression: cache hit short-circuits before Validation. \
-         Doc 15 §2 contract requires validators rerun on hit (pure → cheap). \
-         Current onion: Telemetry → CacheLookup → Retry → Validation → Provider. \
-         Fix likely requires moving ValidationMiddleware OUTSIDE CacheLookup."
+        "B-20.W4 contract: validators rerun on cache hit. With Validation \
+         OUTSIDE Cache, Validation runs every call regardless of hit/miss; \
+         layer trace must contain 'validation' on the hit too."
     );
 }
 

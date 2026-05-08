@@ -1,10 +1,17 @@
 //! Output-validation middleware. See [Doc 15](../../docs/15-output-validation.md).
 //!
-//! Position in the onion: **inside Retry, outside Provider**. A
-//! [`ValidationOutcome::Reject`] surfaces as
-//! [`ProviderError::ValidationFailed`] which RetryMiddleware classifies
-//! by the `retriable` flag — so retry/backoff machinery is reused
-//! without a second retry mechanism.
+//! Position in the onion (W4 final): **outside Cache, outside Retry,
+//! inside Telemetry**. Onion order:
+//! `Telemetry → Validation → Cache → Retry → Provider`.
+//!
+//! `ValidationFailed` is **always `ErrorClass::Permanent`** — no retry.
+//! The W1 "retriable Reject" path was cut in W4: it would have required
+//! either putting Validation back inside Retry (re-introducing the
+//! cache×filter corruption W4 fixes) or duplicating retry logic inside
+//! ValidationMiddleware itself, both for a use case (model resample on
+//! validation failure) that real consumers (arc 2026-05-08 dogfood)
+//! don't have. Callers who do need a model retry on validation failure
+//! catch `ValidationFailed` at their own layer.
 //!
 //! ## Lifecycle within `call()`
 //!
@@ -18,10 +25,10 @@
 //!    - `Pass` → keep response, record `OutcomeSummary::Pass`.
 //!    - `Filter { response, dropped }` → response replaces current;
 //!      subsequent validators see the filtered version.
-//!    - `Reject { reason, retriable }` → short-circuit. Return
-//!      `Err(ValidationFailed { validator, reason, retriable })`.
-//!      No subsequent validators run; no summary is attached
-//!      because there's no Response object.
+//!    - `Reject { reason }` → short-circuit. Return
+//!      `Err(ValidationFailed { validator, reason })` (always Permanent).
+//!      No subsequent validators run; no summary is attached because
+//!      there's no Response object.
 //!    - `Annotate { metrics }` → keep response; record metrics.
 //! 3. Stamp `validation_summary` onto the (potentially Filtered)
 //!    response. Re-emit as a stream so the caller-visible contract
@@ -29,18 +36,26 @@
 //!
 //! ## Cache × Validator interaction
 //!
-//! Decided in B-20 W1: **cache stores raw (pre-validation) Response.
-//! Cache hit ALWAYS reruns validators on cached payload.**
-//! Validators are pure (same input → same output, per [`OutputValidator`]
-//! trait contract) — re-running on cache hit is local CPU only,
-//! cheaper than a wire round-trip. Multi-caller cache sharing works:
-//! caller A's RuleIdWhitelistValidator and caller B's LengthValidator
-//! both operate on the same raw cached output without interfering.
+//! W4 (2026-05-08) moved Validation OUTSIDE Cache, fixing two W1 bugs:
 //!
-//! Validator failure does NOT bypass cache — failed-validator runs
-//! leave the raw response in cache. Repeated cache hits
-//! deterministically fail the same way (validator is pure). Caller
-//! who wants force-fresh on validation fail uses an explicit
+//! 1. Cache used to store post-Filter events (because ValidationMiddleware
+//!    re-emit happened *inside* Cache); now Cache sees raw Provider
+//!    events and stores raw.
+//! 2. Cache hits used to skip validators entirely (because Cache
+//!    short-circuits before reaching its inner layer); now Validation
+//!    runs on every call — hit or miss — because it sits *outside* Cache.
+//!
+//! Result: validators are pure (same input → same output, per
+//! [`OutputValidator`] trait contract) and rerun on every call. Cache
+//! holds raw across the lifetime of an entry — changing the validator
+//! chain on a Pipeline doesn't invalidate cache, multi-caller cache
+//! sharing across distinct validator chains is safe.
+//!
+//! Failed-validator runs DO have a side-effect on cache: the raw
+//! Provider response was already streamed through Cache before
+//! Validation could reject, so it's stored. Repeated cache hits
+//! deterministically fail the same way (validator is pure). Callers
+//! who want force-fresh on validation fail use an explicit
 //! `skip_cache=True` kwarg (future).
 
 use std::sync::Arc;
@@ -180,14 +195,14 @@ impl LlmService for ValidationService {
                     response = filtered;
                     filtered_any = true;
                 }
-                ValidationOutcome::Reject { reason, retriable } => {
+                ValidationOutcome::Reject { reason } => {
                     // Don't write summary on Reject — there's no
                     // Response to attach it to. The error itself
-                    // carries everything caller needs.
+                    // carries everything caller needs. ValidationFailed
+                    // is always Permanent (W4): no retry.
                     return Err(ProviderError::ValidationFailed {
                         validator: name,
                         reason,
-                        retriable,
                     });
                 }
                 ValidationOutcome::Annotate { metrics } => {

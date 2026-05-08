@@ -64,9 +64,14 @@ def test_pass_construct():
 
 
 def test_reject_fields():
-    r = tars.Reject("bad", retriable=True)
+    r = tars.Reject("bad")
     assert r.reason == "bad"
-    assert r.retriable is True
+
+
+def test_reject_no_retriable_kwarg():
+    """W4 cut the retriable field — passing it should TypeError."""
+    with pytest.raises(TypeError):
+        tars.Reject("bad", retriable=True)
 
 
 def test_filter_text_fields():
@@ -111,18 +116,19 @@ def test_validator_pass_through_appears_in_layer_trace():
 
 
 def test_validator_reject_surfaces_validation_failed_error():
-    """Reject(retriable=False) → TarsProviderError(kind='validation_failed',
-    is_retriable=False). Validator name + reason in message."""
+    """Reject → TarsProviderError(kind='validation_failed',
+    is_retriable=False — W4 cut the retriable flag, always Permanent).
+    Validator name + reason embedded in message."""
 
     def rejector(req, resp):
-        return tars.Reject(reason="always reject", retriable=False)
+        return tars.Reject(reason="always reject")
 
     p = _pipeline_with(("always_reject", rejector))
     with pytest.raises(tars.TarsProviderError) as excinfo:
         p.complete(model=MODEL, user="hi", max_output_tokens=10)
     e = excinfo.value
     assert e.kind == "validation_failed"
-    assert e.is_retriable is False
+    assert e.is_retriable is False  # W4: ValidationFailed is always Permanent.
     assert "always_reject" in str(e)
     assert "always reject" in str(e)
 
@@ -198,6 +204,44 @@ def test_validator_wrong_return_type_surfaces_as_permanent_reject():
     msg = str(e)
     # Adapter error message should at least mention the expected types.
     assert "tars.Pass" in msg or "validator" in msg
+
+
+def test_response_validation_summary_populated_after_filter():
+    """B-20.v3: Response.validation_summary surfaces per-validator
+    outcomes for caller-side metrics rollups."""
+    def truncate_to_5(req, resp):
+        return tars.FilterText(text=resp["text"][:5], dropped=["over_5"])
+
+    p = _pipeline_with(("trunc", truncate_to_5))
+    r = p.complete(model=MODEL, user="say a long sentence", max_output_tokens=40)
+    s = r.validation_summary
+    assert s.validators_run == ["trunc"]
+    assert s.outcomes["trunc"]["outcome"] == "filter"
+    assert s.outcomes["trunc"]["dropped"] == ["over_5"]
+    assert s.total_wall_ms >= 0  # wall time recorded, may be 0 on fast paths
+
+
+def test_response_validation_summary_empty_when_no_validators():
+    """No validators attached → empty summary, no exception."""
+    p = tars.Pipeline.from_default(PROVIDER_ID)
+    r = p.complete(model=MODEL, user="hi", max_output_tokens=10)
+    s = r.validation_summary
+    assert s.validators_run == []
+    assert dict(s.outcomes) == {}
+
+
+def test_response_validation_summary_records_pass_and_annotate():
+    """Pass outcome shows up as `outcome=pass`; if downstream wants the
+    pyclass on its own, it's importable as `tars.ValidationSummary`."""
+    assert tars.ValidationSummary  # exported
+
+    def passer(req, resp):
+        return tars.Pass()
+
+    p = _pipeline_with(("ok", passer))
+    r = p.complete(model=MODEL, user="hi", max_output_tokens=10)
+    assert r.validation_summary.validators_run == ["ok"]
+    assert r.validation_summary.outcomes["ok"] == {"outcome": "pass"}
 
 
 def test_validators_none_does_not_add_validation_layer():

@@ -15,7 +15,7 @@
 //!         json.loads(resp["text"])
 //!         return tars.Pass()
 //!     except json.JSONDecodeError as e:
-//!         return tars.Reject(reason=f"not JSON: {e}", retriable=True)
+//!         return tars.Reject(reason=f"not JSON: {e}")
 //!
 //! p = tars.Pipeline.from_default(
 //!     "qwen_coder_local",
@@ -28,7 +28,7 @@
 //! Validators return one of 4 pyclass-based outcome instances:
 //!
 //! - `tars.Pass()` — empty
-//! - `tars.Reject(reason: str, retriable: bool=False)`
+//! - `tars.Reject(reason: str)` — always Permanent (no retry)
 //! - `tars.FilterText(text: str, dropped: list[str]=[])`
 //! - `tars.Annotate(metrics: dict[str, Any]={})`
 //!
@@ -73,24 +73,26 @@ impl PyPass {
     }
 }
 
-/// "Response is unacceptable; surface as ValidationFailed." Caller +
-/// downstream RetryMiddleware decide based on `retriable`.
+/// "Response is unacceptable; surface as ValidationFailed."
+/// `ValidationFailed` is always Permanent — `RetryMiddleware` does
+/// not retry on it. Callers who genuinely need a model resample on
+/// validation failure should catch `TarsProviderError(kind=
+/// "validation_failed")` at their own layer with explicit prompt
+/// variation.
 #[pyclass(frozen, get_all, name = "Reject")]
 #[derive(Debug, Clone)]
 pub(crate) struct PyReject {
     pub(crate) reason: String,
-    pub(crate) retriable: bool,
 }
 
 #[pymethods]
 impl PyReject {
     #[new]
-    #[pyo3(signature = (reason, *, retriable = false))]
-    fn new(reason: String, retriable: bool) -> Self {
-        Self { reason, retriable }
+    fn new(reason: String) -> Self {
+        Self { reason }
     }
     fn __repr__(&self) -> String {
-        format!("Reject(reason={:?}, retriable={})", self.reason, self.retriable)
+        format!("Reject(reason={:?})", self.reason)
     }
 }
 
@@ -249,7 +251,6 @@ fn reject_internal(validator: &str, reason: &str) -> ValidationOutcome {
     );
     ValidationOutcome::Reject {
         reason: reason.to_string(),
-        retriable: false,
     }
 }
 
@@ -347,10 +348,7 @@ fn parse_outcome(
         return Ok(ValidationOutcome::Pass);
     }
     if let Ok(rej) = bound.extract::<PyRef<'_, PyReject>>() {
-        return Ok(ValidationOutcome::Reject {
-            reason: rej.reason.clone(),
-            retriable: rej.retriable,
-        });
+        return Ok(ValidationOutcome::Reject { reason: rej.reason.clone() });
     }
     if let Ok(filt) = bound.extract::<PyRef<'_, PyFilterText>>() {
         let mut new_resp = original_resp.clone();

@@ -33,6 +33,7 @@ from tars._tars_py import (
     TarsRuntimeError,
     Telemetry,
     Usage,
+    ValidationSummary,
     default_config_path,
     version,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "TarsRuntimeError",
     "Telemetry",
     "Usage",
+    "ValidationSummary",
     "default_config_path",
     "version",
 ]

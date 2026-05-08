@@ -183,15 +183,10 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
   - **Tags 字段** — `LlmCallFinished.tags: Vec<String>` + `EvaluationScored.tags: Vec<String>`,事件 schema 一开始就带,默认空。caller 通过 `RequestContext::with_tags()` / `Session::tagged()` helper 打标。Cohort 分析靠 `WHERE 'dogfood_2026_05_05' IN tags` 一句 SQL,远比每加一种过滤维度加一个事件字段干净。
   - **OnlineEvaluatorRunner sampling 配置** — `EvaluatorSampling::{Always, Rate(f64), Stratified, OnDimDrop}` 四种模式。`Always` 是 deterministic evaluator 默认；`OnDimDrop { watch_dim, threshold }` 是 LangSmith 没有的智能采样——便宜 evaluator 持续跑,贵的(LLM-as-judge)只在另一个 dim 掉到阈值下时触发,**节省 LLM-judge 的真钱**。OnDimDrop 写进 trait,即使 v1 默认 `Always`,接口为未来留位。
 
-### B-20.v3. Python `Response.validation_summary` 暴露 — ⭐ arc dogfood 报表回归门必需 (~1h)
-- **现状**: Rust 侧 `ChatResponse.validation_summary: ValidationSummary { outcomes: BTreeMap, validators_run: Vec, total_wall_ms: u64 }` 已经填好。Python `Response` pyclass **没暴露**这个字段。caller 只能从 `r.telemetry.layers` 看到 "validation 跑没跑过"，看不到哪些 validator / 谁 dropped 多少 / 多少 wall time。
-- **shape**:
-  - 在 `tars-py/src/lib.rs` 的 `Response` 上加 `validation_summary` getter，返回 frozen pyclass `ValidationSummary{validators_run: list[str], outcomes: dict[str, dict], total_wall_ms: int}`。`outcomes[name]` = `{"outcome": "pass"|"filter"|"annotate", "dropped"?: list[str], "metrics"?: dict}`。
-  - 跟 `Telemetry` 同样模式 — frozen pyclass, get_all。
-- **预估**: ~1 小时。从 `ChatResponse.validation_summary` → PyValidationSummary 的纯映射。
-- **Trigger**: arc Tier 1 #1 (snippet validator) 落地后立刻 ship。没它 cross-run 比较 "snippet validator 丢了几条" 拿不出数。dogfood 报表的 metrics 列、ship signal 全卡这。
-- **依赖**: 无。
-- **由来**: arc 2026-05-08 反馈。
+### B-20.v3. Python `Response.validation_summary` 暴露 — ✅ shipped 2026-05-08 (~1h)
+- `Response.validation_summary` → frozen pyclass `ValidationSummary { validators_run: list[str], outcomes: dict[str, dict], total_wall_ms: int }`。`outcomes[name]` shape: `{"outcome": "pass"|"filter"|"annotate", "dropped"?: list[str], "metrics"?: dict}`。Reject 不进 outcomes — short-circuit 进 `TarsProviderError`。
+- 3 个 pytest 验证：filter outcome 带 dropped list、no-validators 空 summary、Pass/exported 类型。详见 CHANGELOG B-20 v3 段。
+- **由来**: arc 2026-05-08 反馈，dogfood 报表的 metrics 列前置依赖。
 
 ### B-20.v2. Typed `ValidationOutcome::Reject { reason: ValidationReason }` — ⭐ unblocks arc parse→structured pipeline (1-2 d)
 - **现状 (W1+W2 shipped 后)**: `Reject { reason: String, retriable: bool }` — string-only。Python 侧 `TarsProviderError(kind="validation_failed", is_retriable=bool)` 只把 reason 字符串塞进 message。caller 没法 programmatic match 失败原因。
@@ -206,8 +201,9 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **依赖**: 无。
 - **由来**: arc 2026-05-08 反馈，详见 conversation log。
 
-### B-20.W4. Cache × Validator interaction fix — ⚠️ 真 bug，结构性改动 (1-2 d)
-- **failing regression tests 已锁定 (commit `ce6aa95+`)**: `b20_w4_cache_stores_raw_not_post_filter` + `b20_w4_cache_hit_reruns_validator_chain` 在 `tars-pipeline/src/validation/tests.rs`，标了 `#[ignore]`。`cargo test -- --ignored` 验证两条都 fail。W4 fix 删 `#[ignore]` 同时改代码 → 两条变绿。
+### B-20.W4. Cache × Validator interaction fix — ✅ shipped 2026-05-08 (A2 路线)
+- **状态**: A2 路线落地 — onion 移到 `Telemetry → Validation → Cache → Retry → Provider` + 砍 `Reject{retriable}` 字段（`ValidationFailed` 总是 `ErrorClass::Permanent`）。两个 W4 regression test 在 `tars-pipeline/src/validation/tests.rs` 现在直接通过（`#[ignore]` 已删）。详见 CHANGELOG B-20 W4 段。
+- **历史诊断（保留作 audit 留痕）**:
 - **bug 1 (cache 存 post-Filter)**: `ValidationMiddleware` 在 Filter 改写 response 后 re-emit post-Filter events (`tars-pipeline/src/validation.rs:225-232`)，Cache 看到的是 ValidationMiddleware re-emit 之后的 stream，于是 cache 存 post-Filter。test 1 断言 cache 应存 raw "hello world"，实际是 "hello"。
 - **bug 2 (cache hit 不跑 validator)**: 当前 onion 顺序 `Telemetry → CacheLookup → Retry → Validation → Provider`，Cache 在 Validation 外层。Cache hit 直接短路返回 cached events，**Validation 根本不被调用**。test 2 断言第二次（hit）`telemetry.layers` 含 `"validation"`，实际不含。这条比 bug 1 严重 — W1 doc §2 "validators rerun on hit" 跟 onion 不兼容。
 - **后果**:
