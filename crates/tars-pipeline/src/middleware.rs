@@ -53,7 +53,10 @@ impl Pipeline {
     /// that want to point the pipeline at a hand-rolled fake without
     /// going through a full `LlmProvider` impl.
     pub fn builder_with_inner(inner: Arc<dyn LlmService>) -> PipelineBuilder {
-        PipelineBuilder { inner, layers_outer_to_inner: Vec::new() }
+        PipelineBuilder {
+            inner,
+            layers_outer_to_inner: Vec::new(),
+        }
     }
 
     /// Outermost-first list of layer names. `["telemetry", "retry"]`
@@ -143,7 +146,10 @@ mod tests {
             self.tag
         }
         fn wrap(&self, inner: Arc<dyn LlmService>) -> Arc<dyn LlmService> {
-            Arc::new(TagService { inner, tag: self.tag })
+            Arc::new(TagService {
+                inner,
+                tag: self.tag,
+            })
         }
     }
 

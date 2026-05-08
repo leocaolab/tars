@@ -59,9 +59,7 @@ impl Config {
     /// in their TOML — excludes ambient builtin defaults that were
     /// merged in at load time. Use this for "what did the user actually
     /// want" decisions; use `providers.iter()` for "anything resolvable".
-    pub fn user_declared(
-        &self,
-    ) -> impl Iterator<Item = (&ProviderId, &crate::ProviderConfig)> {
+    pub fn user_declared(&self) -> impl Iterator<Item = (&ProviderId, &crate::ProviderConfig)> {
         self.providers
             .iter()
             .filter(|(id, _)| self.user_provider_ids.contains(id))
@@ -145,10 +143,22 @@ mod tests {
         "#;
         let cfg = ConfigManager::load_from_str(toml_str).unwrap();
         // User entry present.
-        assert!(cfg.providers.get(&tars_types::ProviderId::new("openai_main")).is_some());
+        assert!(
+            cfg.providers
+                .get(&tars_types::ProviderId::new("openai_main"))
+                .is_some()
+        );
         // Built-ins also merged in (`mlx`, `vllm`, etc.).
-        assert!(cfg.providers.get(&tars_types::ProviderId::new("mlx")).is_some());
-        assert!(cfg.providers.get(&tars_types::ProviderId::new("vllm")).is_some());
+        assert!(
+            cfg.providers
+                .get(&tars_types::ProviderId::new("mlx"))
+                .is_some()
+        );
+        assert!(
+            cfg.providers
+                .get(&tars_types::ProviderId::new("vllm"))
+                .is_some()
+        );
     }
 
     #[test]
@@ -161,7 +171,11 @@ mod tests {
         "#;
         let f = tempfile_with_contents(toml_str);
         let cfg = ConfigManager::load_from_file(f.path()).unwrap();
-        assert!(cfg.providers.get(&tars_types::ProviderId::new("local_qwen")).is_some());
+        assert!(
+            cfg.providers
+                .get(&tars_types::ProviderId::new("local_qwen"))
+                .is_some()
+        );
     }
 
     #[test]
@@ -174,10 +188,23 @@ mod tests {
         let toml_str = r#"
             [providers]
         "#;
-        let cfg = ConfigManager::load_from_str(toml_str).expect("empty providers + builtins should validate");
-        assert!(cfg.providers.get(&tars_types::ProviderId::new("openai")).is_some());
-        assert!(cfg.providers.get(&tars_types::ProviderId::new("mlx")).is_some());
-        assert!(cfg.providers.get(&tars_types::ProviderId::new("vllm")).is_some());
+        let cfg = ConfigManager::load_from_str(toml_str)
+            .expect("empty providers + builtins should validate");
+        assert!(
+            cfg.providers
+                .get(&tars_types::ProviderId::new("openai"))
+                .is_some()
+        );
+        assert!(
+            cfg.providers
+                .get(&tars_types::ProviderId::new("mlx"))
+                .is_some()
+        );
+        assert!(
+            cfg.providers
+                .get(&tars_types::ProviderId::new("vllm"))
+                .is_some()
+        );
     }
 
     #[test]

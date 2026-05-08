@@ -43,7 +43,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 
 use tars_cache::CacheKeyFactory;
-use tars_config::{default_config_path, Config, ConfigManager};
+use tars_config::{Config, ConfigManager, default_config_path};
 
 use crate::errors::{config_to_py, provider_to_py, runtime_to_py};
 use tars_pipeline::{
@@ -51,11 +51,11 @@ use tars_pipeline::{
     TelemetryMiddleware,
 };
 use tars_provider::{
-    auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry, LlmProvider,
+    LlmProvider, auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry,
 };
 use tars_types::{
-    ChatRequest, ChatResponseBuilder, ContentBlock, Message, ModelHint, ProviderId,
-    RequestContext, StopReason,
+    ChatRequest, ChatResponseBuilder, ContentBlock, Message, ModelHint, ProviderId, RequestContext,
+    StopReason,
 };
 
 /// Process-wide tokio runtime. Single instance amortizes the
@@ -175,10 +175,10 @@ impl ValidationSummary {
     #[getter]
     fn outcomes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let json_mod = py.import("json")?;
-        let s = serde_json::to_string(&self.outcomes_json)
-            .unwrap_or_else(|_| "{}".into());
+        let s = serde_json::to_string(&self.outcomes_json).unwrap_or_else(|_| "{}".into());
         let obj = json_mod.call_method1("loads", (s,))?;
-        obj.downcast_into::<pyo3::types::PyDict>().map_err(PyErr::from)
+        obj.downcast_into::<pyo3::types::PyDict>()
+            .map_err(PyErr::from)
     }
 
     fn __repr__(&self) -> String {
@@ -191,9 +191,7 @@ impl ValidationSummary {
 
 /// Convert a typed `tars_types::ValidationSummary` into the
 /// Python-facing pyclass shape.
-pub(crate) fn validation_summary_to_py(
-    s: tars_types::ValidationSummary,
-) -> ValidationSummary {
+pub(crate) fn validation_summary_to_py(s: tars_types::ValidationSummary) -> ValidationSummary {
     let mut outcomes = serde_json::Map::new();
     for (name, oc) in s.outcomes {
         let val = match oc {
@@ -272,7 +270,10 @@ pub(crate) struct RetryAttemptPy {
 #[pymethods]
 impl RetryAttemptPy {
     fn __repr__(&self) -> String {
-        format!("RetryAttempt(kind={:?}, retry_after_ms={:?})", self.kind, self.retry_after_ms)
+        format!(
+            "RetryAttempt(kind={:?}, retry_after_ms={:?})",
+            self.kind, self.retry_after_ms
+        )
     }
 }
 
@@ -351,7 +352,11 @@ impl Provider {
     fn from_provider(id: String, provider: Arc<dyn LlmProvider>) -> Self {
         let capabilities_summary = CapabilitiesSummary::from(provider.capabilities());
         let inner: Arc<dyn LlmService> = ProviderService::new(provider);
-        Self { id, inner, capabilities_summary }
+        Self {
+            id,
+            inner,
+            capabilities_summary,
+        }
     }
 }
 
@@ -516,10 +521,19 @@ impl Pipeline {
             .layer(RetryMiddleware::default())
             .build();
 
-        let layer_names: Vec<String> =
-            pipeline.layer_names().iter().map(|s| s.to_string()).collect();
+        let layer_names: Vec<String> = pipeline
+            .layer_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let inner: Arc<dyn LlmService> = Arc::new(pipeline);
-        Self { id, inner, capabilities_summary, capabilities_full, layer_names }
+        Self {
+            id,
+            inner,
+            capabilities_summary,
+            capabilities_full,
+            layer_names,
+        }
     }
 }
 
@@ -577,8 +591,16 @@ impl Pipeline {
     ) -> PyResult<Self> {
         let provider = build_provider(&path, &provider_id)?;
         let validators = validation::build_validator_list(validators)?;
-        let stores = event_store_dir.as_deref().map(EventStorePair::open_in_dir).transpose()?;
-        Ok(Self::from_provider(provider_id, provider, validators, stores))
+        let stores = event_store_dir
+            .as_deref()
+            .map(EventStorePair::open_in_dir)
+            .transpose()?;
+        Ok(Self::from_provider(
+            provider_id,
+            provider,
+            validators,
+            stores,
+        ))
     }
 
     /// Construct a Pipeline from inline TOML text. Equivalent to
@@ -595,8 +617,16 @@ impl Pipeline {
     ) -> PyResult<Self> {
         let provider = build_provider_from_str(toml_text, &provider_id)?;
         let validators = validation::build_validator_list(validators)?;
-        let stores = event_store_dir.as_deref().map(EventStorePair::open_in_dir).transpose()?;
-        Ok(Self::from_provider(provider_id, provider, validators, stores))
+        let stores = event_store_dir
+            .as_deref()
+            .map(EventStorePair::open_in_dir)
+            .transpose()?;
+        Ok(Self::from_provider(
+            provider_id,
+            provider,
+            validators,
+            stores,
+        ))
     }
 
     /// Construct a Pipeline from the default user-level config at
@@ -613,8 +643,16 @@ impl Pipeline {
         let path = resolve_default_config_path()?;
         let provider = build_provider(&path, &provider_id)?;
         let validators = validation::build_validator_list(validators)?;
-        let stores = event_store_dir.as_deref().map(EventStorePair::open_in_dir).transpose()?;
-        Ok(Self::from_provider(provider_id, provider, validators, stores))
+        let stores = event_store_dir
+            .as_deref()
+            .map(EventStorePair::open_in_dir)
+            .transpose()?;
+        Ok(Self::from_provider(
+            provider_id,
+            provider,
+            validators,
+            stores,
+        ))
     }
 
     #[getter]
@@ -636,10 +674,7 @@ impl Pipeline {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "Pipeline(id={:?}, layers={:?})",
-            self.id, self.layer_names,
-        )
+        format!("Pipeline(id={:?}, layers={:?})", self.id, self.layer_names,)
     }
 
     #[pyo3(signature = (
@@ -738,7 +773,9 @@ impl Pipeline {
             response_schema,
             response_schema_strict,
         )?;
-        Ok(compatibility_to_py(req.compatibility_check(&self.capabilities_full)))
+        Ok(compatibility_to_py(
+            req.compatibility_check(&self.capabilities_full),
+        ))
     }
 
     /// **Config-time** capability check (kwargs ergonomic form).
@@ -921,9 +958,18 @@ impl CapabilityRequirementsPy {
         d.set_item("requires_tools", self.requires_tools)?;
         d.set_item("requires_vision", self.requires_vision)?;
         d.set_item("requires_thinking", self.requires_thinking)?;
-        d.set_item("requires_structured_output", self.requires_structured_output)?;
-        d.set_item("estimated_max_prompt_tokens", self.estimated_max_prompt_tokens)?;
-        d.set_item("estimated_max_output_tokens", self.estimated_max_output_tokens)?;
+        d.set_item(
+            "requires_structured_output",
+            self.requires_structured_output,
+        )?;
+        d.set_item(
+            "estimated_max_prompt_tokens",
+            self.estimated_max_prompt_tokens,
+        )?;
+        d.set_item(
+            "estimated_max_output_tokens",
+            self.estimated_max_output_tokens,
+        )?;
         Ok(d)
     }
 
@@ -1047,7 +1093,10 @@ impl CompatibilityReasonPy {
         }
     }
     fn __repr__(&self) -> String {
-        format!("CompatibilityReason(kind={:?}, message={:?})", self.kind, self.message)
+        format!(
+            "CompatibilityReason(kind={:?}, message={:?})",
+            self.kind, self.message
+        )
     }
 }
 
@@ -1065,12 +1114,12 @@ fn compatibility_to_py(c: tars_types::CompatibilityCheck) -> CompatibilityResult
                     let kind = r.kind().to_string();
                     let message = r.to_string();
                     let detail_json = match &r {
-                        CompatibilityReason::ToolUseUnsupported { tool_count } => Some(
-                            serde_json::json!({"tool_count": *tool_count}),
-                        ),
-                        CompatibilityReason::ThinkingUnsupported { mode } => Some(
-                            serde_json::json!({"mode": format!("{mode:?}")}),
-                        ),
+                        CompatibilityReason::ToolUseUnsupported { tool_count } => {
+                            Some(serde_json::json!({"tool_count": *tool_count}))
+                        }
+                        CompatibilityReason::ThinkingUnsupported { mode } => {
+                            Some(serde_json::json!({"mode": format!("{mode:?}")}))
+                        }
                         CompatibilityReason::ContextWindowExceeded {
                             estimated_prompt_tokens,
                             max_context_tokens,
@@ -1089,7 +1138,11 @@ fn compatibility_to_py(c: tars_types::CompatibilityCheck) -> CompatibilityResult
                         // `#[non_exhaustive]` wildcard.
                         _ => None,
                     };
-                    CompatibilityReasonPy { kind, message, detail_json }
+                    CompatibilityReasonPy {
+                        kind,
+                        message,
+                        detail_json,
+                    }
                 })
                 .collect();
             CompatibilityResult {
@@ -1100,7 +1153,10 @@ fn compatibility_to_py(c: tars_types::CompatibilityCheck) -> CompatibilityResult
         // `#[non_exhaustive]` wildcard. Unknown future variants
         // (e.g. `MaybeWithCaveat`) treated as compatible-with-warning
         // until we model the warning channel; for now: pass through.
-        _ => CompatibilityResult { is_compatible: true, reasons: Vec::new() },
+        _ => CompatibilityResult {
+            is_compatible: true,
+            reasons: Vec::new(),
+        },
     }
 }
 
@@ -1130,18 +1186,14 @@ fn default_config_path_py() -> Option<String> {
 /// Build the named provider from an already-loaded `Config`. Shared
 /// between the `from_config` (file-path) and `from_str` (inline TOML)
 /// constructors so error mapping stays uniform.
-fn build_provider_from_cfg(
-    cfg: &Config,
-    provider_id: &str,
-) -> PyResult<Arc<dyn LlmProvider>> {
-    let http = HttpProviderBase::default_arc()
-        .map_err(|e| runtime_to_py("building HTTP base", e))?;
+fn build_provider_from_cfg(cfg: &Config, provider_id: &str) -> PyResult<Arc<dyn LlmProvider>> {
+    let http =
+        HttpProviderBase::default_arc().map_err(|e| runtime_to_py("building HTTP base", e))?;
     let registry = ProviderRegistry::from_config(&cfg.providers, http, basic())
         .map_err(|e| runtime_to_py("building provider registry", e))?;
     let pid = ProviderId::new(provider_id.to_string());
     registry.get(&pid).ok_or_else(|| {
-        let configured: Vec<String> =
-            cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
+        let configured: Vec<String> = cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
         // Unknown provider id is a config-shaped error (the file is
         // valid TOML; the caller just named something not there), so
         // it's TarsConfigError rather than TarsProviderError.
@@ -1160,10 +1212,7 @@ fn build_provider(path: &str, provider_id: &str) -> PyResult<Arc<dyn LlmProvider
 
 /// Same as [`build_provider`] but parses inline TOML — for tests and
 /// programmatic construction without round-tripping through a tmpfile.
-fn build_provider_from_str(
-    toml_text: &str,
-    provider_id: &str,
-) -> PyResult<Arc<dyn LlmProvider>> {
+fn build_provider_from_str(toml_text: &str, provider_id: &str) -> PyResult<Arc<dyn LlmProvider>> {
     let cfg = ConfigManager::load_from_str(toml_text).map_err(config_to_py)?;
     build_provider_from_cfg(&cfg, provider_id)
 }
@@ -1213,9 +1262,7 @@ fn build_request(
             .map(|item| message_from_py(&item))
             .collect::<PyResult<Vec<_>>>()?
     } else {
-        return Err(PyValueError::new_err(
-            "must pass `user=` or `messages=`",
-        ));
+        return Err(PyValueError::new_err("must pass `user=` or `messages=`"));
     };
 
     // Convert the Python dict (JSON Schema doc) into tars's JsonSchema.
@@ -1228,9 +1275,7 @@ fn build_request(
         Some(dict) => {
             let py = dict.py();
             let json_mod = py.import("json")?;
-            let schema_str: String = json_mod
-                .call_method1("dumps", (dict,))?
-                .extract()?;
+            let schema_str: String = json_mod.call_method1("dumps", (dict,))?.extract()?;
             let schema_value: serde_json::Value = serde_json::from_str(&schema_str)
                 .map_err(|e| PyValueError::new_err(format!("invalid response_schema dict: {e}")))?;
             Some(if response_schema_strict {
@@ -1280,7 +1325,10 @@ fn message_from_py(item: &Bound<'_, PyAny>) -> PyResult<Message> {
     let blocks = vec![ContentBlock::text(content_str)];
     match role.as_str() {
         "user" => Ok(Message::User { content: blocks }),
-        "assistant" => Ok(Message::Assistant { content: blocks, tool_calls: Vec::new() }),
+        "assistant" => Ok(Message::Assistant {
+            content: blocks,
+            tool_calls: Vec::new(),
+        }),
         "system" => Ok(Message::System { content: blocks }),
         "tool" => Err(PyValueError::new_err(
             "tool-result messages need a tool_call_id; not supported via this convenience surface yet",

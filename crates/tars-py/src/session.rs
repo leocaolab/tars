@@ -32,7 +32,7 @@ use tars_runtime::{
 use tars_types::{JsonSchema, ModelHint, ToolSpec};
 
 use crate::errors::{provider_to_py, runtime_to_py};
-use crate::{Pipeline as PyPipeline, Response, Usage, TOKIO};
+use crate::{Pipeline as PyPipeline, Response, TOKIO, Usage};
 
 /// `Session` wraps `tars_runtime::Session`. Mutable internally — every
 /// method takes `&mut self`. PyO3's per-instance lock serializes
@@ -167,7 +167,9 @@ impl Session {
     /// Cheap-clone of conversation state. The returned Session shares
     /// the underlying Pipeline + tools but has independent history.
     fn fork(&self) -> Self {
-        Self { inner: self.inner.fork() }
+        Self {
+            inner: self.inner.fork(),
+        }
     }
 
     /// Register a Python callable as a tool the model can call.
@@ -230,9 +232,7 @@ impl Session {
         // self; instead, we run the future on the tokio runtime under
         // `allow_threads`, with a tiny block_in_place to satisfy the
         // borrow checker — `inner` is only touched on this thread.
-        let result = py.allow_threads(|| {
-            TOKIO.block_on(self.inner.send(user, max_output_tokens))
-        });
+        let result = py.allow_threads(|| TOKIO.block_on(self.inner.send(user, max_output_tokens)));
         let (resp, telemetry) = result.map_err(session_err_to_py)?;
         Ok(chat_response_to_py(resp, telemetry))
     }
@@ -245,9 +245,8 @@ impl Session {
         user: &str,
         max_output_tokens: Option<u32>,
     ) -> PyResult<String> {
-        let result: Result<String, SessionError> = py.allow_threads(|| {
-            TOKIO.block_on(self.inner.send_text(user, max_output_tokens))
-        });
+        let result: Result<String, SessionError> =
+            py.allow_threads(|| TOKIO.block_on(self.inner.send_text(user, max_output_tokens)));
         result.map_err(session_err_to_py)
     }
 
@@ -304,12 +303,12 @@ impl Tool for PyTool {
                     }
                 })?;
                 let cb_bound = self.callback.bind(py);
-                let result = cb_bound.call1((arg_obj,)).map_err(|e| {
-                    SessionError::ToolFailed {
+                let result = cb_bound
+                    .call1((arg_obj,))
+                    .map_err(|e| SessionError::ToolFailed {
                         name: name.clone(),
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 let dumped: String = json_mod
                     .call_method1("dumps", (result,))
                     .and_then(|s| s.extract())
@@ -379,9 +378,9 @@ fn stop_reason_str(r: &tars_types::StopReason) -> &'static str {
 fn session_err_to_py(e: SessionError) -> PyErr {
     match e {
         SessionError::Provider(p) => provider_to_py(p),
-        SessionError::ToolFailed { name, message } => crate::errors::TarsRuntimeError::new_err(
-            format!("tool {name:?} failed: {message}"),
-        ),
+        SessionError::ToolFailed { name, message } => {
+            crate::errors::TarsRuntimeError::new_err(format!("tool {name:?} failed: {message}"))
+        }
         SessionError::Internal(m) => crate::errors::TarsRuntimeError::new_err(m),
     }
 }

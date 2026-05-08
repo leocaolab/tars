@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tars_storage::{open_event_store_at_path, SqliteEventStore};
+use tars_storage::{SqliteEventStore, open_event_store_at_path};
 
 pub fn resolve_path(explicit: Option<&std::path::Path>) -> Option<PathBuf> {
     if let Some(p) = explicit {
@@ -40,8 +40,7 @@ pub fn open(explicit: Option<&std::path::Path>) -> Result<Option<Arc<SqliteEvent
     let Some(path) = resolve_path(explicit) else {
         return Ok(None);
     };
-    let store = open_event_store_at_path(&path).with_context(|| {
-        format!("opening event store at {}", path.display())
-    })?;
+    let store = open_event_store_at_path(&path)
+        .with_context(|| format!("opening event store at {}", path.display()))?;
     Ok(Some(store))
 }

@@ -97,7 +97,10 @@ impl Middleware for RetryMiddleware {
         "retry"
     }
     fn wrap(&self, inner: Arc<dyn LlmService>) -> Arc<dyn LlmService> {
-        Arc::new(RetryService { inner, config: self.config.clone() })
+        Arc::new(RetryService {
+            inner,
+            config: self.config.clone(),
+        })
     }
 }
 
@@ -347,11 +350,8 @@ mod tests {
 
         // Cancel after first failure but during backoff.
         let task = tokio::spawn(async move {
-            svc.call(
-                ChatRequest::user(ModelHint::Explicit("m".into()), "x"),
-                ctx,
-            )
-            .await
+            svc.call(ChatRequest::user(ModelHint::Explicit("m".into()), "x"), ctx)
+                .await
         });
 
         // Let the first attempt happen + enter backoff.

@@ -15,8 +15,8 @@ use futures::stream;
 use tars_pipeline::{LlmService, Pipeline, ProviderService};
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{
-    run_task, AgentEvent, CriticAgent, LocalRuntime, OrchestratorAgent, Runtime, RunTaskConfig,
-    RunTaskError, VerdictKind, WorkerAgent,
+    AgentEvent, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, RunTaskError, Runtime,
+    VerdictKind, WorkerAgent, run_task,
 };
 use tars_storage::{EventStore, SqliteEventStore};
 use tars_types::{
@@ -198,7 +198,10 @@ async fn happy_path_one_step_approves_first_attempt() {
     assert_eq!(outcome.steps[0].refinement_attempts, 0);
     assert!(matches!(
         &outcome.steps[0].verdict,
-        tars_runtime::AgentMessage::Verdict { verdict: VerdictKind::Approve, .. },
+        tars_runtime::AgentMessage::Verdict {
+            verdict: VerdictKind::Approve,
+            ..
+        },
     ));
 
     // Trajectory: TrajectoryStarted + 3 step lifecycles (orch, worker, critic)
@@ -207,7 +210,10 @@ async fn happy_path_one_step_approves_first_attempt() {
     let events = rt.replay(&outcome.trajectory_id).await.unwrap();
     assert_eq!(events.len(), 11, "events: {events:#?}");
     assert!(matches!(events[0], AgentEvent::TrajectoryStarted { .. }));
-    assert!(matches!(events.last().unwrap(), AgentEvent::TrajectoryCompleted { .. }));
+    assert!(matches!(
+        events.last().unwrap(),
+        AgentEvent::TrajectoryCompleted { .. }
+    ));
 
     // Three distinct agents appeared as StepStarted entries, in order.
     let agent_steps: Vec<&str> = events
@@ -293,7 +299,9 @@ async fn reject_verdict_aborts_task_and_marks_trajectory_abandoned() {
 
     let traj = err.trajectory_id().clone();
     match err {
-        RunTaskError::Rejected { step_id, reason, .. } => {
+        RunTaskError::Rejected {
+            step_id, reason, ..
+        } => {
             assert_eq!(step_id, "s1");
             assert!(reason.contains("missed the entire point"));
         }
@@ -301,7 +309,10 @@ async fn reject_verdict_aborts_task_and_marks_trajectory_abandoned() {
     }
 
     let events = rt.replay(&traj).await.unwrap();
-    assert!(matches!(events.last().unwrap(), AgentEvent::TrajectoryAbandoned { .. }));
+    assert!(matches!(
+        events.last().unwrap(),
+        AgentEvent::TrajectoryAbandoned { .. }
+    ));
 }
 
 #[tokio::test]
@@ -326,7 +337,9 @@ async fn refine_exhausted_aborts_with_attempt_count() {
         worker,
         critic,
         "summarise PR #42",
-        RunTaskConfig { max_refinements_per_step: 1 },
+        RunTaskConfig {
+            max_refinements_per_step: 1,
+        },
         CancellationToken::new(),
     )
     .await
@@ -334,7 +347,9 @@ async fn refine_exhausted_aborts_with_attempt_count() {
 
     let traj = err.trajectory_id().clone();
     match err {
-        RunTaskError::RefineExhausted { step_id, attempts, .. } => {
+        RunTaskError::RefineExhausted {
+            step_id, attempts, ..
+        } => {
             assert_eq!(step_id, "s1");
             // Saw: attempt 0 (refine) + attempt 1 (refine, exhausted).
             // attempts field reports total attempts incl. the exhausting one.
@@ -344,7 +359,10 @@ async fn refine_exhausted_aborts_with_attempt_count() {
     }
 
     let events = rt.replay(&traj).await.unwrap();
-    assert!(matches!(events.last().unwrap(), AgentEvent::TrajectoryAbandoned { .. }));
+    assert!(matches!(
+        events.last().unwrap(),
+        AgentEvent::TrajectoryAbandoned { .. }
+    ));
 }
 
 #[tokio::test]
@@ -411,6 +429,8 @@ async fn malformed_plan_surfaces_as_orchestrator_error_and_abandons_trajectory()
     let traj = err.trajectory_id().clone();
     assert!(matches!(err, RunTaskError::Orchestrator { .. }));
     let events = rt.replay(&traj).await.unwrap();
-    assert!(matches!(events.last().unwrap(), AgentEvent::TrajectoryAbandoned { .. }));
+    assert!(matches!(
+        events.last().unwrap(),
+        AgentEvent::TrajectoryAbandoned { .. }
+    ));
 }
-

@@ -36,7 +36,9 @@ impl SecretRef {
 
     /// Sugar for the inline variant; keep usage to tests.
     pub fn inline(value: impl Into<String>) -> Self {
-        Self::Inline { value: SecretString::new(value.into()) }
+        Self::Inline {
+            value: SecretString::new(value.into()),
+        }
     }
 }
 

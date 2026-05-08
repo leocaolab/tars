@@ -57,7 +57,10 @@ pub struct CriticAgent {
 
 impl CriticAgent {
     pub fn new(id: impl Into<AgentId>, model: impl Into<String>) -> Arc<Self> {
-        Arc::new(Self { id: id.into(), model: model.into() })
+        Arc::new(Self {
+            id: id.into(),
+            model: model.into(),
+        })
     }
 
     /// Typed convenience: build the critique [`ChatRequest`] for the
@@ -175,7 +178,12 @@ impl<'a> PartialResultRef<'a> {
     /// expects PartialResult input.
     pub fn from_message(msg: &'a AgentMessage) -> Option<Self> {
         match msg {
-            AgentMessage::PartialResult { step_id, summary, confidence, .. } => Some(Self {
+            AgentMessage::PartialResult {
+                step_id,
+                summary,
+                confidence,
+                ..
+            } => Some(Self {
                 step_id: step_id.as_deref(),
                 summary,
                 confidence: *confidence,
@@ -213,7 +221,9 @@ impl RawVerdict {
                         "kind=reject but reason is empty".into(),
                     ));
                 }
-                Ok(VerdictKind::Reject { reason: self.reason })
+                Ok(VerdictKind::Reject {
+                    reason: self.reason,
+                })
             }
             "refine" => {
                 if self.suggestions.is_empty() {
@@ -221,7 +231,9 @@ impl RawVerdict {
                         "kind=refine but suggestions list is empty".into(),
                     ));
                 }
-                Ok(VerdictKind::Refine { suggestions: self.suggestions })
+                Ok(VerdictKind::Refine {
+                    suggestions: self.suggestions,
+                })
             }
             other => Err(CriticError::InvalidVerdict(format!(
                 "unknown verdict kind `{other}` (expected approve / reject / refine)"
@@ -341,7 +353,9 @@ mod tests {
 
     #[test]
     fn partial_result_ref_returns_none_for_other_message_types() {
-        let msg = AgentMessage::PlanIssued { plan: sample_plan() };
+        let msg = AgentMessage::PlanIssued {
+            plan: sample_plan(),
+        };
         assert!(PartialResultRef::from_message(&msg).is_none());
     }
 
@@ -354,7 +368,10 @@ mod tests {
             reason: String::new(),
             suggestions: vec![],
         };
-        assert!(matches!(raw.into_verdict_kind().unwrap(), VerdictKind::Approve));
+        assert!(matches!(
+            raw.into_verdict_kind().unwrap(),
+            VerdictKind::Approve
+        ));
     }
 
     #[test]
@@ -436,7 +453,10 @@ mod tests {
         assert_eq!(req.temperature, Some(0.0));
         assert!(req.system.is_some());
         assert!(req.system.as_ref().unwrap().contains("Critic"));
-        let schema = req.structured_output.as_ref().expect("structured_output set");
+        let schema = req
+            .structured_output
+            .as_ref()
+            .expect("structured_output set");
         assert!(schema.strict);
         assert_eq!(schema.name.as_deref(), Some("Verdict"));
         // Schema describes the flat (kind, reason, suggestions) shape.
@@ -479,9 +499,7 @@ mod tests {
     #[test]
     fn schema_includes_enum_constraint_on_kind() {
         let schema = verdict_json_schema();
-        let kind_enum = schema["properties"]["kind"]["enum"]
-            .as_array()
-            .unwrap();
+        let kind_enum = schema["properties"]["kind"]["enum"].as_array().unwrap();
         let names: Vec<&str> = kind_enum.iter().map(|v| v.as_str().unwrap()).collect();
         assert_eq!(names, vec!["approve", "reject", "refine"]);
     }
@@ -496,7 +514,9 @@ mod tests {
         let properties = schema["properties"].as_object().unwrap();
         for prop_name in properties.keys() {
             assert!(
-                required.iter().any(|r| r.as_str() == Some(prop_name.as_str())),
+                required
+                    .iter()
+                    .any(|r| r.as_str() == Some(prop_name.as_str())),
                 "property `{prop_name}` is in `properties` but not in `required` — \
                  OpenAI strict mode will reject this schema",
             );

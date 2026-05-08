@@ -55,12 +55,15 @@ impl ChatResponse {
             tool_calls,
             stop_reason,
             usage,
-            cache_hit: _, // overridden by argument
+            cache_hit: _,          // overridden by argument
             validation_summary: _, // discard: validators rerun on hit (Doc 15 §4)
         } = self;
 
         let mut out = Vec::with_capacity(3 + tool_calls.len() * 2);
-        out.push(ChatEvent::Started { actual_model, cache_hit });
+        out.push(ChatEvent::Started {
+            actual_model,
+            cache_hit,
+        });
         if !thinking.is_empty() {
             out.push(ChatEvent::ThinkingDelta { text: thinking });
         }
@@ -115,7 +118,10 @@ impl ChatResponseBuilder {
     /// move the event out of their own state.
     pub fn apply(&mut self, event: ChatEvent) {
         match event {
-            ChatEvent::Started { actual_model, cache_hit } => {
+            ChatEvent::Started {
+                actual_model,
+                cache_hit,
+            } => {
                 self.inner.actual_model = actual_model;
                 self.inner.cache_hit = cache_hit;
             }
@@ -135,7 +141,11 @@ impl ChatResponseBuilder {
                 let entry = self.tool_args_buffer.entry(index).or_default();
                 entry.args.push_str(&args_delta);
             }
-            ChatEvent::ToolCallEnd { index, id, parsed_args } => {
+            ChatEvent::ToolCallEnd {
+                index,
+                id,
+                parsed_args,
+            } => {
                 // Prefer the provider's parsed value; if `index` is
                 // missing we still record the call.
                 let name = self
@@ -143,7 +153,9 @@ impl ChatResponseBuilder {
                     .remove(&index)
                     .map(|a| a.name)
                     .unwrap_or_default();
-                self.inner.tool_calls.push(ToolCall::new(id, name, parsed_args));
+                self.inner
+                    .tool_calls
+                    .push(ToolCall::new(id, name, parsed_args));
             }
             ChatEvent::UsageProgress { partial } => {
                 // Don't overwrite — we'll get the authoritative figure
@@ -178,8 +190,12 @@ mod tests {
     fn builder_concatenates_deltas() {
         let mut b = ChatResponseBuilder::new();
         b.apply(ChatEvent::started("gpt-4o"));
-        b.apply(ChatEvent::Delta { text: "Hello, ".into() });
-        b.apply(ChatEvent::Delta { text: "world!".into() });
+        b.apply(ChatEvent::Delta {
+            text: "Hello, ".into(),
+        });
+        b.apply(ChatEvent::Delta {
+            text: "world!".into(),
+        });
         b.apply(ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),

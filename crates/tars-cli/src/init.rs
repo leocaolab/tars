@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
 use tars_config::default_config_path;
@@ -85,8 +85,7 @@ pub struct InitArgs {
 pub async fn execute(args: InitArgs) -> Result<()> {
     let target = match args.path {
         Some(p) => p,
-        None => default_config_path()
-            .ok_or_else(|| anyhow!("could not resolve home directory"))?,
+        None => default_config_path().ok_or_else(|| anyhow!("could not resolve home directory"))?,
     };
 
     if target.exists() && !args.force {
@@ -97,9 +96,8 @@ pub async fn execute(args: InitArgs) -> Result<()> {
     }
 
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("creating parent directory {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent directory {}", parent.display()))?;
     }
 
     std::fs::write(&target, STARTER_TEMPLATE)
@@ -113,7 +111,10 @@ fn print_next_steps(target: &Path) {
     println!("wrote starter config to {}", target.display());
     println!();
     println!("next steps:");
-    println!("  1. open {} and uncomment the providers you use", target.display());
+    println!(
+        "  1. open {} and uncomment the providers you use",
+        target.display()
+    );
     println!("  2. for cloud providers, export the relevant env vars (ANTHROPIC_API_KEY, …)");
     println!("  3. test:  tars run --provider <id> 'hello'");
     println!();

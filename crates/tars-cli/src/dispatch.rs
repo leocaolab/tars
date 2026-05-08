@@ -27,9 +27,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use tars_cache::{open_at_path, CacheRegistry, MemoryCacheRegistry};
+use tars_cache::{CacheRegistry, MemoryCacheRegistry, open_at_path};
 use tars_config::Config;
-use tars_pipeline::{CircuitBreaker, CircuitBreakerConfig, LlmService, RoutingService, StaticPolicy};
+use tars_pipeline::{
+    CircuitBreaker, CircuitBreakerConfig, LlmService, RoutingService, StaticPolicy,
+};
 use tars_provider::auth::basic;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::registry::ProviderRegistry;
@@ -161,15 +163,11 @@ fn build_tier_dispatch(
     }
     let first = candidates.first().expect("non-empty checked above");
     let cost_provider = registry.get(first).ok_or_else(|| {
-        anyhow::anyhow!(
-            "routing: tier `{tier:?}` first candidate `{first}` not in registry"
-        )
+        anyhow::anyhow!("routing: tier `{tier:?}` first candidate `{first}` not in registry")
     })?;
     for c in candidates.iter().skip(1) {
         if registry.get(c).is_none() {
-            anyhow::bail!(
-                "routing: tier `{tier:?}` candidate `{c}` not in registry"
-            );
+            anyhow::bail!("routing: tier `{tier:?}` candidate `{c}` not in registry");
         }
     }
     let model_label = args
@@ -189,7 +187,11 @@ fn build_tier_dispatch(
     let inner: Arc<dyn LlmService> = RoutingService::new(registry.clone(), policy);
     let label = format!(
         "tier `{tier:?}` (candidates: {})",
-        candidates.iter().map(|p| p.as_ref()).collect::<Vec<_>>().join(", "),
+        candidates
+            .iter()
+            .map(|p| p.as_ref())
+            .collect::<Vec<_>>()
+            .join(", "),
     );
     Ok(Dispatch {
         inner,
@@ -208,8 +210,7 @@ pub fn build_registry_with_breaker(
     let mut registry = build_registry(cfg)?;
     if breaker_enabled {
         let cfg_default = CircuitBreakerConfig::default();
-        registry =
-            registry.map_providers(|_id, p| CircuitBreaker::wrap(p, cfg_default.clone()));
+        registry = registry.map_providers(|_id, p| CircuitBreaker::wrap(p, cfg_default.clone()));
     }
     Ok(Arc::new(registry))
 }
@@ -259,7 +260,9 @@ pub fn pick_provider(cfg: &Config, requested: Option<&str>) -> Result<ProviderId
 }
 
 pub fn pick_default_model(cfg: &Config, provider_id: &ProviderId) -> Option<String> {
-    cfg.providers.get(provider_id).map(|p| p.default_model().to_string())
+    cfg.providers
+        .get(provider_id)
+        .map(|p| p.default_model().to_string())
 }
 
 /// Build the cache backend per the `--cache-path` flag and platform.
@@ -270,9 +273,7 @@ pub fn pick_default_model(cfg: &Config, provider_id: &ProviderId) -> Option<Stri
 /// in-memory hides a config or permissions bug.
 pub fn build_cache(explicit: Option<&Path>) -> Result<Arc<dyn CacheRegistry>> {
     fn warn_to_memory(reason: &str) -> Arc<dyn CacheRegistry> {
-        tracing::warn!(
-            "cache: {reason}; using in-memory L1 only (no cross-process hits)"
-        );
+        tracing::warn!("cache: {reason}; using in-memory L1 only (no cross-process hits)");
         MemoryCacheRegistry::default_arc()
     }
 
@@ -286,9 +287,8 @@ pub fn build_cache(explicit: Option<&Path>) -> Result<Arc<dyn CacheRegistry>> {
     };
     match open_at_path(&path) {
         Ok(reg) => Ok(reg),
-        Err(e) if is_explicit => Err(e).with_context(|| {
-            format!("opening sqlite cache at explicit --cache-path {path:?}")
-        }),
+        Err(e) if is_explicit => Err(e)
+            .with_context(|| format!("opening sqlite cache at explicit --cache-path {path:?}")),
         Err(e) => Ok(warn_to_memory(&format!(
             "opening sqlite cache at {path:?} failed: {e}"
         ))),

@@ -11,15 +11,18 @@ use std::sync::Arc;
 use tars_pipeline::{LlmService, Pipeline, ProviderService};
 use tars_provider::backends::mock::{CannedResponse, MockProvider};
 use tars_runtime::{
-    execute_agent_step, AgentContext, AgentEvent, AgentOutput, LocalRuntime, OrchestratorAgent,
-    OrchestratorError, Runtime,
+    AgentContext, AgentEvent, AgentOutput, LocalRuntime, OrchestratorAgent, OrchestratorError,
+    Runtime, execute_agent_step,
 };
 use tars_storage::{EventStore, SqliteEventStore};
 use tars_types::AgentId;
 use tokio_util::sync::CancellationToken;
 
 fn build_llm(canned_json: &str) -> Arc<dyn LlmService> {
-    let mock = MockProvider::new("mock_planner", CannedResponse::text(canned_json.to_string()));
+    let mock = MockProvider::new(
+        "mock_planner",
+        CannedResponse::text(canned_json.to_string()),
+    );
     let inner: Arc<dyn LlmService> = ProviderService::new(mock);
     Arc::new(Pipeline::builder_with_inner(inner).build())
 }
@@ -129,10 +132,8 @@ async fn orchestrator_step_logs_in_trajectory_via_execute_agent_step() {
     // Build a planner request manually; we're testing the
     // execute_agent_step ↔ Agent integration, not the typed
     // plan() helper here.
-    let req = tars_types::ChatRequest::user(
-        tars_types::ModelHint::Explicit("gpt-4o".into()),
-        "any goal",
-    );
+    let req =
+        tars_types::ChatRequest::user(tars_types::ModelHint::Explicit("gpt-4o".into()), "any goal");
 
     let result = execute_agent_step(
         runtime.as_ref(),

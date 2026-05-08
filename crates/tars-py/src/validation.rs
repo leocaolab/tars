@@ -226,10 +226,7 @@ impl OutputValidator for PyValidatorAdapter {
             let outcome = match cb.call1((req_dict, resp_dict)) {
                 Ok(o) => o,
                 Err(e) => {
-                    return reject_internal(
-                        &self.name,
-                        &format!("python callback raised: {e}"),
-                    );
+                    return reject_internal(&self.name, &format!("python callback raised: {e}"));
                 }
             };
             match parse_outcome(py, outcome.unbind(), resp) {
@@ -260,10 +257,7 @@ fn reject_internal(validator: &str, reason: &str) -> ValidationOutcome {
 /// validator use cases (read prompt content, count tools); richer
 /// fields (tool_calls in messages, structured_output schema) added
 /// on demand.
-fn build_req_dict<'py>(
-    py: Python<'py>,
-    req: &ChatRequest,
-) -> PyResult<Bound<'py, PyDict>> {
+fn build_req_dict<'py>(py: Python<'py>, req: &ChatRequest) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("model", req.model.label())?;
     if let Some(s) = &req.system {
@@ -307,10 +301,7 @@ fn build_req_dict<'py>(
 /// Build a Python dict view of `ChatResponse`. Keys: text (str),
 /// thinking (str), tool_calls (list[dict{id, name, arguments_json}]),
 /// stop_reason (str | None).
-fn build_resp_dict<'py>(
-    py: Python<'py>,
-    resp: &ChatResponse,
-) -> PyResult<Bound<'py, PyDict>> {
+fn build_resp_dict<'py>(py: Python<'py>, resp: &ChatResponse) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("text", &resp.text)?;
     d.set_item("thinking", &resp.thinking)?;
@@ -348,7 +339,9 @@ fn parse_outcome(
         return Ok(ValidationOutcome::Pass);
     }
     if let Ok(rej) = bound.extract::<PyRef<'_, PyReject>>() {
-        return Ok(ValidationOutcome::Reject { reason: rej.reason.clone() });
+        return Ok(ValidationOutcome::Reject {
+            reason: rej.reason.clone(),
+        });
     }
     if let Ok(filt) = bound.extract::<PyRef<'_, PyFilterText>>() {
         let mut new_resp = original_resp.clone();
@@ -360,10 +353,7 @@ fn parse_outcome(
     }
     if let Ok(ann) = bound.extract::<PyRef<'_, PyAnnotate>>() {
         let metrics: HashMap<String, JsonValue> = match &ann.metrics_json {
-            JsonValue::Object(m) => m
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+            JsonValue::Object(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             _ => HashMap::new(),
         };
         return Ok(ValidationOutcome::Annotate { metrics });
@@ -382,7 +372,9 @@ fn parse_outcome(
 pub(crate) fn build_validator_list(
     list: Option<Bound<'_, PyList>>,
 ) -> PyResult<Vec<Box<dyn OutputValidator>>> {
-    let Some(list) = list else { return Ok(Vec::new()) };
+    let Some(list) = list else {
+        return Ok(Vec::new());
+    };
     let mut out: Vec<Box<dyn OutputValidator>> = Vec::with_capacity(list.len());
     for (i, item) in list.iter().enumerate() {
         // Expect (name: str, callable). Reject anything else with a

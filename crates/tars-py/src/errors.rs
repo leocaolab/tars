@@ -114,7 +114,13 @@ pub fn provider_to_py(err: ProviderError) -> PyErr {
                             let _ = py_reasons.append(item);
                         }
                     }
-                    let tuple = PyTuple::new(py, &[id_str.into_pyobject(py).unwrap().into_any(), py_reasons.into_any()]);
+                    let tuple = PyTuple::new(
+                        py,
+                        &[
+                            id_str.into_pyobject(py).unwrap().into_any(),
+                            py_reasons.into_any(),
+                        ],
+                    );
                     if let Ok(t) = tuple {
                         let _ = py_skipped.append(t);
                     }
@@ -133,17 +139,13 @@ pub fn provider_to_py(err: ProviderError) -> PyErr {
 /// (and not factored to a shared helper) because lib.rs's
 /// `compatibility_to_py` consumes `CompatibilityReason` by value while
 /// here we have `&CompatibilityReason` — different ownership shapes.
-fn compat_reason_detail(
-    r: &tars_types::CompatibilityReason,
-) -> Option<serde_json::Value> {
+fn compat_reason_detail(r: &tars_types::CompatibilityReason) -> Option<serde_json::Value> {
     use tars_types::CompatibilityReason as R;
     match r {
         R::ToolUseUnsupported { tool_count } => {
             Some(serde_json::json!({"tool_count": *tool_count}))
         }
-        R::ThinkingUnsupported { mode } => {
-            Some(serde_json::json!({"mode": format!("{mode:?}")}))
-        }
+        R::ThinkingUnsupported { mode } => Some(serde_json::json!({"mode": format!("{mode:?}")})),
         R::ContextWindowExceeded {
             estimated_prompt_tokens,
             max_context_tokens,

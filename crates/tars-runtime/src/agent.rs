@@ -112,7 +112,10 @@ impl AgentOutput {
             (true, true) => Self::Text { text }, // empty text — degenerate but legal
             (true, false) => Self::ToolCalls { calls: tool_calls },
             (false, true) => Self::Text { text },
-            (false, false) => Self::Mixed { text, calls: tool_calls },
+            (false, false) => Self::Mixed {
+                text,
+                calls: tool_calls,
+            },
         }
     }
 
@@ -232,7 +235,9 @@ impl Agent for SingleShotAgent {
     }
 
     fn role(&self) -> AgentRole {
-        AgentRole::Worker { domain: "single_shot".into() }
+        AgentRole::Worker {
+            domain: "single_shot".into(),
+        }
     }
 
     async fn execute(
@@ -295,7 +300,10 @@ pub(crate) async fn drive_llm_call(
     let response = builder.finish();
 
     let output = AgentOutput::from_response_parts(response.text, response.tool_calls);
-    Ok(AgentStepResult { output, usage: response.usage })
+    Ok(AgentStepResult {
+        output,
+        usage: response.usage,
+    })
 }
 
 #[cfg(test)]
@@ -353,12 +361,17 @@ mod tests {
         let e: AgentError = ProviderError::Parse("bad json".into()).into();
         assert_eq!(e.classification(), "maybe_retriable");
         assert_eq!(AgentError::Cancelled.classification(), "cancelled");
-        assert_eq!(AgentError::Internal("x".into()).classification(), "internal");
+        assert_eq!(
+            AgentError::Internal("x".into()).classification(),
+            "internal"
+        );
     }
 
     #[test]
     fn role_serializes_with_snake_case_tag() {
-        let r = AgentRole::Worker { domain: "code_review".into() };
+        let r = AgentRole::Worker {
+            domain: "code_review".into(),
+        };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["kind"], "worker");
         assert_eq!(v["domain"], "code_review");

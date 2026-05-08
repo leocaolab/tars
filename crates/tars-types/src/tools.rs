@@ -81,7 +81,11 @@ impl ToolCall {
             "ToolCall.arguments must be a JSON object (got {:?})",
             arguments
         );
-        Self { id: id.into(), name: name.into(), arguments }
+        Self {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
     }
 
     /// True iff `arguments` matches the documented invariant.

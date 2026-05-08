@@ -64,7 +64,11 @@ impl CacheLookupMiddleware {
         factory: CacheKeyFactory,
         origin_provider: ProviderId,
     ) -> Self {
-        Self { registry, factory, origin_provider }
+        Self {
+            registry,
+            factory,
+            origin_provider,
+        }
     }
 }
 
@@ -390,21 +394,14 @@ mod tests {
         provider: Arc<dyn tars_provider::LlmProvider>,
     ) -> (Arc<Pipeline>, Arc<AtomicU32>) {
         let counter = Arc::new(AtomicU32::new(0));
-        let provider_service: Arc<dyn LlmService> =
-            crate::ProviderService::new(provider);
+        let provider_service: Arc<dyn LlmService> = crate::ProviderService::new(provider);
         let counting: Arc<dyn LlmService> = Arc::new(CountingService {
             inner: provider_service,
             calls: counter.clone(),
         });
         let factory = CacheKeyFactory::new(1);
-        let mw = CacheLookupMiddleware::new(
-            registry,
-            factory,
-            ProviderId::new("mock_origin"),
-        );
-        let pipeline = Pipeline::builder_with_inner(counting)
-            .layer(mw)
-            .build();
+        let mw = CacheLookupMiddleware::new(registry, factory, ProviderId::new("mock_origin"));
+        let pipeline = Pipeline::builder_with_inner(counting).layer(mw).build();
         (Arc::new(pipeline), counter)
     }
 
@@ -423,11 +420,19 @@ mod tests {
         let mock = MockProvider::new("mock_origin", CannedResponse::text("haiku"));
         let (pipeline, counter) = build_pipeline_with_cache(registry.clone(), mock);
 
-        let r1 = pipeline.clone().call(deterministic_request("p"), ctx()).await.unwrap();
+        let r1 = pipeline
+            .clone()
+            .call(deterministic_request("p"), ctx())
+            .await
+            .unwrap();
         let _ = drain(r1).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
 
-        let r2 = pipeline.clone().call(deterministic_request("p"), ctx()).await.unwrap();
+        let r2 = pipeline
+            .clone()
+            .call(deterministic_request("p"), ctx())
+            .await
+            .unwrap();
         let events = drain(r2).await;
         // Inner not called again.
         assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -452,15 +457,31 @@ mod tests {
         let (pipeline, counter) = build_pipeline_with_cache(registry, mock);
 
         for prompt in ["a", "b"] {
-            let s = pipeline.clone().call(deterministic_request(prompt), ctx()).await.unwrap();
+            let s = pipeline
+                .clone()
+                .call(deterministic_request(prompt), ctx())
+                .await
+                .unwrap();
             let _ = drain(s).await;
         }
-        assert_eq!(counter.load(Ordering::SeqCst), 2, "two misses on first round");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "two misses on first round"
+        );
         for prompt in ["a", "b"] {
-            let s = pipeline.clone().call(deterministic_request(prompt), ctx()).await.unwrap();
+            let s = pipeline
+                .clone()
+                .call(deterministic_request(prompt), ctx())
+                .await
+                .unwrap();
             let _ = drain(s).await;
         }
-        assert_eq!(counter.load(Ordering::SeqCst), 2, "second round is all hits");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "second round is all hits"
+        );
     }
 
     #[tokio::test]
@@ -490,7 +511,11 @@ mod tests {
         set_cache_policy(&ctx, &CachePolicy::off());
 
         for _ in 0..3 {
-            let s = pipeline.clone().call(deterministic_request("p"), ctx.clone()).await.unwrap();
+            let s = pipeline
+                .clone()
+                .call(deterministic_request("p"), ctx.clone())
+                .await
+                .unwrap();
             let _ = drain(s).await;
         }
         assert_eq!(counter.load(Ordering::SeqCst), 3);
@@ -506,7 +531,10 @@ mod tests {
         // First, an Error provider; verify nothing got cached.
         let bad = MockProvider::new("p", CannedResponse::Error("boom".into()));
         let (pipeline, _counter) = build_pipeline_with_cache(registry.clone(), bad);
-        let result = pipeline.clone().call(deterministic_request("p"), ctx()).await;
+        let result = pipeline
+            .clone()
+            .call(deterministic_request("p"), ctx())
+            .await;
         assert!(result.is_err(), "open-time error should propagate");
         assert_eq!(registry.entry_count(), 0);
     }
@@ -517,7 +545,9 @@ mod tests {
         let registry = MemoryCacheRegistry::default_arc();
         let truncated = vec![
             ChatEvent::started("m"),
-            ChatEvent::Delta { text: "partial".into() },
+            ChatEvent::Delta {
+                text: "partial".into(),
+            },
             ChatEvent::Finished {
                 stop_reason: StopReason::MaxTokens,
                 usage: Usage::default(),
@@ -526,11 +556,19 @@ mod tests {
         let mock = MockProvider::new("p", CannedResponse::Sequence(truncated));
         let (pipeline, counter) = build_pipeline_with_cache(registry.clone(), mock);
 
-        let s = pipeline.clone().call(deterministic_request("p"), ctx()).await.unwrap();
+        let s = pipeline
+            .clone()
+            .call(deterministic_request("p"), ctx())
+            .await
+            .unwrap();
         let _ = drain(s).await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         // Second call must miss again — MaxTokens shouldn't have been cached.
-        let s = pipeline.clone().call(deterministic_request("p"), ctx()).await.unwrap();
+        let s = pipeline
+            .clone()
+            .call(deterministic_request("p"), ctx())
+            .await
+            .unwrap();
         let _ = drain(s).await;
         assert_eq!(counter.load(Ordering::SeqCst), 2);
         // Sanity check: registry stayed empty.
@@ -627,7 +665,11 @@ mod tests {
         let mock = MockProvider::new("p", CannedResponse::text("ok"));
         let (pipeline, counter) = build_pipeline_with_cache(registry, mock);
 
-        let s = pipeline.clone().call(deterministic_request("p"), ctx()).await.unwrap();
+        let s = pipeline
+            .clone()
+            .call(deterministic_request("p"), ctx())
+            .await
+            .unwrap();
         let events = drain(s).await;
         // Inner service called despite the registry erroring.
         assert_eq!(counter.load(Ordering::SeqCst), 1);
@@ -658,7 +700,9 @@ mod tests {
 
         let events: Vec<Result<ChatEvent, ProviderError>> = vec![
             Ok(ChatEvent::started("m")),
-            Ok(ChatEvent::Delta { text: "partial".into() }),
+            Ok(ChatEvent::Delta {
+                text: "partial".into(),
+            }),
             Err(ProviderError::Internal("boom".into())),
             // Even a Finished after Err should not rescue the write.
             Ok(ChatEvent::Finished {
@@ -679,6 +723,10 @@ mod tests {
         let mut s = Box::pin(wrapped);
         while let Some(_item) = s.next().await {}
 
-        assert_eq!(registry.entry_count(), 0, "errored stream must not be cached");
+        assert_eq!(
+            registry.entry_count(),
+            0,
+            "errored stream must not be cached"
+        );
     }
 }

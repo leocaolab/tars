@@ -30,14 +30,20 @@ fn fake_req() -> ChatRequest {
     ChatRequest::user(ModelHint::Explicit("m".into()), "ping")
 }
 fn resp_with_text(t: &str) -> ChatResponse {
-    ChatResponse { text: t.into(), ..Default::default() }
+    ChatResponse {
+        text: t.into(),
+        ..Default::default()
+    }
 }
 
 #[test]
 fn json_shape_passes_valid_json() {
     let v = JsonShapeValidator::new();
     let r = resp_with_text(r#"{"ok": true}"#);
-    assert!(matches!(v.validate(&fake_req(), &r), ValidationOutcome::Pass));
+    assert!(matches!(
+        v.validate(&fake_req(), &r),
+        ValidationOutcome::Pass
+    ));
 }
 
 #[test]
@@ -45,7 +51,10 @@ fn json_shape_passes_empty_text() {
     let v = JsonShapeValidator::new();
     let r = resp_with_text("");
     // Empty is NotEmptyValidator's concern, not JsonShape's.
-    assert!(matches!(v.validate(&fake_req(), &r), ValidationOutcome::Pass));
+    assert!(matches!(
+        v.validate(&fake_req(), &r),
+        ValidationOutcome::Pass
+    ));
 }
 
 #[test]
@@ -64,7 +73,10 @@ fn json_shape_rejects_broken_json() {
 fn not_empty_passes_nonempty() {
     let v = NotEmptyValidator::new();
     let r = resp_with_text("hello");
-    assert!(matches!(v.validate(&fake_req(), &r), ValidationOutcome::Pass));
+    assert!(matches!(
+        v.validate(&fake_req(), &r),
+        ValidationOutcome::Pass
+    ));
 }
 
 #[test]
@@ -91,7 +103,10 @@ fn not_empty_rejects_whitespace_only() {
 fn max_length_passes_under_limit() {
     let v = MaxLengthValidator::reject_above(100);
     let r = resp_with_text("short");
-    assert!(matches!(v.validate(&fake_req(), &r), ValidationOutcome::Pass));
+    assert!(matches!(
+        v.validate(&fake_req(), &r),
+        ValidationOutcome::Pass
+    ));
 }
 
 #[test]
@@ -159,10 +174,7 @@ async fn validation_passes_through_when_validators_pass() {
     let ctx = RequestContext::test_default();
     let outcome_handle = ctx.validation_outcome.clone();
 
-    let stream = svc
-        .call(fake_req(), ctx)
-        .await
-        .expect("stream should open");
+    let stream = svc.call(fake_req(), ctx).await.expect("stream should open");
     let events = drain(stream).await;
     assert!(!events.is_empty());
 
@@ -215,10 +227,7 @@ async fn validation_chain_runs_in_order_and_short_circuits_on_reject() {
     }
     let mock = MockProvider::new("mock", CannedResponse::text("definitely not JSON"));
     let inner: Arc<dyn LlmService> = ProviderService::new(mock);
-    let mw = ValidationMiddleware::new(vec![
-        Box::new(JsonShapeValidator::new()),
-        Box::new(Trap),
-    ]);
+    let mw = ValidationMiddleware::new(vec![Box::new(JsonShapeValidator::new()), Box::new(Trap)]);
     let svc = mw.wrap(inner);
     let result = svc.call(fake_req(), RequestContext::test_default()).await;
     match result {
@@ -355,10 +364,9 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
     )
     .wrap(provider_service);
 
-    let pipeline_svc = ValidationMiddleware::new(vec![
-        Box::new(MaxLengthValidator::truncate_above(5)),
-    ])
-    .wrap(cache_wrapped);
+    let pipeline_svc =
+        ValidationMiddleware::new(vec![Box::new(MaxLengthValidator::truncate_above(5))])
+            .wrap(cache_wrapped);
 
     // Cacheable request: explicit model + temperature=0.
     let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "say hi");
@@ -421,15 +429,12 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
     let provider_service: Arc<dyn LlmService> = ProviderService::new(mock);
 
     let factory = CacheKeyFactory::new(1);
-    let cache_wrapped = CacheLookupMiddleware::new(
-        registry,
-        factory,
-        ProviderId::new("mock_origin"),
-    )
-    .wrap(provider_service);
+    let cache_wrapped =
+        CacheLookupMiddleware::new(registry, factory, ProviderId::new("mock_origin"))
+            .wrap(provider_service);
 
-    let svc = ValidationMiddleware::new(vec![Box::new(NotEmptyValidator::new())])
-        .wrap(cache_wrapped);
+    let svc =
+        ValidationMiddleware::new(vec![Box::new(NotEmptyValidator::new())]).wrap(cache_wrapped);
 
     let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "p");
     req.temperature = Some(0.0);
@@ -444,21 +449,25 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
     )
     .await;
     assert!(
-        ctx1.telemetry.lock().unwrap().layers.iter().any(|l| l == "validation"),
+        ctx1.telemetry
+            .lock()
+            .unwrap()
+            .layers
+            .iter()
+            .any(|l| l == "validation"),
         "validation must run on cache miss (sanity)"
     );
 
     // Second call — cache hit. Per contract, validation must still run.
     let ctx2 = RequestContext::test_default();
-    let _ = drain(
-        svc.clone()
-            .call(req, ctx2.clone())
-            .await
-            .expect("ok"),
-    )
-    .await;
+    let _ = drain(svc.clone().call(req, ctx2.clone()).await.expect("ok")).await;
     assert!(
-        ctx2.telemetry.lock().unwrap().layers.iter().any(|l| l == "validation"),
+        ctx2.telemetry
+            .lock()
+            .unwrap()
+            .layers
+            .iter()
+            .any(|l| l == "validation"),
         "B-20.W4 contract: validators rerun on cache hit. With Validation \
          OUTSIDE Cache, Validation runs every call regardless of hit/miss; \
          layer trace must contain 'validation' on the hit too."

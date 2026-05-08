@@ -74,7 +74,10 @@ impl ReadFileTool {
     /// process can. Use only in trusted contexts (CLI run by the
     /// user against their own filesystem). Tests use this.
     pub fn new() -> Self {
-        Self { root: None, max_bytes: DEFAULT_MAX_BYTES }
+        Self {
+            root: None,
+            max_bytes: DEFAULT_MAX_BYTES,
+        }
     }
 
     /// Constrain reads to `root`. Any path that resolves outside
@@ -88,7 +91,10 @@ impl ReadFileTool {
     /// how to surface the misconfiguration.
     pub fn with_root(root: impl AsRef<Path>) -> Option<Self> {
         let canonical_root = std::fs::canonicalize(root.as_ref()).ok()?;
-        Some(Self { root: Some(canonical_root), max_bytes: DEFAULT_MAX_BYTES })
+        Some(Self {
+            root: Some(canonical_root),
+            max_bytes: DEFAULT_MAX_BYTES,
+        })
     }
 
     /// Override the max-bytes cap (default 256 KiB). Chainable.
@@ -119,10 +125,7 @@ impl ReadFileTool {
         // "not found" error the actual read would, so callers see
         // one consistent message.
         let canonical = std::fs::canonicalize(&combined).map_err(|e| {
-            ToolResult::error(format!(
-                "cannot resolve path `{}`: {e}",
-                combined.display(),
-            ))
+            ToolResult::error(format!("cannot resolve path `{}`: {e}", combined.display(),))
         })?;
         if !canonical.starts_with(root) {
             return Err(ToolResult::error(format!(
@@ -180,8 +183,8 @@ impl Tool for ReadFileTool {
         args: serde_json::Value,
         ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let parsed: ReadFileArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let parsed: ReadFileArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let resolved = match self.resolve(&parsed.path, ctx.cwd.as_deref()) {
             Ok(p) => p,
@@ -355,7 +358,11 @@ mod tests {
             .await
             .unwrap();
         assert!(r.is_error);
-        assert!(r.content.contains("UTF-8"), "should mention UTF-8: {}", r.content);
+        assert!(
+            r.content.contains("UTF-8"),
+            "should mention UTF-8: {}",
+            r.content
+        );
     }
 
     #[tokio::test]
@@ -373,8 +380,16 @@ mod tests {
             .await
             .unwrap();
         assert!(r.is_error);
-        assert!(r.content.contains("1024"), "should report file size: {}", r.content);
-        assert!(r.content.contains("100"), "should report cap: {}", r.content);
+        assert!(
+            r.content.contains("1024"),
+            "should report file size: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("100"),
+            "should report cap: {}",
+            r.content
+        );
     }
 
     #[tokio::test]
@@ -420,11 +435,11 @@ mod tests {
         write(&path, b"rel ok").await;
 
         let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::with_root(dir.path()).unwrap());
-        let ctx = ToolContext { cwd: Some(dir.path().to_path_buf()), ..Default::default() };
-        let r = tool
-            .execute(json!({"path": "rel.txt"}), ctx)
-            .await
-            .unwrap();
+        let ctx = ToolContext {
+            cwd: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let r = tool.execute(json!({"path": "rel.txt"}), ctx).await.unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content, "rel ok");
     }

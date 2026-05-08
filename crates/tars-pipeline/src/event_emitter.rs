@@ -124,7 +124,9 @@ impl LlmService for EventEmitterService {
         // to wait until the stream drains so we capture the response.
         let result_for_error = match &result {
             Ok(_) => None,
-            Err(e) => Some(CallResult::Error { kind: e.kind().to_string() }),
+            Err(e) => Some(CallResult::Error {
+                kind: e.kind().to_string(),
+            }),
         };
 
         match result {
@@ -158,30 +160,28 @@ impl LlmService for EventEmitterService {
                 // Failure before the stream opened. Emit synchronously
                 // (no stream to wrap). Still fire-and-forget.
                 let stores = (self.events.clone(), self.bodies.clone());
-                let event = build_event(
-                    EventInputs {
-                        result: result_for_error.expect("error path"),
-                        response_body: None,
-                        usage: tars_types::Usage::default(),
-                        stop_reason: None,
-                        req_body_bytes,
-                        request_fingerprint,
-                        request_ref: request_ref.clone(),
-                        actual_model,
-                        provider_id,
-                        tenant_id: tenant_id.clone(),
-                        session_id,
-                        trace_id,
-                        has_tools,
-                        has_thinking,
-                        has_structured_output,
-                        temperature,
-                        max_output_tokens,
-                        telemetry_handle,
-                        validation_handle,
-                        tags,
-                    },
-                );
+                let event = build_event(EventInputs {
+                    result: result_for_error.expect("error path"),
+                    response_body: None,
+                    usage: tars_types::Usage::default(),
+                    stop_reason: None,
+                    req_body_bytes,
+                    request_fingerprint,
+                    request_ref: request_ref.clone(),
+                    actual_model,
+                    provider_id,
+                    tenant_id: tenant_id.clone(),
+                    session_id,
+                    trace_id,
+                    has_tools,
+                    has_thinking,
+                    has_structured_output,
+                    temperature,
+                    max_output_tokens,
+                    telemetry_handle,
+                    validation_handle,
+                    tags,
+                });
                 tokio::spawn(async move {
                     fire_and_forget(stores.0, stores.1, event, tenant_id, request_ref).await;
                 });
@@ -243,10 +243,14 @@ struct EventInputs {
 fn build_event(i: EventInputs) -> LlmCallFinished {
     let _ = i.req_body_bytes; // body content already hashed into request_ref + stored
 
-    let telemetry = i.telemetry_handle.lock()
+    let telemetry = i
+        .telemetry_handle
+        .lock()
         .map(|g| g.clone())
         .unwrap_or_default();
-    let validation_summary = i.validation_handle.lock()
+    let validation_summary = i
+        .validation_handle
+        .lock()
         .map(|g| g.summary.clone())
         .unwrap_or_default();
 
@@ -432,9 +436,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_storage::{
-        PipelineEventQuery, SqliteBodyStore, SqlitePipelineEventStore,
-    };
+    use tars_storage::{PipelineEventQuery, SqliteBodyStore, SqlitePipelineEventStore};
     use tars_types::{ChatRequest, ModelHint, RequestContext};
 
     use crate::service::ProviderService;
@@ -450,8 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_path_emits_one_event_with_bodies() {
-        let events: Arc<dyn PipelineEventStore> =
-            SqlitePipelineEventStore::in_memory().unwrap();
+        let events: Arc<dyn PipelineEventStore> = SqlitePipelineEventStore::in_memory().unwrap();
         let bodies: Arc<dyn BodyStore> = SqliteBodyStore::in_memory().unwrap();
 
         let provider = MockProvider::new("p1", CannedResponse::text("hello"));
@@ -483,19 +484,17 @@ mod tests {
 
     #[tokio::test]
     async fn validation_summary_propagates_into_event() {
-        use crate::validation::{builtin::MaxLengthValidator, ValidationMiddleware};
+        use crate::validation::{ValidationMiddleware, builtin::MaxLengthValidator};
 
-        let events: Arc<dyn PipelineEventStore> =
-            SqlitePipelineEventStore::in_memory().unwrap();
+        let events: Arc<dyn PipelineEventStore> = SqlitePipelineEventStore::in_memory().unwrap();
         let bodies: Arc<dyn BodyStore> = SqliteBodyStore::in_memory().unwrap();
 
         let provider = MockProvider::new("p1", CannedResponse::text("hello world"));
         let inner: Arc<dyn LlmService> = ProviderService::new(provider);
         // Onion: EventEmitter (outer) → Validation (inner) → Provider.
-        let validated = ValidationMiddleware::new(vec![Box::new(
-            MaxLengthValidator::truncate_above(5),
-        )])
-        .wrap(inner);
+        let validated =
+            ValidationMiddleware::new(vec![Box::new(MaxLengthValidator::truncate_above(5))])
+                .wrap(inner);
         let svc = EventEmitterMiddleware::new(events.clone(), bodies.clone()).wrap(validated);
 
         let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");

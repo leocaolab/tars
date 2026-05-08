@@ -41,11 +41,9 @@ fn normalize_base_url(base_url: Option<String>) -> String {
 /// `api_key="EMPTY"` substitution.
 fn normalize_auth(auth: Auth) -> Auth {
     match auth {
-        Auth::Secret { secret: tars_types::SecretRef::Inline { ref value } }
-            if value.expose().trim().is_empty() =>
-        {
-            Auth::None
-        }
+        Auth::Secret {
+            secret: tars_types::SecretRef::Inline { ref value },
+        } if value.expose().trim().is_empty() => Auth::None,
         other => other,
     }
 }
@@ -98,9 +96,7 @@ pub fn vllm_local(
 
 fn local_openai_compat_capabilities() -> tars_types::Capabilities {
     use std::collections::HashSet;
-    use tars_types::{
-        Capabilities, Modality, Pricing, PromptCacheKind, StructuredOutputMode,
-    };
+    use tars_types::{Capabilities, Modality, Pricing, PromptCacheKind, StructuredOutputMode};
 
     let mut modalities = HashSet::new();
     modalities.insert(Modality::Text);
@@ -177,7 +173,9 @@ mod tests {
     fn auth_nonempty_inline_passes_through() {
         let out = normalize_auth(Auth::inline("sk-real-key"));
         match out {
-            Auth::Secret { secret: SecretRef::Inline { value } } => {
+            Auth::Secret {
+                secret: SecretRef::Inline { value },
+            } => {
                 assert_eq!(value.expose(), "sk-real-key");
             }
             other => panic!("expected inline secret, got {other:?}"),
@@ -188,7 +186,9 @@ mod tests {
     fn auth_env_variant_passes_through() {
         let out = normalize_auth(Auth::env("VLLM_KEY"));
         match out {
-            Auth::Secret { secret: SecretRef::Env { var } } => {
+            Auth::Secret {
+                secret: SecretRef::Env { var },
+            } => {
                 assert_eq!(var, "VLLM_KEY");
             }
             other => panic!("expected env secret, got {other:?}"),
@@ -209,8 +209,8 @@ mod tests {
 
     #[tokio::test]
     async fn vllm_local_capability_profile() {
-        let http = HttpProviderBase::default_arc()
-            .expect("Failed to create default HTTP provider base");
+        let http =
+            HttpProviderBase::default_arc().expect("Failed to create default HTTP provider base");
         let p = vllm_local("vllm_test", http, basic());
         // Capability profile should match `local_openai_compat_capabilities`.
         // (URL/auth correctness is covered by the normalize_* unit tests.)
@@ -225,8 +225,8 @@ mod tests {
 
     #[tokio::test]
     async fn vllm_accepts_empty_inline_auth() {
-        let http = HttpProviderBase::default_arc()
-            .expect("Failed to create default HTTP provider base");
+        let http =
+            HttpProviderBase::default_arc().expect("Failed to create default HTTP provider base");
         // Construction must not panic when given an empty inline auth
         // — normalize_auth coerces it to Auth::None upstream of the
         // OpenAiProvider's resolver. (The coercion itself is verified

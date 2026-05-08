@@ -24,19 +24,21 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use reqwest::StatusCode;
-use serde_json::{json, Value};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use serde_json::{Value, json};
 use url::Url;
 
 use tars_types::{
-    Capabilities, CacheDirective, ChatEvent, ChatRequest, ContentBlock, ImageData, Message,
+    CacheDirective, Capabilities, ChatEvent, ChatRequest, ContentBlock, ImageData, Message,
     Modality, PromptCacheKind, ProviderError, ProviderId, RequestContext, StopReason,
     StructuredOutputMode, Usage,
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};
-use crate::http_base::{stream_via_adapter, HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent};
+use crate::http_base::{
+    HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent, stream_via_adapter,
+};
 use crate::provider::{LlmEventStream, LlmProvider};
 use crate::tool_buffer::ToolCallBuffer;
 
@@ -195,7 +197,10 @@ impl AnthropicAdapter {
                 "role": "user",
                 "content": Self::translate_content(content),
             }),
-            Message::Assistant { content, tool_calls } => {
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
                 let mut blocks: Vec<Value> = content.iter().map(Self::translate_block).collect();
                 for tc in tool_calls {
                     blocks.push(json!({
@@ -209,7 +214,11 @@ impl AnthropicAdapter {
             }
             // Anthropic doesn't have a `tool` role — tool results are
             // user-role messages with `tool_result` content blocks.
-            Message::Tool { tool_call_id, content, is_error } => {
+            Message::Tool {
+                tool_call_id,
+                content,
+                is_error,
+            } => {
                 let mut result_block = json!({
                     "type": "tool_result",
                     "tool_use_id": tool_call_id,
@@ -229,8 +238,7 @@ impl AnthropicAdapter {
             // into a user-role text block prefixed with "[system]" so
             // it isn't indistinguishable from a real user turn.
             Message::System { content } => {
-                let mut blocks: Vec<Value> =
-                    content.iter().map(Self::translate_block).collect();
+                let mut blocks: Vec<Value> = content.iter().map(Self::translate_block).collect();
                 blocks.insert(0, json!({"type": "text", "text": "[system]"}));
                 json!({
                     "role": "user",
@@ -245,10 +253,7 @@ impl AnthropicAdapter {
     /// content block per directive (in order). The translation here is
     /// best-effort — callers wanting precise placement should construct
     /// messages with the markers already on specific blocks.
-    fn apply_cache_directives(
-        body: &mut Value,
-        directives: &[CacheDirective],
-    ) {
+    fn apply_cache_directives(body: &mut Value, directives: &[CacheDirective]) {
         let want_marker = directives
             .iter()
             .any(|d| matches!(d, CacheDirective::MarkBoundary { .. }));
@@ -267,12 +272,12 @@ impl AnthropicAdapter {
         // cache assistant output instead of user-supplied context,
         // wasting the budget; walk back to the most recent user msg.
         if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-            if let Some(last_user) = messages.iter_mut().rev().find(|m| {
-                m.get("role").and_then(|r| r.as_str()) == Some("user")
-            }) {
-                if let Some(blocks) =
-                    last_user.get_mut("content").and_then(|c| c.as_array_mut())
-                {
+            if let Some(last_user) = messages
+                .iter_mut()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            {
+                if let Some(blocks) = last_user.get_mut("content").and_then(|c| c.as_array_mut()) {
                     if let Some(last_block) = blocks.last_mut() {
                         last_block["cache_control"] = json!({"type": "ephemeral"});
                     }
@@ -285,8 +290,11 @@ impl AnthropicAdapter {
 #[async_trait]
 impl HttpAdapter for AnthropicAdapter {
     fn build_url(&self, _model: &str) -> Result<Url, ProviderError> {
-        Url::parse(&format!("{}/v1/messages", self.base_url.trim_end_matches('/')))
-            .map_err(|e| ProviderError::Internal(format!("bad anthropic base_url: {e}")))
+        Url::parse(&format!(
+            "{}/v1/messages",
+            self.base_url.trim_end_matches('/')
+        ))
+        .map_err(|e| ProviderError::Internal(format!("bad anthropic base_url: {e}")))
     }
 
     fn build_headers(&self, auth: &ResolvedAuth) -> Result<HeaderMap, ProviderError> {
@@ -466,7 +474,10 @@ impl HttpAdapter for AnthropicAdapter {
         }
 
         let v: Value = serde_json::from_str(&raw.data).map_err(|e| {
-            ProviderError::Parse(format!("anthropic sse: {e} (raw: {})", truncate(&raw.data, 200)))
+            ProviderError::Parse(format!(
+                "anthropic sse: {e} (raw: {})",
+                truncate(&raw.data, 200)
+            ))
         })?;
 
         let mut out = Vec::new();
@@ -521,7 +532,9 @@ impl HttpAdapter for AnthropicAdapter {
                         // initial text already populated. Forward it.
                         if let Some(t) = cb.get("text").and_then(|s| s.as_str()) {
                             if !t.is_empty() {
-                                out.push(ChatEvent::Delta { text: t.to_string() });
+                                out.push(ChatEvent::Delta {
+                                    text: t.to_string(),
+                                });
                             }
                         }
                     }
@@ -543,7 +556,9 @@ impl HttpAdapter for AnthropicAdapter {
                 match delta.get("type").and_then(|t| t.as_str()) {
                     Some("text_delta") => {
                         if let Some(t) = delta.get("text").and_then(|s| s.as_str()) {
-                            out.push(ChatEvent::Delta { text: t.to_string() });
+                            out.push(ChatEvent::Delta {
+                                text: t.to_string(),
+                            });
                         }
                     }
                     Some("input_json_delta") => {
@@ -558,7 +573,9 @@ impl HttpAdapter for AnthropicAdapter {
                     }
                     Some("thinking_delta") => {
                         if let Some(t) = delta.get("thinking").and_then(|s| s.as_str()) {
-                            out.push(ChatEvent::ThinkingDelta { text: t.to_string() });
+                            out.push(ChatEvent::ThinkingDelta {
+                                text: t.to_string(),
+                            });
                         }
                     }
                     _ => {}
@@ -648,7 +665,10 @@ impl HttpAdapter for AnthropicAdapter {
             StatusCode::BAD_REQUEST => {
                 let lower = message.to_lowercase();
                 if lower.contains("max_tokens") || lower.contains("context") {
-                    ProviderError::ContextTooLong { limit: 0, requested: 0 }
+                    ProviderError::ContextTooLong {
+                        limit: 0,
+                        requested: 0,
+                    }
                 } else {
                     ProviderError::InvalidRequest(message)
                 }
@@ -698,9 +718,7 @@ fn parse_usage(u: &serde_json::Map<String, Value>) -> Usage {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
     Usage {
-        input_tokens: api_input
-            .saturating_add(cached)
-            .saturating_add(creation),
+        input_tokens: api_input.saturating_add(cached).saturating_add(creation),
         output_tokens: output,
         cached_input_tokens: cached,
         cache_creation_tokens: creation,
@@ -830,7 +848,9 @@ mod tests {
         let err = a.build_headers(&ResolvedAuth::None).unwrap_err();
         assert!(matches!(err, ProviderError::Auth(_)));
 
-        let h = a.build_headers(&ResolvedAuth::ApiKey("sk-ant-x".into())).unwrap();
+        let h = a
+            .build_headers(&ResolvedAuth::ApiKey("sk-ant-x".into()))
+            .unwrap();
         assert_eq!(h.get("x-api-key").unwrap(), "sk-ant-x");
         assert_eq!(h.get("anthropic-version").unwrap(), DEFAULT_API_VERSION);
     }

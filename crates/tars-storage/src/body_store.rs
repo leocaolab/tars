@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use tars_types::{ContentRef, TenantId};
 
@@ -70,7 +70,9 @@ impl SqliteBodyStore {
         })?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
-        Ok(Arc::new(Self { conn: Arc::new(Mutex::new(conn)) }))
+        Ok(Arc::new(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        }))
     }
 
     pub fn in_memory() -> Result<Arc<Self>, StorageError> {
@@ -78,7 +80,9 @@ impl SqliteBodyStore {
             .map_err(|e| StorageError::Backend(format!("opening in-memory body store: {e}")))?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
-        Ok(Arc::new(Self { conn: Arc::new(Mutex::new(conn)) }))
+        Ok(Arc::new(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        }))
     }
 
     fn pragma_setup(conn: &Connection) -> Result<(), StorageError> {
@@ -136,7 +140,9 @@ fn now_ms() -> i64 {
 
 fn cutoff_to_ms(t: SystemTime) -> i64 {
     use std::time::UNIX_EPOCH;
-    t.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[async_trait]
@@ -171,18 +177,19 @@ impl BodyStore for SqliteBodyStore {
         let tenant = r.tenant_id().as_ref().to_string();
         let hash = r.body_hash().to_vec();
 
-        let bytes = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, StorageError> {
-            let conn = conn.lock().expect("body store mutex poisoned");
-            conn.query_row(
-                "SELECT body FROM bodies WHERE tenant_id = ? AND body_hash = ?",
-                params![tenant, hash],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(|e| StorageError::Backend(format!("fetch body: {e}")))
-        })
-        .await
-        .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+        let bytes =
+            tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, StorageError> {
+                let conn = conn.lock().expect("body store mutex poisoned");
+                conn.query_row(
+                    "SELECT body FROM bodies WHERE tenant_id = ? AND body_hash = ?",
+                    params![tenant, hash],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|e| StorageError::Backend(format!("fetch body: {e}")))
+            })
+            .await
+            .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
 
         Ok(bytes.map(Bytes::from))
     }
@@ -194,7 +201,10 @@ impl BodyStore for SqliteBodyStore {
         let n = tokio::task::spawn_blocking(move || -> Result<u64, StorageError> {
             let conn = conn.lock().expect("body store mutex poisoned");
             let n = conn
-                .execute("DELETE FROM bodies WHERE created_at < ?", params![cutoff_ms])
+                .execute(
+                    "DELETE FROM bodies WHERE created_at < ?",
+                    params![cutoff_ms],
+                )
                 .map_err(|e| StorageError::Backend(format!("purge_before: {e}")))?;
             Ok(n as u64)
         })

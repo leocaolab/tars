@@ -211,8 +211,7 @@ impl CircuitBreaker {
         let mut state = self.state.lock().expect("breaker state poisoned");
         match state.kind {
             BreakerStateKind::Closed => {
-                state.consecutive_failures =
-                    state.consecutive_failures.saturating_add(1);
+                state.consecutive_failures = state.consecutive_failures.saturating_add(1);
                 if state.consecutive_failures >= self.config.failure_threshold {
                     tracing::warn!(
                         provider_id = %self.id,
@@ -403,12 +402,20 @@ mod tests {
             let r = breaker.clone().stream(req(), ctx()).await;
             assert!(matches!(r, Err(ProviderError::ModelOverloaded)));
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 3, "all 3 hit the inner provider");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "all 3 hit the inner provider"
+        );
 
         // 4th call should reject without hitting inner.
         let r = breaker.clone().stream(req(), ctx()).await;
         assert!(matches!(r, Err(ProviderError::CircuitOpen { .. })));
-        assert_eq!(calls.load(Ordering::SeqCst), 3, "breaker rejected; inner not called");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "breaker rejected; inner not called"
+        );
     }
 
     // ── Closed counter resets on success ─────────────────────────────
@@ -457,8 +464,7 @@ mod tests {
 
         // The inner sequence: F F S F F → counter went 1, 2, reset, 1, 2.
         // Never hit threshold. Breaker still Closed.
-        let snapshot = breaker
-            .clone();
+        let snapshot = breaker.clone();
         // Cast back to concrete CircuitBreaker via Arc downcasting.
         // We can't downcast Arc<dyn LlmProvider>, so re-implement the
         // assertion path: the next call must still hit the inner

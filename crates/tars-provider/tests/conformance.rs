@@ -37,11 +37,11 @@
 
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use tars_provider::auth::{basic, Auth};
+use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::anthropic::AnthropicProviderBuilder;
 use tars_provider::backends::gemini::GeminiProviderBuilder;
 use tars_provider::backends::openai::OpenAiProviderBuilder;
@@ -118,10 +118,9 @@ mod scenarios {
         pub async fn setup() -> (MockServer, Arc<dyn LlmProvider>, String) {
             let server = MockServer::start().await;
             let http = HttpProviderBase::default_arc().unwrap();
-            let provider =
-                AnthropicProviderBuilder::new("ant_conf", Auth::inline("ant-key"))
-                    .base_url(server.uri())
-                    .build(http, basic());
+            let provider = AnthropicProviderBuilder::new("ant_conf", Auth::inline("ant-key"))
+                .base_url(server.uri())
+                .build(http, basic());
             (server, provider, "claude-opus-4-7".into())
         }
 
@@ -195,13 +194,11 @@ mod scenarios {
         pub async fn mount_tool_call(server: &MockServer, name: &str, args: Value) {
             // Gemini's functionCall arrives with parsed args directly —
             // no streaming reassembly needed. Single chunk.
-            let body = gemini_sse(&[
-                &format!(
-                    r#"{{"candidates":[{{"content":{{"parts":[{{"functionCall":{{"name":{},"args":{}}}}}]}},"finishReason":"STOP"}}],"usageMetadata":{{"promptTokenCount":4,"candidatesTokenCount":8}},"modelVersion":"gemini-2.5-pro"}}"#,
-                    serde_json::Value::String(name.into()),
-                    args,
-                ),
-            ]);
+            let body = gemini_sse(&[&format!(
+                r#"{{"candidates":[{{"content":{{"parts":[{{"functionCall":{{"name":{},"args":{}}}}}]}},"finishReason":"STOP"}}],"usageMetadata":{{"promptTokenCount":4,"candidatesTokenCount":8}},"modelVersion":"gemini-2.5-pro"}}"#,
+                serde_json::Value::String(name.into()),
+                args,
+            )]);
             mount_gemini_sse(server, body).await;
         }
 

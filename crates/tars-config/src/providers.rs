@@ -382,7 +382,12 @@ impl ProviderConfig {
         };
 
         match self {
-            ProviderConfig::Openai { base_url, auth, default_model, .. } => {
+            ProviderConfig::Openai {
+                base_url,
+                auth,
+                default_model,
+                ..
+            } => {
                 check_opt_base_url(base_url, sink);
                 if matches!(auth, Auth::None) {
                     sink.push(ValidationError::new(
@@ -393,7 +398,11 @@ impl ProviderConfig {
                 }
                 check_default_model(default_model, sink);
             }
-            ProviderConfig::OpenaiCompat { base_url, default_model, .. } => {
+            ProviderConfig::OpenaiCompat {
+                base_url,
+                default_model,
+                ..
+            } => {
                 if base_url.trim().is_empty() {
                     sink.push(ValidationError::new(
                         key("base_url"),
@@ -402,7 +411,12 @@ impl ProviderConfig {
                 }
                 check_default_model(default_model, sink);
             }
-            ProviderConfig::Anthropic { base_url, auth, default_model, .. } => {
+            ProviderConfig::Anthropic {
+                base_url,
+                auth,
+                default_model,
+                ..
+            } => {
                 check_opt_base_url(base_url, sink);
                 if matches!(auth, Auth::None) {
                     sink.push(ValidationError::new(
@@ -412,7 +426,12 @@ impl ProviderConfig {
                 }
                 check_default_model(default_model, sink);
             }
-            ProviderConfig::Gemini { base_url, auth, default_model, .. } => {
+            ProviderConfig::Gemini {
+                base_url,
+                auth,
+                default_model,
+                ..
+            } => {
                 check_opt_base_url(base_url, sink);
                 if matches!(auth, Auth::None) {
                     sink.push(ValidationError::new(
@@ -422,21 +441,46 @@ impl ProviderConfig {
                 }
                 check_default_model(default_model, sink);
             }
-            ProviderConfig::Vllm { base_url, default_model, .. }
-            | ProviderConfig::Mlx { base_url, default_model, .. }
-            | ProviderConfig::Llamacpp { base_url, default_model, .. } => {
+            ProviderConfig::Vllm {
+                base_url,
+                default_model,
+                ..
+            }
+            | ProviderConfig::Mlx {
+                base_url,
+                default_model,
+                ..
+            }
+            | ProviderConfig::Llamacpp {
+                base_url,
+                default_model,
+                ..
+            } => {
                 check_opt_base_url(base_url, sink);
                 check_default_model(default_model, sink);
             }
-            ProviderConfig::ClaudeCli { executable, timeout_secs, default_model }
-            | ProviderConfig::GeminiCli { executable, timeout_secs, default_model } => {
+            ProviderConfig::ClaudeCli {
+                executable,
+                timeout_secs,
+                default_model,
+            }
+            | ProviderConfig::GeminiCli {
+                executable,
+                timeout_secs,
+                default_model,
+            } => {
                 if executable.is_empty() {
                     sink.push(ValidationError::new(key("executable"), "must not be empty"));
                 }
                 check_timeout(*timeout_secs, sink);
                 check_default_model(default_model, sink);
             }
-            ProviderConfig::CodexCli { executable, timeout_secs, default_model, .. } => {
+            ProviderConfig::CodexCli {
+                executable,
+                timeout_secs,
+                default_model,
+                ..
+            } => {
                 if executable.is_empty() {
                     sink.push(ValidationError::new(key("executable"), "must not be empty"));
                 }
@@ -484,11 +528,18 @@ mod tests {
         let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
         // Forward direction.
         match &cfg {
-            ProviderConfig::Openai { base_url, auth, default_model, extras: _ } => {
+            ProviderConfig::Openai {
+                base_url,
+                auth,
+                default_model,
+                extras: _,
+            } => {
                 assert!(base_url.is_none());
                 assert_eq!(default_model, "gpt-4o");
                 match auth {
-                    Auth::Secret { secret: SecretRef::Env { var } } => {
+                    Auth::Secret {
+                        secret: SecretRef::Env { var },
+                    } => {
                         assert_eq!(var, "OPENAI_API_KEY");
                     }
                     _ => panic!("wrong auth"),
@@ -502,7 +553,11 @@ mod tests {
         let cfg2: ProviderConfig =
             toml::from_str(&reserialized).expect("re-parse after serialize must succeed");
         match cfg2 {
-            ProviderConfig::Openai { auth, default_model, .. } => {
+            ProviderConfig::Openai {
+                auth,
+                default_model,
+                ..
+            } => {
                 assert_eq!(default_model, "gpt-4o");
                 assert!(matches!(
                     auth,
@@ -521,7 +576,11 @@ mod tests {
         "#;
         let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
         match cfg {
-            ProviderConfig::Mlx { auth, default_model, .. } => {
+            ProviderConfig::Mlx {
+                auth,
+                default_model,
+                ..
+            } => {
                 assert!(matches!(auth, Auth::None));
                 assert!(default_model.contains("Qwen"));
             }
@@ -567,7 +626,11 @@ mod tests {
         "#;
         let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
         match cfg {
-            ProviderConfig::ClaudeCli { executable, timeout_secs, default_model } => {
+            ProviderConfig::ClaudeCli {
+                executable,
+                timeout_secs,
+                default_model,
+            } => {
                 assert_eq!(executable, "claude");
                 assert_eq!(timeout_secs, 300);
                 assert_eq!(default_model, "claude-opus-4-7");
@@ -620,9 +683,7 @@ mod tests {
 
     #[test]
     fn capabilities_overrides_apply_to_replaces_only_set_fields() {
-        let mut base = tars_types::Capabilities::text_only_baseline(
-            tars_types::Pricing::default(),
-        );
+        let mut base = tars_types::Capabilities::text_only_baseline(tars_types::Pricing::default());
         base.max_context_tokens = 4096;
         base.max_output_tokens = 1024;
 
@@ -877,7 +938,9 @@ mod tests {
 
     #[test]
     fn type_label_round_trips() {
-        let cfg = ProviderConfig::Mock { canned_response: "ok".into() };
+        let cfg = ProviderConfig::Mock {
+            canned_response: "ok".into(),
+        };
         assert_eq!(cfg.type_label(), "mock");
     }
 
@@ -903,8 +966,16 @@ mod tests {
 
         // Field-level assertions, not just .is_some(), so a regression
         // that swaps fields between providers fails loudly.
-        match cfg.get(&ProviderId::new("openai_main")).expect("openai_main missing") {
-            ProviderConfig::Openai { base_url, auth, default_model, .. } => {
+        match cfg
+            .get(&ProviderId::new("openai_main"))
+            .expect("openai_main missing")
+        {
+            ProviderConfig::Openai {
+                base_url,
+                auth,
+                default_model,
+                ..
+            } => {
                 assert!(base_url.is_none());
                 assert_eq!(default_model, "gpt-4o");
                 assert!(matches!(
@@ -914,15 +985,29 @@ mod tests {
             }
             other => panic!("openai_main wrong variant: {other:?}"),
         }
-        match cfg.get(&ProviderId::new("local_qwen")).expect("local_qwen missing") {
-            ProviderConfig::OpenaiCompat { base_url, default_model, .. } => {
+        match cfg
+            .get(&ProviderId::new("local_qwen"))
+            .expect("local_qwen missing")
+        {
+            ProviderConfig::OpenaiCompat {
+                base_url,
+                default_model,
+                ..
+            } => {
                 assert_eq!(base_url, "http://localhost:8000/v1");
                 assert_eq!(default_model, "Qwen/Qwen2.5-Coder-32B-Instruct");
             }
             other => panic!("local_qwen wrong variant: {other:?}"),
         }
-        match cfg.get(&ProviderId::new("claude_cli")).expect("claude_cli missing") {
-            ProviderConfig::ClaudeCli { default_model, executable, timeout_secs } => {
+        match cfg
+            .get(&ProviderId::new("claude_cli"))
+            .expect("claude_cli missing")
+        {
+            ProviderConfig::ClaudeCli {
+                default_model,
+                executable,
+                timeout_secs,
+            } => {
                 assert_eq!(default_model, "claude-opus-4-7");
                 assert_eq!(executable, "claude"); // default
                 assert_eq!(*timeout_secs, 300); // default

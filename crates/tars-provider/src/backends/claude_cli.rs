@@ -28,7 +28,7 @@ use serde_json::Value;
 use tokio::process::Command;
 
 use tars_types::{
-    Capabilities, ChatRequest, ChatEvent, ContentBlock, Message, Modality, PromptCacheKind,
+    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message, Modality, PromptCacheKind,
     ProviderError, ProviderId, RequestContext, StopReason, StructuredOutputMode, Usage,
 };
 
@@ -85,10 +85,7 @@ impl ClaudeCliProviderBuilder {
     }
 
     /// Build with a substituted runner — for tests.
-    pub fn build_with_runner(
-        self,
-        runner: Arc<dyn SubprocessRunner>,
-    ) -> Arc<ClaudeCliProvider> {
+    pub fn build_with_runner(self, runner: Arc<dyn SubprocessRunner>) -> Arc<ClaudeCliProvider> {
         let caps = self.capabilities.unwrap_or_else(default_capabilities);
         Arc::new(ClaudeCliProvider {
             id: self.id,
@@ -167,7 +164,10 @@ impl LlmProvider for ClaudeCliProvider {
             system,
             prompt,
             timeout: self.timeout,
-            stripped_env: STRIPPED_ENV_KEYS_UPPER.iter().map(|s| s.to_string()).collect(),
+            stripped_env: STRIPPED_ENV_KEYS_UPPER
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         };
 
         let payload = self.runner.run(invocation).await?;
@@ -260,13 +260,12 @@ impl SubprocessRunner for RealSubprocessRunner {
         // Write the prompt on stdin and close it.
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            stdin
-                .write_all(inv.prompt.as_bytes())
-                .await
-                .map_err(|e| ProviderError::CliSubprocessDied {
+            stdin.write_all(inv.prompt.as_bytes()).await.map_err(|e| {
+                ProviderError::CliSubprocessDied {
                     exit_code: None,
                     stderr: format!("stdin write failed: {e}"),
-                })?;
+                }
+            })?;
             // dropping `stdin` here closes the pipe so the child sees EOF
             drop(stdin);
         }
@@ -295,7 +294,11 @@ impl SubprocessRunner for RealSubprocessRunner {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let truncated = if stderr.len() > 500 { stderr[..500].to_string() } else { stderr };
+            let truncated = if stderr.len() > 500 {
+                stderr[..500].to_string()
+            } else {
+                stderr
+            };
             return Err(ProviderError::CliSubprocessDied {
                 exit_code: output.status.code(),
                 stderr: truncated,
@@ -317,7 +320,11 @@ impl SubprocessRunner for RealSubprocessRunner {
             )));
         }
 
-        if payload.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if payload
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             let detail = payload
                 .get("result")
                 .and_then(|r| r.as_str())
@@ -379,8 +386,14 @@ fn extract_usage(payload: &Value) -> Usage {
         None => return Usage::default(),
     };
     Usage {
-        input_tokens: usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-        output_tokens: usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+        input_tokens: usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        output_tokens: usage
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         cached_input_tokens: usage
             .get("cache_read_input_tokens")
             .and_then(|v| v.as_u64())
@@ -432,8 +445,7 @@ mod tests {
             payload,
             recorded: std::sync::Mutex::new(None),
         });
-        let p = ClaudeCliProviderBuilder::new("claude_cli_test")
-            .build_with_runner(runner.clone());
+        let p = ClaudeCliProviderBuilder::new("claude_cli_test").build_with_runner(runner.clone());
         (p, runner)
     }
 
@@ -480,8 +492,7 @@ mod tests {
                 })
             }
         }
-        let provider = ClaudeCliProviderBuilder::new("c")
-            .build_with_runner(Arc::new(ErrRunner));
+        let provider = ClaudeCliProviderBuilder::new("c").build_with_runner(Arc::new(ErrRunner));
         let err = match provider
             .clone()
             .complete(
@@ -530,8 +541,7 @@ mod tests {
         let (provider, runner) = make_provider(payload);
         let _ = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("opus".into()), "x")
-                    .with_system("be brief"),
+                ChatRequest::user(ModelHint::Explicit("opus".into()), "x").with_system("be brief"),
                 RequestContext::test_default(),
             )
             .await

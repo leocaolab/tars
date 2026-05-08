@@ -125,7 +125,10 @@ pub struct TierPolicy {
 
 impl TierPolicy {
     pub fn new(tiers: HashMap<ModelTier, Vec<ProviderId>>) -> Self {
-        Self { tiers, explicit_fallback: Vec::new() }
+        Self {
+            tiers,
+            explicit_fallback: Vec::new(),
+        }
     }
 
     /// Set the candidate list returned when `req.model` is Explicit.
@@ -238,8 +241,7 @@ impl LlmService for RoutingService {
                     // Structured kinds first so log aggregation /
                     // dashboards can facet on `reasons.kinds` directly
                     // without parsing the human message.
-                    let kinds: Vec<&'static str> =
-                        reasons.iter().map(|r| r.kind()).collect();
+                    let kinds: Vec<&'static str> = reasons.iter().map(|r| r.kind()).collect();
                     tracing::warn!(
                         candidate_id = %id,
                         chain_position = idx,
@@ -378,9 +380,7 @@ mod tests {
     /// Build a 2-provider registry directly using the public TOML loader
     /// (which already sits in tars-provider tests). For routing tests
     /// we just need MockProviders the registry can hand back via id.
-    fn registry_with_mocks(
-        mocks: Vec<(&str, CannedResponse)>,
-    ) -> Arc<ProviderRegistry> {
+    fn registry_with_mocks(mocks: Vec<(&str, CannedResponse)>) -> Arc<ProviderRegistry> {
         // The registry's only public constructor consumes a ProvidersConfig.
         // Build a TOML snippet that maps each id → mock provider.
         let mut toml = String::new();
@@ -492,9 +492,7 @@ mod tests {
         // test harness in sync with the real RoutingService::call
         // semantics so behavioral tests on this fake exercise the
         // same logic as the production path.
-        let candidates = policy
-            .select(&req, &dummy_provider_registry())
-            .await?;
+        let candidates = policy.select(&req, &dummy_provider_registry()).await?;
         let mut last_err: Option<ProviderError> = None;
         let mut skipped: Vec<(ProviderId, Vec<CompatibilityReason>)> = Vec::new();
         for id in &candidates {
@@ -522,9 +520,8 @@ mod tests {
         if last_err.is_none() && !skipped.is_empty() {
             return Err(ProviderError::NoCompatibleCandidate { skipped });
         }
-        Err(last_err.unwrap_or_else(|| {
-            ProviderError::Internal("no candidate produced a result".into())
-        }))
+        Err(last_err
+            .unwrap_or_else(|| ProviderError::Internal("no candidate produced a result".into())))
     }
 
     /// A real ProviderRegistry that we don't actually consult in the
@@ -548,18 +545,15 @@ mod tests {
     // ── StaticPolicy ────────────────────────────────────────────────────
     #[tokio::test]
     async fn static_policy_returns_its_list_unchanged() {
-        let policy = StaticPolicy::new(vec![
-            ProviderId::new("a"),
-            ProviderId::new("b"),
-        ]);
+        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]);
         let r = policy
-            .select(&req(ModelHint::Explicit("m".into())), &dummy_provider_registry())
+            .select(
+                &req(ModelHint::Explicit("m".into())),
+                &dummy_provider_registry(),
+            )
             .await
             .unwrap();
-        assert_eq!(
-            r,
-            vec![ProviderId::new("a"), ProviderId::new("b")]
-        );
+        assert_eq!(r, vec![ProviderId::new("a"), ProviderId::new("b")]);
     }
 
     #[test]
@@ -583,7 +577,10 @@ mod tests {
     async fn tier_policy_resolves_known_tier() {
         let p = tier_table();
         let r = p
-            .select(&req(ModelHint::Tier(ModelTier::Reasoning)), &dummy_provider_registry())
+            .select(
+                &req(ModelHint::Tier(ModelTier::Reasoning)),
+                &dummy_provider_registry(),
+            )
             .await
             .unwrap();
         assert_eq!(r, vec![ProviderId::new("opus"), ProviderId::new("o1")]);
@@ -593,7 +590,10 @@ mod tests {
     async fn tier_policy_unknown_tier_returns_empty() {
         let p = tier_table();
         let r = p
-            .select(&req(ModelHint::Tier(ModelTier::Local)), &dummy_provider_registry())
+            .select(
+                &req(ModelHint::Tier(ModelTier::Local)),
+                &dummy_provider_registry(),
+            )
             .await
             .unwrap();
         assert!(r.is_empty());
@@ -603,7 +603,10 @@ mod tests {
     async fn tier_policy_explicit_falls_through_to_fallback() {
         let p = tier_table().with_explicit_fallback(vec![ProviderId::new("default_p")]);
         let r = p
-            .select(&req(ModelHint::Explicit("gpt-4o".into())), &dummy_provider_registry())
+            .select(
+                &req(ModelHint::Explicit("gpt-4o".into())),
+                &dummy_provider_registry(),
+            )
             .await
             .unwrap();
         assert_eq!(r, vec![ProviderId::new("default_p")]);
@@ -630,10 +633,7 @@ mod tests {
         let (a, calls_a) = scripted("a", ScriptedOutcome::Err(|| ProviderError::ModelOverloaded));
         let (b, calls_b) = scripted("b", ScriptedOutcome::Ok);
 
-        let fake = FakeRegistry::new(vec![
-            (ProviderId::new("a"), a),
-            (ProviderId::new("b"), b),
-        ]);
+        let fake = FakeRegistry::new(vec![(ProviderId::new("a"), a), (ProviderId::new("b"), b)]);
         let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]);
 
         let stream = drive_routing(
@@ -652,13 +652,13 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_chain_halts_on_permanent_error() {
-        let (a, calls_a) = scripted("a", ScriptedOutcome::Err(|| ProviderError::Auth("bad".into())));
+        let (a, calls_a) = scripted(
+            "a",
+            ScriptedOutcome::Err(|| ProviderError::Auth("bad".into())),
+        );
         let (b, calls_b) = scripted("b", ScriptedOutcome::Ok);
 
-        let fake = FakeRegistry::new(vec![
-            (ProviderId::new("a"), a),
-            (ProviderId::new("b"), b),
-        ]);
+        let fake = FakeRegistry::new(vec![(ProviderId::new("a"), a), (ProviderId::new("b"), b)]);
         let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]);
 
         let result = drive_routing(
@@ -677,14 +677,12 @@ mod tests {
     #[tokio::test]
     async fn fallback_chain_returns_last_error_when_all_fail() {
         let (a, _) = scripted("a", ScriptedOutcome::Err(|| ProviderError::ModelOverloaded));
-        let (b, _) = scripted("b", ScriptedOutcome::Err(|| ProviderError::Network(
-            "test transport".to_string().into(),
-        )));
+        let (b, _) = scripted(
+            "b",
+            ScriptedOutcome::Err(|| ProviderError::Network("test transport".to_string().into())),
+        );
 
-        let fake = FakeRegistry::new(vec![
-            (ProviderId::new("a"), a),
-            (ProviderId::new("b"), b),
-        ]);
+        let fake = FakeRegistry::new(vec![(ProviderId::new("a"), a), (ProviderId::new("b"), b)]);
         let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]);
 
         let result = drive_routing(
@@ -744,9 +742,7 @@ mod tests {
     /// Build a Capabilities pinning supports_tool_use to a value, all
     /// other features baseline.
     fn caps_with_tools(tools: bool) -> tars_types::Capabilities {
-        let mut c = tars_types::Capabilities::text_only_baseline(
-            tars_types::Pricing::default(),
-        );
+        let mut c = tars_types::Capabilities::text_only_baseline(tars_types::Pricing::default());
         c.supports_tool_use = tools;
         c
     }
@@ -779,10 +775,16 @@ mod tests {
             .await
             .expect("routing should succeed via the tool-supporting provider");
         drain(stream).await;
-        assert_eq!(calls_skip.load(Ordering::SeqCst), 0,
-            "incompatible provider must NOT be called");
-        assert_eq!(calls_ok.load(Ordering::SeqCst), 1,
-            "compatible provider should serve the request");
+        assert_eq!(
+            calls_skip.load(Ordering::SeqCst),
+            0,
+            "incompatible provider must NOT be called"
+        );
+        assert_eq!(
+            calls_ok.load(Ordering::SeqCst),
+            1,
+            "compatible provider should serve the request"
+        );
     }
 
     #[tokio::test]
@@ -790,10 +792,8 @@ mod tests {
         // chain: [no_tools, no_tools_either] — request has tools.
         // Expected: both skipped, routing returns InvalidRequest with
         // each candidate's reason in the message.
-        let (p_a, _) =
-            scripted_with_caps("a", ScriptedOutcome::Ok, caps_with_tools(false));
-        let (p_b, _) =
-            scripted_with_caps("b", ScriptedOutcome::Ok, caps_with_tools(false));
+        let (p_a, _) = scripted_with_caps("a", ScriptedOutcome::Ok, caps_with_tools(false));
+        let (p_b, _) = scripted_with_caps("b", ScriptedOutcome::Ok, caps_with_tools(false));
         let fake = FakeRegistry::new(vec![
             (ProviderId::new("a"), p_a as _),
             (ProviderId::new("b"), p_b as _),
@@ -807,8 +807,7 @@ mod tests {
             input_schema: tars_types::JsonSchema::loose(serde_json::json!({})),
         });
 
-        let result = drive_routing(&fake, &policy, req, RequestContext::test_default())
-            .await;
+        let result = drive_routing(&fake, &policy, req, RequestContext::test_default()).await;
         let err = match result {
             Ok(_) => panic!("expected error, got Ok stream"),
             Err(e) => e,
@@ -832,8 +831,7 @@ mod tests {
     async fn capability_skip_doesnt_block_compatible_request() {
         // Chain: [no_tools, no_tools] — request WITHOUT tools.
         // Expected: first provider serves the request normally.
-        let (p_a, calls_a) =
-            scripted_with_caps("a", ScriptedOutcome::Ok, caps_with_tools(false));
+        let (p_a, calls_a) = scripted_with_caps("a", ScriptedOutcome::Ok, caps_with_tools(false));
         let fake = FakeRegistry::new(vec![(ProviderId::new("a"), p_a as _)]);
         let policy = StaticPolicy::new(vec![ProviderId::new("a")]);
 

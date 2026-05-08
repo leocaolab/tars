@@ -26,9 +26,7 @@ use tars_types::{ChatEvent, ChatRequest, ModelHint, RequestContext};
 #[ignore = "requires real codex CLI + ChatGPT subscription; run with --ignored --nocapture"]
 async fn codex_cli_say_hi_against_real_binary() {
     if which::which("codex").is_err() {
-        panic!(
-            "`codex` not in PATH; install with `brew install codex` or skip this test",
-        );
+        panic!("`codex` not in PATH; install with `brew install codex` or skip this test",);
     }
 
     let provider = CodexCliProviderBuilder::new("codex_smoke")
@@ -112,7 +110,10 @@ async fn codex_cli_say_hi_against_real_binary() {
     println!("events   = {event_count}");
 
     assert!(saw_finished, "stream must end with Finished");
-    assert!(!full_text.is_empty(), "should have received some text from codex");
+    assert!(
+        !full_text.is_empty(),
+        "should have received some text from codex"
+    );
     // Don't pin exact text — model isn't deterministic enough at the
     // word level even with our prompt. Just sanity-check it's
     // non-empty and looks vaguely like an answer.

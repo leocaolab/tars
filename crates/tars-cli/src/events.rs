@@ -24,8 +24,8 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
 use tars_storage::{
-    BodyStore, PipelineEventQuery, PipelineEventStore, SqliteBodyStore,
-    SqliteBodyStoreConfig, SqlitePipelineEventStore, SqlitePipelineEventStoreConfig,
+    BodyStore, PipelineEventQuery, PipelineEventStore, SqliteBodyStore, SqliteBodyStoreConfig,
+    SqlitePipelineEventStore, SqlitePipelineEventStoreConfig,
 };
 use tars_types::{ContentRef, PipelineEvent, TenantId};
 
@@ -114,7 +114,9 @@ fn open_events(dir: &std::path::Path) -> Result<std::sync::Arc<dyn PipelineEvent
             path.display()
         );
     }
-    Ok(SqlitePipelineEventStore::open(SqlitePipelineEventStoreConfig::new(path))?)
+    Ok(SqlitePipelineEventStore::open(
+        SqlitePipelineEventStoreConfig::new(path),
+    )?)
 }
 
 fn open_bodies(dir: &std::path::Path) -> Result<std::sync::Arc<dyn BodyStore>> {
@@ -255,9 +257,9 @@ fn parse_since(s: &str) -> Result<Option<SystemTime>> {
         return Ok(None);
     }
     let (num, unit) = s.split_at(s.len().saturating_sub(1));
-    let n: u64 = num
-        .parse()
-        .with_context(|| format!("invalid --since value: {s} (expected like `1d`, `2h`, `30m`, `45s`, or `all`)"))?;
+    let n: u64 = num.parse().with_context(|| {
+        format!("invalid --since value: {s} (expected like `1d`, `2h`, `30m`, `45s`, or `all`)")
+    })?;
     let secs = match unit {
         "s" => n,
         "m" => n * 60,
@@ -270,9 +272,11 @@ fn parse_since(s: &str) -> Result<Option<SystemTime>> {
 
 fn format_ts(t: SystemTime) -> String {
     use std::time::UNIX_EPOCH;
-    let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
-        .unwrap_or_default();
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0).unwrap_or_default();
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 

@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, Stream, StreamExt};
 
 use tars_types::{
-    Capabilities, ChatRequest, ChatResponse, ChatResponseBuilder, ChatEvent,
-    CostUsd, ProviderError, ProviderId, RequestContext, Usage,
+    Capabilities, ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, CostUsd,
+    ProviderError, ProviderId, RequestContext, Usage,
 };
 
 /// Convenience alias for the streaming return type. `'static` because
@@ -61,11 +61,7 @@ pub trait LlmProvider: Send + Sync + 'static {
     ///
     /// The default implementation only supports `fast = true`. Adapters
     /// that have a real tokenizer must override this and honor `fast = false`.
-    async fn count_tokens(
-        &self,
-        req: &ChatRequest,
-        fast: bool,
-    ) -> Result<u64, ProviderError> {
+    async fn count_tokens(&self, req: &ChatRequest, fast: bool) -> Result<u64, ProviderError> {
         if !fast {
             return Err(ProviderError::Internal(
                 "count_tokens(fast=false) requires a real tokenizer; this provider only supports fast estimation".into(),

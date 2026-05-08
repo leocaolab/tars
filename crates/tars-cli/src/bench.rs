@@ -135,8 +135,7 @@ pub async fn execute(args: BenchArgs, config_path: Option<PathBuf>) -> Result<()
     let cfg = config_loader::load(config_path)?;
     let provider_id = ProviderId::new(args.provider.clone());
     let provider_cfg = cfg.providers.get(&provider_id).ok_or_else(|| {
-        let configured: Vec<String> =
-            cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
+        let configured: Vec<String> = cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
         anyhow::anyhow!(
             "provider `{}` not in config. Configured: [{}]",
             args.provider,
@@ -153,9 +152,9 @@ pub async fn execute(args: BenchArgs, config_path: Option<PathBuf>) -> Result<()
     let http = HttpProviderBase::default_arc().context("constructing reqwest client")?;
     let registry = ProviderRegistry::from_config(&cfg.providers, http, basic())
         .context("building provider registry from config")?;
-    let provider = registry.get(&provider_id).ok_or_else(|| {
-        anyhow::anyhow!("registry missing provider `{provider_id}`")
-    })?;
+    let provider = registry
+        .get(&provider_id)
+        .ok_or_else(|| anyhow::anyhow!("registry missing provider `{provider_id}`"))?;
 
     eprintln!(
         "── tars bench {} (model={model}, prompt={} chars, max_tokens={}, {} warmup + {} measured) ──",
@@ -236,9 +235,7 @@ async fn run_one(
                 // Reasoning-only output streams (o1 / DeepSeek-R1 in
                 // some configs) would otherwise never fire a Delta and
                 // TTFB would falsely fall back to total.
-                ChatEvent::Delta { .. } | ChatEvent::ThinkingDelta { .. }
-                    if ttfb.is_none() =>
-                {
+                ChatEvent::Delta { .. } | ChatEvent::ThinkingDelta { .. } if ttfb.is_none() => {
                     ttfb = Some(started_at.elapsed());
                 }
                 ChatEvent::Finished { usage, .. } => {
@@ -281,8 +278,10 @@ fn print_summary(provider_id: &str, model: &str, samples: &[Sample]) {
     // local server) was still loading the model on this iter and
     // returned an empty response. Including them tanks the mean.
     let anomalous = samples.iter().filter(|s| s.generated_tokens() == 0).count();
-    let valid: Vec<&Sample> =
-        samples.iter().filter(|s| s.generated_tokens() > 0).collect();
+    let valid: Vec<&Sample> = samples
+        .iter()
+        .filter(|s| s.generated_tokens() > 0)
+        .collect();
 
     if valid.is_empty() {
         println!();
@@ -296,8 +295,10 @@ fn print_summary(provider_id: &str, model: &str, samples: &[Sample]) {
     }
 
     let n = valid.len();
-    let mut ttfbs_ms: Vec<f64> =
-        valid.iter().map(|s| s.ttfb.as_secs_f64() * 1000.0).collect();
+    let mut ttfbs_ms: Vec<f64> = valid
+        .iter()
+        .map(|s| s.ttfb.as_secs_f64() * 1000.0)
+        .collect();
     let mut totals_s: Vec<f64> = valid.iter().map(|s| s.total.as_secs_f64()).collect();
     let mut decodes: Vec<f64> = valid.iter().map(|s| s.decode_tok_per_sec()).collect();
     let mut outs: Vec<u64> = valid.iter().map(|s| s.out_tokens).collect();
@@ -320,7 +321,9 @@ fn print_summary(provider_id: &str, model: &str, samples: &[Sample]) {
     let p50_f = |v: &[f64]| v[v.len() / 2];
     let p99_f = |v: &[f64]| {
         // For n < 100 this isn't a true p99 — clamp to the worst sample.
-        let idx = ((v.len() as f64 * 0.99).ceil() as usize).saturating_sub(1).min(v.len() - 1);
+        let idx = ((v.len() as f64 * 0.99).ceil() as usize)
+            .saturating_sub(1)
+            .min(v.len() - 1);
         v[idx]
     };
 
@@ -363,9 +366,7 @@ fn print_summary(provider_id: &str, model: &str, samples: &[Sample]) {
         mean_u(&ins),
     );
     if thinking_total > 0 {
-        println!(
-            "  (Thinking tokens reported across all iterations: {thinking_total})",
-        );
+        println!("  (Thinking tokens reported across all iterations: {thinking_total})",);
     }
 }
 

@@ -53,11 +53,9 @@ pub fn llamacpp(
 ) -> Arc<dyn LlmProvider> {
     let url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
     let normalized_auth = match auth {
-        Auth::Secret { secret: tars_types::SecretRef::Inline { ref value } }
-            if value.is_empty() =>
-        {
-            Auth::None
-        }
+        Auth::Secret {
+            secret: tars_types::SecretRef::Inline { ref value },
+        } if value.is_empty() => Auth::None,
         other => other,
     };
     let mut caps = llamacpp_default_capabilities();
@@ -90,9 +88,7 @@ pub fn llamacpp_local(
 /// running quantized GGUF models. Override per-deployment.
 fn llamacpp_default_capabilities() -> tars_types::Capabilities {
     use std::collections::HashSet;
-    use tars_types::{
-        Capabilities, Modality, Pricing, PromptCacheKind, StructuredOutputMode,
-    };
+    use tars_types::{Capabilities, Modality, Pricing, PromptCacheKind, StructuredOutputMode};
 
     let mut modalities = HashSet::new();
     modalities.insert(Modality::Text);
@@ -131,7 +127,10 @@ mod tests {
         let http = HttpProviderBase::default_arc().unwrap();
         let p = llamacpp_local("llamacpp_test", http, basic());
         let caps = p.capabilities();
-        assert!(matches!(caps.prompt_cache, tars_types::PromptCacheKind::None));
+        assert!(matches!(
+            caps.prompt_cache,
+            tars_types::PromptCacheKind::None
+        ));
         assert_eq!(caps.max_context_tokens, 8_192);
     }
 

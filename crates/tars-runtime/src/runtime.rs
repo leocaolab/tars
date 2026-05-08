@@ -38,19 +38,12 @@ pub trait Runtime: Send + Sync + 'static {
     ) -> Result<TrajectoryId, RuntimeError>;
 
     /// Append a typed event. Returns the assigned `sequence_no`.
-    async fn append(
-        &self,
-        traj: &TrajectoryId,
-        event: AgentEvent,
-    ) -> Result<u64, RuntimeError>;
+    async fn append(&self, traj: &TrajectoryId, event: AgentEvent) -> Result<u64, RuntimeError>;
 
     /// Replay every event for `traj` in order. Returns an empty `Vec`
     /// (NOT `TrajectoryNotFound`) when the trajectory has no events
     /// — "haven't appended yet" is a normal state.
-    async fn replay(
-        &self,
-        traj: &TrajectoryId,
-    ) -> Result<Vec<AgentEvent>, RuntimeError>;
+    async fn replay(&self, traj: &TrajectoryId) -> Result<Vec<AgentEvent>, RuntimeError>;
 
     /// Replay events with `sequence_no > since`. Used by recovery /
     /// incremental projections.
@@ -119,11 +112,7 @@ impl Runtime for LocalRuntime {
         Ok(traj)
     }
 
-    async fn append(
-        &self,
-        traj: &TrajectoryId,
-        event: AgentEvent,
-    ) -> Result<u64, RuntimeError> {
+    async fn append(&self, traj: &TrajectoryId, event: AgentEvent) -> Result<u64, RuntimeError> {
         // Defensive — surface the obvious bug ("appended an event
         // claiming to be in trajectory A while passing trajectory B")
         // at the runtime layer rather than letting the row land
@@ -142,10 +131,7 @@ impl Runtime for LocalRuntime {
         Ok(seq)
     }
 
-    async fn replay(
-        &self,
-        traj: &TrajectoryId,
-    ) -> Result<Vec<AgentEvent>, RuntimeError> {
+    async fn replay(&self, traj: &TrajectoryId) -> Result<Vec<AgentEvent>, RuntimeError> {
         self.replay_since(traj, 0).await
     }
 
@@ -240,7 +226,12 @@ pub async fn execute_agent_step(
     // `sha256sum read_file.txt`.
     let provider_for_log = guess_provider_id(&input);
     let system_prompt_hash = crate::event::hash_system_prompt(input.system.as_deref());
-    let ctx = AgentContext { trajectory_id: traj.clone(), step_seq, llm, cancel };
+    let ctx = AgentContext {
+        trajectory_id: traj.clone(),
+        step_seq,
+        llm,
+        cancel,
+    };
     let result = agent.clone().execute(ctx, input).await;
 
     // 4 / 5. log outcome
@@ -446,7 +437,10 @@ mod tests {
     #[tokio::test]
     async fn replay_unknown_trajectory_returns_empty_not_error() {
         let rt = fresh().await;
-        let events = rt.replay(&TrajectoryId::new("never_created")).await.unwrap();
+        let events = rt
+            .replay(&TrajectoryId::new("never_created"))
+            .await
+            .unwrap();
         assert!(events.is_empty());
     }
 
@@ -454,10 +448,16 @@ mod tests {
     async fn is_terminated_tracks_completed_and_abandoned() {
         let rt = fresh().await;
         let traj = rt.create_trajectory(None, "t").await.unwrap();
-        assert!(!rt.is_terminated(&traj).await.unwrap(), "Started is not terminal");
+        assert!(
+            !rt.is_terminated(&traj).await.unwrap(),
+            "Started is not terminal"
+        );
         rt.append(
             &traj,
-            AgentEvent::TrajectoryCompleted { traj: traj.clone(), summary: "ok".into() },
+            AgentEvent::TrajectoryCompleted {
+                traj: traj.clone(),
+                summary: "ok".into(),
+            },
         )
         .await
         .unwrap();

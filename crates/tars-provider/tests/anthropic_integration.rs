@@ -8,7 +8,7 @@ use futures::StreamExt;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use tars_provider::auth::{basic, Auth};
+use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::anthropic::AnthropicProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
@@ -94,7 +94,10 @@ async fn streaming_text_response_decodes_to_events() {
                 assert_eq!(actual_model, "claude-opus-4-7");
             }
             ChatEvent::Delta { text: t } => text.push_str(&t),
-            ChatEvent::Finished { stop_reason, usage: u } => {
+            ChatEvent::Finished {
+                stop_reason,
+                usage: u,
+            } => {
                 saw_finish = Some(stop_reason);
                 usage = Some(u);
             }
@@ -230,7 +233,10 @@ async fn thinking_blocks_decode_as_thinking_deltas() {
 
     let resp = provider
         .complete(
-            ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "think then answer"),
+            ChatRequest::user(
+                ModelHint::Explicit("claude-opus-4-7".into()),
+                "think then answer",
+            ),
             RequestContext::test_default(),
         )
         .await

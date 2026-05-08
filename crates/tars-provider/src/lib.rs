@@ -27,22 +27,22 @@ pub mod tool_buffer;
 // "we hit `tars-pipeline` MVP without anyone needing it" — has
 // fired, so the module was deleted on 2026-05-03 (commit follows).
 
-pub use auth::{Auth, AuthResolver, ResolvedAuth, AuthError, BasicAuthResolver, basic};
+pub use auth::{Auth, AuthError, AuthResolver, BasicAuthResolver, ResolvedAuth, basic};
 pub use http_base::{HttpAdapter, HttpProviderBase, HttpProviderConfig};
-pub use provider::{LlmProvider, LlmEventStream};
+pub use provider::{LlmEventStream, LlmProvider};
 pub use registry::{ProviderRegistry, RegistryError};
 pub use tool_buffer::ToolCallBuffer;
 
 // Re-export concrete backends at the crate root for ergonomic use.
 pub use backends::anthropic::{AnthropicAdapter, AnthropicProvider, AnthropicProviderBuilder};
 pub use backends::claude_cli::{
-    claude_cli, ClaudeCliProvider, ClaudeCliProviderBuilder,
-    SubprocessRunner as ClaudeCliSubprocessRunner,
+    ClaudeCliProvider, ClaudeCliProviderBuilder, SubprocessRunner as ClaudeCliSubprocessRunner,
+    claude_cli,
 };
 pub use backends::gemini::{GeminiAdapter, GeminiProvider, GeminiProviderBuilder};
 pub use backends::gemini_cli::{
-    gemini_cli, GeminiCliProvider, GeminiCliProviderBuilder,
-    SubprocessRunner as GeminiCliSubprocessRunner,
+    GeminiCliProvider, GeminiCliProviderBuilder, SubprocessRunner as GeminiCliSubprocessRunner,
+    gemini_cli,
 };
 pub use backends::mock::{CannedResponse, MockProvider};
 pub use backends::openai::{OpenAiAdapter, OpenAiProvider, OpenAiProviderBuilder};

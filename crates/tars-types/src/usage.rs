@@ -143,10 +143,8 @@ impl Pricing {
         let billable_input = usage.input_tokens.saturating_sub(cached_plus_creation);
         let total = (billable_input as f64) * self.input_per_million / 1_000_000.0
             + (usage.output_tokens as f64) * self.output_per_million / 1_000_000.0
-            + (usage.cached_input_tokens as f64) * self.cached_input_per_million
-                / 1_000_000.0
-            + (usage.cache_creation_tokens as f64) * self.cache_creation_per_million
-                / 1_000_000.0
+            + (usage.cached_input_tokens as f64) * self.cached_input_per_million / 1_000_000.0
+            + (usage.cache_creation_tokens as f64) * self.cache_creation_per_million / 1_000_000.0
             + (usage.thinking_tokens as f64) * self.thinking_per_million / 1_000_000.0;
         CostUsd(total)
     }
@@ -158,8 +156,14 @@ mod tests {
 
     #[test]
     fn merge_saturates() {
-        let a = Usage { input_tokens: u64::MAX, ..Default::default() };
-        let b = Usage { input_tokens: 5, ..Default::default() };
+        let a = Usage {
+            input_tokens: u64::MAX,
+            ..Default::default()
+        };
+        let b = Usage {
+            input_tokens: 5,
+            ..Default::default()
+        };
         assert_eq!(a.merge(b).input_tokens, u64::MAX);
     }
 

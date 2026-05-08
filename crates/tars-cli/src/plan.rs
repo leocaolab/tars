@@ -37,14 +37,14 @@ use tars_pipeline::{
     CacheLookupMiddleware, LlmService, Pipeline, RetryMiddleware, TelemetryMiddleware,
 };
 use tars_runtime::{
-    execute_agent_step, AgentEvent, LocalRuntime, OrchestratorAgent, Runtime, StepIdempotencyKey,
+    AgentEvent, LocalRuntime, OrchestratorAgent, Runtime, StepIdempotencyKey, execute_agent_step,
 };
 use tars_storage::EventStore;
 use tars_types::{AgentId, ChatRequest, ModelHint, TrajectoryId};
 use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::{
-    build_cache, build_dispatch, build_registry_with_breaker, Dispatch, DispatchArgs,
+    Dispatch, DispatchArgs, build_cache, build_dispatch, build_registry_with_breaker,
 };
 use crate::{config_loader, event_store};
 
@@ -92,10 +92,7 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
     // block the LLM call.
     let trajectory_logger = build_trajectory_logger(&args, &dispatch).await;
 
-    let agent = OrchestratorAgent::new(
-        AgentId::new("orchestrator"),
-        dispatch.model_label.clone(),
-    );
+    let agent = OrchestratorAgent::new(AgentId::new("orchestrator"), dispatch.model_label.clone());
 
     // The planner builds its OWN ChatRequest (system prompt + Plan
     // schema). We construct a placeholder ChatRequest for
@@ -207,9 +204,7 @@ fn plan_schema_mirror() -> serde_json::Value {
 /// Decode the AgentStepResult from execute_agent_step into a typed
 /// Plan. The orchestrator's Agent::execute returns AgentOutput::Text
 /// containing the JSON the LLM produced.
-fn parse_plan_from_step(
-    step_result: tars_runtime::AgentStepResult,
-) -> Result<tars_runtime::Plan> {
+fn parse_plan_from_step(step_result: tars_runtime::AgentStepResult) -> Result<tars_runtime::Plan> {
     use tars_runtime::AgentOutput;
     let json = match step_result.output {
         AgentOutput::Text { text } => text,
@@ -218,8 +213,7 @@ fn parse_plan_from_step(
              (planner expected JSON; structured_output may have been disabled)"
         ),
     };
-    let plan: tars_runtime::Plan =
-        serde_json::from_str(&json).context("decode planner JSON")?;
+    let plan: tars_runtime::Plan = serde_json::from_str(&json).context("decode planner JSON")?;
     plan.validate().context("plan validation")?;
     Ok(plan)
 }
@@ -252,19 +246,14 @@ impl TrajectoryLogger {
     }
 }
 
-async fn build_trajectory_logger(
-    args: &PlanArgs,
-    dispatch: &Dispatch,
-) -> Option<TrajectoryLogger> {
+async fn build_trajectory_logger(args: &PlanArgs, dispatch: &Dispatch) -> Option<TrajectoryLogger> {
     if args.dispatch.no_trajectory {
         return None;
     }
     let store: Arc<dyn EventStore> = match event_store::open(args.dispatch.events_path.as_deref()) {
         Ok(Some(s)) => s,
         Ok(None) => {
-            tracing::warn!(
-                "trajectory: no XDG data dir on this platform; skipping log",
-            );
+            tracing::warn!("trajectory: no XDG data dir on this platform; skipping log",);
             return None;
         }
         Err(e) => {

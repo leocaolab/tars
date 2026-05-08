@@ -53,6 +53,6 @@ pub use pipeline_event_store::{
     SqlitePipelineEventStoreConfig,
 };
 pub use sqlite::{
-    default_personal_event_store_path, open_event_store_at_path, SqliteEventStore,
-    SqliteEventStoreConfig,
+    SqliteEventStore, SqliteEventStoreConfig, default_personal_event_store_path,
+    open_event_store_at_path,
 };

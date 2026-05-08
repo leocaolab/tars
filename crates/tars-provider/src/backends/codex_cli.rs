@@ -45,8 +45,8 @@ use std::time::Duration;
 
 use async_stream::stream;
 use async_trait::async_trait;
-use futures::stream::BoxStream;
 use futures::StreamExt;
+use futures::stream::BoxStream;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -62,11 +62,8 @@ use crate::provider::{LlmEventStream, LlmProvider};
 /// case-insensitive match. If any survives, codex's auth manager
 /// (`login/src/auth/manager.rs`) picks it up and routes the request
 /// through API billing instead of the user's ChatGPT subscription.
-const STRIPPED_ENV_KEYS_UPPER: &[&str] = &[
-    "OPENAI_API_KEY",
-    "CODEX_API_KEY",
-    "CODEX_AGENT_IDENTITY",
-];
+const STRIPPED_ENV_KEYS_UPPER: &[&str] =
+    &["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_AGENT_IDENTITY"];
 
 /// Sandbox modes accepted by `codex exec --sandbox`. Default is
 /// `ReadOnly` for the principle-of-least-surprise: a TARS user
@@ -146,10 +143,7 @@ impl CodexCliProviderBuilder {
         self.build_with_runner(Arc::new(RealSubprocessLineRunner))
     }
 
-    pub fn build_with_runner(
-        self,
-        runner: Arc<dyn SubprocessLineRunner>,
-    ) -> Arc<CodexCliProvider> {
+    pub fn build_with_runner(self, runner: Arc<dyn SubprocessLineRunner>) -> Arc<CodexCliProvider> {
         let caps = self.capabilities.unwrap_or_else(default_capabilities);
         Arc::new(CodexCliProvider {
             id: self.id,
@@ -240,7 +234,10 @@ impl LlmProvider for CodexCliProvider {
             sandbox: self.sandbox,
             skip_git_repo_check: self.skip_git_repo_check,
             timeout: self.timeout,
-            stripped_env: STRIPPED_ENV_KEYS_UPPER.iter().map(|s| s.to_string()).collect(),
+            stripped_env: STRIPPED_ENV_KEYS_UPPER
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         };
 
         let line_stream = self.runner.run(invocation).await?;
@@ -327,19 +324,18 @@ impl SubprocessLineRunner for RealSubprocessLineRunner {
 
         // Write the prompt on stdin and close it so codex sees EOF.
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(inv.prompt.as_bytes())
-                .await
-                .map_err(|e| ProviderError::CliSubprocessDied {
+            stdin.write_all(inv.prompt.as_bytes()).await.map_err(|e| {
+                ProviderError::CliSubprocessDied {
                     exit_code: None,
                     stderr: format!("stdin write failed: {e}"),
-                })?;
+                }
+            })?;
             drop(stdin);
         }
 
-        let stdout = child.stdout.take().ok_or_else(|| ProviderError::Internal(
-            "codex child has no stdout pipe (Stdio::piped above)".into(),
-        ))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ProviderError::Internal("codex child has no stdout pipe (Stdio::piped above)".into())
+        })?;
         let stderr = child.stderr.take();
         let timeout = inv.timeout;
 
@@ -471,8 +467,12 @@ struct ThreadItem {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ThreadItemDetails {
-    AgentMessage { text: String },
-    Reasoning { text: String },
+    AgentMessage {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
     // All other variants captured as Other so we don't fail on unknown
     // shapes; v1 drops them. When we want to surface tool / command /
     // file_change events we'll add discriminated arms here.
@@ -752,7 +752,12 @@ mod tests {
     fn unknown_item_kinds_drop_silently_via_serde_other() {
         // command_execution / file_change / mcp_tool_call all hit the
         // `Other` arm in v1.
-        for kind in ["command_execution", "file_change", "mcp_tool_call", "web_search"] {
+        for kind in [
+            "command_execution",
+            "file_change",
+            "mcp_tool_call",
+            "web_search",
+        ] {
             let ev = parse(json!({
                 "type": "item.completed",
                 "item": {"id": "x", "type": kind, "command": "ls", "aggregated_output": "", "status": "completed"},
@@ -802,10 +807,7 @@ mod tests {
 
     #[async_trait]
     impl SubprocessLineRunner for FakeRunner {
-        async fn run(
-            &self,
-            invocation: CodexInvocation,
-        ) -> Result<CodexLineStream, ProviderError> {
+        async fn run(&self, invocation: CodexInvocation) -> Result<CodexLineStream, ProviderError> {
             *self.recorded.lock().unwrap() = Some(invocation);
             let lines = self.lines.clone();
             let s = stream::iter(lines.into_iter().map(Ok));
@@ -815,8 +817,8 @@ mod tests {
 
     fn make_provider(lines: Vec<&str>) -> (Arc<CodexCliProvider>, Arc<FakeRunner>) {
         let runner = FakeRunner::new(lines);
-        let provider = CodexCliProviderBuilder::new("codex_cli_test")
-            .build_with_runner(runner.clone());
+        let provider =
+            CodexCliProviderBuilder::new("codex_cli_test").build_with_runner(runner.clone());
         (provider, runner)
     }
 
@@ -932,7 +934,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let inv = runner.recorded().expect("runner should have recorded the invocation");
+        let inv = runner
+            .recorded()
+            .expect("runner should have recorded the invocation");
         for k in ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_AGENT_IDENTITY"] {
             assert!(
                 inv.stripped_env.contains(k),

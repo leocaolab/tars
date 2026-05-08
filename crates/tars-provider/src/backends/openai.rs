@@ -10,18 +10,20 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::StatusCode;
-use serde_json::{json, Value};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use serde_json::{Value, json};
 use url::Url;
 
 use tars_types::{
-    Capabilities, ChatRequest, ChatEvent, ContentBlock, Message, Modality, ProviderError,
+    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message, Modality, ProviderError,
     ProviderId, RequestContext, StopReason, StructuredOutputMode, Usage,
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};
-use crate::http_base::{stream_via_adapter, HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent};
+use crate::http_base::{
+    HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent, stream_via_adapter,
+};
 use crate::provider::{LlmEventStream, LlmProvider};
 use crate::tool_buffer::ToolCallBuffer;
 
@@ -77,7 +79,9 @@ impl OpenAiProviderBuilder {
         http: Arc<HttpProviderBase>,
         auth_resolver: Arc<dyn AuthResolver>,
     ) -> Arc<OpenAiProvider> {
-        let caps = self.capabilities.unwrap_or_else(default_openai_capabilities);
+        let caps = self
+            .capabilities
+            .unwrap_or_else(default_openai_capabilities);
         let adapter = Arc::new(OpenAiAdapter {
             base_url: self.base_url,
             extras: self.extras,
@@ -154,7 +158,10 @@ pub struct OpenAiAdapter {
 impl OpenAiAdapter {
     /// Decide which "max tokens" parameter the model accepts.
     fn max_tokens_field(model: &str) -> &'static str {
-        if NEW_TOKENS_PARAM_PREFIXES.iter().any(|p| model.starts_with(p)) {
+        if NEW_TOKENS_PARAM_PREFIXES
+            .iter()
+            .any(|p| model.starts_with(p))
+        {
             "max_completion_tokens"
         } else {
             "max_tokens"
@@ -168,7 +175,10 @@ impl OpenAiAdapter {
                 "role": "user",
                 "content": Self::translate_content(content),
             }),
-            Message::Assistant { content, tool_calls } => {
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
                 let mut out = json!({
                     "role": "assistant",
                     "content": Self::translate_content(content),
@@ -202,7 +212,11 @@ impl OpenAiAdapter {
                 }
                 out
             }
-            Message::Tool { tool_call_id, content, is_error } => {
+            Message::Tool {
+                tool_call_id,
+                content,
+                is_error,
+            } => {
                 // OpenAI's tool-role message has no literal `is_error`
                 // field. The convention is to prefix the content with
                 // a marker so the model sees the error semantically.
@@ -430,7 +444,10 @@ impl HttpAdapter for OpenAiAdapter {
         }
 
         let v: Value = serde_json::from_str(&raw.data).map_err(|e| {
-            ProviderError::Parse(format!("openai sse json: {e} (raw: {})", truncate(&raw.data, 200)))
+            ProviderError::Parse(format!(
+                "openai sse json: {e} (raw: {})",
+                truncate(&raw.data, 200)
+            ))
         })?;
 
         let mut out = Vec::new();
@@ -441,8 +458,10 @@ impl HttpAdapter for OpenAiAdapter {
             // Defer emission until we also know the model + stop_reason
             // (handled in the choices block). But if there are no
             // choices in this chunk, emit Finished with what we have.
-            let choices_empty =
-                v.get("choices").and_then(|c| c.as_array()).is_none_or(|a| a.is_empty());
+            let choices_empty = v
+                .get("choices")
+                .and_then(|c| c.as_array())
+                .is_none_or(|a| a.is_empty());
             if choices_empty {
                 let usage_struct = parse_openai_usage(usage);
                 // Audit `tars-provider-src-backends-openai-{7,22}`: use
@@ -459,7 +478,11 @@ impl HttpAdapter for OpenAiAdapter {
             }
         }
 
-        let model = v.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+        let model = v
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let choices = match v.get("choices").and_then(|c| c.as_array()) {
             Some(arr) => arr,
@@ -495,11 +518,15 @@ impl HttpAdapter for OpenAiAdapter {
             if let Some(text) = reasoning
                 && !text.is_empty()
             {
-                out.push(ChatEvent::ThinkingDelta { text: text.to_string() });
+                out.push(ChatEvent::ThinkingDelta {
+                    text: text.to_string(),
+                });
             }
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                 if !content.is_empty() {
-                    out.push(ChatEvent::Delta { text: content.to_string() });
+                    out.push(ChatEvent::Delta {
+                        text: content.to_string(),
+                    });
                 }
             }
 
@@ -516,7 +543,11 @@ impl HttpAdapter for OpenAiAdapter {
                         .and_then(|i| i.as_u64())
                         .map(|i| i as usize)
                         .unwrap_or(iter_pos);
-                    let id = tc.get("id").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let id = tc
+                        .get("id")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let name = tc
                         .get("function")
                         .and_then(|f| f.get("name"))
@@ -629,7 +660,10 @@ impl HttpAdapter for OpenAiAdapter {
                     || message.to_lowercase().contains("maximum context length")
                     || message.to_lowercase().contains("too many tokens")
                 {
-                    ProviderError::ContextTooLong { limit: 0, requested: 0 }
+                    ProviderError::ContextTooLong {
+                        limit: 0,
+                        requested: 0,
+                    }
                 } else {
                     ProviderError::InvalidRequest(message)
                 }
@@ -648,8 +682,14 @@ impl HttpAdapter for OpenAiAdapter {
 }
 
 fn parse_openai_usage(usage: &serde_json::Map<String, Value>) -> Usage {
-    let prompt = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    let completion = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let prompt = usage
+        .get("prompt_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let completion = usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let cached = usage
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
@@ -672,7 +712,10 @@ fn parse_openai_usage(usage: &serde_json::Map<String, Value>) -> Usage {
 /// inconsistent state when args were malformed. Now propagates.
 /// Indices that were never started simply don't show up in the
 /// inflight map and yield a benign `not started` error we filter out.
-fn drain_buffer_into(buf: &mut ToolCallBuffer, out: &mut Vec<ChatEvent>) -> Result<(), ProviderError> {
+fn drain_buffer_into(
+    buf: &mut ToolCallBuffer,
+    out: &mut Vec<ChatEvent>,
+) -> Result<(), ProviderError> {
     // We don't have a public iter on ToolCallBuffer; finalize indices
     // 0..32 (parallel call ceiling we treat as practical max).
     for i in 0..32 {
@@ -708,8 +751,14 @@ mod tests {
 
     #[test]
     fn picks_max_completion_tokens_for_o1() {
-        assert_eq!(OpenAiAdapter::max_tokens_field("o1-preview"), "max_completion_tokens");
-        assert_eq!(OpenAiAdapter::max_tokens_field("gpt-5-something"), "max_completion_tokens");
+        assert_eq!(
+            OpenAiAdapter::max_tokens_field("o1-preview"),
+            "max_completion_tokens"
+        );
+        assert_eq!(
+            OpenAiAdapter::max_tokens_field("gpt-5-something"),
+            "max_completion_tokens"
+        );
         assert_eq!(OpenAiAdapter::max_tokens_field("gpt-4o"), "max_tokens");
     }
 
@@ -782,10 +831,7 @@ mod tests {
         };
         let body = a.translate_request(&req).unwrap();
         let messages = body["messages"].as_array().unwrap();
-        let system_count = messages
-            .iter()
-            .filter(|m| m["role"] == "system")
-            .count();
+        let system_count = messages.iter().filter(|m| m["role"] == "system").count();
         assert_eq!(system_count, 1, "should dedupe to one system message");
         assert_eq!(messages[0]["content"][0]["text"], "explicit system");
     }
@@ -796,7 +842,10 @@ mod tests {
 
     #[test]
     fn classify_401_is_auth() {
-        let a = OpenAiAdapter { base_url: DEFAULT_BASE_URL.into(), extras: HttpProviderExtras::default() };
+        let a = OpenAiAdapter {
+            base_url: DEFAULT_BASE_URL.into(),
+            extras: HttpProviderExtras::default(),
+        };
         let err = a.classify_error(
             StatusCode::UNAUTHORIZED,
             &empty_headers(),
@@ -807,14 +856,23 @@ mod tests {
 
     #[test]
     fn classify_429_is_rate_limited() {
-        let a = OpenAiAdapter { base_url: DEFAULT_BASE_URL.into(), extras: HttpProviderExtras::default() };
+        let a = OpenAiAdapter {
+            base_url: DEFAULT_BASE_URL.into(),
+            extras: HttpProviderExtras::default(),
+        };
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &empty_headers(), "");
-        assert!(matches!(err, ProviderError::RateLimited { retry_after: None }));
+        assert!(matches!(
+            err,
+            ProviderError::RateLimited { retry_after: None }
+        ));
     }
 
     #[test]
     fn classify_429_with_retry_after_seconds_populates_field() {
-        let a = OpenAiAdapter { base_url: DEFAULT_BASE_URL.into(), extras: HttpProviderExtras::default() };
+        let a = OpenAiAdapter {
+            base_url: DEFAULT_BASE_URL.into(),
+            extras: HttpProviderExtras::default(),
+        };
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::RETRY_AFTER, "42".parse().unwrap());
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &headers, "");
@@ -828,7 +886,10 @@ mod tests {
 
     #[test]
     fn classify_400_context_length_is_typed() {
-        let a = OpenAiAdapter { base_url: DEFAULT_BASE_URL.into(), extras: HttpProviderExtras::default() };
+        let a = OpenAiAdapter {
+            base_url: DEFAULT_BASE_URL.into(),
+            extras: HttpProviderExtras::default(),
+        };
         let body = r#"{"error":{"message":"context_length_exceeded: too many tokens"}}"#;
         let err = a.classify_error(StatusCode::BAD_REQUEST, &empty_headers(), body);
         assert!(matches!(err, ProviderError::ContextTooLong { .. }));

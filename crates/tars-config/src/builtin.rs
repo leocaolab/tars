@@ -229,7 +229,11 @@ mod tests {
             .get(&ProviderId::new("openai"))
             .expect("merged config should contain 'openai' provider");
         match cfg {
-            ProviderConfig::Openai { base_url, default_model, .. } => {
+            ProviderConfig::Openai {
+                base_url,
+                default_model,
+                ..
+            } => {
                 assert_eq!(base_url.as_deref(), Some("https://my.proxy/v1"));
                 assert_eq!(default_model, "gpt-4o-mini");
             }
@@ -264,7 +268,12 @@ mod tests {
     fn mlx_default_targets_mlx_community_qwen() {
         let cfg = default_mlx();
         match &cfg {
-            ProviderConfig::Mlx { default_model, base_url, auth, .. } => {
+            ProviderConfig::Mlx {
+                default_model,
+                base_url,
+                auth,
+                ..
+            } => {
                 assert!(default_model.starts_with("mlx-community/"));
                 assert!(base_url.is_none()); // adapter falls back to localhost:8080
                 assert!(matches!(auth, Auth::None));

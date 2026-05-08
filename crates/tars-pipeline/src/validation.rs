@@ -114,7 +114,9 @@ pub struct ValidationMiddleware {
 
 impl ValidationMiddleware {
     pub fn new(validators: Vec<Box<dyn OutputValidator>>) -> Self {
-        Self { validators: Arc::new(validators) }
+        Self {
+            validators: Arc::new(validators),
+        }
     }
 }
 
@@ -187,10 +189,15 @@ impl LlmService for ValidationService {
                 ValidationOutcome::Pass => {
                     summary.outcomes.insert(name, OutcomeSummary::Pass);
                 }
-                ValidationOutcome::Filter { response: filtered, dropped } => {
+                ValidationOutcome::Filter {
+                    response: filtered,
+                    dropped,
+                } => {
                     summary.outcomes.insert(
                         name,
-                        OutcomeSummary::Filter { dropped: dropped.clone() },
+                        OutcomeSummary::Filter {
+                            dropped: dropped.clone(),
+                        },
                     );
                     response = filtered;
                     filtered_any = true;
@@ -206,7 +213,9 @@ impl LlmService for ValidationService {
                     });
                 }
                 ValidationOutcome::Annotate { metrics } => {
-                    summary.outcomes.insert(name, OutcomeSummary::Annotate { metrics });
+                    summary
+                        .outcomes
+                        .insert(name, OutcomeSummary::Annotate { metrics });
                 }
                 // `#[non_exhaustive]` wildcard. Future variants
                 // (e.g. Defer) treated as Pass for now.

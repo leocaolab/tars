@@ -4,7 +4,7 @@ use futures::StreamExt;
 use wiremock::matchers::{method, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use tars_provider::auth::{basic, Auth};
+use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::gemini::GeminiProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
@@ -60,7 +60,10 @@ async fn streaming_text_response_decodes_to_events() {
     while let Some(ev) = stream.next().await {
         match ev.expect("event") {
             ChatEvent::Delta { text: t } => text.push_str(&t),
-            ChatEvent::Finished { stop_reason, usage: u } => {
+            ChatEvent::Finished {
+                stop_reason,
+                usage: u,
+            } => {
                 saw_finish = Some(stop_reason);
                 usage = Some(u);
             }

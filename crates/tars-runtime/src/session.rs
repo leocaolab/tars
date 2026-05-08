@@ -36,16 +36,17 @@
 //! See `tests::` at the bottom for end-to-end exercises of each.
 
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use futures::StreamExt;
 use serde_json::Value as JsonValue;
 use tars_pipeline::{LlmService, RequestContext};
 use tars_types::{
-    error::ProviderError, new_shared_telemetry, Capabilities, ChatRequest, ChatResponseBuilder,
-    ContentBlock, Message, ModelHint, SharedTelemetry, TelemetryAccumulator, ToolChoice, ToolSpec,
+    Capabilities, ChatRequest, ChatResponseBuilder, ContentBlock, Message, ModelHint,
+    SharedTelemetry, TelemetryAccumulator, ToolChoice, ToolSpec, error::ProviderError,
+    new_shared_telemetry,
 };
 
 // ── Budget ────────────────────────────────────────────────────────────
@@ -65,7 +66,10 @@ use tars_types::{
 #[derive(Clone, Debug)]
 pub enum Budget {
     Chars(usize),
-    Tokens { limit: usize, tokenizer: Arc<dyn Tokenizer> },
+    Tokens {
+        limit: usize,
+        tokenizer: Arc<dyn Tokenizer>,
+    },
     ContextRatio(f32),
 }
 
@@ -199,8 +203,13 @@ pub struct Turn {
 impl Turn {
     /// Open a new turn with a leading user message.
     pub fn open(leading: Message) -> Self {
-        debug_assert!(matches!(leading, Message::User { .. }), "Turn must open with User");
-        Self { messages: vec![leading] }
+        debug_assert!(
+            matches!(leading, Message::User { .. }),
+            "Turn must open with User"
+        );
+        Self {
+            messages: vec![leading],
+        }
     }
 
     pub fn messages(&self) -> &[Message] {
@@ -224,17 +233,30 @@ impl Turn {
     /// `is_complete()` mid-loop will return false and that's correct —
     /// the loop hasn't finished yet.
     pub fn is_complete(&self) -> bool {
-        let Some(first) = self.messages.first() else { return false };
+        let Some(first) = self.messages.first() else {
+            return false;
+        };
         if !matches!(first, Message::User { .. }) {
             return false;
         }
-        let Some(last) = self.messages.last() else { return false };
-        let Message::Assistant { content, tool_calls } = last else { return false };
+        let Some(last) = self.messages.last() else {
+            return false;
+        };
+        let Message::Assistant {
+            content,
+            tool_calls,
+        } = last
+        else {
+            return false;
+        };
         // Final reply must have text and no pending tool_calls.
         if !tool_calls.is_empty() {
             return false;
         }
-        if !content.iter().any(|c| matches!(c, ContentBlock::Text { .. })) {
+        if !content
+            .iter()
+            .any(|c| matches!(c, ContentBlock::Text { .. }))
+        {
             return false;
         }
         true
@@ -385,7 +407,10 @@ impl Session {
     /// All messages in chronological order. Caller-mutate-safe (it's a
     /// fresh Vec).
     pub fn history(&self) -> Vec<Message> {
-        self.turns.iter().flat_map(|t| t.messages.iter().cloned()).collect()
+        self.turns
+            .iter()
+            .flat_map(|t| t.messages.iter().cloned())
+            .collect()
     }
 
     /// Frozen turn-grouped view. For consumers that care about turn
@@ -409,7 +434,9 @@ impl Session {
     /// subsequent `send()` calls. Existing in-flight calls are not
     /// retroactively affected.
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.get_or_insert_with(ToolRegistry::new).register(tool);
+        self.tools
+            .get_or_insert_with(ToolRegistry::new)
+            .register(tool);
     }
 
     /// Cheap-clone of conversation state. The returned Session shares
@@ -473,7 +500,10 @@ impl Session {
         // For the outer body we keep `&mut self` available by re-
         // borrowing only inside the trim step (which is the only time
         // the guard's `turns` field gets touched).
-        let guard = TurnGuard { turns: &mut self.turns, boundary };
+        let guard = TurnGuard {
+            turns: &mut self.turns,
+            boundary,
+        };
 
         // Budget trim — exactly once, before any model call. Walk the
         // (immutable) trim helper using `guard.turns`, which is the
@@ -530,10 +560,7 @@ impl Session {
         // leaves the caller-visible history identical to before.
         self.history_version = self.history_version.saturating_add(1);
 
-        let acc = telemetry
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        let acc = telemetry.lock().map(|g| g.clone()).unwrap_or_default();
         Ok((final_response, acc))
     }
 
@@ -580,7 +607,11 @@ fn trim_to_budget(
     limit: usize,
 ) -> Option<TrimWarning> {
     fn total_cost(turns: &[Turn], budget: &Budget) -> usize {
-        turns.iter().flat_map(|t| t.messages.iter()).map(|m| budget.cost_of(m)).sum()
+        turns
+            .iter()
+            .flat_map(|t| t.messages.iter())
+            .map(|m| budget.cost_of(m))
+            .sum()
     }
 
     while total_cost(turns, budget) > limit && turns.len() > 1 {
@@ -591,7 +622,9 @@ fn trim_to_budget(
     }
     let total = total_cost(turns, budget);
     if total > limit {
-        Some(TrimWarning { over_by: total - limit })
+        Some(TrimWarning {
+            over_by: total - limit,
+        })
     } else {
         None
     }
@@ -751,7 +784,9 @@ async fn loop_until_text(
         turns
             .last_mut()
             .expect("turn was opened in send()")
-            .push(Message::User { content: result_blocks });
+            .push(Message::User {
+                content: result_blocks,
+            });
 
         // Loop again — assert turn count unchanged so far. If it did
         // change, somebody trimmed mid-loop (forbidden).
@@ -769,7 +804,10 @@ async fn loop_until_text(
 /// message in every turn flows through unchanged — providers see one
 /// contiguous chronological history.
 fn flatten_for_request(turns: &[Turn]) -> Vec<Message> {
-    turns.iter().flat_map(|t| t.messages.iter().cloned()).collect()
+    turns
+        .iter()
+        .flat_map(|t| t.messages.iter().cloned())
+        .collect()
 }
 
 /// Reconstruct an `Assistant` message from a `ChatResponse`. Text +

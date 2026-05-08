@@ -27,7 +27,7 @@ use clap::Args;
 use futures::StreamExt;
 use tars_cache::{CacheKeyFactory, CachePolicy};
 use tars_pipeline::{
-    set_cache_policy, CacheLookupMiddleware, Pipeline, RetryMiddleware, TelemetryMiddleware,
+    CacheLookupMiddleware, Pipeline, RetryMiddleware, TelemetryMiddleware, set_cache_policy,
 };
 use tars_runtime::{AgentEvent, LocalRuntime, Runtime, StepIdempotencyKey};
 use tars_types::{
@@ -35,7 +35,7 @@ use tars_types::{
 };
 
 use crate::dispatch::{
-    build_cache, build_dispatch, build_registry_with_breaker, Dispatch, DispatchArgs,
+    Dispatch, DispatchArgs, build_cache, build_dispatch, build_registry_with_breaker,
 };
 use crate::{config_loader, event_store};
 
@@ -178,16 +178,12 @@ impl TrajectoryLogger {
                 },
             )
             .await
-            .map_err(|e| {
-                tracing::warn!(error = %e, "trajectory: failed to record TrajectoryAbandoned")
-            });
+            .map_err(
+                |e| tracing::warn!(error = %e, "trajectory: failed to record TrajectoryAbandoned"),
+            );
     }
 
-    async fn record_outcome(
-        &self,
-        outcome: &Result<StreamOutcome>,
-        dispatch: &Dispatch,
-    ) {
+    async fn record_outcome(&self, outcome: &Result<StreamOutcome>, dispatch: &Dispatch) {
         match outcome {
             Ok(o) => {
                 let _ = self
@@ -286,11 +282,7 @@ fn response_summary(o: &StreamOutcome) -> String {
     // Doc 04 says payloads are "small (<4KB), large goes to ContentStore".
     // For now we keep a 200-char head to stay well under the cap;
     // ContentStore (D-1 / future B-7 follow-up) replaces this.
-    let head: String = o
-        .response_text
-        .chars()
-        .take(200)
-        .collect::<String>();
+    let head: String = o.response_text.chars().take(200).collect::<String>();
     if o.response_text.chars().count() > 200 {
         format!("{head}…")
     } else {
@@ -298,19 +290,14 @@ fn response_summary(o: &StreamOutcome) -> String {
     }
 }
 
-async fn build_trajectory_logger(
-    args: &RunArgs,
-    dispatch: &Dispatch,
-) -> Option<TrajectoryLogger> {
+async fn build_trajectory_logger(args: &RunArgs, dispatch: &Dispatch) -> Option<TrajectoryLogger> {
     if args.dispatch.no_trajectory {
         return None;
     }
     let store = match event_store::open(args.dispatch.events_path.as_deref()) {
         Ok(Some(s)) => s,
         Ok(None) => {
-            tracing::warn!(
-                "trajectory: no XDG data dir on this platform; skipping log",
-            );
+            tracing::warn!("trajectory: no XDG data dir on this platform; skipping log",);
             return None;
         }
         Err(e) => {

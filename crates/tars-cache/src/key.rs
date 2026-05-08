@@ -10,9 +10,7 @@ use std::fmt;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use tars_types::{
-    ChatRequest, ContentBlock, ImageData, Message, ModelHint, RequestContext,
-};
+use tars_types::{ChatRequest, ContentBlock, ImageData, Message, ModelHint, RequestContext};
 
 use crate::error::CacheError;
 
@@ -68,11 +66,7 @@ impl CacheKeyFactory {
     ///   — request shouldn't be cached (middleware skips lookup/write)
     /// - `Err(CacheError::Serialize)` — JSON serialisation failure
     ///   (tools, structured-output schema, tool-call args)
-    pub fn compute(
-        &self,
-        req: &ChatRequest,
-        ctx: &RequestContext,
-    ) -> Result<CacheKey, CacheError> {
+    pub fn compute(&self, req: &ChatRequest, ctx: &RequestContext) -> Result<CacheKey, CacheError> {
         // Reject early: stochastic outputs and unresolved routing aren't cacheable.
         match req.temperature {
             None => return Err(CacheError::NonDeterministic),
@@ -165,7 +159,10 @@ impl CacheKeyFactory {
             req.messages.len(),
             scopes.len(),
         );
-        Ok(CacheKey { fingerprint, debug_label })
+        Ok(CacheKey {
+            fingerprint,
+            debug_label,
+        })
     }
 }
 
@@ -195,9 +192,7 @@ fn read_iam_scopes(ctx: &RequestContext) -> Vec<String> {
         return Vec::new();
     };
     let Some(arr) = value.as_array() else {
-        tracing::warn!(
-            "cache: `{IAM_SCOPES_ATTR}` attribute is not a JSON array; ignoring"
-        );
+        tracing::warn!("cache: `{IAM_SCOPES_ATTR}` attribute is not a JSON array; ignoring");
         return Vec::new();
     };
     let mut scopes: Vec<String> = arr
@@ -222,7 +217,10 @@ fn hash_message(h: &mut Sha256, msg: &Message) -> Result<(), CacheError> {
                 hash_content_block(h, b);
             }
         }
-        Message::Assistant { content, tool_calls } => {
+        Message::Assistant {
+            content,
+            tool_calls,
+        } => {
             h.update(b"\0ASSISTANT\0");
             for b in content {
                 hash_content_block(h, b);
@@ -321,16 +319,24 @@ mod tests {
     #[test]
     fn identical_requests_produce_identical_keys() {
         let f = CacheKeyFactory::new(1);
-        let a = f.compute(&det_req("hi"), &ctx_with_scopes("t1", &["read"])).unwrap();
-        let b = f.compute(&det_req("hi"), &ctx_with_scopes("t1", &["read"])).unwrap();
+        let a = f
+            .compute(&det_req("hi"), &ctx_with_scopes("t1", &["read"]))
+            .unwrap();
+        let b = f
+            .compute(&det_req("hi"), &ctx_with_scopes("t1", &["read"]))
+            .unwrap();
         assert_eq!(a.fingerprint, b.fingerprint);
     }
 
     #[test]
     fn different_tenants_never_collide_even_with_same_prompt() {
         let f = CacheKeyFactory::new(1);
-        let a = f.compute(&det_req("hi"), &ctx_with_scopes("tenantA", &["read"])).unwrap();
-        let b = f.compute(&det_req("hi"), &ctx_with_scopes("tenantB", &["read"])).unwrap();
+        let a = f
+            .compute(&det_req("hi"), &ctx_with_scopes("tenantA", &["read"]))
+            .unwrap();
+        let b = f
+            .compute(&det_req("hi"), &ctx_with_scopes("tenantB", &["read"]))
+            .unwrap();
         assert_ne!(a.fingerprint, b.fingerprint, "tenant must be in the hash");
     }
 
@@ -340,8 +346,12 @@ mod tests {
         // different read-rights against overlapping data must not
         // share a cache slot.
         let f = CacheKeyFactory::new(1);
-        let a = f.compute(&det_req("hi"), &ctx_with_scopes("t1", &["scope:a"])).unwrap();
-        let b = f.compute(&det_req("hi"), &ctx_with_scopes("t1", &["scope:b"])).unwrap();
+        let a = f
+            .compute(&det_req("hi"), &ctx_with_scopes("t1", &["scope:a"]))
+            .unwrap();
+        let b = f
+            .compute(&det_req("hi"), &ctx_with_scopes("t1", &["scope:b"]))
+            .unwrap();
         assert_ne!(a.fingerprint, b.fingerprint);
     }
 
@@ -427,10 +437,12 @@ mod tests {
         let f = CacheKeyFactory::new(1);
         let ctx = ctx_with_scopes("t", &[]);
         let mut r1 = det_req("hi");
-        r1.structured_output = Some(tars_types::JsonSchema::strict("R", json!({"type":"object"})));
+        r1.structured_output = Some(tars_types::JsonSchema::strict(
+            "R",
+            json!({"type":"object"}),
+        ));
         let mut r2 = det_req("hi");
-        r2.structured_output =
-            Some(tars_types::JsonSchema::strict("R", json!({"type":"array"})));
+        r2.structured_output = Some(tars_types::JsonSchema::strict("R", json!({"type":"array"})));
         assert_ne!(
             f.compute(&r1, &ctx).unwrap().fingerprint,
             f.compute(&r2, &ctx).unwrap().fingerprint,
@@ -445,6 +457,9 @@ mod tests {
             .unwrap();
         let h = key.hex();
         assert_eq!(h.len(), 64);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 }

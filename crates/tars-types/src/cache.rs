@@ -89,7 +89,10 @@ impl std::fmt::Debug for ProviderCacheHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderCacheHandle")
             .field("provider", &self.provider)
-            .field("external_id", &format!("<redacted:{}>", self.external_id.len()))
+            .field(
+                "external_id",
+                &format!("<redacted:{}>", self.external_id.len()),
+            )
             .field("tenant_namespace", &self.tenant_namespace)
             .field("created_at", &self.created_at)
             .field("expires_at", &self.expires_at)
@@ -165,7 +168,9 @@ mod tests {
 
     #[test]
     fn directive_round_trips() {
-        let d = CacheDirective::MarkBoundary { ttl: Duration::from_secs(300) };
+        let d = CacheDirective::MarkBoundary {
+            ttl: Duration::from_secs(300),
+        };
         let v = serde_json::to_value(&d).unwrap();
         let back: CacheDirective = serde_json::from_value(v).unwrap();
         if let CacheDirective::MarkBoundary { ttl } = back {
@@ -199,7 +204,9 @@ mod tests {
             expires_at: now + Duration::from_secs(3600),
             size_estimate_bytes: Some(2048),
         };
-        let d = CacheDirective::UseExplicit { handle: handle.clone() };
+        let d = CacheDirective::UseExplicit {
+            handle: handle.clone(),
+        };
         let v = serde_json::to_value(&d).unwrap();
         // Portable epoch-millis on the wire — not a tagged secs/nanos struct.
         assert!(v["handle"]["created_at"].is_i64());
@@ -210,7 +217,10 @@ mod tests {
             assert_eq!(h.size_estimate_bytes, Some(2048));
             // Round-trip preserves the absolute time to ms precision;
             // we accept the truncation from sub-ms loss.
-            let original_ms = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            let original_ms = now
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
             let recovered_ms = h
                 .created_at
                 .duration_since(std::time::UNIX_EPOCH)

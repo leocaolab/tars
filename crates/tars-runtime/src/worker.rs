@@ -48,12 +48,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use tars_pipeline::LlmService;
 use tars_tools::{ToolContext, ToolRegistry};
 use tars_types::{
     AgentId, ChatRequest, ChatResponseBuilder, ContentBlock, Message, RequestContext,
 };
+use thiserror::Error;
 
 use crate::agent::{Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult};
 use crate::message::AgentMessage;
@@ -228,8 +228,7 @@ impl WorkerAgent {
         from_agent: &AgentId,
         step_id: Option<&str>,
     ) -> Result<AgentMessage, WorkerError> {
-        let raw: RawWorkerResult =
-            serde_json::from_str(json_text).map_err(WorkerError::Decode)?;
+        let raw: RawWorkerResult = serde_json::from_str(json_text).map_err(WorkerError::Decode)?;
         if raw.summary.trim().is_empty() {
             return Err(WorkerError::InvalidResult("summary is empty".into()));
         }
@@ -250,7 +249,9 @@ impl Agent for WorkerAgent {
     }
 
     fn role(&self) -> AgentRole {
-        AgentRole::Worker { domain: self.domain.clone() }
+        AgentRole::Worker {
+            domain: self.domain.clone(),
+        }
     }
 
     async fn execute(
@@ -302,7 +303,10 @@ impl WorkerAgent {
                 // Final answer — text only. Build the AgentStepResult
                 // and return.
                 let output = AgentOutput::from_response_parts(response.text, vec![]);
-                return Ok(AgentStepResult { output, usage: total_usage });
+                return Ok(AgentStepResult {
+                    output,
+                    usage: total_usage,
+                });
             }
 
             // Tool calls present. Build the next request: append the
@@ -378,7 +382,6 @@ async fn drain_one_call(
     }
     Ok(builder.finish())
 }
-
 
 // ── Wire format ────────────────────────────────────────────────────────
 
@@ -513,7 +516,10 @@ mod tests {
         let req = w.build_worker_request(&plan, &plan.steps[0], &[]);
         assert_eq!(req.temperature, Some(0.0));
         assert!(req.system.as_ref().unwrap().contains("Worker"));
-        let schema = req.structured_output.as_ref().expect("structured_output set");
+        let schema = req
+            .structured_output
+            .as_ref()
+            .expect("structured_output set");
         assert!(schema.strict);
         assert_eq!(schema.name.as_deref(), Some("WorkerResult"));
         let required: Vec<&str> = schema.schema["required"]
@@ -546,7 +552,12 @@ mod tests {
         let json = r#"{"summary":"Summarised the diff in two sentences.","confidence":0.85}"#;
         let msg = WorkerAgent::parse_worker_response(json, &id, Some("s1")).unwrap();
         match msg {
-            AgentMessage::PartialResult { from_agent, step_id, summary, confidence } => {
+            AgentMessage::PartialResult {
+                from_agent,
+                step_id,
+                summary,
+                confidence,
+            } => {
                 assert_eq!(from_agent.as_ref(), "worker:summarise");
                 assert_eq!(step_id.as_deref(), Some("s1"));
                 assert_eq!(summary, "Summarised the diff in two sentences.");
@@ -601,7 +612,9 @@ mod tests {
         let properties = schema["properties"].as_object().unwrap();
         for prop_name in properties.keys() {
             assert!(
-                required.iter().any(|r| r.as_str() == Some(prop_name.as_str())),
+                required
+                    .iter()
+                    .any(|r| r.as_str() == Some(prop_name.as_str())),
                 "property `{prop_name}` is in `properties` but not in `required` — \
                  OpenAI strict mode will reject this schema",
             );

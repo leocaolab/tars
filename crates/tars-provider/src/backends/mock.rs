@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use futures::stream;
 
 use tars_types::{
-    Capabilities, ChatRequest, ChatEvent, Pricing, ProviderError, ProviderId,
-    RequestContext, StopReason, Usage,
+    Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, RequestContext,
+    StopReason, Usage,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};

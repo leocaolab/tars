@@ -50,7 +50,7 @@ mod service;
 mod telemetry;
 mod validation;
 
-pub use cache::{set_cache_policy, CacheLookupMiddleware};
+pub use cache::{CacheLookupMiddleware, set_cache_policy};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use event_emitter::EventEmitterMiddleware;
 pub use middleware::{Middleware, Pipeline, PipelineBuilder};
@@ -59,11 +59,11 @@ pub use routing::{RoutingPolicy, RoutingService, StaticPolicy, TierPolicy};
 pub use service::{LlmService, ProviderService};
 pub use telemetry::TelemetryMiddleware;
 pub use validation::{
-    builtin::{JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, OnExceed, ResponseField},
     OutputValidator, ValidationMiddleware,
+    builtin::{JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, OnExceed, ResponseField},
 };
 
 // Re-export the few tars-types items that show up in middleware
 // signatures so callers don't need a separate `use tars_types::…`.
-pub use tars_types::{ChatEvent, ChatRequest, ProviderError, RequestContext};
 pub use tars_provider::LlmEventStream;
+pub use tars_types::{ChatEvent, ChatRequest, ProviderError, RequestContext};

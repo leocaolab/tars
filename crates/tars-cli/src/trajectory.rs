@@ -53,8 +53,9 @@ pub enum TrajectoryCommand {
 }
 
 pub async fn execute(args: TrajectoryArgs) -> Result<()> {
-    let store_arc = event_store_path::open(args.events_path.as_deref())?
-        .context("no event store available — pass --events-path or run on a platform with an XDG data dir")?;
+    let store_arc = event_store_path::open(args.events_path.as_deref())?.context(
+        "no event store available — pass --events-path or run on a platform with an XDG data dir",
+    )?;
     let store: Arc<dyn EventStore> = store_arc;
     let runtime = LocalRuntime::new(store);
 
@@ -62,9 +63,7 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
     let mut out = stdout.lock();
     match args.command {
         TrajectoryCommand::List => list(&runtime, &mut out).await,
-        TrajectoryCommand::Show { id } => {
-            show(&runtime, &TrajectoryId::new(id), &mut out).await
-        }
+        TrajectoryCommand::Show { id } => show(&runtime, &TrajectoryId::new(id), &mut out).await,
     }
 }
 
@@ -91,7 +90,10 @@ async fn list(runtime: &LocalRuntime, out: &mut dyn Write) -> Result<()> {
         match runtime.replay(id).await {
             Ok(events) => {
                 let count = events.len();
-                let status = if events.last().is_some_and(tars_runtime::AgentEvent::is_terminal) {
+                let status = if events
+                    .last()
+                    .is_some_and(tars_runtime::AgentEvent::is_terminal)
+                {
                     // Distinguish completed vs abandoned at the row level
                     // — the last event's discriminator carries it.
                     match events.last().unwrap() {
@@ -112,8 +114,7 @@ async fn list(runtime: &LocalRuntime, out: &mut dyn Write) -> Result<()> {
                     error = %e,
                     "trajectory list: replay failed; row marked <error>",
                 );
-                writeln!(out, "{:<34} {:>6}  <error>", id.as_str(), "?")
-                    .context("stdout write")?;
+                writeln!(out, "{:<34} {:>6}  <error>", id.as_str(), "?").context("stdout write")?;
             }
         }
     }
@@ -139,8 +140,8 @@ async fn show(runtime: &LocalRuntime, id: &TrajectoryId, out: &mut dyn Write) ->
         );
     }
     for (i, ev) in events.iter().enumerate() {
-        let json = serde_json::to_string(ev)
-            .with_context(|| format!("encode event #{i} for output"))?;
+        let json =
+            serde_json::to_string(ev).with_context(|| format!("encode event #{i} for output"))?;
         writeln!(out, "{json}").with_context(|| format!("stdout write for event #{i}"))?;
     }
     Ok(())
@@ -169,14 +170,20 @@ mod tests {
         let b = rt.create_trajectory(None, "to-complete").await.unwrap();
         rt.append(
             &b,
-            AgentEvent::TrajectoryCompleted { traj: b.clone(), summary: "ok".into() },
+            AgentEvent::TrajectoryCompleted {
+                traj: b.clone(),
+                summary: "ok".into(),
+            },
         )
         .await
         .unwrap();
         let c = rt.create_trajectory(None, "to-abandon").await.unwrap();
         rt.append(
             &c,
-            AgentEvent::TrajectoryAbandoned { traj: c.clone(), cause: "x".into() },
+            AgentEvent::TrajectoryAbandoned {
+                traj: c.clone(),
+                cause: "x".into(),
+            },
         )
         .await
         .unwrap();
@@ -186,9 +193,18 @@ mod tests {
         let rendered = String::from_utf8(out).unwrap();
 
         assert!(rendered.contains("STATUS"), "header missing: {rendered}");
-        assert!(rendered.contains(" active"), "active row missing: {rendered}");
-        assert!(rendered.contains(" completed"), "completed row missing: {rendered}");
-        assert!(rendered.contains(" abandoned"), "abandoned row missing: {rendered}");
+        assert!(
+            rendered.contains(" active"),
+            "active row missing: {rendered}"
+        );
+        assert!(
+            rendered.contains(" completed"),
+            "completed row missing: {rendered}"
+        );
+        assert!(
+            rendered.contains(" abandoned"),
+            "abandoned row missing: {rendered}"
+        );
     }
 
     #[tokio::test]

@@ -13,16 +13,7 @@ use std::fmt;
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(
-            Clone,
-            Eq,
-            PartialEq,
-            Hash,
-            Ord,
-            PartialOrd,
-            Serialize,
-            Deserialize,
-        )]
+        #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -38,11 +29,7 @@ macro_rules! string_id {
             /// the symptom three layers down.
             pub fn new(value: impl Into<String>) -> Self {
                 let v: String = value.into();
-                assert!(
-                    !v.is_empty(),
-                    "{} cannot be empty",
-                    stringify!($name),
-                );
+                assert!(!v.is_empty(), "{} cannot be empty", stringify!($name),);
                 Self(v)
             }
 
@@ -89,15 +76,30 @@ macro_rules! string_id {
     };
 }
 
-string_id!(TenantId, "Tenant identifier — the hard isolation boundary (Doc 06 §3).");
+string_id!(
+    TenantId,
+    "Tenant identifier — the hard isolation boundary (Doc 06 §3)."
+);
 string_id!(SessionId, "Session identifier (Doc 06 §3.3).");
-string_id!(TraceId, "Distributed trace identifier; propagated through all layers.");
+string_id!(
+    TraceId,
+    "Distributed trace identifier; propagated through all layers."
+);
 string_id!(TaskId, "Task identifier (Doc 04 submit handle).");
 string_id!(TrajectoryId, "Trajectory node identifier (Doc 04 §3.1).");
 string_id!(PrincipalId, "Principal (caller identity) identifier.");
-string_id!(ProviderId, "Provider instance identifier (e.g. `openai_main`, `local_qwen`).");
-string_id!(L3HandleId, "Internal handle for an L3 explicit cache (Doc 03 §7).");
-string_id!(AgentId, "Agent instance identifier (Doc 04 §4 — `orchestrator`, `worker:code_review`, etc.).");
+string_id!(
+    ProviderId,
+    "Provider instance identifier (e.g. `openai_main`, `local_qwen`)."
+);
+string_id!(
+    L3HandleId,
+    "Internal handle for an L3 explicit cache (Doc 03 §7)."
+);
+string_id!(
+    AgentId,
+    "Agent instance identifier (Doc 04 §4 — `orchestrator`, `worker:code_review`, etc.)."
+);
 
 #[cfg(test)]
 mod tests {

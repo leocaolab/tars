@@ -28,11 +28,19 @@ pub struct JsonSchema {
 
 impl JsonSchema {
     pub fn strict(name: impl Into<String>, schema: serde_json::Value) -> Self {
-        Self { schema, strict: true, name: Some(name.into()) }
+        Self {
+            schema,
+            strict: true,
+            name: Some(name.into()),
+        }
     }
 
     pub fn loose(schema: serde_json::Value) -> Self {
-        Self { schema, strict: false, name: None }
+        Self {
+            schema,
+            strict: false,
+            name: None,
+        }
     }
 }
 

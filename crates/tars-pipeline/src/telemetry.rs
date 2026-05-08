@@ -176,13 +176,13 @@ mod tests {
     use std::sync::Mutex;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
     use tars_types::{ModelHint, StopReason, Usage};
-    use tracing::field::{Field, Visit};
     use tracing::Subscriber;
-    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+    use tracing::field::{Field, Visit};
     use tracing_subscriber::Registry;
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
-    use crate::service::LlmService;
     use crate::Pipeline;
+    use crate::service::LlmService;
 
     /// Captured fields for one tracing event.
     type EventFields = BTreeMap<String, String>;
@@ -219,7 +219,8 @@ mod tests {
 
     impl Visit for FieldCollector {
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-            self.0.insert(field.name().to_string(), format!("{value:?}"));
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
         }
         fn record_str(&mut self, field: &Field, value: &str) {
             self.0.insert(field.name().to_string(), value.to_string());
@@ -245,7 +246,9 @@ mod tests {
         Fut: std::future::Future<Output = T>,
     {
         let captured = CapturedEvents::default();
-        let subscriber = Registry::default().with(CaptureLayer { sink: captured.clone() });
+        let subscriber = Registry::default().with(CaptureLayer {
+            sink: captured.clone(),
+        });
         let _guard = tracing::subscriber::set_default(subscriber);
         let out = f(captured.clone()).await;
         (out, captured)
@@ -417,7 +420,9 @@ mod tests {
         let scripted: Arc<dyn LlmService> = Arc::new(ScriptedService {
             events: Mutex::new(Some(vec![
                 Ok(ChatEvent::started("m-mid")),
-                Ok(ChatEvent::Delta { text: "partial".into() }),
+                Ok(ChatEvent::Delta {
+                    text: "partial".into(),
+                }),
                 Err(ProviderError::Internal("midstream-boom".into())),
             ])),
         });
@@ -514,6 +519,9 @@ mod tests {
             .find("llm.call.finished")
             .expect("missing llm.call.finished event");
         assert_eq!(finished.get("input_tokens").map(String::as_str), Some("7"));
-        assert_eq!(finished.get("output_tokens").map(String::as_str), Some("11"));
+        assert_eq!(
+            finished.get("output_tokens").map(String::as_str),
+            Some("11")
+        );
     }
 }

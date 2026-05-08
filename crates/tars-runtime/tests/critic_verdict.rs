@@ -193,7 +193,10 @@ async fn target_step_id_falls_through_from_partial_result() {
     };
     let result_ref = PartialResultRef::from_message(&standalone).unwrap();
 
-    let envelope = critic.critique(ctx(llm), &plan, &result_ref, "x").await.unwrap();
+    let envelope = critic
+        .critique(ctx(llm), &plan, &result_ref, "x")
+        .await
+        .unwrap();
     match envelope {
         AgentMessage::Verdict { target_step_id, .. } => {
             assert!(target_step_id.is_none());

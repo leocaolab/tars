@@ -56,7 +56,10 @@ struct ListDirArgs {
 impl ListDirTool {
     /// Construct without a jail. Use only in trusted contexts.
     pub fn new() -> Self {
-        Self { root: None, max_entries: DEFAULT_MAX_ENTRIES }
+        Self {
+            root: None,
+            max_entries: DEFAULT_MAX_ENTRIES,
+        }
     }
 
     /// Constrain listings to `root`. Mirrors
@@ -64,7 +67,10 @@ impl ListDirTool {
     /// can't be canonicalized.
     pub fn with_root(root: impl AsRef<Path>) -> Option<Self> {
         let canonical_root = std::fs::canonicalize(root.as_ref()).ok()?;
-        Some(Self { root: Some(canonical_root), max_entries: DEFAULT_MAX_ENTRIES })
+        Some(Self {
+            root: Some(canonical_root),
+            max_entries: DEFAULT_MAX_ENTRIES,
+        })
     }
 
     /// Override the entry-count cap (default 256). Chainable.
@@ -86,10 +92,7 @@ impl ListDirTool {
             return Ok(combined);
         };
         let canonical = std::fs::canonicalize(&combined).map_err(|e| {
-            ToolResult::error(format!(
-                "cannot resolve path `{}`: {e}",
-                combined.display(),
-            ))
+            ToolResult::error(format!("cannot resolve path `{}`: {e}", combined.display(),))
         })?;
         if !canonical.starts_with(root) {
             return Err(ToolResult::error(format!(
@@ -144,8 +147,8 @@ impl Tool for ListDirTool {
         args: serde_json::Value,
         ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let parsed: ListDirArgs = serde_json::from_value(args)
-            .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        let parsed: ListDirArgs =
+            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         let resolved = match self.resolve(&parsed.path, ctx.cwd.as_deref()) {
             Ok(p) => p,
@@ -227,7 +230,10 @@ impl EntryKind {
 }
 
 enum ListOutcome {
-    Ok { entries: Vec<Entry>, truncated: bool },
+    Ok {
+        entries: Vec<Entry>,
+        truncated: bool,
+    },
     NotFound,
     NotDirectory,
 }
@@ -259,8 +265,14 @@ async fn read_dir_capped(path: &Path, cap: usize) -> std::io::Result<ListOutcome
             Err(_) => continue,
         };
         let symlink_meta = fs::symlink_metadata(child.path()).await.ok();
-        let (kind, target) = if symlink_meta.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
-            let t = fs::read_link(child.path()).await.ok().map(|p| p.display().to_string());
+        let (kind, target) = if symlink_meta
+            .as_ref()
+            .is_some_and(|m| m.file_type().is_symlink())
+        {
+            let t = fs::read_link(child.path())
+                .await
+                .ok()
+                .map(|p| p.display().to_string());
             (EntryKind::Symlink, t)
         } else if child_meta.is_dir() {
             (EntryKind::Dir, None)
@@ -270,7 +282,12 @@ async fn read_dir_capped(path: &Path, cap: usize) -> std::io::Result<ListOutcome
             (EntryKind::Other, None)
         };
         let size = matches!(kind, EntryKind::File).then_some(child_meta.len());
-        entries.push(Entry { name, kind, size, target });
+        entries.push(Entry {
+            name,
+            kind,
+            size,
+            target,
+        });
     }
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(ListOutcome::Ok { entries, truncated })
@@ -341,7 +358,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join("zeta.txt"), b"hi").await;
         write(&dir.path().join("alpha.rs"), b"fn main() {}").await;
-        tokio::fs::create_dir(dir.path().join("subdir")).await.unwrap();
+        tokio::fs::create_dir(dir.path().join("subdir"))
+            .await
+            .unwrap();
 
         let tool: Arc<dyn Tool> = Arc::new(ListDirTool::new());
         let r = tool
@@ -358,7 +377,12 @@ mod tests {
         assert_eq!(lines[1], "d subdir");
         assert_eq!(lines[2], "f zeta.txt [2]");
         // L-3: trajectory-readable title with basename + count.
-        let basename = dir.path().file_name().unwrap().to_string_lossy().to_string();
+        let basename = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert_eq!(r.title, format!("Listed {basename}/ (3 entries)"));
     }
 
@@ -381,10 +405,7 @@ mod tests {
     async fn missing_path_yields_is_error_not_hard_error() {
         let tool: Arc<dyn Tool> = Arc::new(ListDirTool::new());
         let r = tool
-            .execute(
-                json!({"path": "/nonexistent/dir"}),
-                ToolContext::default(),
-            )
+            .execute(json!({"path": "/nonexistent/dir"}), ToolContext::default())
             .await
             .unwrap();
         assert!(r.is_error);
@@ -409,7 +430,8 @@ mod tests {
         assert!(r.content.contains("not a directory"));
         assert!(
             r.content.contains("fs.read_file"),
-            "should hint at the right tool: {}", r.content,
+            "should hint at the right tool: {}",
+            r.content,
         );
     }
 

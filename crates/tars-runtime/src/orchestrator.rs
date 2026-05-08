@@ -123,7 +123,10 @@ pub struct OrchestratorAgent {
 
 impl OrchestratorAgent {
     pub fn new(id: impl Into<AgentId>, model: impl Into<String>) -> Arc<Self> {
-        Arc::new(Self { id: id.into(), model: model.into() })
+        Arc::new(Self {
+            id: id.into(),
+            model: model.into(),
+        })
     }
 
     /// Typed convenience: build the planner [`ChatRequest`] for `goal`,
@@ -371,7 +374,10 @@ mod tests {
         assert_eq!(req.temperature, Some(0.0));
         assert!(req.system.is_some());
         assert!(req.system.as_ref().unwrap().contains("planner"));
-        let schema = req.structured_output.as_ref().expect("structured_output set");
+        let schema = req
+            .structured_output
+            .as_ref()
+            .expect("structured_output set");
         assert!(schema.strict);
         assert_eq!(schema.name.as_deref(), Some("Plan"));
         // Schema describes a Plan-shaped object.

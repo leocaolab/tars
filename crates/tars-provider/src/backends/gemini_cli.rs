@@ -46,7 +46,7 @@ use serde_json::Value;
 use tokio::process::Command;
 
 use tars_types::{
-    Capabilities, ChatRequest, ChatEvent, ContentBlock, Message, Modality, PromptCacheKind,
+    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message, Modality, PromptCacheKind,
     ProviderError, ProviderId, RequestContext, StopReason, StructuredOutputMode, Usage,
 };
 
@@ -104,10 +104,7 @@ impl GeminiCliProviderBuilder {
         self.build_with_runner(Arc::new(RealSubprocessRunner))
     }
 
-    pub fn build_with_runner(
-        self,
-        runner: Arc<dyn SubprocessRunner>,
-    ) -> Arc<GeminiCliProvider> {
+    pub fn build_with_runner(self, runner: Arc<dyn SubprocessRunner>) -> Arc<GeminiCliProvider> {
         let caps = self.capabilities.unwrap_or_else(default_capabilities);
         Arc::new(GeminiCliProvider {
             id: self.id,
@@ -186,7 +183,10 @@ impl LlmProvider for GeminiCliProvider {
             model: model.clone(),
             prompt,
             timeout: self.timeout,
-            stripped_env: STRIPPED_ENV_KEYS_UPPER.iter().map(|s| s.to_string()).collect(),
+            stripped_env: STRIPPED_ENV_KEYS_UPPER
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         };
 
         let payload = self.runner.run(invocation).await?;
@@ -288,7 +288,11 @@ impl SubprocessRunner for RealSubprocessRunner {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let truncated = if stderr.len() > 500 { stderr[..500].to_string() } else { stderr };
+            let truncated = if stderr.len() > 500 {
+                stderr[..500].to_string()
+            } else {
+                stderr
+            };
             return Err(ProviderError::CliSubprocessDied {
                 exit_code: output.status.code(),
                 stderr: truncated,
@@ -372,7 +376,10 @@ fn extract_usage(payload: &Value, model: &str) -> Usage {
     };
     Usage {
         input_tokens: tokens.get("prompt").and_then(|v| v.as_u64()).unwrap_or(0),
-        output_tokens: tokens.get("candidates").and_then(|v| v.as_u64()).unwrap_or(0),
+        output_tokens: tokens
+            .get("candidates")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         cached_input_tokens: tokens.get("cached").and_then(|v| v.as_u64()).unwrap_or(0),
         cache_creation_tokens: 0,
         thinking_tokens: tokens.get("thoughts").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -417,8 +424,7 @@ mod tests {
             payload,
             recorded: std::sync::Mutex::new(None),
         });
-        let p = GeminiCliProviderBuilder::new("gemini_cli_test")
-            .build_with_runner(runner.clone());
+        let p = GeminiCliProviderBuilder::new("gemini_cli_test").build_with_runner(runner.clone());
         (p, runner)
     }
 

@@ -81,7 +81,10 @@ mod tests {
     #[test]
     fn model_hint_label_is_diagnostic() {
         assert_eq!(ModelHint::Explicit("gpt-4o".into()).label(), "gpt-4o");
-        assert_eq!(ModelHint::Tier(ModelTier::Reasoning).label(), "tier:reasoning");
+        assert_eq!(
+            ModelHint::Tier(ModelTier::Reasoning).label(),
+            "tier:reasoning"
+        );
         assert_eq!(
             ModelHint::Ensemble(vec![ModelHint::Tier(ModelTier::Fast); 3]).label(),
             "ensemble:3"
@@ -91,9 +94,6 @@ mod tests {
     #[test]
     fn explicit_returns_none_for_non_explicit() {
         assert!(ModelHint::Tier(ModelTier::Fast).explicit().is_none());
-        assert_eq!(
-            ModelHint::Explicit("x".into()).explicit(),
-            Some("x")
-        );
+        assert_eq!(ModelHint::Explicit("x".into()).explicit(), Some("x"));
     }
 }

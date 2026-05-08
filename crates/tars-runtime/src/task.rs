@@ -53,7 +53,7 @@ use crate::critic::{CriticAgent, CriticError};
 use crate::event::AgentEvent;
 use crate::message::{AgentMessage, VerdictKind};
 use crate::orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep};
-use crate::runtime::{execute_agent_step, AgentExecutionError, Runtime};
+use crate::runtime::{AgentExecutionError, Runtime, execute_agent_step};
 use crate::worker::{WorkerAgent, WorkerError};
 
 /// Tunable knobs. Defaults are conservative — bump for harder tasks.
@@ -67,7 +67,9 @@ pub struct RunTaskConfig {
 
 impl Default for RunTaskConfig {
     fn default() -> Self {
-        Self { max_refinements_per_step: 2 }
+        Self {
+            max_refinements_per_step: 2,
+        }
     }
 }
 
@@ -101,21 +103,47 @@ pub struct TaskOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum RunTaskError {
     #[error("orchestrator: {source}")]
-    Orchestrator { trajectory_id: TrajectoryId, #[source] source: OrchestratorError },
+    Orchestrator {
+        trajectory_id: TrajectoryId,
+        #[source]
+        source: OrchestratorError,
+    },
     #[error("worker (step `{step_id}`): {source}")]
-    Worker { trajectory_id: TrajectoryId, step_id: String, #[source] source: WorkerError },
+    Worker {
+        trajectory_id: TrajectoryId,
+        step_id: String,
+        #[source]
+        source: WorkerError,
+    },
     #[error("critic (step `{step_id}`): {source}")]
-    Critic { trajectory_id: TrajectoryId, step_id: String, #[source] source: CriticError },
+    Critic {
+        trajectory_id: TrajectoryId,
+        step_id: String,
+        #[source]
+        source: CriticError,
+    },
     /// Critic returned `Reject{reason}` for a step. We treat reject as
     /// terminal for the task (replan is future work).
     #[error("rejected (step `{step_id}`): {reason}")]
-    Rejected { trajectory_id: TrajectoryId, step_id: String, reason: String },
+    Rejected {
+        trajectory_id: TrajectoryId,
+        step_id: String,
+        reason: String,
+    },
     /// Critic kept asking for Refine and we hit the per-step retry cap.
     #[error("refine exhausted (step `{step_id}`) after {attempts} attempts")]
-    RefineExhausted { trajectory_id: TrajectoryId, step_id: String, attempts: u32 },
+    RefineExhausted {
+        trajectory_id: TrajectoryId,
+        step_id: String,
+        attempts: u32,
+    },
     /// Trajectory event-store write failed somewhere in the loop.
     #[error("runtime: {source}")]
-    Runtime { trajectory_id: TrajectoryId, #[source] source: crate::RuntimeError },
+    Runtime {
+        trajectory_id: TrajectoryId,
+        #[source]
+        source: crate::RuntimeError,
+    },
     /// Underlying agent step failed (LLM provider error, cancellation,
     /// internal). Wraps [`AgentExecutionError`] from
     /// [`execute_agent_step`].
@@ -179,7 +207,15 @@ pub async fn run_task(
     config: RunTaskConfig,
     cancel: CancellationToken,
 ) -> Result<TaskOutcome, RunTaskError> {
-    let ctx = LoopCtx { runtime, llm, orchestrator, worker, critic, config, cancel };
+    let ctx = LoopCtx {
+        runtime,
+        llm,
+        orchestrator,
+        worker,
+        critic,
+        config,
+        cancel,
+    };
     let traj = ctx
         .runtime
         .create_trajectory(None, &format!("run_task: {goal}"))
@@ -212,29 +248,32 @@ pub async fn run_task(
     }
 
     // ── 3. Close ───────────────────────────────────────────────────────
-    let summary = format!(
-        "completed {} step(s) for goal: {goal}",
-        step_outcomes.len(),
-    );
+    let summary = format!("completed {} step(s) for goal: {goal}", step_outcomes.len(),);
     ctx.runtime
         .append(
             &traj,
-            AgentEvent::TrajectoryCompleted { traj: traj.clone(), summary },
+            AgentEvent::TrajectoryCompleted {
+                traj: traj.clone(),
+                summary,
+            },
         )
         .await
-        .map_err(|e| RunTaskError::Runtime { trajectory_id: traj.clone(), source: e })?;
+        .map_err(|e| RunTaskError::Runtime {
+            trajectory_id: traj.clone(),
+            source: e,
+        })?;
 
-    Ok(TaskOutcome { trajectory_id: traj, plan, steps: step_outcomes })
+    Ok(TaskOutcome {
+        trajectory_id: traj,
+        plan,
+        steps: step_outcomes,
+    })
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────
 
 /// Run the Orchestrator: one trajectory step, parse JSON → typed Plan.
-async fn plan_step(
-    ctx: &LoopCtx,
-    traj: &TrajectoryId,
-    goal: &str,
-) -> Result<Plan, RunTaskError> {
+async fn plan_step(ctx: &LoopCtx, traj: &TrajectoryId, goal: &str) -> Result<Plan, RunTaskError> {
     let req = ctx.orchestrator.build_planner_request(goal);
     let agent: Arc<dyn Agent> = ctx.orchestrator.clone();
     let result = execute_agent_step(
@@ -264,7 +303,10 @@ async fn plan_step(
         }
     };
     OrchestratorAgent::parse_plan_response(&json_text).map_err(|source| {
-        RunTaskError::Orchestrator { trajectory_id: traj.clone(), source }
+        RunTaskError::Orchestrator {
+            trajectory_id: traj.clone(),
+            source,
+        }
     })
 }
 
@@ -370,12 +412,13 @@ async fn run_worker(
             });
         }
     };
-    WorkerAgent::parse_worker_response(&json_text, ctx.worker.id(), Some(step.id.as_str()))
-        .map_err(|source| RunTaskError::Worker {
+    WorkerAgent::parse_worker_response(&json_text, ctx.worker.id(), Some(step.id.as_str())).map_err(
+        |source| RunTaskError::Worker {
             trajectory_id: traj.clone(),
             step_id: step.id.clone(),
             source,
-        })
+        },
+    )
 }
 
 /// Run one Critic call, log it as a trajectory step, parse the typed

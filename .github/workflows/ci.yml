@@ -76,14 +76,15 @@ jobs:
       - name: pip install built wheel
         run: pip install --force-reinstall target/wheels/tars-*.whl
 
-      # Run the subset of pytest that doesn't require a local LLM
-      # provider — the validator + event-store integration tests
-      # under `python/tests` mostly need `qwen_coder_local` running on
-      # 127.0.0.1:1234, which CI doesn't provide. The class-export +
-      # construction-error tests are pure-API and run cleanly.
-      - name: pytest (provider-free subset)
+      # Run the subset of pytest that's pure class-construction —
+      # doesn't need `~/.tars/config.toml` and doesn't make a model
+      # call. The remaining 18 tests in `python/tests/` need either a
+      # config file or a local LLM provider on :1234, both of which CI
+      # doesn't supply. Those still run locally via the wheel install
+      # documented in CONTRIBUTING.md.
+      - name: pytest (pure class-construction subset)
         run: |
           pytest crates/tars-py/python/tests \
             -q \
-            -k 'outcome_classes or pass_construct or reject_fields or filter_text or annotate_metrics or annotate_default or no_retriable_kwarg or must_be_tuple or tuple_must_be_pair' \
+            -k 'outcome_classes_exposed or pass_construct or reject_fields or reject_no_retriable_kwarg or filter_text_fields or filter_text_default_dropped or annotate_metrics_dict or annotate_default_metrics_empty' \
             --no-header

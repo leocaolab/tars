@@ -49,9 +49,7 @@ impl TelemetryFormat {
             "pretty" | "" => Self::Pretty,
             other => {
                 // No `tracing` available yet (we ARE init); use stderr.
-                eprintln!(
-                    "tars-melt: unknown TARS_LOG_FORMAT={other:?} — defaulting to pretty",
-                );
+                eprintln!("tars-melt: unknown TARS_LOG_FORMAT={other:?} — defaulting to pretty",);
                 Self::Pretty
             }
         }
@@ -152,11 +150,9 @@ pub fn init(config: TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
     // shouldn't kill the process).
     let filter = match EnvFilter::try_from_default_env() {
         Ok(f) => f,
-        Err(_) => EnvFilter::try_new(&config.level).map_err(|e| {
-            TelemetryError::InvalidFilter {
-                directive: config.level.clone(),
-                reason: e.to_string(),
-            }
+        Err(_) => EnvFilter::try_new(&config.level).map_err(|e| TelemetryError::InvalidFilter {
+            directive: config.level.clone(),
+            reason: e.to_string(),
         })?,
     };
 
@@ -261,17 +257,33 @@ mod tests {
         ] {
             let cfg = TelemetryConfig::from_verbosity(verbose);
             assert_eq!(cfg.level, expected, "verbosity={verbose}");
-            EnvFilter::try_new(&cfg.level)
-                .unwrap_or_else(|e| panic!("verbosity={verbose} produced unparsable filter {:?}: {e}", cfg.level));
+            EnvFilter::try_new(&cfg.level).unwrap_or_else(|e| {
+                panic!(
+                    "verbosity={verbose} produced unparsable filter {:?}: {e}",
+                    cfg.level
+                )
+            });
         }
     }
 
     #[test]
     fn from_env_string_parses_known_formats() {
-        assert_eq!(TelemetryFormat::from_env_string("json"), TelemetryFormat::Json);
-        assert_eq!(TelemetryFormat::from_env_string("JSON"), TelemetryFormat::Json);
-        assert_eq!(TelemetryFormat::from_env_string("pretty"), TelemetryFormat::Pretty);
-        assert_eq!(TelemetryFormat::from_env_string(""), TelemetryFormat::Pretty);
+        assert_eq!(
+            TelemetryFormat::from_env_string("json"),
+            TelemetryFormat::Json
+        );
+        assert_eq!(
+            TelemetryFormat::from_env_string("JSON"),
+            TelemetryFormat::Json
+        );
+        assert_eq!(
+            TelemetryFormat::from_env_string("pretty"),
+            TelemetryFormat::Pretty
+        );
+        assert_eq!(
+            TelemetryFormat::from_env_string(""),
+            TelemetryFormat::Pretty
+        );
         // Unknown falls back to Pretty (best-effort, no panic).
         assert_eq!(
             TelemetryFormat::from_env_string("logfmt"),
@@ -297,7 +309,10 @@ mod tests {
         // refactor breaks `init_or_warn` so it always returns `None`,
         // the first assertion catches it.
         let g1 = init_or_warn(TelemetryConfig::from_verbosity(0));
-        assert!(g1.is_some(), "first install should succeed on a fresh global");
+        assert!(
+            g1.is_some(),
+            "first install should succeed on a fresh global"
+        );
         let g2 = init_or_warn(TelemetryConfig::from_verbosity(0));
         assert!(g2.is_none(), "second install should be skipped");
     }

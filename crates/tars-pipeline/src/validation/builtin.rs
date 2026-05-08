@@ -29,7 +29,9 @@ pub struct JsonShapeValidator {
 
 impl Default for JsonShapeValidator {
     fn default() -> Self {
-        Self { name: "json_shape".into() }
+        Self {
+            name: "json_shape".into(),
+        }
     }
 }
 
@@ -89,7 +91,10 @@ pub enum ResponseField {
 
 impl Default for NotEmptyValidator {
     fn default() -> Self {
-        Self { name: "not_empty".into(), field: ResponseField::Text }
+        Self {
+            name: "not_empty".into(),
+            field: ResponseField::Text,
+        }
     }
 }
 
@@ -99,7 +104,10 @@ impl NotEmptyValidator {
     }
 
     pub fn for_field(field: ResponseField) -> Self {
-        Self { field, ..Self::default() }
+        Self {
+            field,
+            ..Self::default()
+        }
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {

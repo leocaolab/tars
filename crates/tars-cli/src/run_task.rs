@@ -35,21 +35,19 @@ use tars_pipeline::{
     CacheLookupMiddleware, LlmService, Pipeline, RetryMiddleware, TelemetryMiddleware,
 };
 use tars_runtime::{
-    run_task, AgentMessage, CriticAgent, LocalRuntime, OrchestratorAgent, Runtime, RunTaskConfig,
-    RunTaskError, TaskOutcome, VerdictKind, WorkerAgent,
+    AgentMessage, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, RunTaskError,
+    Runtime, TaskOutcome, VerdictKind, WorkerAgent, run_task,
 };
 use tars_storage::{EventStore, SqliteEventStore};
 use tars_tools::{
-    builtins::{ListDirTool, ReadFileTool},
     ToolRegistry,
+    builtins::{ListDirTool, ReadFileTool},
 };
 use tars_types::AgentId;
 use tokio_util::sync::CancellationToken;
 
 use crate::config_loader;
-use crate::dispatch::{
-    build_cache, build_dispatch, build_registry_with_breaker, DispatchArgs,
-};
+use crate::dispatch::{DispatchArgs, build_cache, build_dispatch, build_registry_with_breaker};
 use crate::event_store;
 
 #[derive(Args, Debug)]
@@ -137,7 +135,9 @@ pub async fn execute(args: RunTaskArgs, config_path: Option<PathBuf>) -> Result<
     let worker = build_worker(&args, model.clone())?;
     let critic = CriticAgent::new(AgentId::new("critic"), model);
 
-    let config = RunTaskConfig { max_refinements_per_step: args.max_refinements };
+    let config = RunTaskConfig {
+        max_refinements_per_step: args.max_refinements,
+    };
     let cancel = CancellationToken::new();
 
     let outcome = run_task(
@@ -230,7 +230,8 @@ async fn build_runtime(args: &RunTaskArgs) -> Result<Arc<dyn Runtime>> {
         let rt = LocalRuntime::new(store);
         return Ok(rt as Arc<dyn Runtime>);
     }
-    let store: Arc<dyn EventStore> = match event_store::open(args.dispatch.events_path.as_deref())? {
+    let store: Arc<dyn EventStore> = match event_store::open(args.dispatch.events_path.as_deref())?
+    {
         Some(s) => s,
         None => {
             // Fall back to in-memory rather than refusing to run — same
@@ -239,8 +240,7 @@ async fn build_runtime(args: &RunTaskArgs) -> Result<Arc<dyn Runtime>> {
             tracing::warn!(
                 "trajectory: no XDG data dir on this platform; using in-memory event store",
             );
-            SqliteEventStore::in_memory()
-                .context("opening in-memory event store fallback")?
+            SqliteEventStore::in_memory().context("opening in-memory event store fallback")?
         }
     };
     let rt = LocalRuntime::new(store);
@@ -261,7 +261,12 @@ fn print_outcome_human(o: &TaskOutcome) {
             step.step_id,
             step.refinement_attempts,
         );
-        if let AgentMessage::PartialResult { summary, confidence, .. } = &step.result {
+        if let AgentMessage::PartialResult {
+            summary,
+            confidence,
+            ..
+        } = &step.result
+        {
             println!("    summary    : {summary}");
             println!("    confidence : {confidence:.2}");
         }

@@ -76,11 +76,7 @@ pub trait AuthResolver: Send + Sync {
     /// Resolve `auth` in the context of `ctx`. The context carries
     /// tenant/principal so production resolvers can do per-tenant
     /// secret namespacing (Doc 06 §5.3).
-    async fn resolve(
-        &self,
-        auth: &Auth,
-        ctx: &RequestContext,
-    ) -> Result<ResolvedAuth, AuthError>;
+    async fn resolve(&self, auth: &Auth, ctx: &RequestContext) -> Result<ResolvedAuth, AuthError>;
 }
 
 /// Handles `Auth::None`, `Auth::Delegate`, and the basic [`SecretRef`]
@@ -92,11 +88,7 @@ pub struct BasicAuthResolver;
 
 #[async_trait]
 impl AuthResolver for BasicAuthResolver {
-    async fn resolve(
-        &self,
-        auth: &Auth,
-        _ctx: &RequestContext,
-    ) -> Result<ResolvedAuth, AuthError> {
+    async fn resolve(&self, auth: &Auth, _ctx: &RequestContext) -> Result<ResolvedAuth, AuthError> {
         match auth {
             Auth::None | Auth::Delegate => Ok(ResolvedAuth::None),
             Auth::Secret { secret } => match secret {
@@ -125,9 +117,7 @@ impl AuthResolver for BasicAuthResolver {
                     let raw = value.expose();
                     let trimmed = raw.trim();
                     if trimmed.is_empty() {
-                        return Err(AuthError::Missing(
-                            "inline credential is empty".into(),
-                        ));
+                        return Err(AuthError::Missing("inline credential is empty".into()));
                     }
                     Ok(ResolvedAuth::ApiKey(trimmed.to_string()))
                 }
@@ -158,9 +148,9 @@ impl AuthResolver for BasicAuthResolver {
                     Err(std::env::VarError::NotPresent) => {
                         Err(AuthError::Missing(format!("env var `{var}` is not set")))
                     }
-                    Err(std::env::VarError::NotUnicode(_)) => Err(AuthError::Internal(
-                        format!("env var `{var}` contains non-UTF-8 bytes"),
-                    )),
+                    Err(std::env::VarError::NotUnicode(_)) => Err(AuthError::Internal(format!(
+                        "env var `{var}` contains non-UTF-8 bytes"
+                    ))),
                 },
                 SecretRef::File { path } => {
                     // Cap the read size: a misconfigured path pointing
@@ -168,14 +158,15 @@ impl AuthResolver for BasicAuthResolver {
                     // process. Read up to MAX+1 bytes; if we hit the
                     // limit, reject the file.
                     use tokio::io::AsyncReadExt;
-                    let mut file = tokio::fs::File::open(path).await.map_err(|e| {
-                        AuthError::Io(format!("opening {}: {e}", path.display()))
-                    })?;
+                    let mut file = tokio::fs::File::open(path)
+                        .await
+                        .map_err(|e| AuthError::Io(format!("opening {}: {e}", path.display())))?;
                     let mut buf = Vec::with_capacity(256);
                     let mut limited = (&mut file).take((MAX_CREDENTIAL_BYTES as u64) + 1);
-                    limited.read_to_end(&mut buf).await.map_err(|e| {
-                        AuthError::Io(format!("reading {}: {e}", path.display()))
-                    })?;
+                    limited
+                        .read_to_end(&mut buf)
+                        .await
+                        .map_err(|e| AuthError::Io(format!("reading {}: {e}", path.display())))?;
                     if buf.len() > MAX_CREDENTIAL_BYTES {
                         return Err(AuthError::Internal(format!(
                             "credential file `{}` exceeds size cap ({MAX_CREDENTIAL_BYTES} bytes)",
@@ -294,11 +285,7 @@ mod tests {
         // Audit `tars-provider-src-auth-7`: a file like "  secret  \n"
         // must not leak whitespace into the API key.
         let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "tars-auth-ws-test-{}-{}",
-            std::process::id(),
-            "ws"
-        ));
+        let path = dir.join(format!("tars-auth-ws-test-{}-{}", std::process::id(), "ws"));
         std::fs::write(&path, "  secret-key  \n").unwrap();
         let r = BasicAuthResolver;
         let v = r

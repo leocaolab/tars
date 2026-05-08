@@ -228,7 +228,9 @@ mod tests {
 
     #[test]
     fn call_result_serialises_with_kind_field() {
-        let r = CallResult::Error { kind: "rate_limited".into() };
+        let r = CallResult::Error {
+            kind: "rate_limited".into(),
+        };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["result"], "error");
         assert_eq!(v["kind"], "rate_limited");

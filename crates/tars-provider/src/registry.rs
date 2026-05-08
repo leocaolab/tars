@@ -24,10 +24,10 @@ use crate::backends::claude_cli::ClaudeCliProviderBuilder;
 use crate::backends::codex_cli::{CodexCliProviderBuilder, SandboxMode};
 use crate::backends::gemini::GeminiProviderBuilder;
 use crate::backends::gemini_cli::GeminiCliProviderBuilder;
-use crate::backends::mock::{CannedResponse, MockProvider};
-use crate::backends::openai::OpenAiProviderBuilder;
 use crate::backends::llamacpp::llamacpp;
 use crate::backends::mlx::mlx;
+use crate::backends::mock::{CannedResponse, MockProvider};
+use crate::backends::openai::OpenAiProviderBuilder;
 use crate::backends::vllm::vllm;
 use crate::http_base::HttpProviderBase;
 use crate::provider::LlmProvider;
@@ -52,7 +52,9 @@ pub struct ProviderRegistry {
 impl ProviderRegistry {
     /// Empty registry — useful in tests that build providers manually.
     pub fn empty() -> Self {
-        Self { providers: Arc::new(HashMap::new()) }
+        Self {
+            providers: Arc::new(HashMap::new()),
+        }
     }
 
     /// Build all providers declared in `cfg`. The shared HTTP base + auth
@@ -64,13 +66,14 @@ impl ProviderRegistry {
     ) -> Result<Self, RegistryError> {
         let mut map: HashMap<ProviderId, Arc<dyn LlmProvider>> = HashMap::new();
         for (id, entry) in cfg.iter() {
-            let provider =
-                build_one(id.clone(), entry, http.clone(), auth_resolver.clone())?;
+            let provider = build_one(id.clone(), entry, http.clone(), auth_resolver.clone())?;
             if map.insert(id.clone(), provider).is_some() {
                 return Err(RegistryError::Duplicate(id.clone()));
             }
         }
-        Ok(Self { providers: Arc::new(map) })
+        Ok(Self {
+            providers: Arc::new(map),
+        })
     }
 
     /// Build from a pre-existing map of (id, provider). Useful when a
@@ -80,7 +83,9 @@ impl ProviderRegistry {
     /// `from_config` (relies on the input being a `HashMap` to
     /// pre-deduplicate).
     pub fn from_map(map: HashMap<ProviderId, Arc<dyn LlmProvider>>) -> Self {
-        Self { providers: Arc::new(map) }
+        Self {
+            providers: Arc::new(map),
+        }
     }
 
     /// Map every provider through `f` and return a new registry. The
@@ -136,8 +141,7 @@ fn build_one(
             default_model: _,
             extras,
         } => {
-            let mut builder =
-                OpenAiProviderBuilder::new(id, auth.clone()).extras(extras.clone());
+            let mut builder = OpenAiProviderBuilder::new(id, auth.clone()).extras(extras.clone());
             if let Some(url) = base_url {
                 builder = builder.base_url(url.clone());
             }
@@ -186,8 +190,7 @@ fn build_one(
             default_model: _,
             extras,
         } => {
-            let mut builder =
-                GeminiProviderBuilder::new(id, auth.clone()).extras(extras.clone());
+            let mut builder = GeminiProviderBuilder::new(id, auth.clone()).extras(extras.clone());
             if let Some(url) = base_url {
                 builder = builder.base_url(url.clone());
             }
@@ -242,19 +245,23 @@ fn build_one(
             auth_resolver,
         ),
 
-        ProviderConfig::ClaudeCli { executable, timeout_secs, default_model: _ } => {
-            ClaudeCliProviderBuilder::new(id)
-                .executable(executable.clone())
-                .timeout(Duration::from_secs(*timeout_secs))
-                .build()
-        }
+        ProviderConfig::ClaudeCli {
+            executable,
+            timeout_secs,
+            default_model: _,
+        } => ClaudeCliProviderBuilder::new(id)
+            .executable(executable.clone())
+            .timeout(Duration::from_secs(*timeout_secs))
+            .build(),
 
-        ProviderConfig::GeminiCli { executable, timeout_secs, default_model: _ } => {
-            GeminiCliProviderBuilder::new(id)
-                .executable(executable.clone())
-                .timeout(Duration::from_secs(*timeout_secs))
-                .build()
-        }
+        ProviderConfig::GeminiCli {
+            executable,
+            timeout_secs,
+            default_model: _,
+        } => GeminiCliProviderBuilder::new(id)
+            .executable(executable.clone())
+            .timeout(Duration::from_secs(*timeout_secs))
+            .build(),
 
         ProviderConfig::CodexCli {
             executable,

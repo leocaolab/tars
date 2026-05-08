@@ -177,8 +177,7 @@ where
         .explicit()
         .ok_or_else(|| {
             ProviderError::InvalidRequest(
-                "ChatRequest.model must be ModelHint::Explicit before reaching the Provider"
-                    .into(),
+                "ChatRequest.model must be ModelHint::Explicit before reaching the Provider".into(),
             )
         })?
         .to_string();
@@ -333,7 +332,11 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duratio
     {
         return Some(Duration::from_millis(ms));
     }
-    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
     if let Ok(secs) = raw.parse::<u64>() {
         return Some(Duration::from_secs(secs));
     }
@@ -438,7 +441,10 @@ mod tests {
             "body should be capped at {ERROR_BODY_CAP_BYTES} bytes, got {}",
             body.len(),
         );
-        assert!(body.starts_with('X'), "should contain the start of the body");
+        assert!(
+            body.starts_with('X'),
+            "should contain the start of the body"
+        );
     }
 
     // ── parse_retry_after ──────────────────────────────────────────────
@@ -496,7 +502,10 @@ mod tests {
     #[test]
     fn parse_retry_after_returns_none_for_garbage_value() {
         let mut h = HeaderMap::new();
-        h.insert(RETRY_AFTER, HeaderValue::from_static("not-a-date-or-number"));
+        h.insert(
+            RETRY_AFTER,
+            HeaderValue::from_static("not-a-date-or-number"),
+        );
         assert_eq!(parse_retry_after(&h), None);
     }
 

@@ -8,7 +8,7 @@ use futures::StreamExt;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use tars_provider::auth::{basic, Auth};
+use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::openai::OpenAiProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
@@ -70,7 +70,10 @@ async fn streaming_text_response_decodes_to_events() {
     while let Some(ev) = stream.next().await {
         match ev.expect("event") {
             ChatEvent::Delta { text: t } => text.push_str(&t),
-            ChatEvent::Finished { stop_reason, usage: u } => {
+            ChatEvent::Finished {
+                stop_reason,
+                usage: u,
+            } => {
                 saw_finish = Some(stop_reason);
                 usage = Some(u);
             }
@@ -221,7 +224,10 @@ async fn streaming_tool_call_emits_start_delta_end() {
     assert_eq!(resp.tool_calls.len(), 1);
     assert_eq!(resp.tool_calls[0].id, "call_abc");
     assert_eq!(resp.tool_calls[0].name, "search");
-    assert_eq!(resp.tool_calls[0].arguments, serde_json::json!({"q": "rust"}));
+    assert_eq!(
+        resp.tool_calls[0].arguments,
+        serde_json::json!({"q": "rust"})
+    );
     assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
 }
 

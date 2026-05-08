@@ -38,7 +38,9 @@ mod tests {
         // disk, but the *path* should be `<something>/.tars/config.toml`).
         assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("config.toml"));
         assert_eq!(
-            p.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()),
+            p.parent()
+                .and_then(|d| d.file_name())
+                .and_then(|s| s.to_str()),
             Some(".tars")
         );
     }

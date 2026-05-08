@@ -73,7 +73,9 @@ impl ChatRequest {
         Self {
             model,
             system: None,
-            messages: vec![Message::User { content: vec![ContentBlock::text(prompt)] }],
+            messages: vec![Message::User {
+                content: vec![ContentBlock::text(prompt)],
+            }],
             tools: Vec::new(),
             tool_choice: ToolChoice::default(),
             structured_output: None,
@@ -279,10 +281,7 @@ pub enum CompatibilityReason {
     /// Caller's requested `max_output_tokens` exceeds provider's
     /// `max_output_tokens`. Set the request field smaller, or pick
     /// a model with bigger output cap.
-    MaxOutputTokensExceeded {
-        requested: u32,
-        max: u32,
-    },
+    MaxOutputTokensExceeded { requested: u32, max: u32 },
 }
 
 impl std::fmt::Display for CompatibilityReason {
@@ -381,10 +380,7 @@ impl Capabilities {
     ///
     /// Aggregates ALL incompatibilities (no early-exit on first
     /// failure), same as `compatibility_check`.
-    pub fn check_requirements(
-        &self,
-        req: &CapabilityRequirements,
-    ) -> CompatibilityCheck {
+    pub fn check_requirements(&self, req: &CapabilityRequirements) -> CompatibilityCheck {
         let mut reasons = Vec::new();
 
         if req.requires_tools && !self.supports_tool_use {
@@ -471,7 +467,9 @@ pub enum Message {
 impl Message {
     /// Convenience — single-text user turn.
     pub fn user_text(text: impl Into<String>) -> Self {
-        Self::User { content: vec![ContentBlock::text(text)] }
+        Self::User {
+            content: vec![ContentBlock::text(text)],
+        }
     }
 
     /// Convenience — single-text assistant turn (no tool calls).
@@ -485,7 +483,10 @@ impl Message {
     /// Borrow the role's content list.
     pub fn content(&self) -> &[ContentBlock] {
         match self {
-            Self::User { content } | Self::Assistant { content, .. } | Self::Tool { content, .. } | Self::System { content } => content,
+            Self::User { content }
+            | Self::Assistant { content, .. }
+            | Self::Tool { content, .. }
+            | Self::System { content } => content,
         }
     }
 }
@@ -507,7 +508,11 @@ impl ContentBlock {
 
     /// Borrow text content if this is a text block.
     pub fn as_text(&self) -> Option<&str> {
-        if let Self::Text { text } = self { Some(text) } else { None }
+        if let Self::Text { text } = self {
+            Some(text)
+        } else {
+            None
+        }
     }
 }
 
@@ -551,10 +556,7 @@ mod tests {
 
     #[test]
     fn user_builder_creates_minimal_request() {
-        let r = ChatRequest::user(
-            ModelHint::Explicit("gpt-4o".into()),
-            "hi",
-        );
+        let r = ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "hi");
         assert_eq!(r.messages.len(), 1);
         assert!(matches!(r.messages[0], Message::User { .. }));
     }
@@ -579,8 +581,8 @@ mod tests {
     // ── compatibility_check tests (B-31) ────────────────────────────
 
     use crate::capabilities::{Capabilities, Modality, PromptCacheKind};
-    use crate::usage::Pricing;
     use crate::schema::JsonSchema;
+    use crate::usage::Pricing;
     use std::collections::HashSet;
 
     fn caps_minimal() -> Capabilities {
@@ -678,7 +680,9 @@ mod tests {
             CompatibilityCheck::Incompatible { reasons } => {
                 assert!(reasons.iter().any(|r| matches!(
                     r,
-                    CompatibilityReason::ThinkingUnsupported { mode: ThinkingMode::Auto }
+                    CompatibilityReason::ThinkingUnsupported {
+                        mode: ThinkingMode::Auto
+                    }
                 )));
             }
             _ => panic!("expected Incompatible"),
@@ -698,13 +702,14 @@ mod tests {
     #[test]
     fn compat_structured_output_blocked_by_none_mode() {
         let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
-        req.structured_output =
-            Some(JsonSchema::loose(serde_json::json!({"type":"object"})));
+        req.structured_output = Some(JsonSchema::loose(serde_json::json!({"type":"object"})));
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
-                assert!(reasons
-                    .iter()
-                    .any(|r| matches!(r, CompatibilityReason::StructuredOutputUnsupported)));
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r, CompatibilityReason::StructuredOutputUnsupported))
+                );
             }
             _ => panic!("expected Incompatible"),
         }
@@ -734,9 +739,11 @@ mod tests {
         };
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
-                assert!(reasons
-                    .iter()
-                    .any(|r| matches!(r, CompatibilityReason::VisionUnsupported)));
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r, CompatibilityReason::VisionUnsupported))
+                );
             }
             _ => panic!("expected Incompatible"),
         }
@@ -773,9 +780,14 @@ mod tests {
         });
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
-                assert_eq!(reasons.len(), 4, "expected all 4 reasons collected, got: {reasons:?}");
+                assert_eq!(
+                    reasons.len(),
+                    4,
+                    "expected all 4 reasons collected, got: {reasons:?}"
+                );
                 // verify each kind shows up exactly once
-                let kinds: std::collections::HashSet<_> = reasons.iter().map(|r| r.kind()).collect();
+                let kinds: std::collections::HashSet<_> =
+                    reasons.iter().map(|r| r.kind()).collect();
                 assert_eq!(
                     kinds,
                     ["tool_use", "structured_output", "thinking", "vision"]
@@ -794,10 +806,7 @@ mod tests {
         // Build a request whose prompt clearly exceeds 32k tokens
         // (chars/4 estimate). 32k tokens × 4 chars/tok ≈ 128k chars;
         // pad to 200k chars to be obviously over.
-        let mut req = ChatRequest::user(
-            ModelHint::Explicit("m".into()),
-            "x".repeat(200_000),
-        );
+        let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "x".repeat(200_000));
         req.system = None;
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
@@ -826,7 +835,10 @@ mod tests {
             CompatibilityCheck::Incompatible { reasons } => {
                 assert!(reasons.iter().any(|r| matches!(
                     r,
-                    CompatibilityReason::MaxOutputTokensExceeded { requested: 8192, max: 4096 }
+                    CompatibilityReason::MaxOutputTokensExceeded {
+                        requested: 8192,
+                        max: 4096
+                    }
                 )));
             }
             _ => panic!("expected Incompatible"),
@@ -943,9 +955,11 @@ mod tests {
         };
         match caps_minimal().check_requirements(&reqs) {
             CompatibilityCheck::Incompatible { reasons } => {
-                assert!(reasons
-                    .iter()
-                    .any(|r| matches!(r, CompatibilityReason::ToolUseUnsupported { .. })));
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r, CompatibilityReason::ToolUseUnsupported { .. }))
+                );
             }
             _ => panic!("expected Incompatible"),
         }

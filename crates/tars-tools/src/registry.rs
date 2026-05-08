@@ -172,10 +172,16 @@ mod tests {
 
     impl EchoTool {
         fn ok(name: &'static str, content: &'static str) -> Self {
-            Self { name, outcome: Ok(ToolResult::success(content)) }
+            Self {
+                name,
+                outcome: Ok(ToolResult::success(content)),
+            }
         }
         fn fails(name: &'static str) -> Self {
-            Self { name, outcome: Err(ToolError::Execute("nope".into())) }
+            Self {
+                name,
+                outcome: Err(ToolError::Execute("nope".into())),
+            }
         }
     }
 
@@ -196,11 +202,14 @@ mod tests {
             _args: serde_json::Value,
             _ctx: ToolContext,
         ) -> Result<ToolResult, ToolError> {
-            self.outcome.as_ref().map(Clone::clone).map_err(|e| match e {
-                ToolError::Execute(s) => ToolError::Execute(s.clone()),
-                ToolError::InvalidArguments(s) => ToolError::InvalidArguments(s.clone()),
-                ToolError::Cancelled => ToolError::Cancelled,
-            })
+            self.outcome
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(|e| match e {
+                    ToolError::Execute(s) => ToolError::Execute(s.clone()),
+                    ToolError::InvalidArguments(s) => ToolError::InvalidArguments(s.clone()),
+                    ToolError::Cancelled => ToolError::Cancelled,
+                })
         }
     }
 
@@ -240,11 +249,16 @@ mod tests {
     #[tokio::test]
     async fn dispatch_happy_path_yields_tool_message_with_content() {
         let mut reg = ToolRegistry::new();
-        reg.register_owned(EchoTool::ok("a", "result text")).unwrap();
+        reg.register_owned(EchoTool::ok("a", "result text"))
+            .unwrap();
         let call = ToolCall::new("call_1", "a", json!({"q": "x"}));
         let msg = reg.dispatch(&call, ToolContext::default()).await;
         match msg {
-            Message::Tool { tool_call_id, content, is_error } => {
+            Message::Tool {
+                tool_call_id,
+                content,
+                is_error,
+            } => {
                 assert_eq!(tool_call_id, "call_1");
                 assert!(!is_error);
                 assert_eq!(content[0].as_text(), Some("result text"));
@@ -259,11 +273,18 @@ mod tests {
         let call = ToolCall::new("call_1", "ghost", json!({}));
         let msg = reg.dispatch(&call, ToolContext::default()).await;
         match msg {
-            Message::Tool { tool_call_id, content, is_error } => {
+            Message::Tool {
+                tool_call_id,
+                content,
+                is_error,
+            } => {
                 assert_eq!(tool_call_id, "call_1");
                 assert!(is_error, "lookup miss must produce is_error=true");
                 let text = content[0].as_text().unwrap();
-                assert!(text.contains("ghost"), "error text should mention the missing tool name");
+                assert!(
+                    text.contains("ghost"),
+                    "error text should mention the missing tool name"
+                );
             }
             other => panic!("expected Tool message, got {other:?}"),
         }
@@ -276,11 +297,16 @@ mod tests {
         let call = ToolCall::new("call_1", "a", json!({}));
         let msg = reg.dispatch(&call, ToolContext::default()).await;
         match msg {
-            Message::Tool { is_error, content, .. } => {
+            Message::Tool {
+                is_error, content, ..
+            } => {
                 assert!(is_error);
                 let text = content[0].as_text().unwrap();
                 assert!(text.contains("nope"));
-                assert!(text.contains("execute"), "error text should include the classification");
+                assert!(
+                    text.contains("execute"),
+                    "error text should include the classification"
+                );
             }
             other => panic!("expected Tool message, got {other:?}"),
         }

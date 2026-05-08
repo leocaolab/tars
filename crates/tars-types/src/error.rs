@@ -60,7 +60,10 @@ pub enum ProviderError {
 
     /// CLI subprocess died / returned malformed JSON / non-zero exit.
     #[error("subprocess died: exit={exit_code:?} stderr={stderr}")]
-    CliSubprocessDied { exit_code: Option<i32>, stderr: String },
+    CliSubprocessDied {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
 
     /// Model emitted a tool_use for a tool that isn't registered.
     /// Surfaced by the Session auto-loop when it can't find a handler
@@ -104,10 +107,7 @@ pub enum ProviderError {
     /// that need to re-ask the model with prompt variation should
     /// catch `ValidationFailed` at their own layer.
     #[error("validation failed: {validator}: {reason}")]
-    ValidationFailed {
-        validator: String,
-        reason: String,
-    },
+    ValidationFailed { validator: String, reason: String },
 
     /// Catch-all for adapter bugs. Should be rare.
     #[error("internal: {0}")]
@@ -132,14 +132,15 @@ impl ProviderError {
             RateLimited { .. } | ModelOverloaded | Network(_) | CircuitOpen { .. } => {
                 ErrorClass::Retriable
             }
-            Auth(_) | InvalidRequest(_) | ContextTooLong { .. }
-            | ContentFiltered { .. } | BudgetExceeded
+            Auth(_)
+            | InvalidRequest(_)
+            | ContextTooLong { .. }
+            | ContentFiltered { .. }
+            | BudgetExceeded
             | UnknownTool { .. }
             | NoCompatibleCandidate { .. }
             | ValidationFailed { .. } => ErrorClass::Permanent,
-            Parse(_) | Internal(_) | CliSubprocessDied { .. } => {
-                ErrorClass::MaybeRetriable
-            }
+            Parse(_) | Internal(_) | CliSubprocessDied { .. } => ErrorClass::MaybeRetriable,
         }
     }
 

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use tars_types::{PipelineEvent, TenantId};
 
@@ -52,10 +52,7 @@ pub trait PipelineEventStore: Send + Sync + 'static {
 
     /// Query events. Returns up to 10_000 by default; pass `limit` to
     /// override. Order is `timestamp ASC, event_id ASC` for stability.
-    async fn query(
-        &self,
-        q: &PipelineEventQuery,
-    ) -> Result<Vec<PipelineEvent>, StorageError>;
+    async fn query(&self, q: &PipelineEventQuery) -> Result<Vec<PipelineEvent>, StorageError>;
 
     /// Drop events older than `cutoff`. Returns count removed.
     async fn purge_before(&self, cutoff: SystemTime) -> Result<u64, StorageError>;
@@ -82,9 +79,7 @@ pub struct SqlitePipelineEventStore {
 }
 
 impl SqlitePipelineEventStore {
-    pub fn open(
-        config: SqlitePipelineEventStoreConfig,
-    ) -> Result<Arc<Self>, StorageError> {
+    pub fn open(config: SqlitePipelineEventStoreConfig) -> Result<Arc<Self>, StorageError> {
         let conn = Connection::open(&config.path).map_err(|e| {
             StorageError::Backend(format!(
                 "opening pipeline event store at {:?}: {e}",
@@ -93,7 +88,9 @@ impl SqlitePipelineEventStore {
         })?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
-        Ok(Arc::new(Self { conn: Arc::new(Mutex::new(conn)) }))
+        Ok(Arc::new(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        }))
     }
 
     pub fn in_memory() -> Result<Arc<Self>, StorageError> {
@@ -102,7 +99,9 @@ impl SqlitePipelineEventStore {
         })?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
-        Ok(Arc::new(Self { conn: Arc::new(Mutex::new(conn)) }))
+        Ok(Arc::new(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        }))
     }
 
     fn pragma_setup(conn: &Connection) -> Result<(), StorageError> {
@@ -165,7 +164,9 @@ const DEFAULT_QUERY_LIMIT: u32 = 10_000;
 
 fn ts_to_ms(t: SystemTime) -> i64 {
     use std::time::UNIX_EPOCH;
-    t.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Pull the columns needed for indexed query out of a `PipelineEvent`.
@@ -249,10 +250,7 @@ impl PipelineEventStore for SqlitePipelineEventStore {
         Ok(())
     }
 
-    async fn query(
-        &self,
-        q: &PipelineEventQuery,
-    ) -> Result<Vec<PipelineEvent>, StorageError> {
+    async fn query(&self, q: &PipelineEventQuery) -> Result<Vec<PipelineEvent>, StorageError> {
         let conn = self.conn.clone();
         let tenant = q.tenant_id.as_ref().map(|t| t.as_ref().to_string());
         let since = q.since.map(ts_to_ms);
@@ -264,9 +262,7 @@ impl PipelineEventStore for SqlitePipelineEventStore {
 
             // Build SQL incrementally — keep the where clause to
             // indexed columns only (tenant_id, timestamp_ms).
-            let mut sql = String::from(
-                "SELECT payload_json FROM pipeline_events WHERE 1=1",
-            );
+            let mut sql = String::from("SELECT payload_json FROM pipeline_events WHERE 1=1");
             if tenant.is_some() {
                 sql.push_str(" AND tenant_id = ?");
             }
@@ -420,8 +416,12 @@ mod tests {
     #[tokio::test]
     async fn query_filters_by_tenant() {
         let s = store().await;
-        s.append(&[fake_event("a", SystemTime::now())]).await.unwrap();
-        s.append(&[fake_event("b", SystemTime::now())]).await.unwrap();
+        s.append(&[fake_event("a", SystemTime::now())])
+            .await
+            .unwrap();
+        s.append(&[fake_event("b", SystemTime::now())])
+            .await
+            .unwrap();
 
         let got = s
             .query(&PipelineEventQuery {
@@ -482,8 +482,12 @@ mod tests {
     #[tokio::test]
     async fn purge_tenant_drops_only_that_tenant() {
         let s = store().await;
-        s.append(&[fake_event("a", SystemTime::now())]).await.unwrap();
-        s.append(&[fake_event("b", SystemTime::now())]).await.unwrap();
+        s.append(&[fake_event("a", SystemTime::now())])
+            .await
+            .unwrap();
+        s.append(&[fake_event("b", SystemTime::now())])
+            .await
+            .unwrap();
 
         let n = s.purge_tenant(&TenantId::new("a")).await.unwrap();
         assert_eq!(n, 1);

@@ -90,7 +90,6 @@ pub fn hash_system_prompt(system: Option<&str>) -> Option<String> {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     // ── Trajectory lifecycle ────────────────────────────────────────
-
     /// Trajectory came into existence. `parent` is set on branches
     /// (replan / fork / recovery); `None` on a root trajectory.
     /// `reason` is a free-form string today; will become a typed
@@ -105,30 +104,20 @@ pub enum AgentEvent {
     /// Trajectory finished successfully. `summary` is a short
     /// human-readable description — full result goes in the final
     /// `StepCompleted`'s output_summary or a future `ContentRef`.
-    TrajectoryCompleted {
-        traj: TrajectoryId,
-        summary: String,
-    },
+    TrajectoryCompleted { traj: TrajectoryId, summary: String },
 
     /// Trajectory paused (deadline pause / user suspend / waiting
     /// on an external input). `reason` is free-form like
     /// `TrajectoryStarted::reason`.
-    TrajectorySuspended {
-        traj: TrajectoryId,
-        reason: String,
-    },
+    TrajectorySuspended { traj: TrajectoryId, reason: String },
 
     /// Trajectory was abandoned — by backtrack, budget exhaustion,
     /// deadline, explicit abort. Once written, no further events
     /// for this `traj` should appear (consumers SHOULD warn if they
     /// see one).
-    TrajectoryAbandoned {
-        traj: TrajectoryId,
-        cause: String,
-    },
+    TrajectoryAbandoned { traj: TrajectoryId, cause: String },
 
     // ── Step lifecycle (intra-trajectory work units) ────────────────
-
     /// One agent step is starting. `step_seq` is monotonic
     /// per-trajectory (1-indexed). `agent` is a free-form id (e.g.
     /// `"orchestrator"`, `"worker:code_review"`); will become a
@@ -167,7 +156,6 @@ pub enum AgentEvent {
     },
 
     // ── External-call captures (replay primitives) ──────────────────
-
     /// One LLM call within a step. Records what we asked + what we
     /// got back at a summary level. Doc 04 §3.2 envisages a separate
     /// `LlmResponseCaptured` variant carrying the *raw* response for
@@ -289,7 +277,11 @@ mod tests {
     fn idempotency_key_is_64_lowercase_hex() {
         let k = StepIdempotencyKey::compute(&t(), 1, "input");
         assert_eq!(k.as_str().len(), 64);
-        assert!(k.as_str().chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            k.as_str()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     // ── hash_system_prompt (audit pin) ────────────────────────────
@@ -331,7 +323,10 @@ mod tests {
     fn hash_system_prompt_format_is_64_lowercase_hex() {
         let h = hash_system_prompt(Some("anything")).unwrap();
         assert_eq!(h.len(), 64);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     #[test]
@@ -365,7 +360,10 @@ mod tests {
         assert!(v["system_prompt_hash"].is_string());
         let back: AgentEvent = serde_json::from_value(v).unwrap();
         match back {
-            AgentEvent::LlmCallCaptured { system_prompt_hash: Some(h), .. } => {
+            AgentEvent::LlmCallCaptured {
+                system_prompt_hash: Some(h),
+                ..
+            } => {
                 assert_eq!(h.len(), 64);
             }
             other => panic!("expected LlmCallCaptured with hash, got {other:?}"),
@@ -394,7 +392,9 @@ mod tests {
         });
         let back: AgentEvent = serde_json::from_value(v).expect("old shape must still parse");
         match back {
-            AgentEvent::LlmCallCaptured { system_prompt_hash, .. } => {
+            AgentEvent::LlmCallCaptured {
+                system_prompt_hash, ..
+            } => {
                 assert!(system_prompt_hash.is_none());
             }
             other => panic!("expected LlmCallCaptured, got {other:?}"),
@@ -404,10 +404,23 @@ mod tests {
     #[test]
     fn trajectory_id_extraction_works_for_every_variant() {
         let cases: Vec<AgentEvent> = vec![
-            AgentEvent::TrajectoryStarted { traj: t(), parent: None, reason: "x".into() },
-            AgentEvent::TrajectoryCompleted { traj: t(), summary: "x".into() },
-            AgentEvent::TrajectorySuspended { traj: t(), reason: "x".into() },
-            AgentEvent::TrajectoryAbandoned { traj: t(), cause: "x".into() },
+            AgentEvent::TrajectoryStarted {
+                traj: t(),
+                parent: None,
+                reason: "x".into(),
+            },
+            AgentEvent::TrajectoryCompleted {
+                traj: t(),
+                summary: "x".into(),
+            },
+            AgentEvent::TrajectorySuspended {
+                traj: t(),
+                reason: "x".into(),
+            },
+            AgentEvent::TrajectoryAbandoned {
+                traj: t(),
+                cause: "x".into(),
+            },
             AgentEvent::StepStarted {
                 traj: t(),
                 step_seq: 1,
@@ -444,22 +457,44 @@ mod tests {
 
     #[test]
     fn is_terminal_matches_completed_and_abandoned_only() {
-        assert!(AgentEvent::TrajectoryCompleted { traj: t(), summary: "x".into() }.is_terminal());
-        assert!(AgentEvent::TrajectoryAbandoned { traj: t(), cause: "x".into() }.is_terminal());
-        assert!(!AgentEvent::TrajectoryStarted {
-            traj: t(),
-            parent: None,
-            reason: "x".into(),
-        }
-        .is_terminal());
-        assert!(!AgentEvent::TrajectorySuspended { traj: t(), reason: "x".into() }.is_terminal());
-        assert!(!AgentEvent::StepCompleted {
-            traj: t(),
-            step_seq: 1,
-            output_summary: "x".into(),
-            usage: Usage::default(),
-        }
-        .is_terminal());
+        assert!(
+            AgentEvent::TrajectoryCompleted {
+                traj: t(),
+                summary: "x".into()
+            }
+            .is_terminal()
+        );
+        assert!(
+            AgentEvent::TrajectoryAbandoned {
+                traj: t(),
+                cause: "x".into()
+            }
+            .is_terminal()
+        );
+        assert!(
+            !AgentEvent::TrajectoryStarted {
+                traj: t(),
+                parent: None,
+                reason: "x".into(),
+            }
+            .is_terminal()
+        );
+        assert!(
+            !AgentEvent::TrajectorySuspended {
+                traj: t(),
+                reason: "x".into()
+            }
+            .is_terminal()
+        );
+        assert!(
+            !AgentEvent::StepCompleted {
+                traj: t(),
+                step_seq: 1,
+                output_summary: "x".into(),
+                usage: Usage::default(),
+            }
+            .is_terminal()
+        );
     }
 
     #[test]
@@ -468,7 +503,11 @@ mod tests {
         // attribute change doesn't silently break consumers.
         let cases = [
             (
-                AgentEvent::TrajectoryStarted { traj: t(), parent: None, reason: "x".into() },
+                AgentEvent::TrajectoryStarted {
+                    traj: t(),
+                    parent: None,
+                    reason: "x".into(),
+                },
                 "trajectory_started",
             ),
             (
@@ -496,7 +535,8 @@ mod tests {
         for (ev, expected_tag) in cases {
             let v = serde_json::to_value(&ev).unwrap();
             assert_eq!(
-                v["type"], json!(expected_tag),
+                v["type"],
+                json!(expected_tag),
                 "tag for {ev:?} must be {expected_tag}",
             );
         }

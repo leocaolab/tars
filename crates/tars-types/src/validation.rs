@@ -107,10 +107,14 @@ pub enum OutcomeSummary {
     Pass,
     /// What got removed/changed. Caller decides format (e.g.
     /// list of finding IDs that were demoted to ad-hoc).
-    Filter { dropped: Vec<String> },
+    Filter {
+        dropped: Vec<String>,
+    },
     /// Per-call metrics emitted by the validator. Format is
     /// validator-specific; document per-validator.
-    Annotate { metrics: HashMap<String, serde_json::Value> },
+    Annotate {
+        metrics: HashMap<String, serde_json::Value>,
+    },
 }
 
 /// Shared handle for `ValidationMiddleware` to publish the per-call

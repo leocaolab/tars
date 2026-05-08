@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use tars_types::TrajectoryId;
 
@@ -53,7 +53,9 @@ impl SqliteEventStore {
         })?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
-        Ok(Arc::new(Self { conn: Arc::new(Mutex::new(conn)) }))
+        Ok(Arc::new(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        }))
     }
 
     /// In-memory store for tests. Each call returns a fresh empty
@@ -63,7 +65,9 @@ impl SqliteEventStore {
             .map_err(|e| StorageError::Backend(format!("opening in-memory event store: {e}")))?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
-        Ok(Arc::new(Self { conn: Arc::new(Mutex::new(conn)) }))
+        Ok(Arc::new(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        }))
     }
 
     fn pragma_setup(conn: &Connection) -> Result<(), StorageError> {
@@ -199,49 +203,47 @@ impl EventStore for SqliteEventStore {
     ) -> Result<Vec<EventRecord>, StorageError> {
         let conn = self.conn.clone();
         let traj = trajectory_id.clone();
-        let rows = tokio::task::spawn_blocking(move || -> Result<Vec<EventRecord>, StorageError> {
-            let conn = conn.lock().expect("event store mutex poisoned");
-            let mut stmt = conn
-                .prepare(
-                    "SELECT sequence_no, timestamp_ms, payload_json \
+        let rows =
+            tokio::task::spawn_blocking(move || -> Result<Vec<EventRecord>, StorageError> {
+                let conn = conn.lock().expect("event store mutex poisoned");
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT sequence_no, timestamp_ms, payload_json \
                      FROM events \
                      WHERE trajectory_id = ? AND sequence_no > ? \
                      ORDER BY sequence_no ASC",
-                )
-                .map_err(|e| StorageError::Backend(format!("prepare select: {e}")))?;
-            let iter = stmt
-                .query_map(params![traj.as_ref(), since as i64], |r| {
-                    let seq: i64 = r.get(0)?;
-                    let ts: i64 = r.get(1)?;
-                    let blob: Vec<u8> = r.get(2)?;
-                    Ok((seq as u64, ts, blob))
-                })
-                .map_err(|e| StorageError::Backend(format!("query select: {e}")))?;
+                    )
+                    .map_err(|e| StorageError::Backend(format!("prepare select: {e}")))?;
+                let iter = stmt
+                    .query_map(params![traj.as_ref(), since as i64], |r| {
+                        let seq: i64 = r.get(0)?;
+                        let ts: i64 = r.get(1)?;
+                        let blob: Vec<u8> = r.get(2)?;
+                        Ok((seq as u64, ts, blob))
+                    })
+                    .map_err(|e| StorageError::Backend(format!("query select: {e}")))?;
 
-            let mut out = Vec::new();
-            for row in iter {
-                let (seq, ts, blob) =
-                    row.map_err(|e| StorageError::Backend(format!("row: {e}")))?;
-                let payload: serde_json::Value = serde_json::from_slice(&blob)?;
-                out.push(EventRecord {
-                    trajectory_id: traj.clone(),
-                    sequence_no: seq,
-                    timestamp_ms: ts,
-                    payload,
-                });
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+                let mut out = Vec::new();
+                for row in iter {
+                    let (seq, ts, blob) =
+                        row.map_err(|e| StorageError::Backend(format!("row: {e}")))?;
+                    let payload: serde_json::Value = serde_json::from_slice(&blob)?;
+                    out.push(EventRecord {
+                        trajectory_id: traj.clone(),
+                        sequence_no: seq,
+                        timestamp_ms: ts,
+                        payload,
+                    });
+                }
+                Ok(out)
+            })
+            .await
+            .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
 
         Ok(rows)
     }
 
-    async fn high_water(
-        &self,
-        trajectory_id: &TrajectoryId,
-    ) -> Result<u64, StorageError> {
+    async fn high_water(&self, trajectory_id: &TrajectoryId) -> Result<u64, StorageError> {
         let conn = self.conn.clone();
         let traj = trajectory_id.clone();
         let high = tokio::task::spawn_blocking(move || -> Result<u64, StorageError> {
@@ -262,23 +264,24 @@ impl EventStore for SqliteEventStore {
 
     async fn list_trajectories(&self) -> Result<Vec<TrajectoryId>, StorageError> {
         let conn = self.conn.clone();
-        let ids = tokio::task::spawn_blocking(move || -> Result<Vec<TrajectoryId>, StorageError> {
-            let conn = conn.lock().expect("event store mutex poisoned");
-            let mut stmt = conn
-                .prepare("SELECT DISTINCT trajectory_id FROM events")
-                .map_err(|e| StorageError::Backend(format!("prepare list: {e}")))?;
-            let iter = stmt
-                .query_map([], |r| r.get::<_, String>(0))
-                .map_err(|e| StorageError::Backend(format!("query list: {e}")))?;
-            let mut out = Vec::new();
-            for row in iter {
-                let s = row.map_err(|e| StorageError::Backend(format!("row: {e}")))?;
-                out.push(TrajectoryId::new(s));
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+        let ids =
+            tokio::task::spawn_blocking(move || -> Result<Vec<TrajectoryId>, StorageError> {
+                let conn = conn.lock().expect("event store mutex poisoned");
+                let mut stmt = conn
+                    .prepare("SELECT DISTINCT trajectory_id FROM events")
+                    .map_err(|e| StorageError::Backend(format!("prepare list: {e}")))?;
+                let iter = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(|e| StorageError::Backend(format!("query list: {e}")))?;
+                let mut out = Vec::new();
+                for row in iter {
+                    let s = row.map_err(|e| StorageError::Backend(format!("row: {e}")))?;
+                    out.push(TrajectoryId::new(s));
+                }
+                Ok(out)
+            })
+            .await
+            .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
         Ok(ids)
     }
 }
@@ -360,7 +363,10 @@ mod tests {
         let r = store.append(&t, &[]).await.unwrap();
         assert_eq!(r, 0);
         // After real appends, empty append still reports current high.
-        store.append(&t, &[json!({"x": 1}), json!({"x": 2})]).await.unwrap();
+        store
+            .append(&t, &[json!({"x": 1}), json!({"x": 2})])
+            .await
+            .unwrap();
         let r = store.append(&t, &[]).await.unwrap();
         assert_eq!(r, 2);
     }
@@ -368,9 +374,18 @@ mod tests {
     #[tokio::test]
     async fn distinct_trajectories_are_isolated() {
         let store = SqliteEventStore::in_memory().unwrap();
-        store.append(&traj("a"), &[json!({"k": "a1"})]).await.unwrap();
-        store.append(&traj("b"), &[json!({"k": "b1"}), json!({"k": "b2"})]).await.unwrap();
-        store.append(&traj("a"), &[json!({"k": "a2"})]).await.unwrap();
+        store
+            .append(&traj("a"), &[json!({"k": "a1"})])
+            .await
+            .unwrap();
+        store
+            .append(&traj("b"), &[json!({"k": "b1"}), json!({"k": "b2"})])
+            .await
+            .unwrap();
+        store
+            .append(&traj("a"), &[json!({"k": "a2"})])
+            .await
+            .unwrap();
 
         let a = store.read_all(&traj("a")).await.unwrap();
         let b = store.read_all(&traj("b")).await.unwrap();
@@ -407,7 +422,13 @@ mod tests {
     #[tokio::test]
     async fn read_all_returns_empty_for_unknown_trajectory() {
         let store = SqliteEventStore::in_memory().unwrap();
-        assert!(store.read_all(&traj("never_used")).await.unwrap().is_empty());
+        assert!(
+            store
+                .read_all(&traj("never_used"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -416,8 +437,13 @@ mod tests {
         store.append(&traj("a"), &[json!({})]).await.unwrap();
         store.append(&traj("b"), &[json!({})]).await.unwrap();
         store.append(&traj("a"), &[json!({})]).await.unwrap();
-        let mut ids: Vec<String> =
-            store.list_trajectories().await.unwrap().into_iter().map(|t| t.into_inner()).collect();
+        let mut ids: Vec<String> = store
+            .list_trajectories()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.into_inner())
+            .collect();
         ids.sort();
         assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
     }

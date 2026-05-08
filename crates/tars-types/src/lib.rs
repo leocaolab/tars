@@ -45,10 +45,8 @@ pub mod usage;
 pub mod validation;
 
 pub use auth::Auth;
-pub use cache::{systemtime_millis, CacheDirective, CacheHitInfo, ProviderCacheHandle};
-pub use capabilities::{
-    Capabilities, Modality, PromptCacheKind, StructuredOutputMode,
-};
+pub use cache::{CacheDirective, CacheHitInfo, ProviderCacheHandle, systemtime_millis};
+pub use capabilities::{Capabilities, Modality, PromptCacheKind, StructuredOutputMode};
 pub use chat::{
     CapabilityRequirements, ChatRequest, CompatibilityCheck, CompatibilityReason, ContentBlock,
     ImageData, Message,
@@ -59,8 +57,8 @@ pub use error::{ErrorClass, ProviderError};
 pub use events::{ChatChunk, ChatEvent, PartialUsage, StopReason};
 pub use http_extras::HttpProviderExtras;
 pub use ids::{
-    AgentId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId, TenantId,
-    TraceId, TrajectoryId,
+    AgentId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId, TenantId, TraceId,
+    TrajectoryId,
 };
 pub use model::{ModelHint, ModelTier, ThinkingMode};
 pub use pipeline_events::{
@@ -70,10 +68,10 @@ pub use principal::{Principal, PrincipalKind, Scope};
 pub use response::{ChatResponse, ChatResponseBuilder};
 pub use schema::JsonSchema;
 pub use secret::{SecretRef, SecretString};
-pub use telemetry::{new_shared_telemetry, RetryAttempt, SharedTelemetry, TelemetryAccumulator};
+pub use telemetry::{RetryAttempt, SharedTelemetry, TelemetryAccumulator, new_shared_telemetry};
 pub use tools::{ToolCall, ToolChoice, ToolSpec};
-pub use validation::{
-    new_shared_validation_outcome, OutcomeSummary, SharedValidationOutcome, ValidationOutcome,
-    ValidationOutcomeRecord, ValidationSummary,
-};
 pub use usage::{CostUsd, Pricing, Usage};
+pub use validation::{
+    OutcomeSummary, SharedValidationOutcome, ValidationOutcome, ValidationOutcomeRecord,
+    ValidationSummary, new_shared_validation_outcome,
+};

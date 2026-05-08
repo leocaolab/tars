@@ -38,7 +38,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use futures::StreamExt;
 
@@ -87,8 +87,7 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
     // Look up the config entry first so we can reject non-CLI types
     // with a clear message before any subprocess work.
     let provider_cfg = cfg.providers.get(&provider_id).ok_or_else(|| {
-        let configured: Vec<String> =
-            cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
+        let configured: Vec<String> = cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
         anyhow::anyhow!(
             "provider `{}` not in config. Configured: [{}]",
             args.provider,
@@ -106,18 +105,13 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
     let registry = ProviderRegistry::from_config(&cfg.providers, http, basic())
         .context("building provider registry from config")?;
     let provider = registry.get(&provider_id).ok_or_else(|| {
-        anyhow::anyhow!(
-            "config entry exists for `{provider_id}` but registry.get() returned None",
-        )
+        anyhow::anyhow!("config entry exists for `{provider_id}` but registry.get() returned None",)
     })?;
 
     let mut req = ChatRequest::user(ModelHint::Explicit(model.clone()), prompt);
     req.max_output_tokens = args.max_tokens;
 
-    eprintln!(
-        "── tars probe {} (model={model}) ──",
-        args.provider,
-    );
+    eprintln!("── tars probe {} (model={model}) ──", args.provider,);
 
     let mut stream = Arc::clone(&provider)
         .stream(req, RequestContext::test_default())
@@ -199,4 +193,3 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
 
     Ok(())
 }
-

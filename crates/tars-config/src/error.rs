@@ -63,6 +63,9 @@ pub struct ValidationError {
 
 impl ValidationError {
     pub fn new(key: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { key: key.into(), message: message.into() }
+        Self {
+            key: key.into(),
+            message: message.into(),
+        }
     }
 }

@@ -19,10 +19,10 @@ use std::sync::Arc;
 use tars_pipeline::{LlmService, Pipeline, ProviderService};
 use tars_provider::backends::mock::{CannedResponse, MockProvider};
 use tars_runtime::{
-    execute_agent_step, AgentEvent, AgentExecutionError, AgentOutput, LocalRuntime, Runtime,
-    SingleShotAgent,
+    AgentEvent, AgentExecutionError, AgentOutput, LocalRuntime, Runtime, SingleShotAgent,
+    execute_agent_step,
 };
-use tars_storage::{open_event_store_at_path, EventStore};
+use tars_storage::{EventStore, open_event_store_at_path};
 use tars_types::{AgentId, ChatRequest, ModelHint};
 use tokio_util::sync::CancellationToken;
 
@@ -45,7 +45,10 @@ async fn full_stack_agent_step_lands_in_trajectory_log() {
     let agent = SingleShotAgent::new(AgentId::new("test_agent"));
 
     // ── Run one trajectory step ─────────────────────────────────────
-    let traj = runtime.create_trajectory(None, "agent-step-test").await.unwrap();
+    let traj = runtime
+        .create_trajectory(None, "agent-step-test")
+        .await
+        .unwrap();
     let req = ChatRequest::user(ModelHint::Explicit("mock".into()), "say hi");
 
     let result = execute_agent_step(
@@ -81,9 +84,17 @@ async fn full_stack_agent_step_lands_in_trajectory_log() {
         }
         other => panic!("expected StepStarted, got {other:?}"),
     }
-    assert!(matches!(events[2], AgentEvent::LlmCallCaptured { step_seq: 1, .. }));
+    assert!(matches!(
+        events[2],
+        AgentEvent::LlmCallCaptured { step_seq: 1, .. }
+    ));
     match &events[3] {
-        AgentEvent::StepCompleted { step_seq, output_summary, usage, .. } => {
+        AgentEvent::StepCompleted {
+            step_seq,
+            output_summary,
+            usage,
+            ..
+        } => {
             assert_eq!(*step_seq, 1);
             assert_eq!(output_summary, "hello");
             assert_eq!(usage.output_tokens, result.usage.output_tokens);
@@ -109,7 +120,10 @@ async fn agent_failure_writes_step_failed_and_propagates() {
     let llm: Arc<dyn LlmService> = Arc::new(pipeline);
 
     let agent = SingleShotAgent::new(AgentId::new("doomed_agent"));
-    let traj = runtime.create_trajectory(None, "failure-test").await.unwrap();
+    let traj = runtime
+        .create_trajectory(None, "failure-test")
+        .await
+        .unwrap();
 
     let err = execute_agent_step(
         runtime.as_ref(),
@@ -132,7 +146,11 @@ async fn agent_failure_writes_step_failed_and_propagates() {
     assert!(matches!(events[0], AgentEvent::TrajectoryStarted { .. }));
     assert!(matches!(events[1], AgentEvent::StepStarted { .. }));
     match &events[2] {
-        AgentEvent::StepFailed { error, classification, .. } => {
+        AgentEvent::StepFailed {
+            error,
+            classification,
+            ..
+        } => {
             assert!(error.contains("upstream is broken"));
             // MockProvider's CannedResponse::Error becomes
             // ProviderError::Internal → MaybeRetriable.
@@ -154,8 +172,7 @@ async fn step_seq_increments_across_multiple_agent_calls() {
     let agent = SingleShotAgent::new(AgentId::new("a"));
 
     for i in 1..=3 {
-        let mock_provider =
-            MockProvider::new("p", CannedResponse::text(format!("turn {i}")));
+        let mock_provider = MockProvider::new("p", CannedResponse::text(format!("turn {i}")));
         let inner: Arc<dyn LlmService> = ProviderService::new(mock_provider);
         let pipeline = Pipeline::builder_with_inner(inner).build();
         let llm: Arc<dyn LlmService> = Arc::new(pipeline);

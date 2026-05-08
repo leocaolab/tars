@@ -38,13 +38,19 @@ impl ContentRef {
     pub fn from_body(tenant_id: TenantId, body: &[u8]) -> Self {
         let mut h = Sha256::new();
         h.update(body);
-        Self { tenant_id, body_hash: h.finalize().into() }
+        Self {
+            tenant_id,
+            body_hash: h.finalize().into(),
+        }
     }
 
     /// Construct from already-computed parts. Useful for
     /// deserialisation paths (event log replay) and for tests.
     pub fn from_parts(tenant_id: TenantId, body_hash: [u8; 32]) -> Self {
-        Self { tenant_id, body_hash }
+        Self {
+            tenant_id,
+            body_hash,
+        }
     }
 
     pub fn tenant_id(&self) -> &TenantId {
@@ -107,6 +113,9 @@ mod tests {
         let r = ContentRef::from_body(TenantId::new("t"), b"x");
         let hex = r.body_hash_hex();
         assert_eq!(hex.len(), 64);
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 }

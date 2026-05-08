@@ -19,7 +19,7 @@ use futures::stream;
 use tars_pipeline::{LlmService, Pipeline, ProviderService};
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{AgentContext, AgentMessage, WorkerAgent};
-use tars_tools::{builtins::ReadFileTool, ToolRegistry};
+use tars_tools::{ToolRegistry, builtins::ReadFileTool};
 use tars_types::{
     AgentId, Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId,
     RequestContext, StopReason, TrajectoryId, Usage,
@@ -120,7 +120,11 @@ fn tool_call_events(call_id: &str, tool_name: &str, args: serde_json::Value) -> 
         },
         ChatEvent::Finished {
             stop_reason: StopReason::ToolUse,
-            usage: Usage { input_tokens: 50, output_tokens: 5, ..Default::default() },
+            usage: Usage {
+                input_tokens: 50,
+                output_tokens: 5,
+                ..Default::default()
+            },
         },
     ]
 }
@@ -129,10 +133,16 @@ fn tool_call_events(call_id: &str, tool_name: &str, args: serde_json::Value) -> 
 fn final_text_events(text: &str) -> Vec<ChatEvent> {
     vec![
         ChatEvent::started("any-model"),
-        ChatEvent::Delta { text: text.to_string() },
+        ChatEvent::Delta {
+            text: text.to_string(),
+        },
         ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
-            usage: Usage { input_tokens: 30, output_tokens: 12, ..Default::default() },
+            usage: Usage {
+                input_tokens: 30,
+                output_tokens: 12,
+                ..Default::default()
+            },
         },
     ]
 }
@@ -148,7 +158,8 @@ async fn worker_dispatches_tool_call_and_returns_final_partial_result() {
 
     // Registry with the one tool, jailed to the tempdir.
     let mut reg = ToolRegistry::new();
-    reg.register_owned(ReadFileTool::with_root(dir.path()).unwrap()).unwrap();
+    reg.register_owned(ReadFileTool::with_root(dir.path()).unwrap())
+        .unwrap();
     let registry = Arc::new(reg);
 
     // 2-call sequence: tool call → final JSON answer.
@@ -181,7 +192,12 @@ async fn worker_dispatches_tool_call_and_returns_final_partial_result() {
         .expect("worker should finish");
 
     match msg {
-        AgentMessage::PartialResult { from_agent, step_id, summary, confidence } => {
+        AgentMessage::PartialResult {
+            from_agent,
+            step_id,
+            summary,
+            confidence,
+        } => {
             assert_eq!(from_agent.as_ref(), "worker:summarise");
             assert_eq!(step_id.as_deref(), Some("s1"));
             assert!(
@@ -207,10 +223,13 @@ async fn worker_dispatches_tool_call_and_returns_final_partial_result() {
         "re-prompt should append assistant + tool messages; got {:?}",
         second_call_messages,
     );
-    let saw_tool_msg = second_call_messages.iter().any(|m| {
-        matches!(m, tars_types::Message::Tool { tool_call_id, .. } if tool_call_id == "call_1")
-    });
-    assert!(saw_tool_msg, "re-prompt should carry the Tool result message");
+    let saw_tool_msg = second_call_messages.iter().any(
+        |m| matches!(m, tars_types::Message::Tool { tool_call_id, .. } if tool_call_id == "call_1"),
+    );
+    assert!(
+        saw_tool_msg,
+        "re-prompt should carry the Tool result message"
+    );
 }
 
 #[tokio::test]
@@ -222,16 +241,12 @@ async fn worker_surfaces_tool_specs_to_provider_on_first_call() {
     reg.register_owned(ReadFileTool::new()).unwrap();
     let registry = Arc::new(reg);
 
-    let final_json = serde_json::json!({"summary": "no tool needed", "confidence": 1.0}).to_string();
+    let final_json =
+        serde_json::json!({"summary": "no tool needed", "confidence": 1.0}).to_string();
     let provider = EventQueueProvider::new(vec![final_text_events(&final_json)]);
     let llm = build_llm(provider.clone());
 
-    let worker = WorkerAgent::with_tools(
-        AgentId::new("worker"),
-        "any-model",
-        "general",
-        registry,
-    );
+    let worker = WorkerAgent::with_tools(AgentId::new("worker"), "any-model", "general", registry);
 
     let plan = sample_plan();
     let _ = worker
@@ -259,7 +274,8 @@ async fn worker_loop_aborts_after_max_iterations() {
     tokio::fs::write(&path, b"x").await.unwrap();
 
     let mut reg = ToolRegistry::new();
-    reg.register_owned(ReadFileTool::with_root(dir.path()).unwrap()).unwrap();
+    reg.register_owned(ReadFileTool::with_root(dir.path()).unwrap())
+        .unwrap();
     let registry = Arc::new(reg);
 
     let provider = EventQueueProvider::new(vec![
@@ -280,13 +296,8 @@ async fn worker_loop_aborts_after_max_iterations() {
     ]);
     let llm = build_llm(provider);
 
-    let worker = WorkerAgent::with_tools(
-        AgentId::new("worker"),
-        "any-model",
-        "general",
-        registry,
-    )
-    .with_max_tool_iterations(2);
+    let worker = WorkerAgent::with_tools(AgentId::new("worker"), "any-model", "general", registry)
+        .with_max_tool_iterations(2);
 
     let plan = sample_plan();
     let err = worker
@@ -304,7 +315,8 @@ async fn worker_loop_aborts_after_max_iterations() {
 async fn stub_worker_without_tools_still_works_unchanged() {
     // Regression: enabling the tools field for the with_tools flavour
     // mustn't break the no-tools path.
-    let final_json = serde_json::json!({"summary": "stub did stuff", "confidence": 0.5}).to_string();
+    let final_json =
+        serde_json::json!({"summary": "stub did stuff", "confidence": 0.5}).to_string();
     let provider = EventQueueProvider::new(vec![final_text_events(&final_json)]);
     let llm = build_llm(provider.clone());
 
@@ -316,10 +328,7 @@ async fn stub_worker_without_tools_still_works_unchanged() {
         .execute_step(ctx(llm), &plan, &plan.steps[0], &[])
         .await
         .unwrap();
-    assert!(matches!(
-        msg,
-        AgentMessage::PartialResult { .. }
-    ));
+    assert!(matches!(msg, AgentMessage::PartialResult { .. }));
 
     // No tools advertised on the request.
     let history = provider.history();

@@ -80,11 +80,9 @@ pub fn mlx_local(
 /// directly — `LlmProvider` doesn't expose its resolved auth.
 fn normalize_auth(auth: Auth) -> Auth {
     match auth {
-        Auth::Secret { secret: tars_types::SecretRef::Inline { ref value } }
-            if value.is_empty() =>
-        {
-            Auth::None
-        }
+        Auth::Secret {
+            secret: tars_types::SecretRef::Inline { ref value },
+        } if value.is_empty() => Auth::None,
         other => other,
     }
 }
@@ -93,9 +91,7 @@ fn normalize_auth(auth: Auth) -> Auth {
 /// quantized models in unified memory. Override per-deployment.
 fn mlx_default_capabilities() -> tars_types::Capabilities {
     use std::collections::HashSet;
-    use tars_types::{
-        Capabilities, Modality, Pricing, PromptCacheKind, StructuredOutputMode,
-    };
+    use tars_types::{Capabilities, Modality, Pricing, PromptCacheKind, StructuredOutputMode};
 
     let mut modalities = HashSet::new();
     modalities.insert(Modality::Text);
@@ -133,20 +129,28 @@ mod tests {
         let http = HttpProviderBase::default_arc().unwrap();
         let p = mlx_local("mlx_test", http, basic());
         let caps = p.capabilities();
-        assert!(matches!(caps.prompt_cache, tars_types::PromptCacheKind::None));
+        assert!(matches!(
+            caps.prompt_cache,
+            tars_types::PromptCacheKind::None
+        ));
         assert!(!caps.supports_vision);
         assert!(caps.supports_tool_use);
     }
 
     #[test]
     fn normalize_auth_coerces_empty_inline_to_none() {
-        assert!(matches!(normalize_auth(Auth::inline(String::new())), Auth::None));
+        assert!(matches!(
+            normalize_auth(Auth::inline(String::new())),
+            Auth::None
+        ));
     }
 
     #[test]
     fn normalize_auth_preserves_non_empty_inline() {
         match normalize_auth(Auth::inline("sk-test")) {
-            Auth::Secret { secret: tars_types::SecretRef::Inline { value } } => {
+            Auth::Secret {
+                secret: tars_types::SecretRef::Inline { value },
+            } => {
                 assert_eq!(value.expose(), "sk-test");
             }
             other => panic!("expected inline secret to be preserved, got {other:?}"),

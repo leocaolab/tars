@@ -77,10 +77,7 @@ pub trait EventStore: Send + Sync + 'static {
     /// the trajectory has no events yet. Cheap — useful to skip a
     /// `read_all` when the caller already has events buffered up to
     /// some point.
-    async fn high_water(
-        &self,
-        trajectory_id: &TrajectoryId,
-    ) -> Result<u64, StorageError>;
+    async fn high_water(&self, trajectory_id: &TrajectoryId) -> Result<u64, StorageError>;
 
     /// List every trajectory that has at least one event. Used for
     /// admin / recovery scans. Order is unspecified.

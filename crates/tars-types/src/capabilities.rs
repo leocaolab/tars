@@ -37,9 +37,7 @@ pub enum CapabilityError {
     EmptyModalitiesIn,
     #[error("modalities_out must be non-empty")]
     EmptyModalitiesOut,
-    #[error(
-        "supports_structured_output = ToolUseEmulation requires supports_tool_use = true"
-    )]
+    #[error("supports_structured_output = ToolUseEmulation requires supports_tool_use = true")]
     ToolUseEmulationNeedsToolUse,
 }
 
@@ -54,8 +52,10 @@ impl Capabilities {
         if self.modalities_out.is_empty() {
             return Err(CapabilityError::EmptyModalitiesOut);
         }
-        if matches!(self.supports_structured_output, StructuredOutputMode::ToolUseEmulation)
-            && !self.supports_tool_use
+        if matches!(
+            self.supports_structured_output,
+            StructuredOutputMode::ToolUseEmulation
+        ) && !self.supports_tool_use
         {
             return Err(CapabilityError::ToolUseEmulationNeedsToolUse);
         }
@@ -102,7 +102,9 @@ pub enum StructuredOutputMode {
 pub enum PromptCacheKind {
     None,
     /// Provider auto-caches long prefixes (OpenAI ≥1024 tokens).
-    ImplicitPrefix { min_tokens: u32 },
+    ImplicitPrefix {
+        min_tokens: u32,
+    },
     /// Inline `cache_control` markers (Anthropic).
     ExplicitMarker,
     /// Out-of-band `cachedContent` API (Gemini).
@@ -165,6 +167,10 @@ mod tests {
 
     #[test]
     fn baseline_validates_clean() {
-        assert!(Capabilities::text_only_baseline(Pricing::default()).validate().is_ok());
+        assert!(
+            Capabilities::text_only_baseline(Pricing::default())
+                .validate()
+                .is_ok()
+        );
     }
 }

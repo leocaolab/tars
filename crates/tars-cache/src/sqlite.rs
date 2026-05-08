@@ -38,7 +38,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::error::CacheError;
 use crate::key::CacheKey;
@@ -223,18 +223,19 @@ impl CacheRegistry for SqliteCacheRegistry {
         let l2 = self.l2.clone();
         let fp = key.fingerprint;
         let now = now_ms();
-        let blob: Option<Vec<u8>> = tokio::task::spawn_blocking(move || -> Result<_, CacheError> {
-            let conn = l2.lock().expect("l2 mutex poisoned");
-            conn.query_row(
-                "SELECT value FROM cache_entries WHERE fingerprint = ? AND expires_at_ms > ?",
-                params![fp.as_slice(), now],
-                |r| r.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(|e| CacheError::Backend(format!("l2 lookup: {e}")))
-        })
-        .await
-        .map_err(|e| CacheError::Backend(format!("spawn_blocking: {e}")))??;
+        let blob: Option<Vec<u8>> =
+            tokio::task::spawn_blocking(move || -> Result<_, CacheError> {
+                let conn = l2.lock().expect("l2 mutex poisoned");
+                conn.query_row(
+                    "SELECT value FROM cache_entries WHERE fingerprint = ? AND expires_at_ms > ?",
+                    params![fp.as_slice(), now],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(|e| CacheError::Backend(format!("l2 lookup: {e}")))
+            })
+            .await
+            .map_err(|e| CacheError::Backend(format!("spawn_blocking: {e}")))??;
 
         let Some(blob) = blob else {
             return Ok(None);
@@ -244,7 +245,9 @@ impl CacheRegistry for SqliteCacheRegistry {
 
         // Refill L1 so the next lookup skips the SQLite hop.
         if policy.l1 {
-            self.l1.insert(key.fingerprint, Arc::new(value.clone())).await;
+            self.l1
+                .insert(key.fingerprint, Arc::new(value.clone()))
+                .await;
         }
         Ok(Some(value))
     }
@@ -260,7 +263,9 @@ impl CacheRegistry for SqliteCacheRegistry {
         }
 
         if policy.l1 {
-            self.l1.insert(key.fingerprint, Arc::new(value.clone())).await;
+            self.l1
+                .insert(key.fingerprint, Arc::new(value.clone()))
+                .await;
         }
         if !policy.l2 {
             return Ok(());
@@ -278,8 +283,9 @@ impl CacheRegistry for SqliteCacheRegistry {
 
         let l2 = self.l2.clone();
         let fp = key.fingerprint;
-        let writes_so_far =
-            self.write_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let writes_so_far = self
+            .write_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tokio::task::spawn_blocking(move || -> Result<(), CacheError> {
             let conn = l2.lock().expect("l2 mutex poisoned");
             conn.execute(
@@ -345,9 +351,8 @@ pub fn default_personal_cache_path() -> Option<PathBuf> {
 /// cache, you handle the housekeeping".
 pub fn open_at_path(path: &Path) -> Result<Arc<SqliteCacheRegistry>, CacheError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            CacheError::Backend(format!("create cache dir {parent:?}: {e}"))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CacheError::Backend(format!("create cache dir {parent:?}: {e}")))?;
     }
     SqliteCacheRegistry::open(SqliteCacheRegistryConfig::new(path))
 }
@@ -367,7 +372,10 @@ mod tests {
     fn key(id: u8) -> CacheKey {
         let mut fp = [0u8; 32];
         fp[0] = id;
-        CacheKey { fingerprint: fp, debug_label: format!("test-{id}") }
+        CacheKey {
+            fingerprint: fp,
+            debug_label: format!("test-{id}"),
+        }
     }
 
     fn value(text: &str) -> CachedResponse {
@@ -396,7 +404,11 @@ mod tests {
     async fn write_then_lookup_round_trips_in_memory() {
         let r = SqliteCacheRegistry::in_memory().unwrap();
         let k = key(1);
-        let policy = CachePolicy { l1: true, l2: true, ..CachePolicy::default() };
+        let policy = CachePolicy {
+            l1: true,
+            l2: true,
+            ..CachePolicy::default()
+        };
 
         assert!(r.lookup(&k, &policy).await.unwrap().is_none());
         r.write(k.clone(), value("hi"), &policy).await.unwrap();
@@ -415,13 +427,21 @@ mod tests {
 
         {
             let r = open_at_path(&path).unwrap();
-            let policy = CachePolicy { l1: true, l2: true, ..CachePolicy::default() };
+            let policy = CachePolicy {
+                l1: true,
+                l2: true,
+                ..CachePolicy::default()
+            };
             r.write(key(7), value("persisted"), &policy).await.unwrap();
             // Drop r → close connection → flush WAL on next open.
         }
 
         let r2 = open_at_path(&path).unwrap();
-        let policy = CachePolicy { l1: true, l2: true, ..CachePolicy::default() };
+        let policy = CachePolicy {
+            l1: true,
+            l2: true,
+            ..CachePolicy::default()
+        };
         let hit = r2.lookup(&key(7), &policy).await.unwrap().unwrap();
         assert_eq!(hit.response.text, "persisted");
     }
@@ -438,7 +458,11 @@ mod tests {
 
         // Now lookup with l1+l2: L1 misses (was never written), L2 hits,
         // and that hit refills L1 for next time.
-        let policy_full = CachePolicy { l1: true, l2: true, ..CachePolicy::default() };
+        let policy_full = CachePolicy {
+            l1: true,
+            l2: true,
+            ..CachePolicy::default()
+        };
         let hit = r.lookup(&key(3), &policy_full).await.unwrap().unwrap();
         assert_eq!(hit.response.text, "x");
     }
@@ -449,14 +473,23 @@ mod tests {
         let off = CachePolicy::off();
         r.write(key(1), value("x"), &off).await.unwrap();
         // And verify with default (l1) policy: nothing got persisted.
-        assert!(r.lookup(&key(1), &CachePolicy::default()).await.unwrap().is_none());
+        assert!(
+            r.lookup(&key(1), &CachePolicy::default())
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(r.l2_entry_count().unwrap(), 0);
     }
 
     #[tokio::test]
     async fn invalidate_removes_from_both_layers() {
         let r = SqliteCacheRegistry::in_memory().unwrap();
-        let policy = CachePolicy { l1: true, l2: true, ..CachePolicy::default() };
+        let policy = CachePolicy {
+            l1: true,
+            l2: true,
+            ..CachePolicy::default()
+        };
         r.write(key(1), value("x"), &policy).await.unwrap();
         assert!(r.lookup(&key(1), &policy).await.unwrap().is_some());
         r.invalidate(&key(1)).await.unwrap();
@@ -476,7 +509,9 @@ mod tests {
             l2_ttl: Some(Duration::ZERO),
             ..CachePolicy::default()
         };
-        r.write(key(2), value("ephemeral"), &policy_short).await.unwrap();
+        r.write(key(2), value("ephemeral"), &policy_short)
+            .await
+            .unwrap();
         // Sleep one ms so wall-clock advances past the zero-TTL row.
         tokio::time::sleep(Duration::from_millis(2)).await;
         assert!(r.lookup(&key(2), &policy_short).await.unwrap().is_none());
@@ -485,11 +520,31 @@ mod tests {
     #[tokio::test]
     async fn distinct_keys_dont_collide() {
         let r = SqliteCacheRegistry::in_memory().unwrap();
-        let policy = CachePolicy { l1: true, l2: true, ..CachePolicy::default() };
+        let policy = CachePolicy {
+            l1: true,
+            l2: true,
+            ..CachePolicy::default()
+        };
         r.write(key(1), value("a"), &policy).await.unwrap();
         r.write(key(2), value("b"), &policy).await.unwrap();
-        assert_eq!(r.lookup(&key(1), &policy).await.unwrap().unwrap().response.text, "a");
-        assert_eq!(r.lookup(&key(2), &policy).await.unwrap().unwrap().response.text, "b");
+        assert_eq!(
+            r.lookup(&key(1), &policy)
+                .await
+                .unwrap()
+                .unwrap()
+                .response
+                .text,
+            "a"
+        );
+        assert_eq!(
+            r.lookup(&key(2), &policy)
+                .await
+                .unwrap()
+                .unwrap()
+                .response
+                .text,
+            "b"
+        );
         assert_eq!(r.l2_entry_count().unwrap(), 2);
     }
 

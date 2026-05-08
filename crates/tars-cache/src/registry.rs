@@ -112,7 +112,10 @@ impl MemoryCacheRegistry {
             .max_capacity(config.max_entries)
             .time_to_live(config.default_ttl)
             .build();
-        Self { inner, default_ttl: config.default_ttl }
+        Self {
+            inner,
+            default_ttl: config.default_ttl,
+        }
     }
 
     pub fn default_arc() -> Arc<Self> {
@@ -186,7 +189,10 @@ mod tests {
     fn key(id: u8) -> CacheKey {
         let mut fp = [0u8; 32];
         fp[0] = id;
-        CacheKey { fingerprint: fp, debug_label: format!("test-{id}") }
+        CacheKey {
+            fingerprint: fp,
+            debug_label: format!("test-{id}"),
+        }
     }
 
     fn value(text: &str) -> CachedResponse {
@@ -215,9 +221,20 @@ mod tests {
     async fn write_then_lookup_round_trips() {
         let r = MemoryCacheRegistry::new(MemoryCacheRegistryConfig::default());
         let k = key(1);
-        assert!(r.lookup(&k, &CachePolicy::default()).await.unwrap().is_none());
-        r.write(k.clone(), value("hi"), &CachePolicy::default()).await.unwrap();
-        let hit = r.lookup(&k, &CachePolicy::default()).await.unwrap().unwrap();
+        assert!(
+            r.lookup(&k, &CachePolicy::default())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        r.write(k.clone(), value("hi"), &CachePolicy::default())
+            .await
+            .unwrap();
+        let hit = r
+            .lookup(&k, &CachePolicy::default())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(hit.response.text, "hi");
         assert_eq!(hit.original_usage.input_tokens, 100);
     }
@@ -226,36 +243,73 @@ mod tests {
     async fn lookup_with_l1_disabled_policy_misses_even_if_present() {
         let r = MemoryCacheRegistry::new(MemoryCacheRegistryConfig::default());
         let k = key(1);
-        r.write(k.clone(), value("hi"), &CachePolicy::default()).await.unwrap();
+        r.write(k.clone(), value("hi"), &CachePolicy::default())
+            .await
+            .unwrap();
 
-        let no_l1 = CachePolicy { l1: false, ..CachePolicy::default() };
+        let no_l1 = CachePolicy {
+            l1: false,
+            ..CachePolicy::default()
+        };
         assert!(r.lookup(&k, &no_l1).await.unwrap().is_none());
         // And a write with l1=false is a no-op.
         let k2 = key(2);
         r.write(k2.clone(), value("ho"), &no_l1).await.unwrap();
-        assert!(r.lookup(&k2, &CachePolicy::default()).await.unwrap().is_none());
+        assert!(
+            r.lookup(&k2, &CachePolicy::default())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn invalidate_removes_entry() {
         let r = MemoryCacheRegistry::new(MemoryCacheRegistryConfig::default());
         let k = key(1);
-        r.write(k.clone(), value("hi"), &CachePolicy::default()).await.unwrap();
+        r.write(k.clone(), value("hi"), &CachePolicy::default())
+            .await
+            .unwrap();
         r.invalidate(&k).await.unwrap();
         // The lookup-path removal is synchronous w.r.t. the awaited
         // `invalidate`, so this assertion is the authoritative
         // contract test. `entry_count()` may lag because moka applies
         // its eviction bookkeeping via background sync.
-        assert!(r.lookup(&k, &CachePolicy::default()).await.unwrap().is_none());
+        assert!(
+            r.lookup(&k, &CachePolicy::default())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn distinct_keys_dont_collide() {
         let r = MemoryCacheRegistry::new(MemoryCacheRegistryConfig::default());
-        r.write(key(1), value("a"), &CachePolicy::default()).await.unwrap();
-        r.write(key(2), value("b"), &CachePolicy::default()).await.unwrap();
-        assert_eq!(r.lookup(&key(1), &CachePolicy::default()).await.unwrap().unwrap().response.text, "a");
-        assert_eq!(r.lookup(&key(2), &CachePolicy::default()).await.unwrap().unwrap().response.text, "b");
+        r.write(key(1), value("a"), &CachePolicy::default())
+            .await
+            .unwrap();
+        r.write(key(2), value("b"), &CachePolicy::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            r.lookup(&key(1), &CachePolicy::default())
+                .await
+                .unwrap()
+                .unwrap()
+                .response
+                .text,
+            "a"
+        );
+        assert_eq!(
+            r.lookup(&key(2), &CachePolicy::default())
+                .await
+                .unwrap()
+                .unwrap()
+                .response
+                .text,
+            "b"
+        );
     }
 
     #[tokio::test]
@@ -265,14 +319,22 @@ mod tests {
             default_ttl: Duration::from_millis(100),
         });
         let k = key(1);
-        r.write(k.clone(), value("hi"), &CachePolicy::default()).await.unwrap();
+        r.write(k.clone(), value("hi"), &CachePolicy::default())
+            .await
+            .unwrap();
         assert!(
-            r.lookup(&k, &CachePolicy::default()).await.unwrap().is_some(),
+            r.lookup(&k, &CachePolicy::default())
+                .await
+                .unwrap()
+                .is_some(),
             "entry must be present immediately after write",
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert!(
-            r.lookup(&k, &CachePolicy::default()).await.unwrap().is_none(),
+            r.lookup(&k, &CachePolicy::default())
+                .await
+                .unwrap()
+                .is_none(),
             "entry must be evicted after default_ttl elapses",
         );
     }
@@ -291,11 +353,16 @@ mod tests {
             l1_ttl: Some(Duration::from_millis(50)),
             ..CachePolicy::default()
         };
-        r.write(k.clone(), value("hi"), &policy_short).await.unwrap();
+        r.write(k.clone(), value("hi"), &policy_short)
+            .await
+            .unwrap();
         // Sleep well past the requested-but-ignored override.
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
-            r.lookup(&k, &CachePolicy::default()).await.unwrap().is_some(),
+            r.lookup(&k, &CachePolicy::default())
+                .await
+                .unwrap()
+                .is_some(),
             "MemoryCacheRegistry honours only the constructor-time \
              default_ttl; a shorter per-write l1_ttl must not expire \
              the entry early",
@@ -324,7 +391,11 @@ mod tests {
         // At least one of the early keys must be gone.
         let mut survivors = 0;
         for i in 1u8..=5 {
-            if r.lookup(&key(i), &CachePolicy::default()).await.unwrap().is_some() {
+            if r.lookup(&key(i), &CachePolicy::default())
+                .await
+                .unwrap()
+                .is_some()
+            {
                 survivors += 1;
             }
         }

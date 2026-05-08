@@ -11,8 +11,8 @@ use std::time::Instant;
 pub use tokio_util::sync::CancellationToken;
 
 use crate::ids::{PrincipalId, SessionId, TenantId, TraceId};
-use crate::telemetry::{new_shared_telemetry, SharedTelemetry};
-use crate::validation::{new_shared_validation_outcome, SharedValidationOutcome};
+use crate::telemetry::{SharedTelemetry, new_shared_telemetry};
+use crate::validation::{SharedValidationOutcome, new_shared_validation_outcome};
 
 #[derive(Clone, Debug)]
 pub struct RequestContext {

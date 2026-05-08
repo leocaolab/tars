@@ -16,12 +16,12 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use tars_runtime::{AgentEvent, LocalRuntime, Runtime, StepIdempotencyKey};
-use tars_storage::{open_event_store_at_path, EventStore};
+use tars_storage::{EventStore, open_event_store_at_path};
 use tars_types::{ProviderId, TrajectoryId, Usage};
 
 fn build_runtime(dir: &TempDir) -> Arc<LocalRuntime> {
-    let store: Arc<dyn EventStore> = open_event_store_at_path(&dir.path().join("events.sqlite"))
-        .expect("event store opens");
+    let store: Arc<dyn EventStore> =
+        open_event_store_at_path(&dir.path().join("events.sqlite")).expect("event store opens");
     LocalRuntime::new(store)
 }
 
@@ -76,7 +76,10 @@ async fn trajectory_survives_runtime_restart() {
 
     // Recovery scan finds the trajectory.
     let listed = rt2.list_trajectories().await.unwrap();
-    assert!(listed.contains(&traj), "list_trajectories sees the recovered id");
+    assert!(
+        listed.contains(&traj),
+        "list_trajectories sees the recovered id"
+    );
 
     // Replay returns every event in order.
     let events = rt2.replay(&traj).await.unwrap();

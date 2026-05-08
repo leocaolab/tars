@@ -186,7 +186,10 @@ impl ToolCallBuffer {
         };
 
         // Parsing succeeded — now consume the buffer.
-        let acc = self.inflight.remove(&index).expect("we just confirmed presence");
+        let acc = self
+            .inflight
+            .remove(&index)
+            .expect("we just confirmed presence");
         Ok((acc.id, acc.name, value))
     }
 

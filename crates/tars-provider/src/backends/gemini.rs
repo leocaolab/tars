@@ -23,19 +23,21 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use reqwest::StatusCode;
-use serde_json::{json, Value};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use serde_json::{Value, json};
 use url::Url;
 
 use tars_types::{
     Capabilities, ChatEvent, ChatRequest, ContentBlock, ImageData, Message, Modality,
-    PromptCacheKind, ProviderError, ProviderId, RequestContext, StopReason,
-    StructuredOutputMode, Usage,
+    PromptCacheKind, ProviderError, ProviderId, RequestContext, StopReason, StructuredOutputMode,
+    Usage,
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};
-use crate::http_base::{stream_via_adapter, HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent};
+use crate::http_base::{
+    HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent, stream_via_adapter,
+};
 use crate::provider::{LlmEventStream, LlmProvider};
 use crate::tool_buffer::ToolCallBuffer;
 
@@ -149,15 +151,14 @@ impl LlmProvider for GeminiProvider {
         let resolved = match auth {
             ResolvedAuth::ApiKey(k) => {
                 if k.is_empty() {
-                    return Err(ProviderError::Auth(
-                        "Gemini API key is empty".into(),
-                    ));
+                    return Err(ProviderError::Auth("Gemini API key is empty".into()));
                 }
                 ResolvedAuthWithKey::Key(k)
             }
             ResolvedAuth::Bearer(_) => {
                 return Err(ProviderError::Auth(
-                    "Gemini bearer auth (Vertex AI ADC) is not yet supported; use an API key".into(),
+                    "Gemini bearer auth (Vertex AI ADC) is not yet supported; use an API key"
+                        .into(),
                 ));
             }
             ResolvedAuth::None => {
@@ -175,8 +176,14 @@ impl LlmProvider for GeminiProvider {
         // Cast through the trait — `stream_via_adapter` takes any HttpAdapter.
         // We resolve auth to None at the layer below since the key is
         // already in the URL.
-        stream_via_adapter(self.http.clone(), adapter_with_key, ResolvedAuth::None, req, ctx)
-            .await
+        stream_via_adapter(
+            self.http.clone(),
+            adapter_with_key,
+            ResolvedAuth::None,
+            req,
+            ctx,
+        )
+        .await
     }
 }
 
@@ -271,7 +278,10 @@ impl GeminiAdapter {
                 let parts: Vec<Value> = content.iter().map(Self::translate_part).collect();
                 Ok(json!({"role": "user", "parts": parts}))
             }
-            Message::Assistant { content, tool_calls } => {
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => {
                 let mut parts: Vec<Value> = content.iter().map(Self::translate_part).collect();
                 for tc in tool_calls {
                     parts.push(json!({
@@ -283,7 +293,11 @@ impl GeminiAdapter {
                 }
                 Ok(json!({"role": "model", "parts": parts}))
             }
-            Message::Tool { tool_call_id, content, is_error } => {
+            Message::Tool {
+                tool_call_id,
+                content,
+                is_error,
+            } => {
                 // Gemini's functionResponse needs the function's *name*, but
                 // tars's canonical Message::Tool only carries the
                 // `tool_call_id`. Convention: callers targeting Gemini must
@@ -369,10 +383,7 @@ impl HttpAdapter for GeminiAdapter {
 
     fn translate_request(&self, req: &ChatRequest) -> Result<Value, ProviderError> {
         let _ = req.model.explicit().ok_or_else(|| {
-            ProviderError::InvalidRequest(format!(
-                "model must be explicit, got: {:?}",
-                req.model
-            ))
+            ProviderError::InvalidRequest(format!("model must be explicit, got: {:?}", req.model))
         })?;
 
         if req.messages.is_empty() {
@@ -483,7 +494,10 @@ impl HttpAdapter for GeminiAdapter {
             return Ok(Vec::new());
         }
         let v: Value = serde_json::from_str(&raw.data).map_err(|e| {
-            ProviderError::Parse(format!("gemini sse: {e} (raw: {})", truncate(&raw.data, 200)))
+            ProviderError::Parse(format!(
+                "gemini sse: {e} (raw: {})",
+                truncate(&raw.data, 200)
+            ))
         })?;
 
         let mut out = Vec::new();
@@ -564,7 +578,9 @@ impl HttpAdapter for GeminiAdapter {
                                 text: text.to_string(),
                             });
                         } else {
-                            out.push(ChatEvent::Delta { text: text.to_string() });
+                            out.push(ChatEvent::Delta {
+                                text: text.to_string(),
+                            });
                         }
                     }
                 }
@@ -575,7 +591,10 @@ impl HttpAdapter for GeminiAdapter {
                         .and_then(|s| s.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let args = fc.get("args").cloned().unwrap_or(Value::Object(Default::default()));
+                    let args = fc
+                        .get("args")
+                        .cloned()
+                        .unwrap_or(Value::Object(Default::default()));
                     // Embed the function name in the id so that downstream
                     // Tool messages can recover it via the `<name>@<id>`
                     // convention required by `translate_message`.
@@ -654,7 +673,10 @@ impl HttpAdapter for GeminiAdapter {
             StatusCode::BAD_REQUEST => {
                 let lower = message.to_lowercase();
                 if lower.contains("token") && lower.contains("limit") {
-                    ProviderError::ContextTooLong { limit: 0, requested: 0 }
+                    ProviderError::ContextTooLong {
+                        limit: 0,
+                        requested: 0,
+                    }
                 } else {
                     ProviderError::InvalidRequest(message)
                 }
@@ -680,7 +702,10 @@ fn map_stop_reason(s: &str) -> StopReason {
 }
 
 fn parse_usage(u: &serde_json::Map<String, Value>) -> Usage {
-    let prompt = u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0);
+    let prompt = u
+        .get("promptTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let candidates = u
         .get("candidatesTokenCount")
         .and_then(|v| v.as_u64())
@@ -824,12 +849,15 @@ mod tests {
             data: r#"{"candidates":[
                 {"content":{"parts":[{"text":"a"}]},"finishReason":"STOP"},
                 {"content":{"parts":[{"text":"b"}]},"finishReason":"STOP"}
-            ]}"#.into(),
+            ]}"#
+            .into(),
         };
         let events = adapter().parse_event(&raw, &mut buf).unwrap();
         let finished = events.iter().filter(|e| e.is_terminal()).count();
         assert_eq!(finished, 1, "exactly one Finished event expected");
-        let has_b = events.iter().any(|e| matches!(e, ChatEvent::Delta { text } if text == "b"));
+        let has_b = events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::Delta { text } if text == "b"));
         assert!(!has_b, "second candidate must be ignored");
     }
 
@@ -843,7 +871,8 @@ mod tests {
                     {"text":"thinking..."},
                     {"functionCall":{"name":"search","args":{"q":"x"}}}
                 ]},"finishReason":"STOP"}
-            ]}"#.into(),
+            ]}"#
+            .into(),
         };
         let events = adapter().parse_event(&raw, &mut buf).unwrap();
         let start = events.iter().find_map(|e| match e {
@@ -886,7 +915,10 @@ mod tests {
             serde_json::json!({"type":"object"}),
         ));
         let body = adapter().translate_request(&req).unwrap();
-        assert_eq!(body["generationConfig"]["responseMimeType"], "application/json");
+        assert_eq!(
+            body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
         assert!(body["generationConfig"]["responseSchema"].is_object());
     }
 
@@ -897,7 +929,10 @@ mod tests {
             "hi",
         );
         let body = adapter().translate_request(&req).unwrap();
-        assert_eq!(body["generationConfig"]["thinkingConfig"]["thinkingBudget"], 0);
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            0
+        );
     }
 
     #[test]

@@ -23,8 +23,12 @@ pub struct Principal {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrincipalKind {
-    HumanUser { email: Option<String> },
-    ServiceAccount { description: String },
+    HumanUser {
+        email: Option<String>,
+    },
+    ServiceAccount {
+        description: String,
+    },
     /// A subprocess acting on behalf of a parent principal with a
     /// reduced scope set. Used for CLI / MCP integrations (Doc 10 §4.1).
     DelegatedSubprocess {
@@ -51,7 +55,10 @@ impl Scope {
         let mut actions = actions;
         actions.sort();
         actions.dedup();
-        Self { resource: resource.into(), actions }
+        Self {
+            resource: resource.into(),
+            actions,
+        }
     }
 }
 

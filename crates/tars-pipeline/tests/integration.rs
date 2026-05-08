@@ -24,9 +24,7 @@ use tars_pipeline::{Pipeline, RetryMiddleware, TelemetryMiddleware};
 use tars_provider::auth::basic;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::registry::ProviderRegistry;
-use tars_types::{
-    ChatEvent, ChatRequest, ModelHint, ProviderId, RequestContext, StopReason,
-};
+use tars_types::{ChatEvent, ChatRequest, ModelHint, ProviderId, RequestContext, StopReason};
 
 /// OpenAI SSE shape: `data: <json>\n\n` per chunk, terminator `data: [DONE]\n\n`.
 fn sse_body(events: &[&str]) -> String {
@@ -56,8 +54,7 @@ fn happy_path_body() -> String {
 fn registry_from_toml(toml_str: &str) -> ProviderRegistry {
     let cfg = ConfigManager::load_from_str(toml_str).expect("config parses");
     let http = HttpProviderBase::default_arc().expect("http base");
-    ProviderRegistry::from_config(&cfg.providers, http, basic())
-        .expect("registry builds")
+    ProviderRegistry::from_config(&cfg.providers, http, basic()).expect("registry builds")
 }
 
 // ── 1. Happy path ───────────────────────────────────────────────────────────
@@ -251,7 +248,11 @@ async fn registry_built_from_toml_can_drive_pipeline_call() {
     // and that builtins are also present.
     assert_eq!(registry.len(), 10);
     assert!(registry.get(&ProviderId::new("unused_mock")).is_some());
-    assert!(registry.get(&ProviderId::new("openai_under_test")).is_some());
+    assert!(
+        registry
+            .get(&ProviderId::new("openai_under_test"))
+            .is_some()
+    );
     assert!(registry.get(&ProviderId::new("mlx")).is_some());
 
     let provider = registry

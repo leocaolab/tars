@@ -61,14 +61,22 @@ impl ToolResult {
     /// Prefer [`Self::titled_success`] when the tool can produce a
     /// useful one-line summary.
     pub fn success(content: impl Into<String>) -> Self {
-        Self { title: String::new(), content: content.into(), is_error: false }
+        Self {
+            title: String::new(),
+            content: content.into(),
+            is_error: false,
+        }
     }
 
     /// Build a successful result with a short human-readable title
     /// (`"Read foo.rs"`, etc.). The title is for trajectory log /
     /// TUI readability; it is NOT sent to the LLM.
     pub fn titled_success(title: impl Into<String>, content: impl Into<String>) -> Self {
-        Self { title: title.into(), content: content.into(), is_error: false }
+        Self {
+            title: title.into(),
+            content: content.into(),
+            is_error: false,
+        }
     }
 
     /// Build a logical-failure (`is_error=true`) result with no title.
@@ -77,13 +85,21 @@ impl ToolResult {
     /// different path). Prefer [`Self::titled_error`] when a one-line
     /// summary is available.
     pub fn error(content: impl Into<String>) -> Self {
-        Self { title: String::new(), content: content.into(), is_error: true }
+        Self {
+            title: String::new(),
+            content: content.into(),
+            is_error: true,
+        }
     }
 
     /// Build a logical-failure result with a short human-readable
     /// title (`"hello.txt not found"`, etc.).
     pub fn titled_error(title: impl Into<String>, content: impl Into<String>) -> Self {
-        Self { title: title.into(), content: content.into(), is_error: true }
+        Self {
+            title: title.into(),
+            content: content.into(),
+            is_error: true,
+        }
     }
 }
 
@@ -176,9 +192,7 @@ mod tests {
             // Static so we can return a borrow.
             use std::sync::OnceLock;
             static S: OnceLock<JsonSchema> = OnceLock::new();
-            S.get_or_init(|| {
-                JsonSchema::strict("StubArgs", json!({"type": "object"}))
-            })
+            S.get_or_init(|| JsonSchema::strict("StubArgs", json!({"type": "object"})))
         }
         async fn execute(
             &self,
@@ -194,7 +208,10 @@ mod tests {
         let t: Arc<dyn Tool> = Arc::new(StubTool);
         assert_eq!(t.name(), "stub");
         assert!(t.description().contains("test tool"));
-        let r = t.execute(json!({"k": "v"}), ToolContext::default()).await.unwrap();
+        let r = t
+            .execute(json!({"k": "v"}), ToolContext::default())
+            .await
+            .unwrap();
         assert!(!r.is_error);
         assert!(r.content.contains("\"k\""));
     }
@@ -203,7 +220,10 @@ mod tests {
     fn tool_result_constructors() {
         let s = ToolResult::success("ok");
         assert!(!s.is_error);
-        assert!(s.title.is_empty(), "untitled success defaults to empty title");
+        assert!(
+            s.title.is_empty(),
+            "untitled success defaults to empty title"
+        );
         let e = ToolResult::error("nope");
         assert!(e.is_error);
         assert_eq!(e.content, "nope");

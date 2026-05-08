@@ -140,13 +140,22 @@ impl AgentMessage {
             Self::PlanIssued { plan } => {
                 format!("plan_issued({} steps)", plan.steps.len())
             }
-            Self::PartialResult { from_agent, step_id, confidence, .. } => {
+            Self::PartialResult {
+                from_agent,
+                step_id,
+                confidence,
+                ..
+            } => {
                 format!(
                     "partial_result(from={from_agent}, step={}, confidence={confidence:.2})",
                     step_id.as_deref().unwrap_or("-"),
                 )
             }
-            Self::Verdict { from_agent, target_step_id, verdict } => {
+            Self::Verdict {
+                from_agent,
+                target_step_id,
+                verdict,
+            } => {
                 let kind = match verdict {
                     VerdictKind::Approve => "approve",
                     VerdictKind::Reject { .. } => "reject",
@@ -199,7 +208,9 @@ mod tests {
 
     #[test]
     fn plan_issued_tag_is_snake_case() {
-        let msg = AgentMessage::PlanIssued { plan: sample_plan() };
+        let msg = AgentMessage::PlanIssued {
+            plan: sample_plan(),
+        };
         let v = serde_json::to_value(&msg).unwrap();
         assert_eq!(v["type"], json!("plan_issued"));
         assert!(v["plan"].is_object());
@@ -223,7 +234,9 @@ mod tests {
             (VerdictKind::Approve, "approve"),
             (VerdictKind::Reject { reason: "x".into() }, "reject"),
             (
-                VerdictKind::Refine { suggestions: vec!["a".into(), "b".into()] },
+                VerdictKind::Refine {
+                    suggestions: vec!["a".into(), "b".into()],
+                },
                 "refine",
             ),
         ];
@@ -248,7 +261,9 @@ mod tests {
     #[test]
     fn every_variant_round_trips_through_json() {
         let cases: Vec<AgentMessage> = vec![
-            AgentMessage::PlanIssued { plan: sample_plan() },
+            AgentMessage::PlanIssued {
+                plan: sample_plan(),
+            },
             AgentMessage::PartialResult {
                 from_agent: AgentId::new("a"),
                 step_id: Some("s1".into()),
@@ -269,7 +284,9 @@ mod tests {
             AgentMessage::Verdict {
                 from_agent: AgentId::new("critic"),
                 target_step_id: Some("s1".into()),
-                verdict: VerdictKind::Reject { reason: "too vague".into() },
+                verdict: VerdictKind::Reject {
+                    reason: "too vague".into(),
+                },
             },
             AgentMessage::Verdict {
                 from_agent: AgentId::new("critic"),
@@ -295,38 +312,56 @@ mod tests {
 
     #[test]
     fn is_terminal_for_orchestrator_partitions_correctly() {
-        assert!(!AgentMessage::PlanIssued { plan: sample_plan() }.is_terminal_for_orchestrator());
-        assert!(!AgentMessage::PartialResult {
-            from_agent: AgentId::new("a"),
-            step_id: None,
-            summary: "x".into(),
-            confidence: 1.0,
-        }
-        .is_terminal_for_orchestrator());
-        assert!(AgentMessage::Verdict {
-            from_agent: AgentId::new("c"),
-            target_step_id: None,
-            verdict: VerdictKind::Approve,
-        }
-        .is_terminal_for_orchestrator());
-        assert!(AgentMessage::NeedsClarification {
-            from_agent: AgentId::new("a"),
-            question: "?".into(),
-        }
-        .is_terminal_for_orchestrator());
+        assert!(
+            !AgentMessage::PlanIssued {
+                plan: sample_plan()
+            }
+            .is_terminal_for_orchestrator()
+        );
+        assert!(
+            !AgentMessage::PartialResult {
+                from_agent: AgentId::new("a"),
+                step_id: None,
+                summary: "x".into(),
+                confidence: 1.0,
+            }
+            .is_terminal_for_orchestrator()
+        );
+        assert!(
+            AgentMessage::Verdict {
+                from_agent: AgentId::new("c"),
+                target_step_id: None,
+                verdict: VerdictKind::Approve,
+            }
+            .is_terminal_for_orchestrator()
+        );
+        assert!(
+            AgentMessage::NeedsClarification {
+                from_agent: AgentId::new("a"),
+                question: "?".into(),
+            }
+            .is_terminal_for_orchestrator()
+        );
     }
 
     #[test]
     fn verdict_approves_only_for_approve_variant() {
         assert!(VerdictKind::Approve.approves());
         assert!(!VerdictKind::Reject { reason: "x".into() }.approves());
-        assert!(!VerdictKind::Refine { suggestions: vec![] }.approves());
+        assert!(
+            !VerdictKind::Refine {
+                suggestions: vec![]
+            }
+            .approves()
+        );
     }
 
     #[test]
     fn summary_is_short_and_non_panicking_for_every_variant() {
         let msgs: Vec<AgentMessage> = vec![
-            AgentMessage::PlanIssued { plan: sample_plan() },
+            AgentMessage::PlanIssued {
+                plan: sample_plan(),
+            },
             AgentMessage::PartialResult {
                 from_agent: AgentId::new("a"),
                 step_id: Some("s1".into()),
@@ -366,6 +401,9 @@ mod tests {
             "made_up_field": "x",
         });
         let result: Result<AgentMessage, _> = serde_json::from_value(v);
-        assert!(result.is_err(), "unknown variant must error, not silently drop");
+        assert!(
+            result.is_err(),
+            "unknown variant must error, not silently drop"
+        );
     }
 }

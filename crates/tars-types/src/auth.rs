@@ -26,17 +26,23 @@ pub enum Auth {
 impl Auth {
     /// Sugar: use a process env var.
     pub fn env(var: impl Into<String>) -> Self {
-        Self::Secret { secret: SecretRef::env(var) }
+        Self::Secret {
+            secret: SecretRef::env(var),
+        }
     }
 
     /// Sugar: inline plaintext (test/dev only).
     pub fn inline(value: impl Into<String>) -> Self {
-        Self::Secret { secret: SecretRef::inline(value) }
+        Self::Secret {
+            secret: SecretRef::inline(value),
+        }
     }
 
     /// Sugar: file-backed secret.
     pub fn file(path: impl Into<std::path::PathBuf>) -> Self {
-        Self::Secret { secret: SecretRef::File { path: path.into() } }
+        Self::Secret {
+            secret: SecretRef::File { path: path.into() },
+        }
     }
 
     /// True iff this Auth doesn't need to look anything up.
