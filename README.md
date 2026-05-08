@@ -1,5 +1,9 @@
 # TARS — Multi-Agent LLM Runtime
 
+[![ci](https://github.com/moomoo-tech/tars/actions/workflows/ci.yml/badge.svg)](https://github.com/moomoo-tech/tars/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](./rust-toolchain.toml)
+
 **Rust-first agent runtime supporting 8+ LLM providers, with PyO3 Python bindings, a 10-layer middleware pipeline, and observability by construction.**
 
 > **⚠️ Pre-1.0 Preview**
