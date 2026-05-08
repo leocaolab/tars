@@ -243,3 +243,6 @@ api_keys.toml
 config.local.toml
 **/config.local.toml
 
+
+# Per-run log dumps (arc.log.jsonl is the existing case; future tools may emit similar)
+*.log.jsonl
