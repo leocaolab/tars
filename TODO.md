@@ -164,14 +164,12 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **设计文档**: [Doc 15 — Output Validation](./docs/15-output-validation.md) + [Doc 16 — Evaluation Framework](./docs/16-evaluation-framework.md)
 - **拆分**(2026-05-05 review 后调整,3-wave 降低 PyO3 单点风险):
   - **Wave 1 (Rust-only Validator framework)** — ✅ shipped 2026-05-07. `OutputValidator` trait + `ValidationOutcome` enum + `ProviderError::ValidationFailed` + 3 built-in validators (JsonShape / NotEmpty / MaxLength) + `ValidationMiddleware` + `Response.validation_summary` 字段 + `RequestContext.validation_outcome` 侧信道 + 17 单元测试。详见 CHANGELOG B-20 W1 段。
-  - **Wave 2 (PyO3 binding, ~5 天)** — Python class → Rust trait callback adapter (复用 Stage 3 PyTool pattern) + `tars.OutputValidator` base class + 1 个 Python 实现的 validator 跑通 `Pipeline.complete` 端到端 + GIL release + tokio runtime 边界测试。
+  - **Wave 2 (PyO3 binding)** — ✅ shipped 2026-05-08. Python validators 通过 `[(name, callable), ...]` 挂到 `Pipeline.{from_default,from_config,from_str}`。`PyValidatorAdapter` 把 Python callback 桥接成 Rust `OutputValidator` trait；4 个 outcome pyclasses (`tars.Pass / Reject / FilterText / Annotate`)。Buggy validator (raise / wrong return type) 自动 catch 成 permanent `ValidationFailed` — worker 不会被 user-side bug 打死。17 个 pytest in `crates/tars-py/python/tests/test_validators.py`。详见 CHANGELOG B-20 W2 段。
   - **Wave 3 (ARC 接入 + Evaluation framework Doc 16, ~7.5 天)** — Doc 16 完整实施(`Evaluator` / `AsyncEvaluator` traits + `LlmCallFinished` / `EvaluationScored` events + `OnlineEvaluatorRunner` / `OfflineEvaluatorRunner` + Built-in evaluators + tars-py `tars.eval.Evaluator` base + `Pipeline.with_event_store` API + SQL templates),ARC 删 inline `_known_rule_ids` 并切到 Pipeline-attached validator + dogfood。
-- **关键设计决定 (Cache × Validator 交互, W1 实施时锁定)**:
-  - **Cache stores raw Response (pre-validation)**。Cache hit 仍跑 validator chain。
-  - 理由: validator 是 pure (同 input → 同 output, Doc 15 §3.1 trait 契约),重跑 = CPU local cost only,远比 wire round-trip 便宜。
-  - 多 caller 共享 cache 安全 — 不同 validator 配置不无效化 cache。
-  - 改 validator 不改 cache key — 后期改是 SemVer break。
-  - **Validator failure NOT bypass cache** — 失败的 raw response 仍存进 cache。重复 cache hit 跑同 validator 仍稳定失败 (validator pure)。caller 想 force-fresh 用显式 `skip_cache=True` kwarg (future)。这条避免 cache-poisoning 焦虑同时保持 trait 契约干净。W1 doc 必须明写。
+- **关键设计决定 (Cache × Validator 交互, W1 实施时锁定 — ⚠️ 实现与设计不一致，W4 修复)**:
+  - **设计意图**: Cache stores raw Response (pre-Filter)。Cache hit 仍跑 validator chain。validator 是 pure，重跑 = CPU local cost only，远比 wire round-trip 便宜。多 caller 共享 cache 安全。改 validator 不改 cache key。Validator failure NOT bypass cache。
+  - **W1 实现的 bug** (arc 2026-05-08 dogfood flag 引发的 audit 找到): `ValidationMiddleware` Filter 时把 stream re-emit 成 post-Filter events (`validation.rs:225-232`)，cache 看到的就是 post-Filter 流。**任何 Filter validator + Cache 同时存在 → cache 存的不是 raw**。multi-caller 不同 validator 链 → silent corruption；单链情况下 cache 也永远拿不回 raw。Side channel `rec.filtered_response` 已经存在但被冗余化了。
+  - **修复 → 见 B-20.W4**。在那之前，arc / 任何 multi-role consumer 必须 per-role 独立 Pipeline 实例，不要复用同一 Pipeline + 不同 validator 链。
 - **Why 这个排在 B-16 / B-17 / B-19 前面**:
   - ARC dogfood (2026-05-04 / 05) 暴露的两类痛点都在这里解：(a) 模型造 rule_id / 漏 evidence tag → validation；(b) "metrics 突然掉了我们看看怎么回事" → evaluation。
   - ARC 现在 inline 实现了 `_known_rule_ids` post-filter (见 ARC commit `1fe6cbc`)，是 v1 validation 的占位实现 — 等 Doc 15 落地直接 migrate 出来。
@@ -184,6 +182,44 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **LangSmith borrow points (落进 W1.1 / W2.1 一起做,不单独 backlog)**:
   - **Tags 字段** — `LlmCallFinished.tags: Vec<String>` + `EvaluationScored.tags: Vec<String>`,事件 schema 一开始就带,默认空。caller 通过 `RequestContext::with_tags()` / `Session::tagged()` helper 打标。Cohort 分析靠 `WHERE 'dogfood_2026_05_05' IN tags` 一句 SQL,远比每加一种过滤维度加一个事件字段干净。
   - **OnlineEvaluatorRunner sampling 配置** — `EvaluatorSampling::{Always, Rate(f64), Stratified, OnDimDrop}` 四种模式。`Always` 是 deterministic evaluator 默认；`OnDimDrop { watch_dim, threshold }` 是 LangSmith 没有的智能采样——便宜 evaluator 持续跑,贵的(LLM-as-judge)只在另一个 dim 掉到阈值下时触发,**节省 LLM-judge 的真钱**。OnDimDrop 写进 trait,即使 v1 默认 `Always`,接口为未来留位。
+
+### B-20.v3. Python `Response.validation_summary` 暴露 — ⭐ arc dogfood 报表回归门必需 (~1h)
+- **现状**: Rust 侧 `ChatResponse.validation_summary: ValidationSummary { outcomes: BTreeMap, validators_run: Vec, total_wall_ms: u64 }` 已经填好。Python `Response` pyclass **没暴露**这个字段。caller 只能从 `r.telemetry.layers` 看到 "validation 跑没跑过"，看不到哪些 validator / 谁 dropped 多少 / 多少 wall time。
+- **shape**:
+  - 在 `tars-py/src/lib.rs` 的 `Response` 上加 `validation_summary` getter，返回 frozen pyclass `ValidationSummary{validators_run: list[str], outcomes: dict[str, dict], total_wall_ms: int}`。`outcomes[name]` = `{"outcome": "pass"|"filter"|"annotate", "dropped"?: list[str], "metrics"?: dict}`。
+  - 跟 `Telemetry` 同样模式 — frozen pyclass, get_all。
+- **预估**: ~1 小时。从 `ChatResponse.validation_summary` → PyValidationSummary 的纯映射。
+- **Trigger**: arc Tier 1 #1 (snippet validator) 落地后立刻 ship。没它 cross-run 比较 "snippet validator 丢了几条" 拿不出数。dogfood 报表的 metrics 列、ship signal 全卡这。
+- **依赖**: 无。
+- **由来**: arc 2026-05-08 反馈。
+
+### B-20.v2. Typed `ValidationOutcome::Reject { reason: ValidationReason }` — ⭐ unblocks arc parse→structured pipeline (1-2 d)
+- **现状 (W1+W2 shipped 后)**: `Reject { reason: String, retriable: bool }` — string-only。Python 侧 `TarsProviderError(kind="validation_failed", is_retriable=bool)` 只把 reason 字符串塞进 message。caller 没法 programmatic match 失败原因。
+- **inconsistency**: B-31 v4 已经把 `CompatibilityReason{kind, message, detail_json}` 做成 typed enum + structured detail。validator 失败也该一致 — 不然 fix-stage 又得 grep `e.message`，回到 B-31 v1 那种字符串脆弱契约。
+- **shape**:
+  - 引入 `ValidationReason` enum (`#[non_exhaustive]`)：`JsonShape{json_path, parse_error}` / `NotEmpty{field}` / `MaxLength{field, length, max}` / `Custom{kind: String, message: String, detail: Option<serde_json::Value>}`。
+  - 内置 validator 用对应 typed variant；Python user-side validator 走 `Custom` (caller 给 kind+message+detail)。
+  - Python 兼容入口: `tars.Reject(reason=str)` 自动包成 `Custom{kind="user", message=reason, detail=None}`；新增 `tars.Reject.typed(kind, message, detail=None)` 显式 typed 路径。
+  - `ProviderError::ValidationFailed { validator, reason: ValidationReason, retriable }`；Python `TarsProviderError` 加 `validation_reason: dict` 属性 (`{kind, message, detail}`) 给 caller programmatic 访问。
+- **预估**: 1-2 天。改动跨 `tars-types/validation.rs` + `tars-pipeline/validation.rs` + 3 builtin + `tars-py/{validation.rs, errors.rs}`。需要 deprecate-not-break 现有 `reason: str` 入口。
+- **Trigger**: arc 开 Tier 2 #4 (parse → structured pipeline) 之前必须 ship。Tier 1 #1/#2/#3 用 FilterText 路径不阻塞，可以并行落。
+- **依赖**: 无。
+- **由来**: arc 2026-05-08 反馈，详见 conversation log。
+
+### B-20.W4. Cache × Filter validator silent corruption fix — ⚠️ 真 bug (~半天)
+- **bug**: `ValidationMiddleware` 在 Filter 改写 response 后 re-emit post-Filter events (`tars-pipeline/src/validation.rs:225-232`)，因为 onion 顺序是 `Telemetry → CacheLookup → Retry → Validation → Provider`，Cache 看到的是 ValidationMiddleware re-emit 之后的 stream。**任何 Filter validator + Cache 同时存在 → cache 存的就是 post-Filter 版本，不是设计意图的 raw。**
+- **后果**:
+  - multi-caller 不同 validator 链共享同一 Pipeline + cache: 第二个 caller cache hit 拿到的是第一个 caller filter 过的内容 — silent corruption。
+  - 单 validator 链情况下: cache 永远拿不回 raw response，"换 validator 配置 cache 仍有效" 这条 W1 设计契约破。
+  - W1 doc 写的 "Cache stores raw Response (pre-validation)" 与实现不一致 — arc 之前是按 doc 设计架构的，所以 Tier 1 #1 落地前必须修。
+- **fix shape (一行级修改 — side-channel 已经在了)**:
+  - `ValidationMiddleware::call` 始终 re-emit `events_held` (raw events，line 234 那条 branch)，去掉 line 225 的 `if filtered_any { ... }` 分支。
+  - Filter 后的 response 已经通过 `rec.filtered_response = Some(response.clone())` (line 217) 走 side-channel publish 给 outer caller。outer caller (tars-py 的 `run_complete`) 已经在用这个 side channel — 让它优先用 side-channel 的 filtered version 替代从 stream rebuild 的 response。
+  - 配套 unit test: 加一个 "Filter + Cache" 组合 test — 第一次调 cache miss、第二次调 cache hit，断言两次的 raw cached events 一致 (post-Filter 不能漏进 cache)。
+- **预估**: ~半天。修改 ≤20 行 + 新加 1 个 integration test。
+- **Trigger**: arc Tier 1 #1 (snippet validator) ship 之前必须修，否则 arc dogfood 第一天就踩。
+- **依赖**: 无。
+- **由来**: arc 2026-05-08 raised "single-validator-chain assumption" flag → tars 端 audit (本次 conversation) 发现是真 bug 不是 doc-only 收紧问题。
 
 ### B-19. `tars-tui` — interactive terminal UI (path C: build-our-own, not fork-codex)
 - **Where**: New crate `crates/tars-tui/` (doesn't exist yet). Consumer of `tars-runtime::Session` + `tars-pipeline::Pipeline`. ratatui-based.
