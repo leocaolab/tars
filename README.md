@@ -2,6 +2,12 @@
 
 **Rust-first agent runtime supporting 8+ LLM providers, with PyO3 Python bindings, a 10-layer middleware pipeline, and observability by construction.**
 
+> **⚠️ Pre-1.0 Preview**
+>
+> Public for transparency, code review, and design feedback — not for broader adoption yet. **No community campaign, no announcement, no roadshow** has happened or is planned before v1.0; star and fork counts are intentionally low at this stage. The only way someone is reading this README right now is targeted (peer review, hiring evaluation, or curiosity from an adjacent project), not organic discovery.
+>
+> Track the [Releases page](../../releases) for the v1.0 announcement, which will include a stability commitment, migration guide, and a proper README rewrite for a broader audience. Until then, expect breaking API changes between minor versions, and don't put TARS on a critical production path unless you're prepared to follow `main` closely.
+
 > **Status (2026-05, v0.2.0):** M0–M7 shipped (types / config / provider / pipeline / cache / runtime / tools). M8 (`tars-py`) in progress — `Provider`, `Pipeline`, `Session`, `CapabilityRequirements`, `CompatibilityResult`, and Python output validators (Pass / Reject / FilterText / Annotate) all exposed. Workspace builds clean on stable Rust 1.85+ with `cargo clippy -Dwarnings` green. See [CHANGELOG.md](./CHANGELOG.md) for per-milestone shipped detail.
 
 ---
@@ -124,9 +130,7 @@ def must_be_json(req, resp):
         json.loads(resp["text"])
         return tars.Pass()
     except ValueError as e:
-        # retriable=True triggers Retry middleware (re-asks the model);
-        # retriable=False surfaces immediately as a permanent error.
-        return tars.Reject(reason=str(e), retriable=True)
+        return tars.Reject(reason=str(e))
 
 def strip_pii(req, resp):
     return tars.FilterText(text=resp["text"].replace(EMAIL, "[REDACTED]"))
@@ -137,7 +141,9 @@ p = tars.Pipeline.from_default("anthropic", validators=[
 ])
 ```
 
-Buggy validators (raising or returning the wrong type) are caught and translated into a permanent `TarsProviderError(kind="validation_failed")` — the worker is never crashed by user-side bugs. ([Doc 15](./docs/15-output-validation.md))
+`tars.Reject` is always classified as `Permanent` — `RetryMiddleware` does not retry on validation failures (same prompt → same model → same output; model retry on validation failure is a near-pure gamble that doesn't belong inside the runtime). Callers that want a model resample on validation failure catch `TarsProviderError(kind="validation_failed")` at their own layer with explicit prompt variation.
+
+Buggy validators (raising or returning the wrong type) are caught and translated into the same permanent `TarsProviderError` — the worker is never crashed by user-side bugs. ([Doc 15](./docs/15-output-validation.md))
 
 ---
 
