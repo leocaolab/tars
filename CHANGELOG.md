@@ -322,7 +322,7 @@ Shipped: typed pyclass as the single source of truth.
 
 ### B-20 Wave 1 — Rust-only Validator framework (`<unreleased>`)
 
-Implements [Doc 15 — Output Validation](./docs/architecture/15-output-validation.md)
+Implements [Doc 15 — Output Validation](./docs/architecture/zh/15-output-validation.md)
 Wave 1 (Rust side; PyO3 binding lands in W2). After-call validators
 run between Retry and Provider; rejections surface as
 `ProviderError::ValidationFailed` and bubble through normal
@@ -1057,7 +1057,7 @@ milestone Doc 14 §9 specifies.
   `tars-cli/src/dispatch.rs` module so future subcommands (`tars chat`)
   flatten the same `DispatchArgs` and can't drift on flag semantics.
 - **`AgentMessage` typed inter-agent envelope** (`5d0d2a5`) — Doc 04
-  §4.2's "禁止纯文本互喷" piece. 4 variants chosen for concrete
+  §4.2's "no plaintext cross-talk" piece. 4 variants chosen for concrete
   near-term consumers: `PlanIssued{plan}`,
   `PartialResult{from_agent, step_id, summary, confidence}`,
   `Verdict{from_agent, target_step_id, verdict: VerdictKind}`,

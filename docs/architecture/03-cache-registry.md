@@ -1,82 +1,82 @@
-# 文档 03 — Cache Registry
+# Doc 03 — Cache Registry
 
-> 范围：定义 LLM 响应缓存的三级架构（L1 进程内 / L2 Redis / L3 Provider explicit cache）、Key 构造、租户隔离、stampede 防护、主动回收（Janitor）。
+> Scope: defines the three-tier architecture of the LLM response cache (L1 in-process / L2 Redis / L3 Provider explicit cache), key construction, tenant isolation, stampede protection, and active reclamation (Janitor).
 >
-> 上游：被 Doc 02 §4.4 的 `CacheLookupMiddleware` 调用。
+> Upstream: invoked by `CacheLookupMiddleware` in Doc 02 §4.4.
 >
-> 下游：消费 Doc 01 §10 的 `ExplicitCacheProvider` sub-trait 管理 Provider 侧缓存对象。
+> Downstream: consumes the `ExplicitCacheProvider` sub-trait from Doc 01 §10 to manage Provider-side cache objects.
 
 ---
 
-## 1. 设计目标
+## 1. Design Goals
 
-| 目标 | 说明 |
+| Goal | Description |
 |---|---|
-| **租户绝对隔离** | 不同 tenant_id / IAM scope 的请求即使 prompt 相同，cache key 也必须不同 |
-| **三级抽象统一** | L1 / L2 / L3 三层在调用方看来是同一接口，差异在 Registry 内部 |
-| **零穿透** | Singleflight 保证同一 key 的并发请求只会有一次到达 Provider |
-| **主动止损** | 不依赖 Provider TTL 自动过期，Janitor 主动 delete 控制成本 |
-| **流式友好** | Cache write 异步执行，不阻塞响应返回 |
-| **可观测** | 每次 lookup / hit / miss / write / evict 都有 metric |
-| **可逆** | 任何缓存操作都不能破坏数据正确性——缓存损坏时降级为 miss，不阻断业务 |
+| **Absolute tenant isolation** | Requests from different tenant_id / IAM scope must produce different cache keys, even with identical prompts |
+| **Unified three-tier abstraction** | L1 / L2 / L3 expose the same interface to callers; differences are internal to the Registry |
+| **Zero passthrough** | Singleflight ensures concurrent requests for the same key result in only one Provider call |
+| **Active loss prevention** | Don't rely on Provider TTL auto-expiry; Janitor actively deletes to control cost |
+| **Stream-friendly** | Cache writes execute asynchronously, never blocking response return |
+| **Observable** | Every lookup / hit / miss / write / evict emits metrics |
+| **Reversible** | No cache operation may corrupt data correctness — when the cache is broken, degrade to miss, never block business |
 
-**反目标**：
-- 不做语义缓存（embedding 相似度匹配）——精度不可控，租户隔离做不干净，留给上层业务自己决定
-- 不缓存 stream 中途的部分响应——只缓存完整成功的响应
-- 不在 Cache 层做 IAM 决策——Cache Key 已经包含 IAM scope，Cache 只认 Key
-- 不向上层暴露 L3 Provider cache 的 raw handle——必须经过 Registry 包装
+**Anti-goals**:
+- No semantic caching (embedding similarity matching) — accuracy is uncontrollable, tenant isolation can't be done cleanly, leave it to upper-layer business
+- Don't cache partial mid-stream responses — only cache complete successful responses
+- Don't make IAM decisions in the Cache layer — the Cache Key already encodes IAM scope; Cache only recognizes Keys
+- Don't expose L3 Provider cache raw handles to upper layers — must go through Registry wrapping
 
 ---
 
-## 2. 三级缓存模型
+## 2. Three-Tier Cache Model
 
-### 2.1 层级定位
+### 2.1 Layer Positioning
 
-| 层 | 介质 | 范围 | 命中延迟 | TTL 典型值 | 命中收益 | 失效成本 |
+| Layer | Medium | Scope | Hit Latency | Typical TTL | Hit Benefit | Invalidation Cost |
 |---|---|---|---|---|---|---|
-| **L1** | 进程内 `moka` LRU | 单实例 | <100µs | 5-15 min | 完全跳过网络 | 进程重启全失 |
-| **L2** | Redis | 集群共享 | 1-3 ms | 1-24 h | 跳过 LLM API | 跨实例同步成本 |
-| **L3** | Provider 侧 (Gemini cachedContent / Anthropic cache_control / OpenAI 隐式) | 单 Provider 账号 | 走完整网络但减少 input token 计费 | 5min - 1h | 大幅降低 input token 成本 | 仍要付 output 成本和延迟 |
+| **L1** | In-process `moka` LRU | Single instance | <100µs | 5-15 min | Skip network entirely | Lost on process restart |
+| **L2** | Redis | Cluster-shared | 1-3 ms | 1-24 h | Skip LLM API | Cross-instance sync cost |
+| **L3** | Provider-side (Gemini cachedContent / Anthropic cache_control / OpenAI implicit) | Single Provider account | Full network round-trip but reduced input token billing | 5min - 1h | Significant input token cost reduction | Still pays output cost and latency |
 
-**重要观察**：
-- L1 和 L2 缓存的是**完整响应**——hit 时 Provider 不被调用
-- L3 缓存的是**输入 prefix**——hit 时 Provider 仍被调用，只是 input token 不全额计费
-- L3 必须显式管理（创建、引用、删除），L1/L2 是透明 KV
-- 三层不是包含关系，是互补关系：L1/L2 命中跳过 LLM，L3 命中减半成本但仍走 LLM（适合每次输入不同但 system prompt 巨大的场景）
+**Key observations**:
+- L1 and L2 cache the **complete response** — on hit, the Provider is not invoked
+- L3 caches the **input prefix** — on hit, the Provider is still invoked, only input tokens aren't fully billed
+- L3 must be explicitly managed (create, reference, delete); L1/L2 are transparent KV
+- The three layers are not nested but complementary: L1/L2 hits skip the LLM, L3 hits halve cost but still call the LLM (suitable when each input differs but the system prompt is huge)
 
-### 2.2 选择策略
+### 2.2 Selection Strategy
 
-不是所有请求都适合走全部三层：
+Not every request is suited to all three layers:
 
-| 请求特征 | L1 | L2 | L3 |
+| Request profile | L1 | L2 | L3 |
 |---|---|---|---|
-| 短 prompt + 高频重复 (FAQ) | ✅ | ✅ | ❌ 不必要 |
-| 长 system prompt + 多轮对话 | ❌ 多轮变化大 | ❌ 同上 | ✅ system prompt 复用 |
-| 长 RAG context + 单次推理 | ❌ context 唯一 | ❌ 同上 | ✅ 如果 context 重复 |
-| temperature > 0 的创意生成 | ❌ 缓存伤害多样性 | ❌ 同上 | ✅ 仍可省 input cost |
-| Tool use 链式调用中间步骤 | ✅ 严格 deterministic | ✅ | ❌ 通常 prefix 短 |
+| Short prompt + high-frequency repeats (FAQ) | ✅ | ✅ | ❌ unnecessary |
+| Long system prompt + multi-turn dialog | ❌ multi-turn varies | ❌ same | ✅ system prompt reuse |
+| Long RAG context + single inference | ❌ context unique | ❌ same | ✅ if context repeats |
+| temperature > 0 creative generation | ❌ caching hurts diversity | ❌ same | ✅ still saves input cost |
+| Tool use chained intermediate steps | ✅ strictly deterministic | ✅ | ❌ prefix typically short |
 
-策略由 `CachePolicy` 表达，跟随请求传入：
+The strategy is expressed via `CachePolicy`, passed in with the request:
 
 ```rust
 pub struct CachePolicy {
     pub l1: bool,
     pub l2: bool,
     pub l3: bool,
-    pub l1_ttl: Option<Duration>,   // None = 用默认
+    pub l1_ttl: Option<Duration>,   // None = use default
     pub l2_ttl: Option<Duration>,
     pub l3_ttl: Option<Duration>,
 }
 
 impl Default for CachePolicy {
     fn default() -> Self {
-        // 默认开 L1+L2,L3 由请求显式开
+        // L1+L2 on by default, L3 must be explicitly enabled per request
         Self { l1: true, l2: true, l3: false, l1_ttl: None, l2_ttl: None, l3_ttl: None }
     }
 }
 ```
 
-调用方（通常是 Agent Runtime）通过 `RequestContext::attributes` 传入：
+Callers (typically the Agent Runtime) pass it via `RequestContext::attributes`:
 
 ```rust
 ctx.attributes.insert("cache.policy".into(), CachePolicy { l3: true, ..Default::default() }.into());
@@ -84,29 +84,29 @@ ctx.attributes.insert("cache.policy".into(), CachePolicy { l3: true, ..Default::
 
 ---
 
-## 3. Cache Key 构造
+## 3. Cache Key Construction
 
-### 3.1 致命的反例
+### 3.1 The Fatal Anti-Example
 
-最容易出的 IDOR 漏洞：
+The easiest IDOR vulnerability to introduce:
 
 ```rust
-// ❌ 错误：仅哈希 prompt
+// ❌ Wrong: hash only the prompt
 let key = sha256(format!("{}{}{}", system, user_msg, model));
 ```
 
-这意味着：实习生 B 与总监 A 各自请求同一段开源代码 review，cache key 完全相同。如果代码在某次请求中被替换为机密代码，B 会读到 A 的机密分析。**前面对话中讨论的核心安全问题**。
+This means: intern B and director A independently request a review of the same open-source code, and the cache keys are identical. If the code in some request was swapped for confidential code, B will read A's confidential analysis. **The core security issue discussed earlier**.
 
-### 3.2 正确的 Key 构造
+### 3.2 Correct Key Construction
 
 ```rust
 pub struct CacheKey {
-    pub fingerprint: [u8; 32],     // 最终的 SHA-256
-    pub debug_label: String,        // 仅用于日志,不参与匹配
+    pub fingerprint: [u8; 32],     // final SHA-256
+    pub debug_label: String,        // logging only, not part of matching
 }
 
 pub struct CacheKeyFactory {
-    hasher_version: u32,            // bump 这个值可以一键失效全部缓存
+    hasher_version: u32,            // bumping this invalidates all caches at once
 }
 
 impl CacheKeyFactory {
@@ -117,12 +117,12 @@ impl CacheKeyFactory {
     ) -> Result<CacheKey, CacheError> {
         let mut h = Sha256::new();
         
-        // —— 隔离域 (必须前置) ——
+        // —— isolation domain (must come first) ——
         h.update(self.hasher_version.to_le_bytes());
         h.update(b"\0TENANT\0");
         h.update(ctx.tenant_id.as_bytes());
         
-        // IAM scopes 必须参与哈希,且要规范化排序
+        // IAM scopes must participate in the hash, with canonical sorting
         let scopes: &Vec<String> = ctx.attributes.get("iam.allowed_scopes")
             .ok_or(CacheError::MissingIamScopes)?
             .downcast_ref()
@@ -135,25 +135,25 @@ impl CacheKeyFactory {
             h.update(b"\0");
         }
         
-        // —— 模型身份 ——
+        // —— model identity ——
         h.update(b"\0MODEL\0");
         match &req.model {
             ModelHint::Explicit(name) => h.update(name.as_bytes()),
             ModelHint::Tier(tier) => {
-                // Tier 不能直接哈希,必须先经过 Routing 解析为 Explicit
+                // Tier cannot be hashed directly; must be resolved to Explicit by Routing first
                 return Err(CacheError::UnresolvedModel);
             }
             ModelHint::Ensemble(_) => {
-                // Ensemble 通常不该缓存
+                // Ensemble typically should not be cached
                 return Err(CacheError::UncacheableRequest);
             }
         }
         
-        // —— 决定输出的请求参数 ——
+        // —— output-determining request parameters ——
         h.update(b"\0PARAMS\0");
-        // temperature > 0 时,理论上每次输出都不同 → 不应缓存
-        // 但很多调用方不显式设 temperature,默认值由 Provider 决定
-        // 策略：temperature 显式为 0 才进入缓存,其他全部跳过
+        // When temperature > 0, output theoretically differs each call → should not cache
+        // But many callers don't explicitly set temperature; the default is Provider-decided
+        // Policy: only cache when temperature is explicitly 0; skip everything else
         match req.temperature {
             Some(t) if t == 0.0 => h.update(b"t=0"),
             _ => return Err(CacheError::NonDeterministic),
@@ -171,7 +171,7 @@ impl CacheKeyFactory {
             h.update(stop.as_bytes());
         }
         
-        // —— 内容 ——
+        // —— content ——
         h.update(b"\0SYSTEM\0");
         if let Some(sys) = &req.system {
             h.update(sys.as_bytes());
@@ -179,10 +179,10 @@ impl CacheKeyFactory {
         
         h.update(b"\0MESSAGES\0");
         for msg in &req.messages {
-            hash_message(&mut h, msg);   // 规范化序列化
+            hash_message(&mut h, msg);   // canonical serialization
         }
         
-        // Tools schema 也影响输出
+        // Tools schema also affects output
         if !req.tools.is_empty() {
             h.update(b"\0TOOLS\0");
             let tools_canonical = serde_json::to_vec(&req.tools).map_err(CacheError::Serialize)?;
@@ -208,14 +208,14 @@ impl CacheKeyFactory {
 }
 ```
 
-**强制规则**：
-1. **`hasher_version`** 是第一个进入哈希的字节——bump 这个常量可以一键作废全部 L1/L2 缓存（用于发现哈希算法 bug 时的紧急止血）
-2. **TENANT + SCOPES 必须前置**——逻辑上是命名空间，把它们前置放有助于 debug 时通过原始字节流定位问题
-3. **每个字段用 `\0` 分隔符 + 字段名 tag**——防止字段拼接歧义攻击（"abc" + "def" vs "ab" + "cdef"）
-4. **temperature ≠ 0 直接拒绝缓存**——非确定性输出缓存毫无意义
-5. **ModelHint 必须是 Explicit**——上游 Routing 层负责解析。这意味着 Cache Lookup 必须在 Routing 之后？不——前面 Doc 02 是 Cache 在 Routing 之前。**解决方案**：cache lookup 时只用 ModelHint::Tier 算"租户级 hint key"，命中要求是租户内任何 Explicit 模型都能服务该 Tier；二级精确匹配在 Routing 之后再做。详见 §4.2
+**Mandatory rules**:
+1. **`hasher_version`** is the first byte fed into the hash — bumping this constant invalidates all L1/L2 caches at once (used as emergency stop-loss when a hash bug is found)
+2. **TENANT + SCOPES must come first** — they are logically the namespace; placing them up front aids debugging by raw-byte-stream localization
+3. **Each field uses a `\0` separator + field-name tag** — prevents field concatenation ambiguity attacks ("abc" + "def" vs "ab" + "cdef")
+4. **temperature ≠ 0 rejects caching outright** — caching non-deterministic output is meaningless
+5. **ModelHint must be Explicit** — upstream Routing is responsible for resolution. Does this mean Cache Lookup must happen after Routing? No — Doc 02 places Cache before Routing. **Solution**: at cache lookup time, use only `ModelHint::Tier` to compute a "tenant-level hint key"; a hit requires that any Explicit model within the tenant's Tier can serve it; precise secondary matching is done after Routing. See §4.2
 
-### 3.3 Message 规范化
+### 3.3 Message Canonicalization
 
 ```rust
 fn hash_message(h: &mut Sha256, msg: &Message) {
@@ -231,7 +231,7 @@ fn hash_message(h: &mut Sha256, msg: &Message) {
             for block in content {
                 hash_content_block(h, block);
             }
-            // tool_calls 必须按 id 排序
+            // tool_calls must be sorted by id
             let mut sorted = tool_calls.clone();
             sorted.sort_by(|a, b| a.id.cmp(&b.id));
             for call in &sorted {
@@ -240,7 +240,7 @@ fn hash_message(h: &mut Sha256, msg: &Message) {
                 h.update(b"\0");
                 h.update(call.name.as_bytes());
                 h.update(b"\0");
-                // arguments 是 JSON,必须规范化(键排序)
+                // arguments is JSON, must be canonical (keys sorted)
                 let canonical = canonical_json(&call.arguments);
                 h.update(&canonical);
             }
@@ -267,33 +267,33 @@ fn hash_content_block(h: &mut Sha256, block: &ContentBlock) {
             h.update(b"\0IMG\0");
             h.update(mime.as_bytes());
             h.update(b"\0");
-            // 不哈希原始图像字节(可能 MB 级),哈希 SHA-256 摘要
+            // Don't hash raw image bytes (potentially MB-scale); hash the SHA-256 digest
             h.update(data.content_hash());
         }
     }
 }
 ```
 
-**JSON 规范化**：必须用确定性序列化（键排序、无空格、固定数字格式），否则 `{"a":1,"b":2}` 和 `{"b":2,"a":1}` 会产生不同的 hash。Rust 生态用 `serde_json::to_string_pretty` **不可以**——用 `canonical_json` crate 或自己实现 RFC 8785。
+**JSON canonicalization**: must use deterministic serialization (sorted keys, no whitespace, fixed numeric format), otherwise `{"a":1,"b":2}` and `{"b":2,"a":1}` produce different hashes. In the Rust ecosystem, `serde_json::to_string_pretty` is **not** acceptable — use the `canonical_json` crate or implement RFC 8785 yourself.
 
 ---
 
-## 4. CacheRegistry 抽象
+## 4. CacheRegistry Abstraction
 
-### 4.1 核心 trait
+### 4.1 Core trait
 
 ```rust
 #[async_trait]
 pub trait CacheRegistry: Send + Sync {
-    /// 多级查找 (L1 → L2)
-    /// L3 不在此接口,L3 通过 lookup_l3_handle 单独查
+    /// Multi-tier lookup (L1 → L2)
+    /// L3 is not in this interface; query L3 separately via lookup_l3_handle
     async fn lookup(
         &self,
         key: &CacheKey,
         policy: &CachePolicy,
     ) -> Result<Option<CachedResponse>, CacheError>;
     
-    /// 写入 L1 + L2
+    /// Write to L1 + L2
     async fn write(
         &self,
         key: CacheKey,
@@ -302,14 +302,14 @@ pub trait CacheRegistry: Send + Sync {
         metadata: WriteMetadata,
     ) -> Result<(), CacheError>;
     
-    /// 查找适配当前请求的 L3 handle (Provider 侧 cache)
+    /// Look up an L3 handle (Provider-side cache) suited to the current request
     async fn lookup_l3_handle(
         &self,
         key: &CacheKey,
         provider: &ProviderId,
     ) -> Result<Option<ProviderCacheHandle>, CacheError>;
     
-    /// 注册新创建的 L3 handle
+    /// Register a newly created L3 handle
     async fn register_l3_handle(
         &self,
         key: CacheKey,
@@ -317,10 +317,10 @@ pub trait CacheRegistry: Send + Sync {
         owner: SessionId,
     ) -> Result<(), CacheError>;
     
-    /// 显式失效 (用于上游业务变更触发)
+    /// Explicit invalidation (triggered by upstream business changes)
     async fn invalidate(&self, key: &CacheKey) -> Result<(), CacheError>;
     
-    /// 租户级清理 (合规删除,GDPR 等)
+    /// Tenant-level purge (compliance deletion, GDPR, etc.)
     async fn purge_tenant(&self, tenant: &TenantId) -> Result<u64, CacheError>;
 }
 
@@ -328,7 +328,7 @@ pub struct CachedResponse {
     pub response: ChatResponse,
     pub cached_at: SystemTime,
     pub origin_provider: ProviderId,
-    pub original_usage: Usage,        // 原始消耗,用于"省了多少钱"统计
+    pub original_usage: Usage,        // original consumption, for "how much money saved" stats
 }
 
 pub struct WriteMetadata {
@@ -337,41 +337,41 @@ pub struct WriteMetadata {
 }
 ```
 
-### 4.2 解决 ModelHint 二阶段问题
+### 4.2 Resolving the Two-Phase ModelHint Problem
 
-Cache Lookup 在 Routing 之前发生（Doc 02 的层序），此时 `req.model` 还是 `ModelHint::Tier(...)`。两阶段查找：
+Cache Lookup happens before Routing (per Doc 02's layer ordering); at this point `req.model` is still `ModelHint::Tier(...)`. Two-phase lookup:
 
 ```rust
 async fn lookup(&self, key: &CacheKey, policy: &CachePolicy) 
     -> Result<Option<CachedResponse>, CacheError> 
 {
-    // 阶段 1：按 Tier 查"该租户内任意模型的响应"
+    // Phase 1: query "responses from any model within this tenant" by Tier
     if let Some(cached) = self.l1.get_by_tier_key(&key.tier_fingerprint).await {
-        // 命中条件：缓存的响应来自当前 Tier 包含的某个 Explicit 模型
+        // Hit condition: cached response originates from some Explicit model contained by the current Tier
         return Ok(Some(cached));
     }
     // ...
 }
 ```
 
-**两个独立的 hash**：
-- `tier_fingerprint`：用 Tier 名计算（"reasoning" / "fast"），租户内 Tier 级共享
-- `explicit_fingerprint`：用 Explicit model 计算，精确匹配
+**Two independent hashes**:
+- `tier_fingerprint`: computed using the Tier name ("reasoning" / "fast"), shared at Tier level within a tenant
+- `explicit_fingerprint`: computed using the Explicit model, exact match
 
-**两套都存**。Lookup 阶段先查 tier_fingerprint，命中即返回（接受 Tier 内任意模型的响应）；Write 阶段同时写两套 key。这样：
-- Routing 选哪个具体模型不影响命中率
-- 不同 Tier 的请求互不污染（reasoning 缓存不会被 fast 命中）
+**Both are stored**. Lookup queries `tier_fingerprint` first and returns on hit (accepts a response from any model in the Tier); Write writes both keys simultaneously. This way:
+- Whichever specific model Routing picks doesn't affect hit rate
+- Requests across Tiers don't pollute each other (a reasoning cache won't be hit by fast)
 
-代价：cache 体积翻倍。考虑到响应通常 1-10KB，可接受。
+Cost: cache size doubles. Given responses are typically 1-10KB, this is acceptable.
 
-### 4.3 多级查找流程
+### 4.3 Multi-Tier Lookup Flow
 
 ```rust
 impl CacheRegistry for DefaultCacheRegistry {
     async fn lookup(&self, key: &CacheKey, policy: &CachePolicy)
         -> Result<Option<CachedResponse>, CacheError>
     {
-        // 健康度检查：缓存损坏时降级为 miss,不阻断业务
+        // Health check: when cache is broken, degrade to miss; never block business
         let with_fallback = |result: Result<Option<CachedResponse>, CacheError>| {
             match result {
                 Ok(v) => Ok(v),
@@ -395,7 +395,7 @@ impl CacheRegistry for DefaultCacheRegistry {
         if policy.l2 {
             if let Some(cached) = with_fallback(self.l2.get(key).await)? {
                 self.metrics.record_hit(CacheLevel::L2, &cached);
-                // 回填 L1
+                // Backfill L1
                 if policy.l1 {
                     self.l1.put(key.clone(), cached.clone(), policy.l1_ttl_or_default()).await;
                 }
@@ -409,18 +409,18 @@ impl CacheRegistry for DefaultCacheRegistry {
 }
 ```
 
-**关键决策**：
-- **缓存错误绝不传染业务**——Redis 宕机时 lookup 返回 None，请求继续走 Provider，告警但不阻断
-- **L2 命中回填 L1**——下次同实例命中无需走 Redis
-- **错误也要采样**——`record_lookup_error` 推动 SRE 关注
+**Key decisions**:
+- **Cache errors must never contaminate business** — when Redis is down, lookup returns None, the request continues to the Provider; alert but don't block
+- **L2 hits backfill L1** — next hit on the same instance skips Redis
+- **Errors are also sampled** — `record_lookup_error` drives SRE attention
 
 ---
 
-## 5. Cache Write 策略
+## 5. Cache Write Strategy
 
-### 5.1 写入时机
+### 5.1 Write Timing
 
-只有**完整成功**的响应才写入（`StopReason::EndTurn` / `StopReason::ToolUse`）：
+Only **complete successful** responses are written (`StopReason::EndTurn` / `StopReason::ToolUse`):
 
 ```rust
 fn should_cache(response: &ChatResponse, policy: &CachePolicy) -> bool {
@@ -430,16 +430,16 @@ fn should_cache(response: &ChatResponse, policy: &CachePolicy) -> bool {
         response.stop_reason,
         StopReason::EndTurn | StopReason::ToolUse
     )
-    // 拒绝缓存的情况：
-    // - MaxTokens (响应被截断,不完整)
-    // - Cancelled (上游主动中断)
-    // - ContentFilter (Provider 拒答,无意义)
-    // - StopSequence (语义不完整)
-    // - Other (未知,保守起见不缓存)
+    // Cases rejected from caching:
+    // - MaxTokens (response was truncated, incomplete)
+    // - Cancelled (upstream actively interrupted)
+    // - ContentFilter (Provider refused to answer, meaningless)
+    // - StopSequence (semantically incomplete)
+    // - Other (unknown, conservatively skip caching)
 }
 ```
 
-### 5.2 写入路径（异步，不阻塞响应）
+### 5.2 Write Path (Async, Non-Blocking)
 
 ```rust
 async fn write(
@@ -449,12 +449,12 @@ async fn write(
     policy: &CachePolicy,
     meta: WriteMetadata,
 ) -> Result<(), CacheError> {
-    // L1 同步写 (本地内存,μs 级)
+    // L1 sync write (local memory, μs scale)
     if policy.l1 {
         self.l1.put(key.clone(), response.clone(), policy.l1_ttl_or_default()).await;
     }
     
-    // L2 异步写 (避免阻塞响应返回)
+    // L2 async write (avoid blocking response return)
     if policy.l2 {
         let l2 = self.l2.clone();
         let key = key.clone();
@@ -470,55 +470,55 @@ async fn write(
         });
     }
     
-    // L3 不在 write 路径处理 —— 由 ExplicitCacheProvider 在请求路径上创建,
-    // 由 register_l3_handle 单独登记
+    // L3 is not handled in the write path —— it is created by ExplicitCacheProvider on the request path,
+    // and registered separately via register_l3_handle
     
     Ok(())
 }
 ```
 
-### 5.3 L3 (Provider explicit cache) 的写入路径
+### 5.3 L3 (Provider Explicit Cache) Write Path
 
-L3 与 L1/L2 完全不同——它在 Provider 调用过程中创建，不是事后写入：
+L3 is fundamentally different from L1/L2 — it is created during the Provider call, not written after the fact:
 
 ```rust
-// 上游 Cache Lookup Middleware 的逻辑 (简化)
+// Logic of upstream Cache Lookup Middleware (simplified)
 async fn handle_l3(&self, req: &mut ChatRequest, key: &CacheKey, ctx: &RequestContext) {
-    // 1. 查询是否已有可复用的 handle
+    // 1. Check whether a reusable handle already exists
     let provider_id = ctx.attributes.get("routing.provider_priority")
         .and_then(|p| p.first());
     
     if let Some(handle) = self.registry.lookup_l3_handle(key, provider_id).await? {
-        // 命中：注入 directive,Provider 调用时直接 reference
+        // Hit: inject directive; Provider call references it directly
         req.cache_directives.push(CacheDirective::UseExplicit { handle });
         return;
     }
     
-    // 2. 未命中：判断是否值得创建 (启发式)
+    // 2. Miss: decide whether creation is worthwhile (heuristic)
     if !worth_creating_l3(req) {
         return;
     }
     
-    // 3. 标记请求,Provider 在响应里返回新创建的 handle id
+    // 3. Mark the request; Provider returns the newly created handle id in the response
     req.cache_directives.push(CacheDirective::MarkBoundary { 
         ttl: policy.l3_ttl_or_default() 
     });
     
-    // 4. 响应到达后,从 ChatEvent::Started.cache_hit_info 提取 handle,
-    //    调 register_l3_handle 登记
+    // 4. After response arrives, extract handle from ChatEvent::Started.cache_hit_info,
+    //    and call register_l3_handle to register it
 }
 
 fn worth_creating_l3(req: &ChatRequest) -> bool {
-    // L3 创建有成本(存储费 + 创建 latency),不是越多越好
+    // L3 creation has cost (storage fees + creation latency); more isn't always better
     let prefix_size = estimate_prefix_tokens(req);
-    prefix_size > 4096           // prefix 太短不值得
-        && req.tools.is_empty()  // tool schema 频繁变化
+    prefix_size > 4096           // prefix too short — not worth it
+        && req.tools.is_empty()  // tool schema changes too frequently
 }
 ```
 
-### 5.4 流式写入的累积
+### 5.4 Streaming Write Accumulation
 
-CacheLookupMiddleware 在 inner stream 上 inspect 累积响应（Doc 02 §4.4 已展示），完成后调 `write()`：
+CacheLookupMiddleware inspects the inner stream to accumulate the response (already shown in Doc 02 §4.4); upon completion it calls `write()`:
 
 ```rust
 let stream = inner_stream.inspect(move |event| {
@@ -538,19 +538,19 @@ let stream = inner_stream.inspect(move |event| {
 });
 ```
 
-**注意**：accumulator 必须复制一份原始 ChatEvent 而非引用——stream Drop 时引用失效。
+**Note**: the accumulator must clone the original ChatEvent rather than hold a reference — when the stream is dropped, references become invalid.
 
 ---
 
-## 6. Singleflight（防雪崩）
+## 6. Singleflight (Stampede Protection)
 
-### 6.1 问题场景
+### 6.1 Problem Scenario
 
-热门请求（比如 100 个 Agent 同时调用同一个分类工具）→ 100 个并发 miss → 100 次 Provider 调用 → 100 倍成本 + 触发 rate limit。
+A hot request (e.g., 100 Agents simultaneously calling the same classification tool) → 100 concurrent misses → 100 Provider calls → 100x cost + rate limit triggered.
 
-### 6.2 Singleflight 模式
+### 6.2 Singleflight Pattern
 
-同一 key 的并发请求只允许一次到达下游，其他请求订阅这个 in-flight 操作的结果：
+For concurrent requests on the same key, only one is allowed to reach downstream; others subscribe to the result of that in-flight operation:
 
 ```rust
 pub struct SingleflightGate<T> {
@@ -558,19 +558,19 @@ pub struct SingleflightGate<T> {
 }
 
 impl<T: Clone + Send + 'static> SingleflightGate<T> {
-    /// 返回 Either<Leader, Follower>
-    /// Leader 必须执行真正的工作并 broadcast 结果
-    /// Follower 等待 Leader 结果
+    /// Returns Either<Leader, Follower>
+    /// Leader must do the actual work and broadcast the result
+    /// Follower waits for the Leader's result
     pub fn enter(&self, key: CacheKey) -> SingleflightHandle<T> {
         match self.inflight.entry(key.clone()) {
             Entry::Occupied(e) => {
-                // 已有 leader,本请求是 follower
+                // A leader already exists; this request is a follower
                 SingleflightHandle::Follower {
                     rx: e.get().subscribe(),
                 }
             }
             Entry::Vacant(e) => {
-                // 我是第一个,成为 leader
+                // I'm first; become leader
                 let (tx, _) = broadcast::channel(1);
                 e.insert(tx.clone());
                 SingleflightHandle::Leader {
@@ -603,7 +603,7 @@ impl<T> Drop for SingleflightHandle<T> {
 }
 ```
 
-### 6.3 集成到 Lookup 流程
+### 6.3 Integration with the Lookup Flow
 
 ```rust
 async fn lookup_or_compute<F, Fut>(
@@ -616,7 +616,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<CachedResponse, ProviderError>>,
 {
-    // 1. 普通 lookup
+    // 1. Plain lookup
     if let Some(cached) = self.lookup(&key, &policy).await? {
         return Ok(cached);
     }
@@ -624,10 +624,10 @@ where
     // 2. Singleflight
     match self.gate.enter(key.clone()) {
         SingleflightHandle::Leader { tx, .. } => {
-            // 我执行 compute,广播结果
+            // I run compute, broadcast the result
             let result = compute().await;
             
-            // 写缓存 (成功才写)
+            // Write cache (only on success)
             if let Ok(ref response) = result {
                 self.write(key, response.clone(), &policy, default_meta()).await.ok();
             }
@@ -636,11 +636,11 @@ where
             result
         }
         SingleflightHandle::Follower { mut rx } => {
-            // 等 leader 结果
+            // Wait for leader's result
             match tokio::time::timeout(Duration::from_secs(120), rx.recv()).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(_)) | Err(_) => {
-                    // Leader 死了或超时 → 降级,自己再 compute 一次
+                    // Leader died or timed out → degrade, compute on our own
                     tracing::warn!("singleflight follower fallback to direct compute");
                     compute().await
                 }
@@ -650,61 +650,61 @@ where
 }
 ```
 
-### 6.4 与流式响应的兼容
+### 6.4 Compatibility with Streaming Responses
 
-上面的 `compute` 返回的是 `CachedResponse`（完整响应，非 stream）。这意味着 Singleflight **将流式调用降级为非流式**——follower 拿到的是 leader 写入缓存后的完整响应。
+The `compute` above returns a `CachedResponse` (complete response, not a stream). This means Singleflight **degrades streaming calls to non-streaming** — the follower obtains the complete response that the leader wrote into cache.
 
-代价：follower 失去了流式 TTFT 优势——必须等 leader 完整生成完才能拿到结果。
+Cost: followers lose streaming TTFT advantages — they must wait for the leader to fully generate before getting the result.
 
-权衡：
-- 对延迟敏感且非热门：跳过 singleflight，每个请求独立调 Provider
-- 对成本敏感且热门：开启 singleflight，接受 follower 的延迟代价
-- 默认策略：当 in-flight 数量 > 5 时自动启用 singleflight（"被打爆才进保护"）
+Trade-off:
+- Latency-sensitive and non-hot: skip singleflight; each request hits the Provider independently
+- Cost-sensitive and hot: enable singleflight, accepting follower latency cost
+- Default policy: automatically enable singleflight when in-flight count > 5 ("only enter protection when overwhelmed")
 
 ---
 
-## 7. Provider-side Cache 生命周期管理
+## 7. Provider-side Cache Lifecycle Management
 
-### 7.1 Handle 注册表（内容寻址 + 引用计数）
+### 7.1 Handle Registry (Content-Addressed + Reference Counted)
 
-**核心语义**：L3 handle 是**内容寻址**的——同一个 `CacheKey` 在同一 Provider 上只创建一次,被多个并发 session 共享。这是为什么 §3.2 强调 CacheKey 必须包含 TENANT + IAM_SCOPES：在隔离边界内最大化复用,在隔离边界外强制独立。
+**Core semantics**: L3 handles are **content-addressed** — the same `CacheKey` on the same Provider is created exactly once and shared across multiple concurrent sessions. This is why §3.2 emphasizes that CacheKey must include TENANT + IAM_SCOPES: maximize reuse within isolation boundaries, enforce independence across them.
 
-跨 session 共享 → **不能用单 session 所有权**,必须用引用计数管理生命周期：
+Cross-session sharing → **single-session ownership won't work**; lifecycle must be managed by reference counting:
 
 ```rust
 pub struct L3HandleRegistry {
     /// (key, provider) -> handle record
-    /// 同一语义 key 在不同 Provider 上独立存在
+    /// The same semantic key exists independently on different Providers
     by_key: Arc<DashMap<(CacheKey, ProviderId), Arc<L3HandleRecord>>>,
     
-    /// 反向索引：session 持有的所有 handle 引用 (用于 session 退出时批量 release)
+    /// Reverse index: all handle references held by a session (used to batch-release on session exit)
     by_session: Arc<DashMap<SessionId, HashSet<L3HandleId>>>,
     
-    /// LRU 索引：按 last_used_at 排序 (用于配额淘汰候选)
+    /// LRU index: sorted by last_used_at (used as quota eviction candidates)
     lru: Arc<Mutex<LruOrder>>,
     
-    /// 持久化后端 (Postgres) - 防止进程重启丢失
+    /// Persistent backend (Postgres) - prevents loss across process restarts
     persistent: Arc<dyn L3Persistence>,
 }
 
 pub struct L3HandleRecord {
     pub id: L3HandleId,
     pub provider: ProviderId,
-    pub external_id: String,                  // Provider 侧句柄,如 "cachedContents/abc123"
+    pub external_id: String,                  // Provider-side handle, e.g. "cachedContents/abc123"
     pub key: CacheKey,
     pub tenant: TenantId,
     pub size_estimate_bytes: u64,
     pub created_at: SystemTime,
     pub expires_at: SystemTime,
     
-    /// 当前引用本 handle 的 session 集合
-    /// 共享语义：同 tenant + 同 IAM scopes + 同 content → 同一 handle
+    /// Set of sessions currently referencing this handle
+    /// Sharing semantics: same tenant + same IAM scopes + same content → same handle
     pub referencing_sessions: RwLock<HashSet<SessionId>>,
     
     pub last_used_at: AtomicSystemTime,
     pub usage_count: AtomicU64,
     
-    /// 标记为待删除 (ref_count 为 0 后进入此状态,等待 grace period)
+    /// Marked as pending deletion (entered after ref_count hits 0; awaits grace period)
     pub pending_eviction_since: RwLock<Option<SystemTime>>,
 }
 
@@ -715,11 +715,11 @@ impl L3HandleRecord {
 }
 ```
 
-### 7.2 Acquire / Release 协议
+### 7.2 Acquire / Release Protocol
 
 ```rust
 impl L3HandleRegistry {
-    /// 获取或创建 handle。命中已有 handle 时增加引用计数
+    /// Acquire or create a handle. On hit, increment reference count
     pub async fn acquire(
         &self,
         key: CacheKey,
@@ -727,9 +727,9 @@ impl L3HandleRegistry {
         session: SessionId,
         creator: impl FnOnce() -> BoxFuture<'_, Result<ProviderCacheHandle, ProviderError>>,
     ) -> Result<L3HandleId, CacheError> {
-        // 1. 查找已有 handle
+        // 1. Look for existing handle
         if let Some(record) = self.by_key.get(&(key.clone(), provider_id.clone())) {
-            // 共享：增加引用,清除 pending_eviction 标记
+            // Share: bump ref, clear pending_eviction marker
             let mut sessions = record.referencing_sessions.write().unwrap();
             sessions.insert(session.clone());
             *record.pending_eviction_since.write().unwrap() = None;
@@ -739,7 +739,7 @@ impl L3HandleRegistry {
             return Ok(record.id.clone());
         }
         
-        // 2. 未找到 → singleflight 创建 (防止并发 acquire 同一 key 时创建多份)
+        // 2. Not found → singleflight create (prevents duplicate creation under concurrent acquires of the same key)
         let handle = self.creation_gate.run(key.clone(), creator).await?;
         
         let record = Arc::new(L3HandleRecord {
@@ -764,8 +764,8 @@ impl L3HandleRegistry {
         Ok(record.id.clone())
     }
     
-    /// 释放引用。引用计数归零时进入 pending_eviction 状态
-    /// 不立即删除 —— 给 grace period (默认 5 min) 让短时间内的复用还有机会
+    /// Release a reference. When ref count hits zero, enter pending_eviction state
+    /// Don't delete immediately —— give a grace period (default 5 min) so short-term reuse still has a chance
     pub async fn release(
         &self,
         handle_id: &L3HandleId,
@@ -783,7 +783,7 @@ impl L3HandleRegistry {
         Ok(())
     }
     
-    /// Session 完全结束时,批量 release 该 session 持有的所有 handle
+    /// On full session termination, batch-release all handles held by that session
     pub async fn release_session(&self, session: &SessionId) -> Result<usize, CacheError> {
         let handles: Vec<_> = self.by_session.remove(session)
             .map(|(_, set)| set.into_iter().collect())
@@ -795,7 +795,7 @@ impl L3HandleRegistry {
         Ok(handles.len())
     }
     
-    /// 标记 handle 已被使用 (用于 LRU 排序和 metrics)
+    /// Mark a handle as used (for LRU sorting and metrics)
     pub fn mark_used(&self, handle_id: &L3HandleId) {
         if let Ok(record) = self.by_id(handle_id) {
             record.last_used_at.store(SystemTime::now());
@@ -805,20 +805,20 @@ impl L3HandleRegistry {
 }
 ```
 
-**核心不变量**：
-1. 同一个 `(CacheKey, ProviderId)` 在 Registry 中**最多存在一个 record**——通过 `by_key` 的 DashMap 原子性保证
-2. 创建 handle 是 singleflight 的——并发 acquire 同一未知 key 时,只有一个会真正调 Provider create_cache,其他等待结果并复用
-3. Session 释放是幂等的——重复 release 同一 (handle, session) 不会出错
-4. ref_count 归零进入 pending_eviction,**不立即删除**——给 grace period 容忍"刚释放就有新请求进来"的常见模式
+**Core invariants**:
+1. The same `(CacheKey, ProviderId)` exists in the Registry **at most once** — guaranteed atomically by the `by_key` DashMap
+2. Handle creation is singleflight — under concurrent acquires of the same unknown key, only one actually calls Provider create_cache; others wait for the result and reuse it
+3. Session release is idempotent — repeated release of the same (handle, session) does not error
+4. Hitting ref_count 0 enters pending_eviction; **does not delete immediately** — the grace period tolerates the common pattern of "just released, then a new request comes in"
 
-### 7.3 跨进程一致性
+### 7.3 Cross-Process Consistency
 
-进程重启后，内存中的 `by_key` / `by_session` 索引清零。但 Provider 侧的 cache 对象仍然存在（按它们自己的 TTL）——如果不能在重启后重建索引，就会**泄漏 Provider 侧资源（仍在花钱）**。
+After process restart, the in-memory `by_key` / `by_session` indexes are cleared. But the Provider-side cache objects still exist (per their own TTL) — if the index can't be rebuilt after restart, **Provider-side resources leak (and continue costing money)**.
 
-解决：
-1. **持久化到 Postgres**：每次 register / extend / delete 都同步到 DB
-2. **启动时 reload**：进程启动时从 DB 读所有未过期 handle 重建内存索引
-3. **periodic reconciliation**：每小时跟 Provider 对账（List API），删除内存里有但 Provider 已经过期的，告警 Provider 有但内存里没的（潜在泄漏）
+Solution:
+1. **Persist to Postgres**: every register / extend / delete is sync'd to DB
+2. **Reload on startup**: on process startup, read all unexpired handles from DB and rebuild in-memory indexes
+3. **Periodic reconciliation**: hourly reconcile against the Provider (List API), delete entries the local has but the Provider has expired, alert on entries the Provider has but local lacks (potential leak)
 
 ```rust
 async fn reconcile(&self) -> Result<ReconcileReport, CacheError> {
@@ -826,21 +826,21 @@ async fn reconcile(&self) -> Result<ReconcileReport, CacheError> {
     
     for provider_id in self.providers.list_explicit_cache_capable() {
         let provider = self.providers.get_explicit_cache(&provider_id)?;
-        let remote = provider.list_caches().await?;        // 调 Provider List API
+        let remote = provider.list_caches().await?;        // Provider List API
         let local: HashSet<_> = self.by_key.iter()
             .flat_map(|entry| entry.value().iter()
                 .filter(|r| r.provider == provider_id)
                 .map(|r| r.external_id.clone()))
             .collect();
         
-        // 远端有,本地无 → 泄漏 (可能是其他实例创建的或者本实例之前崩溃没清理)
+        // Remote has, local doesn't → leak (possibly created by another instance, or this instance crashed without cleanup)
         for remote_id in &remote {
             if !local.contains(remote_id) {
                 report.orphans.push((provider_id.clone(), remote_id.clone()));
             }
         }
         
-        // 本地有,远端无 → 已过期,清理本地索引
+        // Local has, remote doesn't → already expired, clean up local index
         for record in self.records_for_provider(&provider_id) {
             if !remote.contains(&record.external_id) {
                 self.remove_local_index(&record.id).await;
@@ -849,7 +849,7 @@ async fn reconcile(&self) -> Result<ReconcileReport, CacheError> {
         }
     }
     
-    // 孤儿处理策略：跨实例可能误判 → 给 30 分钟宽限期再删
+    // Orphan handling: cross-instance scenarios may produce false positives → 30-min grace before deletion
     self.schedule_orphan_cleanup(report.orphans.clone(), Duration::from_mins(30));
     
     Ok(report)
@@ -858,9 +858,9 @@ async fn reconcile(&self) -> Result<ReconcileReport, CacheError> {
 
 ---
 
-## 8. Janitor（主动回收）
+## 8. Janitor (Active Reclamation)
 
-Janitor 是后台 task,循环执行四类清理。**核心修正**：所有 L3 删除都必须先检查引用计数,只有 ref_count == 0 且超过 grace period 的 handle 才进入淘汰候选。Session 闲置不能直接触发删除——它只是触发 release,真正的删除取决于全局引用情况。
+The Janitor is a background task running four kinds of cleanup in a loop. **Core correction**: every L3 deletion must first check ref count; only handles with ref_count == 0 and past the grace period become eviction candidates. Session idleness alone cannot trigger deletion — it only triggers release; actual deletion depends on the global reference state.
 
 ```rust
 pub struct CacheJanitor {
@@ -870,13 +870,13 @@ pub struct CacheJanitor {
 }
 
 pub struct JanitorConfig {
-    pub tick_interval: Duration,                 // 主循环间隔,默认 60s
-    pub session_idle_timeout: Duration,          // session 闲置阈值,触发 release,默认 15min
-    pub eviction_grace_period: Duration,         // ref_count=0 后的宽限期,默认 5min
-    pub l3_storage_quota_bytes: u64,             // L3 总存储配额
-    pub l3_storage_high_water: f64,              // 触发 LRU 淘汰的水位 (默认 0.8)
-    pub l3_storage_low_water: f64,               // LRU 淘汰停止水位 (默认 0.6)
-    pub reconcile_interval: Duration,            // 与 Provider 对账,默认 1h
+    pub tick_interval: Duration,                 // main loop interval, default 60s
+    pub session_idle_timeout: Duration,          // session idle threshold, triggers release, default 15min
+    pub eviction_grace_period: Duration,         // grace period after ref_count=0, default 5min
+    pub l3_storage_quota_bytes: u64,             // total L3 storage quota
+    pub l3_storage_high_water: f64,              // water mark that triggers LRU eviction (default 0.8)
+    pub l3_storage_low_water: f64,               // water mark at which LRU eviction stops (default 0.6)
+    pub reconcile_interval: Duration,            // reconcile with Provider, default 1h
 }
 
 impl CacheJanitor {
@@ -887,19 +887,19 @@ impl CacheJanitor {
         loop {
             tick.tick().await;
             
-            // 1. Idle session 触发 release (不一定立即删除 handle)
+            // 1. Idle sessions trigger release (does not necessarily delete handle immediately)
             self.release_idle_sessions().await;
             
-            // 2. ref_count=0 且过 grace period 的 handle → 实际删除
+            // 2. Handles with ref_count=0 past their grace period → actual deletion
             self.evict_unreferenced_handles().await;
             
-            // 3. LRU 淘汰 (容量超水位时,可强制删除即使 ref_count > 0)
+            // 3. LRU eviction (when capacity exceeds water mark, may force-delete even if ref_count > 0)
             self.evict_lru_if_over_quota().await;
             
-            // 4. 过期清理 (TTL 已过)
+            // 4. Expiry cleanup (TTL elapsed)
             self.evict_expired().await;
             
-            // 5. 对账 (低频)
+            // 5. Reconcile (low frequency)
             if last_reconcile.elapsed() >= self.config.reconcile_interval {
                 self.registry.reconcile().await.ok();
                 last_reconcile = Instant::now();
@@ -907,8 +907,8 @@ impl CacheJanitor {
         }
     }
     
-    /// Idle session 触发 release —— 不直接删 handle,只解除该 session 的引用
-    /// 实际删除取决于其他 session 是否还在引用 (ref counting)
+    /// Idle sessions trigger release — does not delete handles directly; only drops the session's references
+    /// Actual deletion depends on whether other sessions still reference (ref counting)
     async fn release_idle_sessions(&self) {
         let cutoff = SystemTime::now() - self.config.session_idle_timeout;
         let stale_sessions: Vec<_> = self.registry.sessions_idle_since(cutoff).collect();
@@ -919,7 +919,7 @@ impl CacheJanitor {
         }
     }
     
-    /// 真正删除：ref_count == 0 且过了 grace period
+    /// Actual deletion: ref_count == 0 and past the grace period
     async fn evict_unreferenced_handles(&self) {
         let candidates = self.registry.unreferenced_for(self.config.eviction_grace_period);
         for record in candidates {
@@ -927,8 +927,8 @@ impl CacheJanitor {
         }
     }
     
-    /// LRU 淘汰：容量超过水位时,即使 ref_count > 0 也要强制删除
-    /// 这是最后的资金/容量防线 (LRU 优先选择 ref_count 低 + last_used 早的)
+    /// LRU eviction: when capacity exceeds the water mark, force-delete even if ref_count > 0
+    /// This is the last cost/capacity defense (LRU prefers low ref_count + earliest last_used)
     async fn evict_lru_if_over_quota(&self) {
         let total_size = self.registry.total_l3_size();
         let high = (self.config.l3_storage_quota_bytes as f64 * self.config.l3_storage_high_water) as u64;
@@ -939,11 +939,11 @@ impl CacheJanitor {
         let target = (self.config.l3_storage_quota_bytes as f64 * self.config.l3_storage_low_water) as u64;
         let mut freed = 0u64;
         
-        // LRU 排序：优先 ref_count == 0,其次 last_used_at 最早
+        // LRU sorting: prefer ref_count == 0, then earliest last_used_at
         for record in self.registry.lru_iter_weighted() {
             if total_size - freed <= target { break; }
             
-            // 强制淘汰 ref > 0 的 handle 是有代价的 —— 引用方下次会 cache miss 并重建
+            // Force-evicting a ref > 0 handle has cost — referencers will cache miss and rebuild on next call
             if record.ref_count() > 0 {
                 tracing::warn!(
                     handle = ?record.id,
@@ -952,7 +952,7 @@ impl CacheJanitor {
                 );
                 self.metrics.record_forced_eviction(&record);
                 
-                // 通知所有引用 session: 你的 handle 即将失效
+                // Notify all referencing sessions: your handle is about to be invalidated
                 for session in record.referencing_sessions.read().unwrap().iter() {
                     self.notify_handle_invalidation(session, &record.id);
                 }
@@ -978,8 +978,8 @@ impl CacheJanitor {
             expires_at: record.expires_at,
         };
         
-        // Provider delete 失败时仍要从本地索引移除? 不行——会造成泄漏
-        // 策略：标记为 "pending_delete",下次 reconcile 时重试
+        // If Provider delete fails, should we still remove from local index? No — that causes leaks
+        // Strategy: mark as "pending_delete" and retry on next reconcile
         match provider.delete_cache(&provider_handle).await {
             Ok(_) => {
                 self.registry.remove_handle(handle_id);
@@ -987,7 +987,7 @@ impl CacheJanitor {
                 Ok(())
             }
             Err(e) if e.is_not_found() => {
-                // Provider 那边已经删了 (TTL 自然到期),本地清理就行
+                // Provider already deleted (TTL naturally elapsed); local cleanup suffices
                 self.registry.remove_handle(handle_id);
                 Ok(())
             }
@@ -1003,9 +1003,9 @@ impl CacheJanitor {
 
 ---
 
-### 8.1 LRU 加权排序（淘汰优先级）
+### 8.1 Weighted LRU Sorting (Eviction Priority)
 
-强制淘汰 referenced handle 是高成本操作（被淘汰的 session 下次 acquire 会 miss → 重建），所以 LRU 排序不能只看时间，必须**加权**：
+Force-evicting a referenced handle is an expensive operation (the evicted session will miss on next acquire → rebuild), so LRU sorting cannot rely on time alone — it must be **weighted**:
 
 ```rust
 fn eviction_priority(record: &L3HandleRecord) -> EvictionScore {
@@ -1013,13 +1013,13 @@ fn eviction_priority(record: &L3HandleRecord) -> EvictionScore {
     let idle_secs = record.last_used_at.elapsed().as_secs() as i64;
     let usage_count = record.usage_count.load(Ordering::Relaxed) as i64;
     
-    // 越大越优先淘汰
+    // Larger = higher eviction priority
     EvictionScore(
-        // ref_count = 0 的优先级最高 (无副作用)
+        // ref_count = 0 has the highest priority (no side effects)
         if ref_count == 0 { 1_000_000 } else { 0 }
-        // 闲置越久越优先
+        // The longer idle, the higher priority
         + idle_secs
-        // 使用次数越少越优先 (避免淘汰热点)
+        // The fewer uses, the higher priority (avoid evicting hotspots)
         - usage_count.saturating_mul(10)
     )
 }
@@ -1027,16 +1027,16 @@ fn eviction_priority(record: &L3HandleRecord) -> EvictionScore {
 
 ---
 
-## 9. 失效与一致性
+## 9. Invalidation and Consistency
 
-### 9.1 显式失效场景
+### 9.1 Explicit Invalidation Scenarios
 
-- 上游 IAM 变更（用户被移出某项目 → 该项目的 cache 必须立即失效）
-- 业务数据变更（被 review 的代码仓库有新 commit → 旧 review 缓存过时）
-- 用户主动"重新生成"
-- 合规删除（GDPR / 租户注销 → 该租户全部 cache 必须删）
+- Upstream IAM changes (a user is removed from a project → that project's cache must invalidate immediately)
+- Business data changes (the reviewed code repo has a new commit → the old review cache is stale)
+- The user actively "regenerates"
+- Compliance deletion (GDPR / tenant decommissioning → all caches for that tenant must be deleted)
 
-### 9.2 失效粒度
+### 9.2 Invalidation Granularity
 
 ```rust
 #[async_trait]
@@ -1048,27 +1048,27 @@ pub trait CacheInvalidation {
 }
 ```
 
-### 9.3 跨实例失效
+### 9.3 Cross-Instance Invalidation
 
-L1 是进程内缓存，单实例失效不够——必须广播给所有实例：
+L1 is in-process; single-instance invalidation is insufficient — it must broadcast to all instances:
 
 ```rust
-// 用 Redis pub/sub 实现跨实例失效广播
+// Use Redis pub/sub to broadcast cross-instance invalidation
 pub struct InvalidationBroadcaster {
     redis: Arc<RedisClient>,
-    channel: String,                 // 例如 "tars:cache:invalidate"
+    channel: String,                 // e.g. "tars:cache:invalidate"
     local_l1: Arc<L1Cache>,
 }
 
 impl InvalidationBroadcaster {
     pub async fn broadcast(&self, event: InvalidationEvent) -> Result<()> {
-        // 1. 本地立即应用
+        // 1. Apply locally immediately
         self.apply_local(&event).await;
         
-        // 2. Redis L2 立即删
+        // 2. Delete from Redis L2 immediately
         self.delete_from_l2(&event).await;
         
-        // 3. 广播给其他实例
+        // 3. Broadcast to other instances
         let payload = serde_json::to_string(&event)?;
         self.redis.publish(&self.channel, payload).await?;
         Ok(())
@@ -1085,29 +1085,29 @@ impl InvalidationBroadcaster {
 }
 ```
 
-### 9.4 最终一致性的诚实性
+### 9.4 Honesty About Eventual Consistency
 
-L1 跨实例失效有窗口（pub/sub 延迟通常 <100ms，但不保证）。这意味着：
-- 同一 cache key 被失效后，可能有 < 100ms 的窗口内某实例仍返回旧响应
-- 这对 LLM 缓存是可接受的——缓存内容本身就是过去某次 LLM 决策的快照
-- 对**安全敏感的失效**（IAM 变更）必须强一致：应在 IAM 决策点同步检查权限版本，不能依赖 cache 失效广播
+Cross-instance L1 invalidation has a window (pub/sub latency typically <100ms, not guaranteed). This means:
+- After the same cache key is invalidated, there may be a < 100ms window where some instance still returns the old response
+- This is acceptable for an LLM cache — the cached content itself is a snapshot of a past LLM decision
+- For **security-sensitive invalidations** (IAM changes), strong consistency is required: synchronously check the permission version at the IAM decision point; do not rely on cache invalidation broadcasts
 
 ---
 
-## 10. 跨租户隔离的安全保证
+## 10. Cross-Tenant Isolation Security Guarantees
 
-这是这个 Cache Registry 设计的核心安全性，从前面对话中的讨论提取的核心要求：
+This is the core security of the Cache Registry design, extracting the core requirements from the earlier discussion:
 
-### 10.1 三道防线
+### 10.1 Three Lines of Defense
 
-**防线 1：CacheKey 命名空间前置**（§3.2）
-TENANT + IAM SCOPES 是哈希的第一批字节，租户 A 与租户 B 即使 prompt 完全相同，key 也必然不同。
+**Line 1: CacheKey namespace prefix** (§3.2)
+TENANT + IAM SCOPES are the first bytes of the hash; even with identical prompts, tenant A and tenant B will inevitably have different keys.
 
-**防线 2：IAM 必须在 Cache Lookup 之前**（Doc 02 §4.2 强约束）
-即使绕过 CacheKey 隔离（比如某个 bug），IAM 已经先拒绝了无权限的请求，根本不会进入 Cache 层。
+**Line 2: IAM must precede Cache Lookup** (Doc 02 §4.2 hard constraint)
+Even if CacheKey isolation is bypassed (say, due to a bug), IAM has already rejected unauthorized requests, so they never reach the Cache layer.
 
-**防线 3：CacheKey 反向校验**（防御深度）
-Cache 命中时，再做一次廉价的所有权检查：
+**Line 3: CacheKey reverse verification** (defense in depth)
+On cache hit, perform a cheap ownership recheck:
 
 ```rust
 async fn lookup(&self, key: &CacheKey, policy: &CachePolicy) -> Result<Option<CachedResponse>, CacheError> {
@@ -1116,8 +1116,8 @@ async fn lookup(&self, key: &CacheKey, policy: &CachePolicy) -> Result<Option<Ca
         None => return Ok(None),
     };
     
-    // 防御性检查：cached 的 origin tenant 必须与当前 key 包含的 tenant 一致
-    // 理论上不可能不一致 (因为 key 已经包含 tenant),但作为最后一道防线
+    // Defensive check: cached's origin tenant must match the tenant encoded in current key
+    // Theoretically impossible to mismatch (since key already includes tenant), but as final defense
     if !key.tenant_matches(&cached.cached_at_tenant) {
         tracing::error!(
             ?key.debug_label,
@@ -1125,27 +1125,27 @@ async fn lookup(&self, key: &CacheKey, policy: &CachePolicy) -> Result<Option<Ca
             "CACHE TENANT MISMATCH - possible key collision or corruption"
         );
         self.metrics.record_security_alert("tenant_mismatch");
-        return Ok(None);   // 当作 miss 处理,触发重新生成
+        return Ok(None);   // Treat as miss; trigger regeneration
     }
     
     Ok(Some(cached))
 }
 ```
 
-### 10.2 Provider-side Handle 的隔离
+### 10.2 Provider-side Handle Isolation
 
-L3 handle 不能跨租户复用——`tenant_namespace` 字段强制：
+L3 handles cannot be reused across tenants — the `tenant_namespace` field enforces this:
 
 ```rust
 pub struct ProviderCacheHandle {
     pub provider: ProviderId,
     pub external_id: String,
-    pub tenant_namespace: String,    // 必填,Provider 适配器拒绝接受空值
+    pub tenant_namespace: String,    // required; Provider adapters reject empty values
     // ...
 }
 ```
 
-注入 L3 handle 到请求时，CacheLookupMiddleware 必须验证：
+When injecting an L3 handle into a request, CacheLookupMiddleware must validate:
 
 ```rust
 fn validate_l3_use(handle: &ProviderCacheHandle, ctx: &RequestContext) -> Result<()> {
@@ -1156,11 +1156,11 @@ fn validate_l3_use(handle: &ProviderCacheHandle, ctx: &RequestContext) -> Result
 }
 ```
 
-### 10.3 系统 Prompt 注入 tenant marker
+### 10.3 System Prompt Tenant Marker Injection
 
-如前面讨论提到，Provider-side prefix cache 在 Provider 内部按 prompt 字节哈希。即使我们的 Registry 隔离干净，如果两个租户的 system prompt 字节级相同，Provider 自己的隐式缓存可能命中同一 entry——虽然不会泄漏内容，但可能产生计费归属错乱和性能侧信道（攻击者通过 TTFT 推断别人是否问过类似问题）。
+As mentioned earlier, Provider-side prefix caches hash by prompt bytes inside the Provider. Even if our Registry isolates cleanly, if two tenants' system prompts are byte-identical, the Provider's own implicit cache may hit the same entry — content won't leak, but billing attribution may be confused and timing side channels may emerge (an attacker infers via TTFT whether someone else asked similar questions).
 
-**强制规则**：所有 Provider 适配器在构造请求时，自动在 system prompt 头部插入：
+**Mandatory rule**: all Provider adapters automatically inject the following at the head of the system prompt when constructing requests:
 
 ```
 <!--
@@ -1169,68 +1169,68 @@ session_marker: {session_id_hash_first_8_chars}
 -->
 ```
 
-这一行的存在让不同租户的 prefix 字节级不同，Provider 的隐式缓存自然隔离。这个注入在 Provider 适配器层完成，不在 Cache 层——因为这是"绕过 Provider 自身缓存的隔离漏洞"，与我们的 Cache Registry 无关。
+The presence of this line makes prefixes byte-different across tenants, naturally isolating the Provider's implicit cache. This injection is performed at the Provider adapter layer, not the Cache layer — because this is the "isolation hole that bypasses the Provider's own cache", unrelated to our Cache Registry.
 
-### 10.4 Cache 句柄绝不外泄
+### 10.4 Cache Handles Must Never Leak
 
-Doc 01 §10 已规定：`ProviderCacheHandle.external_id` 是 Provider 侧的"不记名提货凭证"——任何持有该 ID 的请求都能用这份缓存。因此：
+Doc 01 §10 already specifies: `ProviderCacheHandle.external_id` is a Provider-side "bearer pickup ticket" — any request holding the ID can use the cache. Therefore:
 
-- 绝不返回给前端 / 客户端 / 日志（debug 模式下也只输出 hash 摘要）
-- API 返回值里只暴露我们自己的 `L3HandleId`（不透明 UUID），需要使用时由 Registry 翻译为真实 external_id
+- Never return to frontend / client / logs (debug mode only outputs hash digests)
+- API return values only expose our own `L3HandleId` (opaque UUIDs); when use is needed, the Registry translates to the real external_id
 
 ---
 
-## 10.5 跨 Session 共享与 Prompt 分层（设计指引）
+## 10.5 Cross-Session Sharing and Prompt Tiering (Design Guidance)
 
-Cache Registry 的 Key 构造（§3.2）已经决定了**共享边界 = Tenant ∩ IAM Scopes ∩ Model ∩ Static Content**——边界内最大化共享，边界外强制独立。这意味着上层（Agent Runtime / Prompt 拼装）必须按以下原则组织 prompt 才能让缓存真正生效：
+Cache Registry's Key construction (§3.2) already determines that **sharing boundary = Tenant ∩ IAM Scopes ∩ Model ∩ Static Content** — maximize sharing within boundaries, enforce independence outside. This means upper layers (Agent Runtime / prompt assembly) must structure prompts according to the following principles for caching to actually take effect:
 
-### Prompt 三段式分层（命名避开 L1/L2/L3 冲突）
+### Three-Section Prompt Tiering (Naming Avoids L1/L2/L3 Conflict)
 
-| 段位 | 内容 | 变化频率 | 缓存策略 |
+| Tier | Content | Change Frequency | Cache Strategy |
 |---|---|---|---|
-| **Static Prefix (冷)** | System Prompt、Agent 角色定义、JSON Schema、全局工具规范 | 月级变动 | 必须放最前；进入 CacheKey；适合 L3 explicit cache |
-| **Project Anchor (温)** | 当前项目的代码库快照（绑定 commit hash）、API 文档、依赖图 | 随 commit 变动 | 接 Static Prefix；进入 CacheKey；适合 L3 |
-| **Dynamic Suffix (热)** | 用户当前 PR diff、即时对话、实时日志 | 每次请求都变 | **绝对不进 CacheKey**；普通调用附加 |
+| **Static Prefix (cold)** | System Prompt, Agent role definition, JSON Schema, global tool spec | Monthly changes | Must be at the front; enters CacheKey; suitable for L3 explicit cache |
+| **Project Anchor (warm)** | Codebase snapshot for the current project (bound to commit hash), API docs, dependency graph | Changes per commit | Follows Static Prefix; enters CacheKey; suitable for L3 |
+| **Dynamic Suffix (hot)** | The user's current PR diff, real-time conversation, real-time logs | Changes every request | **Absolutely not in CacheKey**; appended on plain calls |
 
-### 为什么这样分层能让跨 session 共享生效
+### Why This Tiering Enables Cross-Session Sharing
 
-- 总监 A 与实习生 B 在同一租户下、同时审查同一 commit `a1b2c3` → Static Prefix + Project Anchor 完全相同 → CacheKey 哈希相同 → §7.2 的 acquire 自动返回同一 L3 handle，引用计数 = 2
-- 两人审查的 PR diff 不同 → Dynamic Suffix 不同 → LLM 输出不同 → L1/L2 响应缓存不会跨 PR 命中（这是对的，不应该）
-- 但 L3 prefix cache 命中率 100%，input token 享受降价
+- Director A and intern B, in the same tenant, simultaneously review the same commit `a1b2c3` → Static Prefix + Project Anchor are byte-identical → CacheKey hash is identical → §7.2's acquire automatically returns the same L3 handle, ref count = 2
+- Their reviewed PR diffs differ → Dynamic Suffix differs → LLM output differs → L1/L2 response cache won't hit across PRs (correct; it shouldn't)
+- But L3 prefix cache hit rate is 100%; input tokens enjoy the discount
 
-### 上层的责任
+### Upper-Layer Responsibility
 
-Cache Registry 不负责 prompt 拼装顺序——这是 Agent Runtime 的工作。Cache Registry 只承诺：**只要你拼出的 Static 部分字节级相同（且其他参数也一致），我就能跨 session 共享**。
+Cache Registry is not responsible for prompt assembly order — that's the Agent Runtime's job. Cache Registry only promises: **as long as your assembled Static portion is byte-identical (and other parameters match), I can share across sessions**.
 
-这意味着 Agent Runtime 必须遵守：
-1. Static Prefix 的拼装顺序在配置变更前**永不改动**——加一个空格、调整一个 Markdown 标题，就会导致全公司的 cache 全部 miss
-2. Static Prefix 不能包含动态变量（时间戳、请求 ID、随机生成的实例标识）——这些必须移到 Dynamic Suffix
-3. Project Anchor 必须显式标注 commit/version——`Codebase` 是动态概念，`Codebase@a1b2c3` 是静态概念
-4. Tools schema 如果不变化（同一项目内通常如此），应该作为 Static Prefix 的一部分
+This means the Agent Runtime must comply:
+1. The assembly order of Static Prefix **must never change** outside config changes — adding a single space or tweaking a Markdown heading will miss the entire company's cache
+2. Static Prefix must not contain dynamic variables (timestamps, request IDs, randomly generated instance markers) — these must move to Dynamic Suffix
+3. Project Anchor must explicitly mark commit/version — `Codebase` is a dynamic concept, `Codebase@a1b2c3` is a static one
+4. If tools schema doesn't change (typical within a project), it should be part of Static Prefix
 
-Agent Runtime 的 Prompt Builder 应该提供 `static_prefix() -> String` 和 `dynamic_suffix() -> String` 两个方法，Cache Lookup 只哈希前者。这个契约在 Doc 04（Agent Runtime）中详细约束。
+The Agent Runtime's Prompt Builder should provide `static_prefix() -> String` and `dynamic_suffix() -> String` methods; Cache Lookup hashes only the former. This contract is detailed in Doc 04 (Agent Runtime).
 
 ---
 
-## 11. 配置形态
+## 11. Configuration Shape
 
 ```toml
 [cache]
 enabled = true
-hasher_version = 1                      # bump 这个值一键作废全部 L1/L2
+hasher_version = 1                      # bumping invalidates all L1/L2 at once
 
 [cache.l1]
 backend = "moka"
 max_capacity = 10000
 default_ttl_secs = 600
-weighted_eviction = true                # 按 response 字节数加权
+weighted_eviction = true                # weighted by response byte size
 
 [cache.l2]
 backend = "redis"
 url = "redis://redis-cluster:6379"
 default_ttl_secs = 86400
 key_prefix = "tars:cache:"
-compression = "zstd"                    # 大响应压缩,节省 50-70% 存储
+compression = "zstd"                    # large response compression, saves 50-70% storage
 serialization = "messagepack"
 
 [cache.l3]
@@ -1242,7 +1242,7 @@ default_ttl_secs = 3600
 
 [cache.singleflight]
 enabled = true
-auto_threshold_inflight = 5             # in-flight > 5 时自动启用
+auto_threshold_inflight = 5             # auto-enable when in-flight > 5
 follower_timeout_secs = 120
 
 [cache.janitor]
@@ -1253,93 +1253,93 @@ reconcile_interval_secs = 3600
 [cache.invalidation]
 broadcast_channel = "tars:cache:invalidate"
 
-# 租户级覆盖
+# Tenant-level overrides
 [tenants.acme_corp.cache]
-l3_storage_quota_bytes = 53687091200    # 50 GB,大客户更高配额
+l3_storage_quota_bytes = 53687091200    # 50 GB; larger quota for big customers
 
-# 安全旋钮 (生产中通常不动)
+# Security knobs (rarely touched in production)
 [cache.security]
-strict_tenant_check = true              # 启用 §10.1 防线 3
-require_iam_scopes = true               # 缺少 iam.allowed_scopes 直接报错(否则 fallback 为空)
+strict_tenant_check = true              # enables §10.1 line of defense 3
+require_iam_scopes = true               # missing iam.allowed_scopes errors out (otherwise falls back to empty)
 ```
 
 ---
 
-## 12. 指标与可观测性
+## 12. Metrics and Observability
 
-必须采集的 metrics：
+Required metrics to collect:
 
-| Metric | Type | Labels | 用途 |
+| Metric | Type | Labels | Purpose |
 |---|---|---|---|
-| `cache.lookup.total` | counter | level, tenant, hit/miss | 命中率追踪 |
-| `cache.lookup.latency` | histogram | level | L1/L2/L3 性能监控 |
-| `cache.write.total` | counter | level, tenant | 写入量 |
-| `cache.write.errors` | counter | level, error_kind | L2 故障告警 |
-| `cache.evictions` | counter | reason (idle/lru/expired/explicit) | 容量调优 |
-| `cache.l3.handles` | gauge | provider, tenant | L3 数量监控 |
-| `cache.l3.storage_bytes` | gauge | provider, tenant | 容量水位 |
-| `cache.l3.cost_saved_usd` | counter | provider, tenant | ROI 证明 |
-| `cache.singleflight.coalesced` | counter | tenant | 雪崩防护效果 |
-| `cache.security.alerts` | counter | kind | 异常告警 (tenant_mismatch 等) |
-| `cache.invalidation.broadcast` | counter | scope | 失效事件 |
+| `cache.lookup.total` | counter | level, tenant, hit/miss | Hit rate tracking |
+| `cache.lookup.latency` | histogram | level | L1/L2/L3 performance monitoring |
+| `cache.write.total` | counter | level, tenant | Write volume |
+| `cache.write.errors` | counter | level, error_kind | L2 failure alerts |
+| `cache.evictions` | counter | reason (idle/lru/expired/explicit) | Capacity tuning |
+| `cache.l3.handles` | gauge | provider, tenant | L3 count monitoring |
+| `cache.l3.storage_bytes` | gauge | provider, tenant | Capacity water mark |
+| `cache.l3.cost_saved_usd` | counter | provider, tenant | ROI proof |
+| `cache.singleflight.coalesced` | counter | tenant | Stampede protection effectiveness |
+| `cache.security.alerts` | counter | kind | Anomaly alerts (tenant_mismatch, etc.) |
+| `cache.invalidation.broadcast` | counter | scope | Invalidation events |
 
-**节省成本的核算公式**：
+**Cost savings accounting formula**:
 
 ```
-cost_saved = sum(cached_response.original_usage 按当前 model 的定价) - 0
+cost_saved = sum(cached_response.original_usage priced under current model) - 0
 ```
 
-每次 L1/L2 命中时累加，反映"如果不命中需要花多少钱"。这是说服管理层投入缓存基建的关键 metric。
+Accumulated on every L1/L2 hit, reflecting "how much it would have cost without the hit". This is the key metric for convincing management to invest in cache infrastructure.
 
 ---
 
-## 13. 反模式清单
+## 13. Anti-Pattern Checklist
 
-1. **不要把 prompt 作为 cache key 的全部输入**——必须包含 TENANT + IAM_SCOPES + MODEL + 决定输出的所有参数。
-2. **不要把 ProviderCacheHandle.external_id 暴露给前端 / API 调用方**——它是不记名凭证，泄漏 = 跨租户访问漏洞。
-3. **不要在 cache 命中时省略 IAM 检查**——IAM 必须在 Lookup 之前发生（Doc 02 §4.2），这是安全防线。
-4. **不要在写入路径上同步阻塞**——L2 写必须 spawn 异步任务，不阻塞响应返回。
-5. **不要缓存非完整响应**——MaxTokens / Cancelled / ContentFilter 不进缓存。
-6. **不要让 cache 错误传染业务**——Redis 宕机时降级为 miss，不阻断 LLM 调用。
-7. **不要在没 hasher_version 的情况下变更 hash 算法**——升级算法时必须 bump version 一键失效旧缓存。
-8. **不要相信 Provider 的 TTL 自动过期**——主动 delete 才是真正的成本控制（§8 Janitor）。
-9. **不要让 Janitor 因为单个 delete 失败而停止工作**——失败标记 pending_delete，下次重试。
-10. **不要假设 JSON 序列化是确定性的**——不同库 / 不同运行时输出可能不同字节，必须用 RFC 8785 风格的 canonical JSON。
-11. **不要在 cache key 里包含 trace_id / timestamp / request_id**——这些每次都不同，必然 0% 命中率。
-12. **不要让 singleflight 的 follower 等待超过合理时间**——Leader 死了 follower 自己 fallback，不能无限等待。
-13. **不要混用不同 hasher_version 的缓存**——key 字节相同但语义不同，会读到错误数据。
-14. **不要在 Cache Registry 里维护"业务对象 → cache key"的映射**——业务对象的失效应该通过 ResourceRef 触发 invalidate_by_resource，而不是 Cache 层反向跟踪业务依赖。
-
----
-
-## 14. 与上下游的契约
-
-### 上游 (CacheLookupMiddleware) 承诺
-
-- 调用 lookup 之前，IAM 已经决策完毕，`ctx.attributes["iam.allowed_scopes"]` 已写入
-- 调用 write 时，response 是完整的（已经过 `should_cache()` 过滤）
-- ChatRequest 的 `cache_directives` 字段由本层填充，不修改其他字段
-
-### 下游 (ExplicitCacheProvider) 承诺
-
-- `create_cache` 返回的 handle 立即可用
-- `delete_cache` 是幂等的（多次删除同一 handle 返回 NotFound 而非 error）
-- `list_caches` 用于 Janitor reconcile，返回该账号下所有未过期的 cache external_id
-
-### 跨实例契约
-
-- 所有实例共享 L2 (Redis)
-- L1 失效通过 Redis pub/sub 广播
-- L3 handle registry 的真值在 Postgres，每个实例的内存索引是只读副本，重启后 reload
+1. **Don't use prompt as the entire cache key input** — must include TENANT + IAM_SCOPES + MODEL + all output-determining parameters.
+2. **Don't expose ProviderCacheHandle.external_id to frontend / API callers** — it's a bearer credential; leakage = cross-tenant access vulnerability.
+3. **Don't skip IAM checks on cache hit** — IAM must occur before Lookup (Doc 02 §4.2); this is a security defense.
+4. **Don't synchronously block on the write path** — L2 writes must spawn async tasks and not block response return.
+5. **Don't cache incomplete responses** — MaxTokens / Cancelled / ContentFilter do not enter cache.
+6. **Don't let cache errors contaminate business** — when Redis is down, degrade to miss; never block LLM calls.
+7. **Don't change the hash algorithm without bumping hasher_version** — algorithm upgrades must bump version to invalidate old caches at once.
+8. **Don't trust Provider TTL auto-expiry** — active delete is true cost control (§8 Janitor).
+9. **Don't let the Janitor halt because a single delete failed** — mark failed deletions pending_delete and retry next time.
+10. **Don't assume JSON serialization is deterministic** — different libs / different runtimes may emit different bytes; use RFC 8785-style canonical JSON.
+11. **Don't include trace_id / timestamp / request_id in the cache key** — these change every time, guaranteeing 0% hit rate.
+12. **Don't let singleflight followers wait beyond a reasonable time** — when the leader dies, followers fall back themselves; never wait indefinitely.
+13. **Don't mix caches across hasher_versions** — same key bytes but different semantics; you'll read wrong data.
+14. **Don't maintain "business object → cache key" mappings inside the Cache Registry** — business object invalidation should trigger via ResourceRef and invalidate_by_resource, not have the Cache layer reverse-track business dependencies.
 
 ---
 
-## 15. 待办与开放问题
+## 14. Contracts with Upstream and Downstream
 
-- [ ] 确定 canonical JSON 实现：自研 vs `cjson-rs` vs `jcs` (RFC 8785)
-- [ ] L2 Redis 的高可用方案：Sentinel vs Cluster
-- [ ] L3 storage_quota 的多 Provider 维度建模（Gemini quota 与 Anthropic quota 是独立的）
-- [ ] 跨数据中心的 L2 部署策略（每个 DC 独立 Redis vs 全局 Redis vs CRDT）
-- [ ] L3 reconcile 在 Provider List API 不存在时的降级（Gemini 提供 List，Anthropic ephemeral cache 不提供）
-- [ ] 缓存预热：是否值得为高频 prompt 提前生成 L3 handle
-- [ ] cache_saved_usd metric 的统计精度（命中时使用原始 model 的当前定价 vs 命中时刻定价）
+### Upstream (CacheLookupMiddleware) Promises
+
+- Before calling lookup, IAM has already decided; `ctx.attributes["iam.allowed_scopes"]` is populated
+- When calling write, the response is complete (already filtered by `should_cache()`)
+- The `cache_directives` field of ChatRequest is populated by this layer; no other fields are modified
+
+### Downstream (ExplicitCacheProvider) Promises
+
+- The handle returned by `create_cache` is immediately usable
+- `delete_cache` is idempotent (multiple deletes of the same handle return NotFound rather than error)
+- `list_caches` is used for Janitor reconcile and returns all unexpired cache external_ids under that account
+
+### Cross-Instance Contract
+
+- All instances share L2 (Redis)
+- L1 invalidation is broadcast via Redis pub/sub
+- The truth source for L3 handle registry is Postgres; each instance's in-memory index is a read-only replica, reloaded on restart
+
+---
+
+## 15. TODOs and Open Questions
+
+- [ ] Decide on the canonical JSON implementation: in-house vs `cjson-rs` vs `jcs` (RFC 8785)
+- [ ] L2 Redis HA scheme: Sentinel vs Cluster
+- [ ] Multi-Provider dimensional modeling for L3 storage_quota (Gemini quota and Anthropic quota are independent)
+- [ ] Cross-DC L2 deployment strategy (per-DC independent Redis vs global Redis vs CRDT)
+- [ ] Degradation when Provider List API is absent for L3 reconcile (Gemini provides List; Anthropic ephemeral cache does not)
+- [ ] Cache pre-warming: is it worth pre-creating L3 handles for high-frequency prompts
+- [ ] Statistical precision of the cache_saved_usd metric (use original model's current pricing on hit vs pricing at hit time)

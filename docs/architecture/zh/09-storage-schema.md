@@ -1,108 +1,108 @@
-# Doc 09 — Data Persistence and Storage Schema
+# 文档 09 — 数据持久化与 Storage Schema
 
-> Scope: define storage media, table structures, indexes, partitioning, migrations, and backup strategies for all persistent data.
+> 范围：定义所有持久化数据的存储介质、表结构、索引、分区、迁移、备份策略。
 >
-> Context: spans the preceding Docs 01-08 — this document introduces no new business concepts, only consolidating scattered storage constraints.
+> 上下文：贯穿前面 Doc 01-08——本文档不引入新业务概念，只把散落的存储约束统一规范。
 >
-> Targets two deployment shapes: Personal (SQLite) and Team/SaaS/Hybrid (Postgres + Redis + S3).
+> 适配两种部署形态：Personal (SQLite) 与 Team/SaaS/Hybrid (Postgres + Redis + S3)。
 
 ---
 
-## 1. Design Goals
+## 1. 设计目标
 
-| Goal | Description |
+| 目标 | 说明 |
 |---|---|
-| **Same schema across stores** | SQLite and Postgres table structures stay isomorphic where possible; business code is shared |
-| **Append-only first** | Events / audit / billing — the three big tables are INSERT-only; UPDATE / DELETE never on business paths |
-| **Tenant-level partitioning** | Large tables physically partitioned by tenant_id; tenant deletion completes via DROP PARTITION in seconds |
-| **Hot/cold tiering** | Hot data (last 30 days) in OLTP, cold data archived to S3, queries transparent |
-| **Zero-downtime migration** | Schema migration must support rolling upgrade; new and old versions coexist |
-| **Recoverable backups** | Any point-in-time state recoverable from backups, RPO < 1h, RTO < 4h |
-| **Storage decoupled from business** | All schemas exposed via Repository traits; business code writes no SQL |
+| **同 schema 跨存储** | SQLite 与 Postgres 表结构尽量同型,业务代码同一份 |
+| **Append-only 优先** | 事件 / 审计 / 计费三大表 INSERT-only,不允许 UPDATE / DELETE 业务路径 |
+| **租户级分区** | 大表按 tenant_id 物理分区,删除租户时 DROP PARTITION 秒级完成 |
+| **冷热分层** | 热数据 (近 30 天) 在 OLTP,冷数据归档到 S3,查询透明 |
+| **零停机迁移** | Schema migration 必须支持滚动升级,新老版本能并存 |
+| **Backup 可恢复** | 任何时间点的状态都能通过备份恢复,RPO < 1h,RTO < 4h |
+| **存储与业务解耦** | 所有 schema 通过 Repository trait 暴露,业务代码不写 SQL |
 
-**Non-goals**:
-- No cross-table transactions on business paths (performance bottleneck, complex error recovery)
-- No business dependence on a specific SQL dialect (Postgres-specific features hidden behind Repository)
-- No denormalization "for performance" that forces the same data to be updated in multiple places
-- No concurrent hot writes against SQLite (Personal mode expects a single process; multi-process will conflict)
+**反目标**：
+- 不在业务路径上做跨表 transaction（性能瓶颈，错误恢复复杂）
+- 不让业务依赖某个特定 SQL 方言（Postgres 特有 feature 通过 Repository 屏蔽）
+- 不为了"性能"反规范化导致同一数据多处更新
+- 不在 SQLite 里做并发热写（Personal 模式预期单进程，多进程会冲突）
 
 ---
 
-## 2. Storage Medium Matrix
+## 2. 存储介质矩阵
 
-Allocation by deployment shape:
+按部署形态分配：
 
-| Data type | Personal | Team / SaaS | Hybrid |
+| 数据类型 | Personal | Team / SaaS | Hybrid |
 |---|---|---|---|
-| Event log | SQLite (WAL mode) | Postgres (partitioned) | SQLite (local) |
-| Audit log | SQLite (separate file) | Postgres + S3 mirror + SIEM | SQLite + no upload |
-| Billing events | SQLite | Postgres | SQLite (local rollup → upload anonymized metric) |
-| Tenant config | TOML file (no DB) | Postgres | TOML + cloud sync |
-| L1 Cache | In-process memory | In-process memory | In-process memory |
+| 事件日志 | SQLite (WAL mode) | Postgres (partitioned) | SQLite (本地) |
+| 审计日志 | SQLite (单独 file) | Postgres + S3 mirror + SIEM | SQLite + 不上传 |
+| 计费事件 | SQLite | Postgres | SQLite (本地汇总→上传匿名 metric) |
+| 租户配置 | TOML 文件 (无 DB) | Postgres | TOML + 云端 sync |
+| L1 Cache | 进程内内存 | 进程内内存 | 进程内内存 |
 | L2 Cache | SQLite blob | Redis Cluster | SQLite blob |
-| L3 Cache index | SQLite | Postgres | SQLite |
-| Budget state | SQLite (single process) | Redis (atomic decrement) | SQLite |
+| L3 Cache 索引 | SQLite | Postgres | SQLite |
+| Budget 状态 | SQLite (单进程) | Redis (原子扣减) | SQLite |
 | Idempotency Cache | SQLite | Redis | SQLite |
-| Session state | SQLite | Redis | SQLite |
-| Large Content (ContentRef) | Local FS | S3 | Local FS |
-| Secret reference (no value) | TOML | Postgres | TOML |
-| Secret value | OS keychain / file | Vault / KMS | OS keychain |
+| Session 状态 | SQLite | Redis | SQLite |
+| 大 Content (ContentRef) | 本地 FS | S3 | 本地 FS |
+| Secret 引用 (无值) | TOML | Postgres | TOML |
+| Secret 值 | OS keychain / file | Vault / KMS | OS keychain |
 
-### 2.1 Selection Rationale at a Glance
+### 2.1 选型理由速览
 
-- **SQLite + WAL**: Personal mode is single-process, no operational overhead, performance is sufficient (<1k events/s is plenty)
-- **Postgres**: required for Team/SaaS multi-replica, strong transactional guarantees, mature partitioning
-- **Redis**: atomic decrement + pub/sub + high QPS — best fit for Budget and Cache L2
-- **S3**: large objects + cold archive + cross-region replication
-- **OS keychain / Vault**: secret values must never sit alongside the business DB
+- **SQLite + WAL**：Personal 模式单进程，无运维负担，性能足够（<1k events/s 完全够用）
+- **Postgres**：Team/SaaS 多副本必备，事务能力强，分区成熟
+- **Redis**：原子扣减 + pub/sub + 高 QPS——Budget 和 Cache L2 的最佳形态
+- **S3**：大对象 + 冷归档 + 跨区复制
+- **OS keychain / Vault**：secret 值绝不与业务 DB 同地存放
 
 ---
 
 ## 3. Postgres Schema (Team / SaaS)
 
-### 3.1 Overview
+### 3.1 总览
 
 ```
-public schema (core business):
+public schema (核心业务):
   tenants
   workspaces
   sessions
   iam_scope_assignments
   
-  trajectories                       (partitioned by tenant_id)
-  agent_events                       (partitioned by tenant_id, sub-partitioned by month)
+  trajectories                       (按 tenant_id 分区)
+  agent_events                       (按 tenant_id 分区,内部按月再分)
   content_refs
   
   l3_cache_handles
-  l3_handle_sessions                 (reference relations)
+  l3_handle_sessions                 (引用关系)
   
-  idempotency_cache                  (partitioned by tenant_id)
+  idempotency_cache                  (按 tenant_id 分区)
   
   pending_compensations
-  compensation_failures              (alert source)
+  compensation_failures              (告警源)
   
-audit schema (compliance):
-  audit_events                       (partitioned by time, append-only)
-  audit_signatures                   (HMAC, 1:1 with event)
+audit schema (合规):
+  audit_events                       (按时间分区,append-only)
+  audit_signatures                   (HMAC,与 event 1:1)
   
-billing schema (billing):
-  billing_events                     (partitioned by month)
+billing schema (计费):
+  billing_events                     (按月分区)
   billing_aggregations_hourly
   billing_aggregations_daily
   billing_aggregations_monthly
   
-config schema (configuration):
+config schema (配置):
   tenant_configs                     (JSONB)
-  config_change_log                  (append-only, who changed what)
-  secret_refs                        (references, not values)
+  config_change_log                  (append-only,谁改了什么)
+  secret_refs                        (引用,不是值)
   
-ops schema (operational metadata):
+ops schema (运维元数据):
   schema_migrations                  (refinery / sqlx::migrate!)
   cardinality_observations           (Doc 08 §5.5)
   reconciliation_runs                (Doc 03 §7.3)
 ```
 
-### 3.2 Key Table DDL
+### 3.2 关键表 DDL
 
 #### 3.2.1 tenants
 
@@ -127,7 +127,7 @@ CREATE INDEX idx_tenants_pending_deletion ON tenants(deletion_scheduled_for)
     WHERE status = 'pending_deletion';
 ```
 
-#### 3.2.2 trajectories (partitioned by tenant)
+#### 3.2.2 trajectories (按 tenant 分区)
 
 ```sql
 CREATE TABLE trajectories (
@@ -145,7 +145,7 @@ CREATE TABLE trajectories (
     PRIMARY KEY (tenant_id, id)
 ) PARTITION BY HASH (tenant_id);
 
--- Create partitions (typical deployment uses 64 hash partitions)
+-- 创建分区 (典型部署 64 个 hash partition)
 DO $$
 BEGIN
     FOR i IN 0..63 LOOP
@@ -157,7 +157,7 @@ BEGIN
     END LOOP;
 END $$;
 
--- Indexes
+-- 索引
 CREATE INDEX idx_trajectories_active 
     ON trajectories (tenant_id, status, updated_at) 
     WHERE status IN ('active', 'suspended');
@@ -168,19 +168,19 @@ CREATE INDEX idx_trajectories_parent
     WHERE parent_id IS NOT NULL;
 ```
 
-#### 3.2.3 agent_events (partitioned by tenant + time)
+#### 3.2.3 agent_events (按 tenant + 时间分区)
 
-The largest table, expected 10⁶-10⁹ rows. Two-level partitioning: tenant_id (HASH) → created_at (RANGE by month):
+最大表，预期 10⁶-10⁹ 行。双层分区：tenant_id (HASH) → created_at (RANGE 按月)：
 
 ```sql
 CREATE TABLE agent_events (
     id              BIGSERIAL,
     tenant_id       UUID NOT NULL,
     trajectory_id   UUID NOT NULL,
-    step_seq        INT,                  -- nullable: non-step events have none
+    step_seq        INT,                  -- nullable: 非 step 事件没有
     event_type      TEXT NOT NULL,
     payload         JSONB NOT NULL,
-    content_ref     BYTEA,                -- large payloads referenced indirectly via content_refs
+    content_ref     BYTEA,                -- 大 payload 通过 content_refs 间接引用
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (tenant_id, created_at, id)
 ) PARTITION BY HASH (tenant_id);
@@ -197,7 +197,7 @@ BEGIN
     END LOOP;
 END $$;
 
--- Each hash partition is sub-partitioned by month, automatically maintained by pg_partman:
+-- 每个 hash partition 内部再按月分区,通过 pg_partman 自动维护:
 -- SELECT partman.create_parent('public.agent_events_p0', 'created_at', 'native', 'monthly');
 
 CREATE INDEX idx_agent_events_trajectory 
@@ -205,12 +205,12 @@ CREATE INDEX idx_agent_events_trajectory
 CREATE INDEX idx_agent_events_type 
     ON agent_events (tenant_id, event_type, created_at);
 
--- BRIN index suits append-only time series; 100x smaller than B-tree
+-- BRIN 索引适合 append-only 时间序列,体积比 B-tree 小 100x
 CREATE INDEX idx_agent_events_brin 
     ON agent_events USING BRIN (created_at);
 ```
 
-**Cold archive**: month partitions older than 30 days are exported via `pg_dump` → S3, then `DROP PARTITION`. After archiving, queries follow the hot/cold mixed path in §7.
+**冷归档**：超过 30 天的 month partition 通过 `pg_dump` → S3，然后 `DROP PARTITION`。归档后查询走 §7 的冷热混合路径。
 
 #### 3.2.4 content_refs
 
@@ -221,10 +221,10 @@ CREATE TABLE content_refs (
     size_bytes      BIGINT NOT NULL,
     mime_type       TEXT,
     backend         TEXT NOT NULL CHECK (backend IN ('inline', 's3', 'fs')),
-    inline_data     BYTEA,                    -- only when backend = 'inline'
-    s3_key          TEXT,                     -- only when backend = 's3'
-    fs_path         TEXT,                     -- only when backend = 'fs'
-    refcount        INT NOT NULL DEFAULT 0,   -- reference count, used by GC
+    inline_data     BYTEA,                    -- 仅 backend = 'inline' 时
+    s3_key          TEXT,                     -- 仅 backend = 's3' 时
+    fs_path         TEXT,                     -- 仅 backend = 'fs' 时
+    refcount        INT NOT NULL DEFAULT 0,   -- 引用计数,GC 用
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -234,21 +234,21 @@ CREATE INDEX idx_content_refs_zero_refcount ON content_refs(refcount) WHERE refc
 CREATE INDEX idx_content_refs_unaccessed ON content_refs(last_accessed_at) 
     WHERE refcount = 0;
 
--- Backend selection policy (in the application layer):
+-- 自动选择 backend 的策略 (在应用层):
 -- size <= 16KB    → inline
--- size <= 1MB     → fs (local)
+-- size <= 1MB     → fs (本地)
 -- size > 1MB      → s3
 ```
 
-#### 3.2.5 l3_cache_handles + reference counting
+#### 3.2.5 l3_cache_handles + 引用计数
 
 ```sql
 CREATE TABLE l3_cache_handles (
     id              UUID PRIMARY KEY,
     tenant_id       UUID NOT NULL,
-    cache_key_hash  BYTEA NOT NULL,           -- fingerprint per Doc 03 §3
+    cache_key_hash  BYTEA NOT NULL,           -- Doc 03 §3 的 fingerprint
     provider        TEXT NOT NULL,
-    external_id     TEXT NOT NULL,            -- provider-side cache id
+    external_id     TEXT NOT NULL,            -- Provider 侧的 cache id
     size_estimate_bytes BIGINT NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at      TIMESTAMPTZ NOT NULL,
@@ -265,7 +265,7 @@ CREATE INDEX idx_l3_handles_expired
     ON l3_cache_handles (expires_at) 
     WHERE expires_at < NOW();
 
--- Reference relation table (Doc 03 §7.2)
+-- 引用关系表 (Doc 03 §7.2)
 CREATE TABLE l3_handle_sessions (
     handle_id       UUID NOT NULL REFERENCES l3_cache_handles(id) ON DELETE CASCADE,
     session_id      UUID NOT NULL,
@@ -276,12 +276,12 @@ CREATE TABLE l3_handle_sessions (
 CREATE INDEX idx_l3_handle_sessions_session ON l3_handle_sessions(session_id);
 ```
 
-#### 3.2.6 audit_events (partitioned by time)
+#### 3.2.6 audit_events (按时间分区)
 
 ```sql
 CREATE TABLE audit.audit_events (
     id              BIGSERIAL,
-    tenant_id       UUID,                     -- nullable: system-level events (config reload)
+    tenant_id       UUID,                     -- nullable: 系统级事件 (config reload)
     principal_id    TEXT NOT NULL,
     event_type      TEXT NOT NULL,
     severity        TEXT NOT NULL CHECK (severity IN ('info', 'warning', 'critical')),
@@ -290,7 +290,7 @@ CREATE TABLE audit.audit_events (
     PRIMARY KEY (occurred_at, id)
 ) PARTITION BY RANGE (occurred_at);
 
--- Monthly partitions, 7-year retention
+-- 月分区,7 年保留
 SELECT partman.create_parent(
     'audit.audit_events', 
     'occurred_at', 
@@ -298,7 +298,7 @@ SELECT partman.create_parent(
     'monthly',
     p_premake := 12,
     p_retention := '7 years',
-    p_retention_keep_table := false  -- actually delete (after compliance allows)
+    p_retention_keep_table := false  -- 真实删除 (合规允许后)
 );
 
 CREATE INDEX idx_audit_tenant ON audit.audit_events(tenant_id, occurred_at) 
@@ -307,7 +307,7 @@ CREATE INDEX idx_audit_type ON audit.audit_events(event_type, occurred_at);
 CREATE INDEX idx_audit_critical ON audit.audit_events(occurred_at) 
     WHERE severity = 'critical';
 
--- HMAC signature table (1:1 with event, tamper-resistant)
+-- HMAC 签名表 (与 event 1:1, 防篡改)
 CREATE TABLE audit.audit_signatures (
     event_id        BIGINT NOT NULL,
     occurred_at     TIMESTAMPTZ NOT NULL,
@@ -318,13 +318,13 @@ CREATE TABLE audit.audit_signatures (
 );
 ```
 
-**Key invariants**:
-- `audit_events` has no UPDATE / DELETE permissions — enforced via Postgres role
-- Even superuser can only delete via a special approval workflow (compliance requirement)
-- `audit_signatures` is populated immediately after event write; HMAC keys rotate periodically
+**关键不变量**：
+- `audit_events` 没有 UPDATE / DELETE 权限——通过 Postgres role 强制
+- 即使 superuser 也只能通过特殊审批流程删除（合规要求）
+- `audit_signatures` 在 event 写入后立即填充，HMAC key 定期轮换
 
 ```sql
--- Enforce append-only
+-- 强制 append-only
 REVOKE UPDATE, DELETE, TRUNCATE ON audit.audit_events FROM application_role;
 GRANT INSERT, SELECT ON audit.audit_events TO application_role;
 ```
@@ -361,7 +361,7 @@ SELECT partman.create_parent(
 CREATE INDEX idx_billing_tenant_time ON billing.billing_events(tenant_id, occurred_at);
 CREATE INDEX idx_billing_kind ON billing.billing_events(event_kind, occurred_at);
 
--- Pre-aggregations (written by scheduled jobs to speed up dashboard queries)
+-- 预聚合 (定时 job 写入,加速 dashboard 查询)
 CREATE TABLE billing.aggregations_daily (
     tenant_id       UUID NOT NULL,
     bucket_date     DATE NOT NULL,
@@ -394,14 +394,14 @@ CREATE TABLE config.tenant_configs (
     updated_by      TEXT NOT NULL
 );
 
--- Configuration change history (append-only)
+-- 配置变更历史 (append-only)
 CREATE TABLE config.config_change_log (
     id              BIGSERIAL PRIMARY KEY,
-    tenant_id       UUID,                     -- NULL means a global configuration change
+    tenant_id       UUID,                     -- NULL 表示全局配置变更
     changed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     changed_by      TEXT NOT NULL,
     change_kind     TEXT NOT NULL,
-    diff            JSONB NOT NULL,           -- patch of before/after
+    diff            JSONB NOT NULL,           -- 变更前后的 patch
     reason          TEXT
 );
 
@@ -412,31 +412,31 @@ CREATE INDEX idx_config_log_tenant ON config.config_change_log(tenant_id, change
 
 ## 4. SQLite Schema (Personal)
 
-The SQLite-mode schema is broadly isomorphic to Postgres, with a few key differences:
+SQLite 模式的 schema 与 Postgres 大致同型，但有几点关键差异：
 
-### 4.1 Schema Differences
+### 4.1 模式差异
 
-| Dimension | Postgres | SQLite (Personal) |
+| 维度 | Postgres | SQLite (Personal) |
 |---|---|---|
-| Data types | UUID / TIMESTAMPTZ / JSONB / BYTEA | TEXT (UUID string) / INTEGER (unix epoch) / TEXT (JSON string) / BLOB |
-| Partitioning | HASH + RANGE | none (single tenant, low volume, not needed) |
-| Concurrency | MVCC | WAL mode + busy_timeout |
-| Foreign keys | enabled automatically | must `PRAGMA foreign_keys = ON` |
-| Schema isolation | schema namespace | flat single file |
+| 数据类型 | UUID / TIMESTAMPTZ / JSONB / BYTEA | TEXT (UUID 字符串) / INTEGER (unix epoch) / TEXT (JSON 字符串) / BLOB |
+| 分区 | HASH + RANGE | 无 (单租户量小,不需要) |
+| 并发 | MVCC | WAL mode + busy_timeout |
+| 外键 | 自动启用 | 必须 `PRAGMA foreign_keys = ON` |
+| Schema 隔离 | schema namespace | 单 file 平铺 |
 
-### 4.2 SQLite Startup Configuration
+### 4.2 SQLite 启动配置
 
 ```rust
 async fn init_sqlite(path: &Path) -> Result<Pool<SqliteConnectionManager>> {
     let manager = SqliteConnectionManager::file(path)
         .with_init(|conn| {
-            // Key PRAGMAs
+            // 关键 PRAGMA
             conn.execute_batch("
                 PRAGMA journal_mode = WAL;
-                PRAGMA synchronous = NORMAL;       -- safe enough under WAL
+                PRAGMA synchronous = NORMAL;       -- WAL 下足够安全
                 PRAGMA foreign_keys = ON;
-                PRAGMA busy_timeout = 5000;        -- 5s lock wait
-                PRAGMA cache_size = -32000;        -- 32MB in-memory cache
+                PRAGMA busy_timeout = 5000;        -- 5s 等锁
+                PRAGMA cache_size = -32000;        -- 32MB 内存缓存
                 PRAGMA temp_store = MEMORY;
                 PRAGMA mmap_size = 268435456;      -- 256MB mmap
             ")?;
@@ -444,14 +444,14 @@ async fn init_sqlite(path: &Path) -> Result<Pool<SqliteConnectionManager>> {
         });
     
     let pool = Pool::builder()
-        .max_size(8)                              // Personal mode, low concurrency
+        .max_size(8)                              // Personal 模式低并发
         .build(manager)?;
     
     Ok(pool)
 }
 ```
 
-### 4.3 SQLite agent_events (example, mirroring Postgres)
+### 4.3 SQLite agent_events (示例,与 Postgres 对应)
 
 ```sql
 CREATE TABLE agent_events (
@@ -468,11 +468,11 @@ CREATE INDEX idx_agent_events_trajectory ON agent_events(trajectory_id, created_
 CREATE INDEX idx_agent_events_type ON agent_events(event_type, created_at);
 ```
 
-Note: SQLite has no tenant_id field (Personal is always single-tenant, hardcoded as `local`).
+注意：SQLite 没有 tenant_id 字段（Personal 永远 single-tenant，hardcode 为 `local`）。
 
-### 4.4 Sharing Code Between SQLite and Postgres
+### 4.4 SQLite 与 Postgres 共享代码
 
-Through `sqlx`'s `Database` abstraction, business code is shielded by a trait:
+通过 `sqlx` 的 `Database` 抽象，业务代码用 trait 屏蔽：
 
 ```rust
 #[async_trait]
@@ -488,7 +488,7 @@ pub struct PostgresEventStore { pool: PgPool }
 #[async_trait] impl EventStore for PostgresEventStore { ... }
 ```
 
-Implementation chosen at startup based on `mode` configuration:
+启动时根据 `mode` 配置选择实现：
 
 ```rust
 let event_store: Arc<dyn EventStore> = match config.storage.backend {
@@ -499,9 +499,9 @@ let event_store: Arc<dyn EventStore> = match config.storage.backend {
 
 ---
 
-## 5. Redis Data Structures (Team / SaaS)
+## 5. Redis 数据结构 (Team / SaaS)
 
-### 5.1 Key Naming Convention
+### 5.1 Key 命名规范
 
 ```
 {purpose}:{tenant}:{rest}
@@ -519,20 +519,20 @@ session:{session_id}                       → hash (workspace, principal, last_
 session:tenant_active:{tenant}             → set of active session_ids
 
 inflight:singleflight:{cache_key_hash}     → broadcaster channel proxy
-                                             (short-lived, held by leader)
+                                             (短生命周期, 由 leader 持有)
 
 invalidation_channel                       → pub/sub channel (cross-instance)
 ```
 
-### 5.2 Atomic Budget Decrement (Lua)
+### 5.2 Budget 原子扣减 (Lua)
 
-A non-atomic GET + business check + SET pattern is unacceptable (race condition):
+不能用 GET + 业务判断 + SET 的非原子模式（race condition）：
 
 ```lua
 -- KEYS[1] = budget key (e.g., "budget:cost:daily:acme:2026-05-02")
 -- ARGV[1] = amount to deduct
 -- ARGV[2] = hard limit
--- returns: { remaining, granted (1/0) }
+-- 返回: { remaining, granted (1/0) }
 
 local current = redis.call('GET', KEYS[1])
 current = tonumber(current) or 0
@@ -545,7 +545,7 @@ end
 
 local new_value = redis.call('INCRBYFLOAT', KEYS[1], amount)
 
--- Set TTL on first creation (24h, automatic reset across days)
+-- 第一次创建时设置 TTL (24h, 跨日自动重置)
 if current == 0 then
     redis.call('EXPIRE', KEYS[1], 86400)
 end
@@ -553,7 +553,7 @@ end
 return { new_value, 1 }
 ```
 
-Application-side call:
+应用层调用：
 
 ```rust
 async fn try_deduct(&self, key: &str, amount: f64, limit: f64) 
@@ -572,10 +572,10 @@ async fn try_deduct(&self, key: &str, amount: f64, limit: f64)
 }
 ```
 
-### 5.3 Invalidation Broadcast (pub/sub)
+### 5.3 失效广播 (pub/sub)
 
 ```rust
-// Each instance subscribes at startup
+// 每个实例启动时订阅
 async fn subscribe_invalidation(redis: &RedisClient, l1: Arc<L1Cache>) {
     let mut sub = redis.subscribe("cache:invalidation").await.unwrap();
     while let Some(msg) = sub.next().await {
@@ -585,55 +585,55 @@ async fn subscribe_invalidation(redis: &RedisClient, l1: Arc<L1Cache>) {
     }
 }
 
-// Writer side
+// 写入端
 async fn invalidate(&self, key: &CacheKey) {
     let event = InvalidationEvent::Key(key.clone());
     let payload = serde_json::to_string(&event).unwrap();
     self.redis.publish("cache:invalidation", payload).await.ok();
     
-    // Apply locally immediately
+    // 本地立即应用
     self.local_l1.remove(key).await;
     self.l2.delete(key).await.ok();
 }
 ```
 
-### 5.4 Recommended Redis Configuration
+### 5.4 Redis 配置建议
 
 ```toml
 [storage.redis]
 url = { source = "vault", path = "secret/data/tars/redis" }
 pool_size = 50
 connection_timeout_ms = 1000
-command_timeout_ms = 500          # short timeout, fallback on failure does not block business
+command_timeout_ms = 500          # 短超时,失败时 fallback 不阻塞业务
 
-# Persistence policy
-# AOF everysec: at most 1s of data loss, suitable for budget/cache (small loss tolerable)
-# RDB backups hourly, replicated across availability zones
+# 持久化策略
+# AOF everysec: 最多丢 1s 数据,适合 budget/cache (允许少量丢失)
+# RDB 备份每小时一次,跨可用区复制
 ```
 
-**Key decisions**:
-- Redis is not the source of truth — losing budget state can be re-accumulated (worst case, the user gets a few extra seconds), losing cache means regenerating
-- Do not put audit / billing / event data in Redis (insufficient durability)
-- Redis Cluster uses hashtags (`{tenant_id}`) so same-tenant keys land in the same slot
+**关键决策**：
+- Redis 不是真理之源——budget 状态丢了重新累计就行（最多让用户多用几秒），cache 丢了重新生成
+- 不要把 audit / billing / event 放 Redis（持久性不够）
+- Redis Cluster 用 hashtag (`{tenant_id}`) 让同租户的 key 落在同一 slot
 
 ---
 
-## 6. S3 / Object Storage Layout
+## 6. S3 / Object Storage 布局
 
-### 6.1 Bucket Structure
+### 6.1 Bucket 结构
 
 ```
 s3://tars-{env}-content/
   ├─ tenants/{tenant_id}/
-  │  ├─ content/{hash[0:2]}/{hash[2:32]}      → ContentRef large objects
-  │  └─ debug-snapshots/{date}/{trajectory_id}.json  → user-initiated export
+  │  ├─ content/{hash[0:2]}/{hash[2:32]}      → ContentRef 大对象
+  │  └─ debug-snapshots/{date}/{trajectory_id}.json  → 用户主动 export
   └─ shared/
-     └─ models/                                → embedded ONNX / GGUF (cross-tenant shared)
+     └─ models/                                → 嵌入式 ONNX / GGUF (跨租户共享)
 
 s3://tars-{env}-archive/
-  ├─ events/{tenant_id}/{year}/{month}/events.jsonl.zstd  → cold-archived events
-  ├─ audit/{year}/{month}/audit.jsonl.zstd               → audit cold archive (7 years)
-  └─ billing/{year}/{month}/billing.jsonl.zstd           → billing cold archive (3 years)
+  ├─ events/{tenant_id}/{year}/{month}/events.jsonl.zstd  → 冷归档事件
+  ├─ audit/{year}/{month}/audit.jsonl.zstd               → 审计冷归档 (7 年)
+  └─ billing/{year}/{month}/billing.jsonl.zstd           → 计费冷归档 (3 年)
 
 s3://tars-{env}-backup/
   ├─ postgres/{date}/{cluster}.dump
@@ -641,7 +641,7 @@ s3://tars-{env}-backup/
   └─ config/{date}/config-snapshot.tar.gz
 ```
 
-### 6.2 ContentRef S3 Operations
+### 6.2 ContentRef S3 操作
 
 ```rust
 async fn put_content(&self, content: Vec<u8>, tenant: &TenantId) -> Result<ContentRef> {
@@ -650,7 +650,7 @@ async fn put_content(&self, content: Vec<u8>, tenant: &TenantId) -> Result<Conte
     let key = format!("tenants/{}/content/{}/{}", 
         tenant, &hash_hex[..2], &hash_hex[2..]);
     
-    // Content addressing: skip upload if it already exists
+    // 内容寻址:已存在则跳过上传
     if self.s3.head_object(&self.bucket, &key).await.is_ok() {
         return Ok(ContentRef { hash, size: content.len() as u64, ..Default::default() });
     }
@@ -665,7 +665,7 @@ async fn put_content(&self, content: Vec<u8>, tenant: &TenantId) -> Result<Conte
 }
 
 async fn delete_tenant_content(&self, tenant: &TenantId) -> Result<u64> {
-    // Called during GDPR cascade deletion
+    // GDPR 级联删除时调用
     let prefix = format!("tenants/{}/", tenant);
     let mut deleted = 0u64;
     
@@ -695,16 +695,16 @@ async fn delete_tenant_content(&self, tenant: &TenantId) -> Result<u64> {
 }
 ```
 
-### 6.3 Cold Archive Strategy
+### 6.3 冷归档策略
 
 ```
-After 30 days:
-  - Month partitions exported from Postgres via pg_dump → S3 archive bucket
-  - Then DROP PARTITION (free hot storage)
-  - On query, if occurred_at > 30 days and data not in hot tier, automatically pull from S3
+30 天后:
+  - 月分区从 Postgres 通过 pg_dump → S3 archive bucket
+  - 然后 DROP PARTITION (释放热存储)
+  - 应用层查询时,如果 occurred_at > 30 天且数据不在 hot,自动从 S3 拉取
 ```
 
-Application-layer "query cold data" logic:
+应用层的"查询冷数据"逻辑：
 
 ```rust
 async fn fetch_events(&self, traj: TrajectoryId, since: SystemTime) 
@@ -713,11 +713,11 @@ async fn fetch_events(&self, traj: TrajectoryId, since: SystemTime)
     let cutoff = SystemTime::now() - Duration::from_days(30);
     
     if since >= cutoff {
-        // Entirely in the hot zone
+        // 完全在热区
         return self.fetch_from_postgres(traj, since).await;
     }
     
-    // Crosses the hot/cold boundary
+    // 跨冷热边界
     let hot_events = self.fetch_from_postgres(traj, cutoff).await?;
     let cold_events = self.fetch_from_s3_archive(traj, since, cutoff).await?;
     
@@ -728,13 +728,13 @@ async fn fetch_events(&self, traj: TrajectoryId, since: SystemTime)
 }
 ```
 
-Cold queries are slow (S3 listing + downloading tens of MB); the application layer should surface "loading history" in the UI.
+冷数据查询慢（S3 列表 + 下载几十 MB），应用层应该在 UI 上提示用户"加载历史中"。
 
 ---
 
-## 7. Migration Strategy
+## 7. Migration 策略
 
-### 7.1 Tooling
+### 7.1 工具选型
 
 ```rust
 // Cargo.toml
@@ -750,7 +750,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), MigrationError> {
 }
 ```
 
-Migration file layout:
+Migration 文件格式：
 
 ```
 migrations/
@@ -763,63 +763,63 @@ migrations/
     20260201120000_add_indexes.sql
 ```
 
-### 7.2 Forward-compatible Evolution Rules
+### 7.2 Forward-compatible 演进规则
 
-- **Add field**: must have a default value; old code is unaware
-- **Add table**: fully forward-compatible
-- **Rename field**: do it in two steps — first add the new field with dual writes, remove the old field in the next version
-- **Drop field**: only drop in N+2 (N introduces deprecation, N+1 stops using it, N+2 physically removes)
-- **Data migration**: must be idempotent and rerunnable
-- **Schema migration decoupled from code deployment**: deploy the migration first, then the new code
+- **新增字段**：必须有 default value，老代码不感知
+- **新增表**：完全向前兼容
+- **重命名字段**：分两步——先加新字段双写，下个版本删除老字段
+- **删除字段**：只在 N+2 版本删除（N 引入弃用，N+1 不再使用，N+2 物理删除）
+- **数据 migration**：必须 idempotent，可重跑
+- **Schema migration 与代码部署解耦**：先部署 migration，再部署新代码
 
-### 7.3 Rolling Upgrade Flow
+### 7.3 滚动升级流程
 
 ```
-T0: app v1.2 running, schema v5
-T1: deploy migration → schema v6 (forward compatible, v1.2 still runs)
-T2: deploy app v1.3 replica 1 (uses schema v6 fields, but does not depend on them)
-T3: verify v1.3 replica 1 is healthy
-T4: roll all replicas to v1.3
-T5: (next release cycle) deploy v1.4 to remove v5 fields
-T6: deploy migration → schema v7 (physically drop old fields)
+T0: 应用 v1.2 在跑,schema v5
+T1: 部署 migration → schema v6 (向前兼容,v1.2 仍能跑)
+T2: 部署应用 v1.3 副本 1 (使用 schema v6 字段,但不依赖)
+T3: 验证 v1.3 副本 1 健康
+T4: 滚动升级所有副本到 v1.3
+T5: (下个版本周期) 部署 v1.4 删除 v5 字段
+T6: 部署 migration → schema v7 (物理 drop 旧字段)
 ```
 
-### 7.4 Major Schema Changes
+### 7.4 重大 schema 变更
 
-Unavoidable breaking changes (e.g. partitioning policy adjustment, primary key change):
+不可避免的破坏性变更（如分区策略调整、主键变更）：
 
-1. **Create a new table schema**
-2. **Application-layer dual writes** (old + new tables)
-3. **Background backfill of data** (idempotent)
-4. **Application layer switches to read-only against the new table**
-5. **After N weeks of validation**, drop the old table
+1. **创建新表 schema**
+2. **应用层双写**（旧表 + 新表）
+3. **后台 backfill 数据**（idempotent）
+4. **应用层切到只读新表**
+5. **验证 N 周后**，drop 旧表
 
-Breaking changes are not allowed within a major version — they require a major version bump (v1 → v2).
+不允许在主版本内做破坏性变更——必须是 major version bump（v1 → v2）。
 
 ---
 
-## 8. Backup and Recovery
+## 8. Backup 与 Recovery
 
-### 8.1 Backup Strategy
+### 8.1 备份策略
 
-| Data | Backup frequency | Medium | RPO | RTO |
+| 数据 | 备份频率 | 介质 | RPO | RTO |
 |---|---|---|---|---|
-| Postgres (events / audit / billing / config) | hourly incremental + daily full | S3 + cross-region replication | 1h | 4h |
-| Redis | hourly RDB snapshot | S3 | 1h | 1h (loss acceptable) |
-| ContentRef S3 | cross-region replication (real-time) | different region | 0 | immediate |
-| SecretManager | guaranteed by the secret manager itself | Vault built-in | <5min | 5min |
+| Postgres (events / audit / billing / config) | 每小时增量 + 每日全量 | S3 + 跨区复制 | 1h | 4h |
+| Redis | 每小时 RDB snapshot | S3 | 1h | 1h (可丢失) |
+| ContentRef S3 | 跨区复制 (实时) | 不同 region | 0 | 立即 |
+| SecretManager | 由 secret manager 自身保证 | Vault 内置 | <5min | 5min |
 
-### 8.2 Disaster Recovery Drills
+### 8.2 灾难恢复演练
 
-Quarterly full DR drills:
-1. Restore Postgres + Redis + S3 from the latest backup in an isolated environment
-2. Start the application, verify basic functions (login / submit task / cancel task)
-3. Run a smoke suite to verify data integrity
-4. Record actual RTO and compare against target
+每季度一次完整 DR 演练：
+1. 在隔离环境从最新备份恢复 Postgres + Redis + S3
+2. 启动应用,验证基本功能 (login / submit task / cancel task)
+3. 跑一组 smoke 用例验证数据完整性
+4. 记录 RTO 实际值,与目标对比
 
-### 8.3 Personal Mode Backup
+### 8.3 Personal 模式备份
 
-The SQLite file can simply be `cp`'d, but Personal mode performs no automatic backups by default — users handle it themselves with Time Machine / sync drives / manual `tars backup`:
+SQLite 文件简单 cp 即可，但 Personal 模式默认不做自动备份——用户自己用 Time Machine / 同步盘 / 手动 `tars backup` 命令：
 
 ```bash
 tars backup --output ~/Documents/tars-backup-2026-05-02.tar.gz
@@ -828,52 +828,52 @@ tars restore --input ~/Documents/tars-backup-2026-05-02.tar.gz
 
 ---
 
-## 9. Performance and Capacity Planning
+## 9. 性能与容量规划
 
-### 9.1 Volume Estimation (Team / SaaS)
+### 9.1 数据量预估 (Team / SaaS)
 
-Assume: 100 tenants, 1000 LLM requests per tenant per day on average
+假设：100 租户、平均每租户每天 1000 LLM 请求
 
-| Table | Daily | Monthly | Yearly |
+| 表 | 日增 | 月增 | 年增 |
 |---|---|---|---|
-| agent_events | 100 × 1000 × 8 (avg 8 events per request) = 800k | 24M | 290M |
+| agent_events | 100 × 1000 × 8 (每请求平均 8 events) = 800k | 24M | 290M |
 | audit_events | 100k | 3M | 36M |
 | billing_events | 100k | 3M | 36M |
-| trajectories | 100k (new) | 3M | 36M |
+| trajectories | 100k (新建) | 3M | 36M |
 | content_refs | 50k | 1.5M | 18M |
 
-Storage estimates:
-- agent_events row ~500B (with JSONB) → ~12GB monthly → ~12GB of 30-day hot data (~200MB per hash partition)
-- billing_events row ~200B → ~600MB monthly
-- Total hot data ~20-30GB; a standard RDS / Aurora instance is more than sufficient
+存储估算：
+- agent_events 单行 ~500B (含 JSONB) → 月增 ~12GB → 30 天热数据 ~12GB（每 hash partition ~200MB）
+- billing_events 单行 ~200B → 月增 ~600MB
+- 总热数据 ~20-30GB，标准 RDS / Aurora 实例完全够
 
-### 9.2 Query Patterns and Indexes
+### 9.2 查询模式与索引
 
-| Query | Frequency | Index |
+| 查询 | 频率 | 索引 |
 |---|---|---|
-| `SELECT * FROM agent_events WHERE tenant_id=? AND trajectory_id=? ORDER BY created_at` | high | `idx_agent_events_trajectory` |
-| `SELECT * FROM trajectories WHERE tenant_id=? AND status='active'` | high | `idx_trajectories_active` |
-| `SELECT SUM(cost_usd) FROM billing_events WHERE tenant_id=? AND occurred_at >= ?` | medium | `idx_billing_tenant_time` |
-| `SELECT * FROM audit_events WHERE occurred_at BETWEEN ? AND ? AND severity='critical'` | low | `idx_audit_critical` |
+| `SELECT * FROM agent_events WHERE tenant_id=? AND trajectory_id=? ORDER BY created_at` | 高 | `idx_agent_events_trajectory` |
+| `SELECT * FROM trajectories WHERE tenant_id=? AND status='active'` | 高 | `idx_trajectories_active` |
+| `SELECT SUM(cost_usd) FROM billing_events WHERE tenant_id=? AND occurred_at >= ?` | 中 | `idx_billing_tenant_time` |
+| `SELECT * FROM audit_events WHERE occurred_at BETWEEN ? AND ? AND severity='critical'` | 低 | `idx_audit_critical` |
 
-### 9.3 Connection Pools
+### 9.3 连接池
 
 ```toml
 [storage.postgres]
-pool_size = 50                    # = (CPU cores × 2) + effective_io_count, rule of thumb
+pool_size = 50                    # = (CPU 核数 × 2) + effective_io_count, 经验值
 acquire_timeout_ms = 3000
 idle_timeout_secs = 600
-max_lifetime_secs = 1800          # forced connection rotation, avoids stale connections
+max_lifetime_secs = 1800          # 强制连接轮换,避免 stale connections
 
 [storage.redis]
 pool_size = 100
 connection_timeout_ms = 500
 ```
 
-### 9.4 Slow Query Monitoring
+### 9.4 慢查询监控
 
 ```sql
--- With pg_stat_statements enabled, sample periodically
+-- pg_stat_statements 启用后定期采样
 SELECT query, calls, total_exec_time, mean_exec_time, rows
 FROM pg_stat_statements
 WHERE mean_exec_time > 100        -- > 100ms
@@ -881,18 +881,18 @@ ORDER BY total_exec_time DESC
 LIMIT 20;
 ```
 
-Slow query alert threshold: a single query > 1s and > 10 times/minute → SRE alert.
+慢查询阈值告警：单查询 > 1s 且 > 10 次/分钟 → 触发 SRE 告警。
 
 ---
 
-## 10. Cross-Storage Consistency
+## 10. 跨存储一致性
 
-Avoid cross-storage transactions on the business path. Three typical scenarios are handled as follows:
+业务路径上避免跨存储事务。三种典型场景的处理：
 
-### 10.1 Write agent_event + billing (cross-table)
+### 10.1 写 agent_event + 计费 (跨表)
 
 ```rust
-// Single Postgres transaction, since both agent_events and billing_events live in Postgres
+// 单 Postgres 事务,因为 agent_events 和 billing_events 都在 Postgres
 async fn record_llm_call(&self, event: AgentEvent, billing: BillingEvent) -> Result<()> {
     let mut tx = self.pool.begin().await?;
     sqlx::query!(...).execute(&mut *tx).await?;     // agent_events
@@ -902,15 +902,15 @@ async fn record_llm_call(&self, event: AgentEvent, billing: BillingEvent) -> Res
 }
 ```
 
-### 10.2 Write agent_event + deduct budget (cross-store)
+### 10.2 写 agent_event + 扣 budget (跨存储)
 
 ```rust
-// Postgres + Redis spans stores; transaction not possible
+// Postgres + Redis 跨存储,不能用事务
 async fn record_with_budget(&self, event: AgentEvent, cost: f64) -> Result<()> {
-    // Step 1: write Postgres event (business truth, must succeed)
+    // Step 1: 写 Postgres event (业务真相,必须成功)
     self.event_store.append(event).await?;
     
-    // Step 2: deduct Redis budget (failure does not block business; record metric, async reconcile)
+    // Step 2: 扣 Redis budget (失败不阻塞业务,记 metric 异步对账)
     if let Err(e) = self.budget.deduct(&tenant, cost).await {
         tracing::warn!(?e, "budget deduct failed, will reconcile from billing_events");
         self.metrics.record_budget_lag();
@@ -920,52 +920,52 @@ async fn record_with_budget(&self, event: AgentEvent, cost: f64) -> Result<()> {
 }
 ```
 
-Periodic reconciliation: recompute the expected budget from billing_events on a schedule, compare with Redis, and correct if it exceeds threshold.
+定时 reconciliation：定期从 billing_events 重算预算应有值，与 Redis 对比，超过阈值则修正。
 
-### 10.3 Write ContentRef + agent_event
+### 10.3 写 ContentRef + agent_event
 
 ```rust
 async fn append_with_large_payload(&self, traj: TrajectoryId, payload: Vec<u8>) -> Result<()> {
-    // Step 1: write ContentStore (S3 / FS), get the hash
+    // Step 1: 写 ContentStore (S3 / FS),获取 hash
     let content_ref = self.content_store.put(payload).await?;
     
-    // Step 2: write the event (referencing content_ref)
+    // Step 2: 写 event (引用 content_ref)
     let event = AgentEvent::StepCompleted { 
         output_ref: content_ref,
         ...
     };
     self.event_store.append(event).await?;
     
-    // Failure handling:
-    // - Step 1 succeeds + Step 2 fails → S3 has an orphan, GC'd by Janitor via refcount=0
-    // - Step 1 fails → business aborts directly
+    // 失败处理:
+    // - Step 1 成功 + Step 2 失败 → S3 有孤儿,Janitor 通过 refcount=0 GC
+    // - Step 1 失败 → 业务直接 abort
     Ok(())
 }
 ```
 
-ContentRef relies on refcount + GC to clean orphans, not transactions.
+ContentRef 通过 refcount + GC 清理孤儿，不依赖事务。
 
 ---
 
-## 11. Data Lifecycle and Tenant Deletion
+## 11. 数据生命周期与租户删除
 
-Echoing Doc 06 §8.3's cascading deletion, this section details the cleanup path per storage:
+呼应 Doc 06 §8.3 的级联删除，本节细化每个存储的清理路径：
 
 ```rust
 async fn purge_tenant_data(&self, tenant: &TenantId) -> Result<PurgeReport, PurgeError> {
     let mut report = PurgeReport::default();
     
-    // 1. Postgres - DROP PARTITION (seconds)
+    // 1. Postgres - DROP PARTITION (秒级)
     for partition in self.list_tenant_partitions(tenant).await? {
         self.execute(&format!("DROP TABLE {}", partition)).await?;
         report.dropped_partitions += 1;
     }
     
-    // 2. Postgres - delete rows referenced by tenant primary key (rest cascades automatically)
+    // 2. Postgres - 删除 tenant 主键引用的行 (其余表自动 CASCADE)
     sqlx::query!("DELETE FROM tenants WHERE id = $1", tenant.0).execute(...).await?;
     report.deleted_tenant_rows = 1;
     
-    // 3. Redis - SCAN + DEL by prefix
+    // 3. Redis - SCAN + DEL 按前缀
     let patterns = vec![
         format!("cache:l2:{}:*", tenant),
         format!("cache:l2:meta:{}:*", tenant),
@@ -977,13 +977,13 @@ async fn purge_tenant_data(&self, tenant: &TenantId) -> Result<PurgeReport, Purg
         report.deleted_redis_keys += self.redis.scan_and_delete(&pattern).await?;
     }
     
-    // 4. S3 - delete by prefix
+    // 4. S3 - 按 prefix 删除
     report.deleted_s3_objects += self.s3
         .delete_tenant_content(tenant).await?;
     report.deleted_s3_objects += self.s3_archive
         .delete_tenant_archive(tenant).await?;
     
-    // 5. Filesystem (subprocess HOME)
+    // 5. 文件系统 (subprocess HOME)
     let home = format!("/var/lib/tars/tenants/{}/", tenant);
     if Path::new(&home).exists() {
         fs::remove_dir_all(&home).await?;
@@ -994,7 +994,7 @@ async fn purge_tenant_data(&self, tenant: &TenantId) -> Result<PurgeReport, Purg
     self.secret_manager.delete_namespace(&format!("tenants/{}", tenant)).await?;
     report.secrets_purged = true;
     
-    // 7. Write tamper-resistant audit (kept even after the tenant is deleted)
+    // 7. 写不可篡改 audit (即使 tenant 被删,这条记录保留)
     self.audit.write(AuditEvent::TenantDeleted {
         tenant: tenant.clone(),
         deleted_at: SystemTime::now(),
@@ -1005,17 +1005,17 @@ async fn purge_tenant_data(&self, tenant: &TenantId) -> Result<PurgeReport, Purg
 }
 ```
 
-**Key invariants**:
-- The 7 steps must run in order (stop on any failure)
-- Each step has its own metric (deleted_partitions / deleted_redis_keys / etc.)
-- Records about this tenant in audit_events are **retained** — they are facts about "what once happened" and are not tenant data
-- billing_events disappear only when their partition is dropped (monthly partitions; rows from before the tenant deletion in the current month survive until the partition expires). If compliance requires immediate deletion, separately query and delete that tenant's billing rows
+**关键不变量**：
+- 7 步必须按顺序执行（前面失败则停止）
+- 每步都有独立 metric (deleted_partitions / deleted_redis_keys / etc.)
+- audit_events 中关于该 tenant 的记录**保留**——它们是关于"曾经发生过"的事实，不属于 tenant 数据
+- billing_events 在分区被 drop 时才一起消失（按月分区，租户删除当月之前的会保留到分区到期）。如果合规要求立即删除，需要单独 query 删除该 tenant 的 billing 行
 
 ---
 
-## 12. Testing Strategy
+## 12. 测试策略
 
-### 12.1 Schema Tests
+### 12.1 Schema 测试
 
 ```rust
 #[tokio::test]
@@ -1023,7 +1023,7 @@ async fn migrations_apply_cleanly_to_empty_db() {
     let pool = empty_test_postgres().await;
     sqlx::migrate!("./migrations/postgres").run(&pool).await.unwrap();
     
-    // Verify key tables exist
+    // 验证关键表存在
     let tables: Vec<String> = sqlx::query_scalar(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
     ).fetch_all(&pool).await.unwrap();
@@ -1036,14 +1036,14 @@ async fn migrations_apply_cleanly_to_empty_db() {
 async fn migrations_idempotent() {
     let pool = empty_test_postgres().await;
     sqlx::migrate!("./migrations/postgres").run(&pool).await.unwrap();
-    sqlx::migrate!("./migrations/postgres").run(&pool).await.unwrap();  // second run must succeed
+    sqlx::migrate!("./migrations/postgres").run(&pool).await.unwrap();  // 第二次必须成功
 }
 ```
 
-### 12.2 Repository Contract Tests
+### 12.2 Repository contract 测试
 
 ```rust
-// Same contract test runs twice - must pass against both SQLite and Postgres
+// 同一组 contract test 跑两遍 - SQLite 和 Postgres 都必须通过
 async fn event_store_contract_test(store: Arc<dyn EventStore>) {
     let event = AgentEvent::TaskCreated { /* ... */ };
     let offset = store.append(event.clone()).await.unwrap();
@@ -1066,7 +1066,7 @@ async fn postgres_event_store_satisfies_contract() {
 }
 ```
 
-### 12.3 Partition Tests
+### 12.3 分区测试
 
 ```rust
 #[tokio::test]
@@ -1093,11 +1093,11 @@ async fn drop_tenant_partition_does_not_affect_others() {
 }
 ```
 
-### 12.4 Backup/Restore Tests
+### 12.4 备份恢复测试
 
 ```rust
 #[tokio::test]
-#[ignore]   // slow test, only runs nightly
+#[ignore]   // 慢测试,只在 nightly 跑
 async fn backup_and_restore_round_trip() {
     let pool_a = test_pg_pool().await;
     populate_test_data(&pool_a).await;
@@ -1113,58 +1113,58 @@ async fn backup_and_restore_round_trip() {
 
 ---
 
-## 13. Anti-pattern List
+## 13. 反模式清单
 
-1. **Do not run cross-storage transactions on business paths** — Postgres + Redis + S3 each manage their own; converge via reconciliation.
-2. **Do not put high-cardinality labels into table names** (`events_user_x_y` style) — use partitioning, not dynamic table names.
-3. **Do not UPDATE the event log** — append-only; corrections are also expressed by appending new events.
-4. **Do not SELECT * on big tables** — event rows can be 10KB+; fetch only what you need.
-5. **Do not forget PostgreSQL's `WAL` configuration** — defaults for `wal_buffers` / `checkpoint_timeout` are not suitable for write-heavy workloads.
-6. **Do not enable multi-process SQLite in Personal mode** — SQLite is a file-based database; concurrent multi-process writes conflict, strictly single-process.
-7. **Do not bundle data migration into a Migration** — schema and data migrations are two steps; data migration is an independent idempotent script.
-8. **Do not skip a storage during tenant deletion** — every step of the 7-item checklist must be observable and retryable.
-9. **Do not add business indexes on audit / billing tables** — these tables are append-only + range-by-time queries, only the time index is needed.
-10. **Do not ignore `pg_stat_statements`** — invisible slow queries cannot be optimized.
-11. **Do not let ContentRef live forever** — orphan content (refcount=0) needs GC, otherwise the S3 bill spirals.
-12. **Do not rename fields directly during schema evolution** — two steps: first add the new field with dual writes, then drop the old.
-13. **Do not persist "must-not-lose" data in Redis** — even AOF everysec loses up to 1s; event/audit/billing must go to Postgres.
-14. **Do not add retention policies in Personal mode** — it is the user's data; the user decides when to delete.
-15. **Do not store secret values in the business DB** — store only SecretRef (path / var name); values are pulled at runtime by SecretResolver.
-
----
-
-## 14. Contracts with Up- and Downstream
-
-### Upstream (business code) commitments
-
-- Access storage via Repository traits, never write SQL / Redis commands directly
-- Do not assume cross-storage atomicity
-- Large payloads (>16KB) go through ContentStore put first, then are referenced; never inlined into event payloads
-- All queries on the business path are covered by indexes; review periodically
-
-### Downstream (DB / Redis / S3) contracts
-
-- DB schema migrations are managed via `sqlx::migrate!` with forward-compatibility constraints
-- Redis is a performance-optimization layer; data loss is repaired by reconciliation
-- S3 is cold storage + large objects + cross-region replication, managed via versioning + lifecycle rules
-
-### Cross-node contracts
-
-- Multi-replica apps sync state via Postgres / Redis; they do not communicate directly
-- Postgres primary/replica lag < 100ms (synchronous_commit = on for primary, async replicas only for reads)
-- Read replicas can serve most queries, but event writes must hit the primary
+1. **不要在业务路径做跨存储事务**——Postgres + Redis + S3 各自管自己,通过 reconciliation 收敛。
+2. **不要把高基数 label 放进表名**（`events_user_x_y` 风格）——用分区,不用动态表名。
+3. **不要 UPDATE 事件日志**——append-only,纠错也通过追加新事件表达。
+4. **不要 SELECT * 在大表**——event 表行可能 10KB+,只取需要的字段。
+5. **不要忘记 PostgreSQL 的 `WAL` 配置**——`wal_buffers` / `checkpoint_timeout` 默认值不适合写密集负载。
+6. **不要在 Personal 模式启用 SQLite 多进程**——SQLite 是 file-based 数据库,多进程并发写会冲突,严格单进程。
+7. **不要让 Migration 包含数据 migration**——schema 和 data migration 分两步,data migration 是独立 idempotent script。
+8. **不要在租户删除时漏掉某个存储**——7 步清单必须每步可观测+可重试。
+9. **不要在 audit / billing 表上加业务索引**——这些表是 append-only + 时间范围查询,只需要时间索引。
+10. **不要忽略 `pg_stat_statements`**——慢查询不可见就不可优化。
+11. **不要让 ContentRef 永不过期**——orphan content (refcount=0) 必须有 GC,否则 S3 账单失控。
+12. **不要在 schema 演进时直接重命名字段**——分两步,先加新字段双写,再删老字段。
+13. **不要在 Redis 里持久化"绝不能丢"的数据**——即使 AOF everysec 也最多丢 1s,event/audit/billing 必须 Postgres。
+14. **不要在 Personal 模式加 retention policy**——用户数据,用户决定何时删。
+15. **不要把 secret 值存在业务 DB**——只存 SecretRef (path / var name),值由 SecretResolver 运行时拉取。
 
 ---
 
-## 15. TODO and Open Questions
+## 14. 与上下游的契约
 
-- [ ] Application-layer transparency for Postgres primary/standby switchover (PgBouncer vs HAProxy vs RDS Proxy)
-- [ ] ContentRef GC frequency and policy (linear scan vs incremental marking)
-- [ ] S3 cross-region replication latency monitoring (avoid data gaps during disaster recovery)
-- [ ] SQLite mmap performance on Apple Silicon (whether enlarging mmap_size is worthwhile)
-- [ ] Cost/complexity trade-off of dedicated physical DBs for large tenants (vs hash partition)
-- [ ] How to host OLAP needs (read replica vs CDC into ClickHouse vs DuckDB)
-- [ ] Postgres architecture for multi-region deployments (BDR vs Patroni vs cloud-managed)
-- [ ] Dry-run / canary mechanism for schema migrations
-- [ ] Audit table partition pruning query performance under 7-year retention
-- [ ] Impact of Redis persistence policy on budget accuracy (lose 1s on restart vs full reconcile)
+### 上游 (业务代码) 承诺
+
+- 通过 Repository trait 访问存储,不直接写 SQL / Redis 命令
+- 不假设跨存储原子性
+- 大 payload (>16KB) 通过 ContentStore put 后引用,不直接放进 event payload
+- 业务路径上的查询都有索引覆盖,定期 review
+
+### 下游 (DB / Redis / S3) 契约
+
+- DB schema migration 通过 `sqlx::migrate!` 管理,有 forward-compatibility 约束
+- Redis 是性能优化层,丢数据通过 reconciliation 修复
+- S3 是冷存储 + 大对象 + 跨区复制,通过 versioning + lifecycle rule 管理
+
+### 跨节点契约
+
+- 多副本应用通过 Postgres / Redis 同步状态,不直接互相通信
+- Postgres 主从延迟 < 100ms (synchronous_commit = on for primary, async replica 仅做读)
+- 读副本可承担大部分查询,但事件写入必须主库
+
+---
+
+## 15. 待办与开放问题
+
+- [ ] Postgres 主备切换的应用层透明 (PgBouncer vs HAProxy vs RDS Proxy)
+- [ ] ContentRef 的 GC 频率与策略 (linear scan vs incremental marking)
+- [ ] S3 跨区复制延迟监控 (避免 disaster recovery 时数据缺失)
+- [ ] SQLite 在 Apple Silicon 上的 mmap 性能 (是否值得调大 mmap_size)
+- [ ] 大租户单独物理库 (vs hash partition) 的成本/复杂度权衡
+- [ ] OLAP 需求的承载方式 (read replica vs CDC 到 ClickHouse vs DuckDB)
+- [ ] 跨区域 multi-region 部署的 Postgres 架构 (BDR vs Patroni vs Cloud-managed)
+- [ ] Schema migration 的 dry-run / canary 机制
+- [ ] Audit 表的 partition pruning 在 7 年保留下的查询性能
+- [ ] Redis 持久化策略对 budget 准确性的影响 (重启丢 1s vs 重新对账)

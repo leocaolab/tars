@@ -193,69 +193,69 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **Trigger**: First user complaint that "long agentic loop dropped a critical detail in trim". Or first product where 50+ turn conversations are normal (chat product, not batch reviewer).
 - **Pattern reference**: production-tested compaction implementations include an `InitialContextInjection::BeforeLastUserMessage` mode for mid-turn invocation.
 
-### B-18. Optional — `CallObserver` trait (rust-side push hook) — ❌ 撤回
-- ~~原 design：trait + push callback。~~
-- **撤销原因**：B-20 (Evaluation Framework) 用 EventStore stream 解决了 cross-call 聚合的同一类问题，且解耦更彻底（pipeline ↔ aggregator 通过 events 而不是 trait callback 耦合）。CallObserver 写出来会跟 EvaluatorRunner 形成两条同质机制。
-- **如果你需要"跨 pipeline 跨 call 聚合 metric"** → 用 B-20 的 OnlineEvaluatorRunner，不是 CallObserver。
+### B-18. Optional — `CallObserver` trait (rust-side push hook) — ❌ withdrawn
+- ~~Original design: trait + push callback.~~
+- **Reason for withdrawal**: B-20 (Evaluation Framework) solves the same class of cross-call aggregation problem via the EventStore stream, with cleaner decoupling (pipeline ↔ aggregator coupled through events rather than a trait callback). Writing CallObserver would create two homogeneous mechanisms alongside EvaluatorRunner.
+- **If you need "aggregate metric across pipelines / across calls"** → use B-20's OnlineEvaluatorRunner, not CallObserver.
 
-### B-20. Output Validation + Evaluation Framework — ⭐ 优先级最高（M9）
-- **设计文档**: [Doc 15 — Output Validation](./docs/architecture/15-output-validation.md) + [Doc 16 — Evaluation Framework](./docs/architecture/16-evaluation-framework.md)
-- **拆分**(2026-05-05 review 后调整,3-wave 降低 PyO3 单点风险):
-  - **Wave 1 (Rust-only Validator framework)** — ✅ shipped 2026-05-07. `OutputValidator` trait + `ValidationOutcome` enum + `ProviderError::ValidationFailed` + 3 built-in validators (JsonShape / NotEmpty / MaxLength) + `ValidationMiddleware` + `Response.validation_summary` 字段 + `RequestContext.validation_outcome` 侧信道 + 17 单元测试。详见 CHANGELOG B-20 W1 段。
-  - **Wave 2 (PyO3 binding)** — ✅ shipped 2026-05-08. Python validators 通过 `[(name, callable), ...]` 挂到 `Pipeline.{from_default,from_config,from_str}`。`PyValidatorAdapter` 把 Python callback 桥接成 Rust `OutputValidator` trait；4 个 outcome pyclasses (`tars.Pass / Reject / FilterText / Annotate`)。Buggy validator (raise / wrong return type) 自动 catch 成 permanent `ValidationFailed` — worker 不会被 user-side bug 打死。17 个 pytest in `crates/tars-py/python/tests/test_validators.py`。详见 CHANGELOG B-20 W2 段。
-  - **Wave 3 (downstream consumer 接入 + Evaluation framework Doc 16, ~7.5 天)** — Doc 16 完整实施(`Evaluator` / `AsyncEvaluator` traits + `LlmCallFinished` / `EvaluationScored` events + `OnlineEvaluatorRunner` / `OfflineEvaluatorRunner` + Built-in evaluators + tars-py `tars.eval.Evaluator` base + `Pipeline.with_event_store` API + SQL templates),downstream consumer 删 inline `_known_rule_ids` 并切到 Pipeline-attached validator + dogfood。
-- **关键设计决定 (Cache × Validator 交互, W1 实施时锁定 — ⚠️ 实现与设计不一致，W4 修复)**:
-  - **设计意图**: Cache stores raw Response (pre-Filter)。Cache hit 仍跑 validator chain。validator 是 pure，重跑 = CPU local cost only，远比 wire round-trip 便宜。多 caller 共享 cache 安全。改 validator 不改 cache key。Validator failure NOT bypass cache。
-  - **W1 实现的 bug** (downstream consumer (2026-05-08) dogfood flag 引发的 audit 找到): `ValidationMiddleware` Filter 时把 stream re-emit 成 post-Filter events (`validation.rs:225-232`)，cache 看到的就是 post-Filter 流。**任何 Filter validator + Cache 同时存在 → cache 存的不是 raw**。multi-caller 不同 validator 链 → silent corruption；单链情况下 cache 也永远拿不回 raw。Side channel `rec.filtered_response` 已经存在但被冗余化了。
-  - **修复 → 见 B-20.W4**。在那之前，consumer / 任何 multi-role consumer 必须 per-role 独立 Pipeline 实例，不要复用同一 Pipeline + 不同 validator 链。
-- **Why 这个排在 B-16 / B-17 / B-19 前面**:
-  - downstream consumer dogfood (2026-05-04 / 05) 暴露的两类痛点都在这里解：(a) 模型造 rule_id / 漏 evidence tag → validation；(b) "metrics 突然掉了我们看看怎么回事" → evaluation。
-  - downstream consumer 现在 inline 实现了 `_known_rule_ids` post-filter (见 the downstream consumer)，是 v1 validation 的占位实现 — 等 Doc 15 落地直接 migrate 出来。
-  - 整个 LLM 系统的 observability + quality gating 是 cross-consumer 基础设施，比单产品功能（compact / tui）优先级高。
-- **依赖**:
-  - 依赖 `Pipeline.builder()` API 暴露到 Python (内部 B-6c) — 这一条作为 Doc 15 / Wave 1 的子任务一起做。
-  - 依赖 EventStore 在 Pipeline 层可用 — 当前只在 tars-runtime 用，需要把 `Arc<dyn EventStore>` 接到 Pipeline 上。
-- **预估总工作量**: 12 天 (两个 wave 加起来)，可分 wave 出 wheel。
-- **与 B-15 (Stage 4 Telemetry) 的关系**: 互补不重叠。`Response.telemetry` 装 infrastructure 指标 (cache_hit / retry_count / latency)；evaluation 装 semantic 指标 (rubric grounded rate / evidence filled rate)。仪表板可以 cross-join 两者出"指标突然掉的同时 retry_count 涨了吗"这种问题。
-- ** points (落进 W1.1 / W2.1 一起做,不单独 backlog)**:
-  - **Tags 字段** — `LlmCallFinished.tags: Vec<String>` + `EvaluationScored.tags: Vec<String>`,事件 schema 一开始就带,默认空。caller 通过 `RequestContext::with_tags()` / `Session::tagged()` helper 打标。Cohort 分析靠 `WHERE 'dogfood_2026_05_05' IN tags` 一句 SQL,远比每加一种过滤维度加一个事件字段干净。
-  - **OnlineEvaluatorRunner sampling 配置** — `EvaluatorSampling::{Always, Rate(f64), Stratified, OnDimDrop}` 四种模式。`Always` 是 deterministic evaluator 默认；`OnDimDrop { watch_dim, threshold }` 是 区别于固定采样的智能采样——便宜 evaluator 持续跑,贵的(LLM-as-judge)只在另一个 dim 掉到阈值下时触发,**节省 LLM-judge 的真钱**。OnDimDrop 写进 trait,即使 v1 默认 `Always`,接口为未来留位。
+### B-20. Output Validation + Evaluation Framework — ⭐ highest priority (M9)
+- **Design docs**: [Doc 15 — Output Validation](./docs/architecture/zh/15-output-validation.md) + [Doc 16 — Evaluation Framework](./docs/architecture/zh/16-evaluation-framework.md)
+- **Breakdown** (adjusted after 2026-05-05 review; 3-wave split to reduce PyO3 single-point risk):
+  - **Wave 1 (Rust-only Validator framework)** — ✅ shipped 2026-05-07. `OutputValidator` trait + `ValidationOutcome` enum + `ProviderError::ValidationFailed` + 3 built-in validators (JsonShape / NotEmpty / MaxLength) + `ValidationMiddleware` + `Response.validation_summary` field + `RequestContext.validation_outcome` side channel + 17 unit tests. See CHANGELOG B-20 W1 section for details.
+  - **Wave 2 (PyO3 binding)** — ✅ shipped 2026-05-08. Python validators attach to `Pipeline.{from_default,from_config,from_str}` via `[(name, callable), ...]`. `PyValidatorAdapter` bridges Python callbacks into the Rust `OutputValidator` trait; 4 outcome pyclasses (`tars.Pass / Reject / FilterText / Annotate`). A buggy validator (raise / wrong return type) is auto-caught into a permanent `ValidationFailed` — workers don't get killed by user-side bugs. 17 pytests in `crates/tars-py/python/tests/test_validators.py`. See CHANGELOG B-20 W2 section for details.
+  - **Wave 3 (downstream consumer integration + Evaluation framework Doc 16, ~7.5 days)** — full Doc 16 implementation (`Evaluator` / `AsyncEvaluator` traits + `LlmCallFinished` / `EvaluationScored` events + `OnlineEvaluatorRunner` / `OfflineEvaluatorRunner` + built-in evaluators + tars-py `tars.eval.Evaluator` base + `Pipeline.with_event_store` API + SQL templates); downstream consumer removes inline `_known_rule_ids` and switches to a Pipeline-attached validator + dogfood.
+- **Key design decision (Cache × Validator interaction, locked in during W1 — ⚠️ implementation inconsistent with design, fixed in W4)**:
+  - **Design intent**: Cache stores raw Response (pre-Filter). Cache hit still runs the validator chain. Validators are pure, so re-running = CPU local cost only, much cheaper than a wire round-trip. Multi-caller cache sharing is safe. Changing validators doesn't change the cache key. Validator failure does NOT bypass cache.
+  - **Bug in W1 implementation** (found during the audit triggered by the downstream consumer (2026-05-08) dogfood flag): `ValidationMiddleware` re-emits the stream as post-Filter events when filtering (`validation.rs:225-232`), so cache sees the post-Filter stream. **Whenever a Filter validator + Cache coexist → cache stores something other than raw**. multi-caller with different validator chains → silent corruption; even with a single chain, cache never returns raw. The side channel `rec.filtered_response` already exists but had been made redundant.
+  - **Fix → see B-20.W4**. Until then, consumer / any multi-role consumer must use a per-role independent Pipeline instance, and not reuse one Pipeline with different validator chains.
+- **Why this ranks ahead of B-16 / B-17 / B-19**:
+  - Both classes of pain points exposed by downstream consumer dogfood (2026-05-04 / 05) are solved here: (a) the model fabricating rule_id / dropping evidence tags → validation; (b) "metrics suddenly dropped, let's figure out what happened" → evaluation.
+  - downstream consumer currently has an inline `_known_rule_ids` post-filter (see the downstream consumer) — a placeholder v1 validation implementation; once Doc 15 ships, migrate it directly out.
+  - LLM-system-wide observability + quality gating is cross-consumer infrastructure, with higher priority than single-product features (compact / tui).
+- **Dependencies**:
+  - Depends on the `Pipeline.builder()` API being exposed to Python (internal B-6c) — done as a sub-task of Doc 15 / Wave 1.
+  - Depends on EventStore being available at the Pipeline layer — currently only used in tars-runtime; need to wire `Arc<dyn EventStore>` into Pipeline.
+- **Estimated total effort**: 12 days (both waves combined); ship a wheel per wave.
+- **Relationship with B-15 (Stage 4 Telemetry)**: complementary, non-overlapping. `Response.telemetry` carries infrastructure metrics (cache_hit / retry_count / latency); evaluation carries semantic metrics (rubric grounded rate / evidence filled rate). A dashboard can cross-join the two to answer "did retry_count rise at the same time the metric dropped?".
+- ** points (folded into W1.1 / W2.1, not separate backlog entries)**:
+  - **Tags field** — `LlmCallFinished.tags: Vec<String>` + `EvaluationScored.tags: Vec<String>`, included in the event schema from day one, defaulting empty. Callers tag via `RequestContext::with_tags()` / `Session::tagged()` helpers. Cohort analysis runs as a one-line SQL `WHERE 'dogfood_2026_05_05' IN tags`, much cleaner than adding a new event field per filter dimension.
+  - **OnlineEvaluatorRunner sampling configuration** — four modes: `EvaluatorSampling::{Always, Rate(f64), Stratified, OnDimDrop}`. `Always` is the default for deterministic evaluators; `OnDimDrop { watch_dim, threshold }` is intelligent sampling distinct from fixed sampling — cheap evaluators run continuously, expensive ones (LLM-as-judge) only trigger when another dim drops below a threshold, **saving real money on LLM-judge runs**. OnDimDrop is written into the trait so the interface is reserved for the future even if v1 defaults to `Always`.
 
-### B-20.v3. Python `Response.validation_summary` 暴露 — ✅ shipped 2026-05-08 (~1h)
-- `Response.validation_summary` → frozen pyclass `ValidationSummary { validators_run: list[str], outcomes: dict[str, dict], total_wall_ms: int }`。`outcomes[name]` shape: `{"outcome": "pass"|"filter"|"annotate", "dropped"?: list[str], "metrics"?: dict}`。Reject 不进 outcomes — short-circuit 进 `TarsProviderError`。
-- 3 个 pytest 验证：filter outcome 带 dropped list、no-validators 空 summary、Pass/exported 类型。详见 CHANGELOG B-20 v3 段。
-- **由来**: downstream consumer (2026-05-08) 反馈，dogfood 报表的 metrics 列前置依赖。
+### B-20.v3. Python `Response.validation_summary` exposure — ✅ shipped 2026-05-08 (~1h)
+- `Response.validation_summary` → frozen pyclass `ValidationSummary { validators_run: list[str], outcomes: dict[str, dict], total_wall_ms: int }`. `outcomes[name]` shape: `{"outcome": "pass"|"filter"|"annotate", "dropped"?: list[str], "metrics"?: dict}`. Reject does not enter outcomes — short-circuits into `TarsProviderError`.
+- 3 pytests verifying: filter outcome carries dropped list, no-validators yields empty summary, Pass/exported types. See CHANGELOG B-20 v3 section for details.
+- **Origin**: downstream consumer (2026-05-08) feedback; upstream dependency for the metrics column in the dogfood report.
 
 ### B-20.v2. Typed `ValidationOutcome::Reject { reason: ValidationReason }` — ⭐ unblocks  consumer parse→structured pipeline (1-2 d)
-- **现状 (W1+W2 shipped 后)**: `Reject { reason: String, retriable: bool }` — string-only。Python 侧 `TarsProviderError(kind="validation_failed", is_retriable=bool)` 只把 reason 字符串塞进 message。caller 没法 programmatic match 失败原因。
-- **inconsistency**: B-31 v4 已经把 `CompatibilityReason{kind, message, detail_json}` 做成 typed enum + structured detail。validator 失败也该一致 — 不然 fix-stage 又得 grep `e.message`，回到 B-31 v1 那种字符串脆弱契约。
-- **shape**:
-  - 引入 `ValidationReason` enum (`#[non_exhaustive]`)：`JsonShape{json_path, parse_error}` / `NotEmpty{field}` / `MaxLength{field, length, max}` / `Custom{kind: String, message: String, detail: Option<serde_json::Value>}`。
-  - 内置 validator 用对应 typed variant；Python user-side validator 走 `Custom` (caller 给 kind+message+detail)。
-  - Python 兼容入口: `tars.Reject(reason=str)` 自动包成 `Custom{kind="user", message=reason, detail=None}`；新增 `tars.Reject.typed(kind, message, detail=None)` 显式 typed 路径。
-  - `ProviderError::ValidationFailed { validator, reason: ValidationReason, retriable }`；Python `TarsProviderError` 加 `validation_reason: dict` 属性 (`{kind, message, detail}`) 给 caller programmatic 访问。
-- **预估**: 1-2 天。改动跨 `tars-types/validation.rs` + `tars-pipeline/validation.rs` + 3 builtin + `tars-py/{validation.rs, errors.rs}`。需要 deprecate-not-break 现有 `reason: str` 入口。
-- **Trigger**:  consumer 开 Tier 2 #4 (parse → structured pipeline) 之前必须 ship。Tier 1 #1/#2/#3 用 FilterText 路径不阻塞，可以并行落。
-- **依赖**: 无。
-- **由来**: downstream consumer (2026-05-08) 反馈，详见 conversation log。
+- **Current state (post-W1+W2)**: `Reject { reason: String, retriable: bool }` — string-only. The Python side `TarsProviderError(kind="validation_failed", is_retriable=bool)` only stuffs the reason string into the message. Callers can't programmatically match against the failure reason.
+- **Inconsistency**: B-31 v4 already turned `CompatibilityReason{kind, message, detail_json}` into a typed enum + structured detail. Validator failure should be consistent — otherwise fix-stage has to grep `e.message` again, regressing to the brittle string contract from B-31 v1.
+- **Shape**:
+  - Introduce `ValidationReason` enum (`#[non_exhaustive]`): `JsonShape{json_path, parse_error}` / `NotEmpty{field}` / `MaxLength{field, length, max}` / `Custom{kind: String, message: String, detail: Option<serde_json::Value>}`.
+  - Built-in validators use the corresponding typed variant; Python user-side validators go through `Custom` (caller supplies kind+message+detail).
+  - Python compat entry point: `tars.Reject(reason=str)` auto-wraps into `Custom{kind="user", message=reason, detail=None}`; add `tars.Reject.typed(kind, message, detail=None)` as the explicit typed path.
+  - `ProviderError::ValidationFailed { validator, reason: ValidationReason, retriable }`; Python `TarsProviderError` gains a `validation_reason: dict` attribute (`{kind, message, detail}`) for caller programmatic access.
+- **Estimate**: 1-2 days. Changes span `tars-types/validation.rs` + `tars-pipeline/validation.rs` + 3 builtins + `tars-py/{validation.rs, errors.rs}`. Need to deprecate-not-break the existing `reason: str` entry point.
+- **Trigger**: must ship before  consumer starts Tier 2 #4 (parse → structured pipeline). Tier 1 #1/#2/#3 use the FilterText path and aren't blocked; they can land in parallel.
+- **Dependencies**: none.
+- **Origin**: downstream consumer (2026-05-08) feedback; see conversation log for details.
 
-### B-20.W4. Cache × Validator interaction fix — ✅ shipped 2026-05-08 (A2 路线)
-- **状态**: A2 路线落地 — onion 移到 `Telemetry → Validation → Cache → Retry → Provider` + 砍 `Reject{retriable}` 字段（`ValidationFailed` 总是 `ErrorClass::Permanent`）。两个 W4 regression test 在 `tars-pipeline/src/validation/tests.rs` 现在直接通过（`#[ignore]` 已删）。详见 CHANGELOG B-20 W4 段。
-- **历史诊断（保留作 audit 留痕）**:
-- **bug 1 (cache 存 post-Filter)**: `ValidationMiddleware` 在 Filter 改写 response 后 re-emit post-Filter events (`tars-pipeline/src/validation.rs:225-232`)，Cache 看到的是 ValidationMiddleware re-emit 之后的 stream，于是 cache 存 post-Filter。test 1 断言 cache 应存 raw "hello world"，实际是 "hello"。
-- **bug 2 (cache hit 不跑 validator)**: 当前 onion 顺序 `Telemetry → CacheLookup → Retry → Validation → Provider`，Cache 在 Validation 外层。Cache hit 直接短路返回 cached events，**Validation 根本不被调用**。test 2 断言第二次（hit）`telemetry.layers` 含 `"validation"`，实际不含。这条比 bug 1 严重 — W1 doc §2 "validators rerun on hit" 跟 onion 不兼容。
-- **后果**:
-  - multi-caller 不同 validator 链共享同一 Pipeline + cache: 第二个 caller cache hit 拿到的是第一个 caller filter 过的内容，且新 validator 链不会跑 — silent corruption。
-  - 单 validator 链情况下: cache 永远拿不回 raw；换 validator 配置后 hit 仍返回老 cached payload + 不重跑新 validator → 配置改动等于隐性 SemVer break。
-  - W1 doc §2 "Cache stores raw Response (pre-validation), validators rerun on hit" 与实现两条都不一致。
-- **fix 选项 (须选一)**:
-  - **A. 改 onion 顺序**（推荐）: 移到 `Telemetry → Validation → CacheLookup → Retry → Provider`。Validation 在 Cache 外面 → cache hit 仍走 Validation。同时 ValidationMiddleware 不再需要 re-emit raw vs filtered 分支（Cache 看不到 Validation 输出）。代价: `ValidationFailed{retriable:true}` 不再触发 `RetryMiddleware`（Validation 在 Retry 外）。要么把 retry 逻辑挪进 ValidationMiddleware 自己，要么接受 "validation-driven retry 不存在" 的语义（更干净）。改动: 调 PipelineBuilder 调用顺序 (~3 处 caller)、调 Doc 02 onion 图 + Doc 15 §2、删 ValidationMiddleware 里的 `filtered_any` re-emit 分支、删现有"validation 从 cache hit replay drain"那段注释。
-  - **B. 维持 onion + 仅修 re-emit**: 让 ValidationMiddleware 始终 re-emit `events_held`(raw)。**只修 bug 1，不修 bug 2** — cache hit 仍跳过 validator。doc 必须明写 "validators only run on cache miss" 这条限制。代价低但 W1 设计契约的 "rerun on hit" 永远做不到。
-  - 选 A — Tier 1 落地前必须解决 multi-chain 安全；B 把"caller 必须保证 cache 命名空间隔离"的负担推给 consumer，又得在每个 consumer 重复一次。
-- **预估**: 选 A → 1-2 天（onion 改动 + 5 处 doc 同步 + retry 语义决定 + 验证 W1 17 个 unit test 仍通过）。选 B → 半天。
-- **Trigger**: consumer-side Tier 1 #1 (snippet validator) ship 之前必须修。
-- **依赖**: 无。
-- **由来**: downstream consumer (2026-05-08) raised "single-validator-chain assumption" flag → tars 端 audit + 写 failing test 发现实际 bug 比 audit 想的严重一层（不止"chain 不一致 corruption"，是"任何 Filter + Cache 共存 + Cache hit 不验证"）。
+### B-20.W4. Cache × Validator interaction fix — ✅ shipped 2026-05-08 (route A2)
+- **Status**: route A2 landed — onion moved to `Telemetry → Validation → Cache → Retry → Provider` + dropped the `Reject{retriable}` field (`ValidationFailed` is always `ErrorClass::Permanent`). The two W4 regression tests in `tars-pipeline/src/validation/tests.rs` now pass directly (`#[ignore]` removed). See CHANGELOG B-20 W4 section for details.
+- **Historical diagnosis (preserved as audit trail)**:
+- **bug 1 (cache stores post-Filter)**: `ValidationMiddleware` re-emits post-Filter events after rewriting the response in Filter (`tars-pipeline/src/validation.rs:225-232`); Cache sees the stream after ValidationMiddleware re-emit, so cache stores post-Filter. test 1 asserts cache should store raw "hello world", actual was "hello".
+- **bug 2 (cache hit doesn't run validator)**: current onion order `Telemetry → CacheLookup → Retry → Validation → Provider` — Cache is outside Validation. Cache hit short-circuits and returns cached events directly, **Validation is never invoked**. test 2 asserts the second (hit) `telemetry.layers` contains `"validation"`; actually does not. This is more severe than bug 1 — W1 doc §2 "validators rerun on hit" is incompatible with the onion.
+- **Consequences**:
+  - multi-caller with different validator chains sharing the same Pipeline + cache: the second caller's cache hit returns content filtered by the first caller, and the new validator chain doesn't run — silent corruption.
+  - single validator chain case: cache never returns raw; after changing the validator config, hits still return the old cached payload + don't rerun the new validator → a config change becomes an implicit SemVer break.
+  - W1 doc §2 "Cache stores raw Response (pre-validation), validators rerun on hit" is inconsistent with the implementation on both points.
+- **Fix options (must pick one)**:
+  - **A. Change onion order** (recommended): move to `Telemetry → Validation → CacheLookup → Retry → Provider`. Validation is outside Cache → cache hit still goes through Validation. Also, ValidationMiddleware no longer needs the raw vs filtered re-emit branch (Cache can't see Validation output). Cost: `ValidationFailed{retriable:true}` no longer triggers `RetryMiddleware` (Validation is outside Retry). Either move retry logic into ValidationMiddleware itself, or accept the "validation-driven retry doesn't exist" semantics (cleaner). Changes: tweak PipelineBuilder call order (~3 callers), update Doc 02 onion diagram + Doc 15 §2, delete the `filtered_any` re-emit branch in ValidationMiddleware, delete the existing "validation drains replay from cache hit" comment.
+  - **B. Keep onion + only fix re-emit**: have ValidationMiddleware always re-emit `events_held` (raw). **Only fixes bug 1, not bug 2** — cache hit still skips the validator. Docs must explicitly state the "validators only run on cache miss" limitation. Low cost but the W1 design contract "rerun on hit" can never be met.
+  - Pick A — multi-chain safety must be resolved before Tier 1 lands; B pushes the "caller must guarantee cache namespace isolation" burden onto consumers, repeated in each one.
+- **Estimate**: A → 1-2 days (onion change + 5 doc sync points + retry-semantics decision + verify W1's 17 unit tests still pass). B → half a day.
+- **Trigger**: must be fixed before consumer-side Tier 1 #1 (snippet validator) ships.
+- **Dependencies**: none.
+- **Origin**: downstream consumer (2026-05-08) raised the "single-validator-chain assumption" flag → tars-side audit + writing a failing test found the actual bug is one layer worse than the audit suspected (not just "chain inconsistency corruption", but "any Filter + Cache coexistence + Cache hit skips validation").
 
 ### B-19. `tars-tui` — interactive terminal UI (path C: build-our-own, not fork-codex)
 - **Where**: New crate `crates/tars-tui/` (doesn't exist yet). Consumer of `tars-runtime::Session` + `tars-pipeline::Pipeline`. ratatui-based.
@@ -288,86 +288,86 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 
 ---
 
-## Brainstorm 存盘 (Day-2 + Day-3, 2026-05-05)
+## Brainstorm archive (Day-2 + Day-3, 2026-05-05)
 
-下面 7 条是 downstream consumer dogfood 反馈 + 跨工程师 brainstorm 期间提到的"未来需要但当前不挡路"的架构方向。**全部明确不在 M9 范围**——M9 只做 B-20（Validation + Evaluation）。这些 brainstorm 落盘给将来真有 trigger 时翻出来对照用。
+The 7 entries below are architectural directions raised during downstream-consumer dogfood feedback + cross-engineer brainstorming — "needed in the future but not blocking right now". **All are explicitly out of M9 scope** — M9 only does B-20 (Validation + Evaluation). These brainstorms are archived so we can pull them back when a real trigger fires.
 
 ### B-21. OpenTelemetry distributed tracing exporter
-- **What**: 在 `tars-melt` (M5 本就规划) 落地完整 OTel exporter。tars 内部 `tracing::*` 事件 → OTLP → Jaeger / DataDog / Grafana Tempo。带 session_id → turn_id → span_id 的 hierarchical context propagation。
-- **半成品现状**: TelemetryMiddleware 已经在发完整 tracing event；缺的是 `tracing-opentelemetry` + OTLP exporter。约 1.5 周。
-- **Trigger**: 多阶 agent 调用（orchestrator + worker + critic）的 timeline 调试痛了——光看 `pipeline_total_ms` 不够，要瀑布图。downstream consumer dogfood 可能是第一个 user。
+- **What**: ship a full OTel exporter inside `tars-melt` (M5 was already planning it). tars-internal `tracing::*` events → OTLP → Jaeger / DataDog / Grafana Tempo. Hierarchical context propagation with session_id → turn_id → span_id.
+- **Semi-finished state**: TelemetryMiddleware already emits full tracing events; what's missing is `tracing-opentelemetry` + the OTLP exporter. About 1.5 weeks.
+- **Trigger**: when timeline debugging of multi-stage agent calls (orchestrator + worker + critic) becomes painful — looking only at `pipeline_total_ms` isn't enough; you need a waterfall view. downstream consumer dogfood is likely the first user.
 - **Pattern reference**: a standalone OTel exporter crate is the right shape (OTLP / metrics / traces in one place, decoupled from the runtime).
-- **关键设计 — 不能只做 flat trace_id **:
-  - tars 当前 `RequestContext.trace_id` 是扁平的——一整个请求一个 id,**没有 parent-child 关系**。multi-step agent 跑完看不出哪一阶段花多久。
-  - Run tree 模型 (每个 LLM/tool call 是一个 run,带 parent_run_id 形成树) 是这一片观测层值得做的形态。OTel 的 span 模型本来就是这棵树。
-  - 实施时**必须**给 `RequestContext` 加 `span_id: SpanId` + `parent_span_id: Option<SpanId>`,新事件 `SpanStarted` / `SpanFinished` 进 EventStore,每层 middleware / agent / tool 进入退出都打。
-  - 落地后:Jaeger 瀑布图 + SQL `WHERE op='critic.review'` 直接查"过去 1d critic.review 这个 op 平均花多久"——比 `pipeline_total_ms` 一个总数有用得多。
-  - 不做这一层,B-21 就退化成"加一个 OTLP exporter"——半成品,真用户拿到瀑布图发现"trace 全是孤立点没有结构"。
-- **codex 借鉴清单 (实施时一起带,不单独 backlog)**:
-  - **W3C Traceparent 跨服务传播** —— codex `otel/src/trace_context.rs:19-36`:`set_parent_from_w3c_trace_context(headers)` + `current_span_w3c_trace_context() -> W3cTraceContext` + `traceparent_context_from_env()`。tars 当前 `trace_id` 是内部生成,无法跟上下游(downstream consumer 嵌进 web app / downstream consumer 被 RPC 调起)的已有 trace 串起来。**实施时加 `RequestContext::from_traceparent` / `to_traceparent`**——tars trace 跟外部 Jaeger/DataDog 自动衔接。
-  - **Dual-stream event macros** —— codex `otel/src/events/shared.rs:4-52` 提供 `log_event!` / `trace_event!` 两个宏 + target prefix 约定。同事件 emit 两次按 target 路由到不同后端(logs → file/Loki; traces → OTel span)。当前 tars `tracing::info!` 一锅端没法分流。**实施时建 `tars_melt::{log_event!, trace_event!}` 两个宏 + 标准 target 前缀约定**。
-  - **Metrics naming taxonomy** —— codex `otel/src/metrics/names.rs:1-48` 集中 48 个 metric 常量,层级命名:`<subsystem>.<entity>.<measure>_<unit>`(`pipeline.turn.e2e_duration_ms` / `provider.responses_api.ttft_duration_ms`)。tars 现在 `pipeline_total_ms` / `provider_latency_ms` 风格不一致,半年后会 churn。**实施时做一个 `tars_metrics::names` 模块集中常量**,去掉 codex 的 `codex.` 前缀,采用同样的层级 taxonomy。
+- **Key design — must not be a flat-trace_id-only build**:
+  - tars's current `RequestContext.trace_id` is flat — one id per whole request, **with no parent-child relationship**. After a multi-step agent run, you can't tell which stage took how long.
+  - The run-tree model (each LLM/tool call is a run with a parent_run_id forming a tree) is the right shape for this observability layer. OTel's span model is exactly this tree.
+  - When implementing, **must** add `span_id: SpanId` + `parent_span_id: Option<SpanId>` to `RequestContext`, new events `SpanStarted` / `SpanFinished` written to EventStore, every middleware / agent / tool emits on entry and exit.
+  - After landing: Jaeger waterfall + SQL `WHERE op='critic.review'` directly answers "average duration of critic.review op over the past 1d" — much more useful than a single `pipeline_total_ms` total.
+  - Without this layer, B-21 degenerates into "add an OTLP exporter" — semi-finished, and real users get a waterfall and find "the trace is just isolated points with no structure".
+- **codex borrow list (carry along during implementation, not separate backlog entries)**:
+  - **W3C Traceparent cross-service propagation** —— codex `otel/src/trace_context.rs:19-36`: `set_parent_from_w3c_trace_context(headers)` + `current_span_w3c_trace_context() -> W3cTraceContext` + `traceparent_context_from_env()`. tars's current `trace_id` is internally generated, can't string together with existing upstream/downstream traces (downstream consumer embedded in a web app / downstream consumer invoked via RPC). **When implementing, add `RequestContext::from_traceparent` / `to_traceparent`** — tars traces auto-connect to external Jaeger/DataDog.
+  - **Dual-stream event macros** —— codex `otel/src/events/shared.rs:4-52` provides `log_event!` / `trace_event!` macros + target-prefix convention. The same event is emitted twice and routed to different backends by target (logs → file/Loki; traces → OTel span). tars's current `tracing::info!` lumps it all together with no way to separate. **When implementing, build `tars_melt::{log_event!, trace_event!}` macros + a standard target-prefix convention**.
+  - **Metrics naming taxonomy** —— codex `otel/src/metrics/names.rs:1-48` centralizes 48 metric constants, hierarchically named: `<subsystem>.<entity>.<measure>_<unit>` (`pipeline.turn.e2e_duration_ms` / `provider.responses_api.ttft_duration_ms`). tars currently has inconsistent styles like `pipeline_total_ms` / `provider_latency_ms`; this will churn in half a year. **When implementing, build a `tars_metrics::names` module centralizing constants**, drop codex's `codex.` prefix, and adopt the same hierarchical taxonomy.
 
-### B-22. Shadow Replay — 模型替换防退化体系
-- **What**: 把生产 EventStore 中代表性 trace 标记为 `golden`；新 `ShadowRunner` 重发这些请求到候选 provider/model，背靠背 diff 评分。CLI: `tars shadow --dataset regression-v1 --provider gemini-3 > report.json`。
-- **复用基础**: 90% 跟 OnlineRunner / OfflineRunner 共代码，仅多一个"重发 + diff"模式 + LlmCallFinished `tags` 字段(已在 B-20 加进 schema)。约 4-5 天（在 B-20 落地之后）。
-- **Trigger**: 第一次模型替换（OpenAI 暗改 / 想切 Gemini-3 / 想切本地）。当前 downstream consumer 已经在讨论 gemini-3-flash-preview 切换。
-- **Why 不进 M9**: 需要 EventStore + Evaluator 已经稳；过早做就是空架子。
-- ** points (B-22 实施时一起带)**:
-  - **`PairwiseEvaluator` trait** — 单 response 评分 (`Evaluator::score`) 之外加一个 pairwise 接口 `compare(req, a, b) -> A | B | Tie + confidence`。**Shadow Replay 的核心动作就是 pairwise** ("切到 gemini-3 后比之前好还是差?"),没这接口做不了。新事件 `PairwiseScored { trace_id_a, trace_id_b, evaluator_name, verdict }` 写 EventStore。
-  - **`Dataset` 一等 typed 对象** — 不是"一堆 jsonl 文件"或"一组 trace_id 临时变量"。`Dataset { id, name, version, trace_ids, metadata }` 持久化在 EventStore,API 包括 `create_dataset` / `fork_dataset` / `dataset_traces`。`tars dataset create --name regression-v1 --tag dogfood_2026_05_05 --schema-compliance ">0.8"` 一句话从 production trace 沉淀出 regression set。与 tars library positioning 一致(无 hosted UI,纯 library 形态)。
-  - 这两条**都是 Shadow 的硬依赖**——B-22 实施 spec 必须包含。
+### B-22. Shadow Replay — model-swap regression-prevention system
+- **What**: mark representative traces in the production EventStore as `golden`; a new `ShadowRunner` resends those requests to a candidate provider/model and back-to-back diff-scores them. CLI: `tars shadow --dataset regression-v1 --provider gemini-3 > report.json`.
+- **Reuse base**: 90% shares code with OnlineRunner / OfflineRunner — only adds a "resend + diff" mode + `LlmCallFinished` `tags` field (already added to the schema in B-20). About 4-5 days (after B-20 lands).
+- **Trigger**: first model swap (OpenAI silently changes / want to switch to Gemini-3 / want to switch to local). The downstream consumer is already discussing a gemini-3-flash-preview switch.
+- **Why not in M9**: needs EventStore + Evaluator to be stable; doing it too early is an empty shell.
+- ** points (carry along during B-22 implementation)**:
+  - **`PairwiseEvaluator` trait** — beyond single-response scoring (`Evaluator::score`), add a pairwise interface `compare(req, a, b) -> A | B | Tie + confidence`. **The core action of Shadow Replay is pairwise** ("after switching to gemini-3, is it better or worse than before?"); without this interface it can't be done. New event `PairwiseScored { trace_id_a, trace_id_b, evaluator_name, verdict }` written to EventStore.
+  - **`Dataset` as a first-class typed object** — not "a pile of jsonl files" or "a group of trace_id ad-hoc variables". `Dataset { id, name, version, trace_ids, metadata }` persisted in EventStore, with API including `create_dataset` / `fork_dataset` / `dataset_traces`. `tars dataset create --name regression-v1 --tag dogfood_2026_05_05 --schema-compliance ">0.8"` distills a regression set out of production traces in one line. Aligned with tars's library positioning (no hosted UI, pure library form).
+  - Both items **are hard dependencies for Shadow** — B-22's implementation spec must include them.
 
-### B-23. Circuit Breaker → Routing fallback 最后一公里
-- **What**: tars 已有 `CircuitBreakerMiddleware` + `Routing` layer（M2 shipped），但"circuit_open → 自动 fallback 到下一个 candidate"的 wiring 可能不完整。验证 + 补全，让"主 provider 熔断 → 自动切 candidate"真正可用。
-- **Trigger**: 第一次跨 provider fallback 需求。downstream consumer 当前 critic 退化时还是手工配置降级，自动化是优化。
-- **估时**: 1-2 天补 wiring + 写测试。
+### B-23. Circuit Breaker → Routing fallback last mile
+- **What**: tars already has `CircuitBreakerMiddleware` + the `Routing` layer (M2 shipped), but the "circuit_open → auto-fallback to the next candidate" wiring may be incomplete. Verify + fill in so "primary provider trips → auto-switch to candidate" is truly usable.
+- **Trigger**: first cross-provider fallback need. The downstream consumer currently still configures degradation manually when the critic degrades; automation is an optimization.
+- **Estimate**: 1-2 days to fill in wiring + write tests.
 
 ### B-24. Prompt Registry / A/B Routing
-- **What**: Prompt-as-code，远程下发（从 git / 配置中心），SemVer 版本号；`Router` 层支持按 prompt_version 比例分流；`LlmCallFinished` 带 `prompt_version`，走 EventStore SQL 直接出 v1 vs v2 评分对比。
-- **当前**: downstream consumer 把 prompt 写死在 Python 文件里，改 prompt 要发 PR。规模化后这条会痛。
-- **Trigger**: 团队扩大到 prompt 改动需要灰度 / 多人并行迭代时；或者第一次想 A/B 测试两个 prompt 版本时。
-- **依赖**: B-20 EvalFramework 已落（提供分数）。
+- **What**: Prompt-as-code, remotely distributed (from git / config center), SemVer versioned; `Router` layer supports prompt_version-based traffic splitting; `LlmCallFinished` carries `prompt_version`, EventStore SQL directly produces v1 vs v2 score comparisons.
+- **Currently**: the downstream consumer hardcodes prompts in Python files; prompt changes require a PR. Painful at scale.
+- **Trigger**: when the team grows enough that prompt changes need canary rollout / parallel iteration by multiple people; or the first time we want to A/B test two prompt versions.
+- **Dependencies**: B-20 EvalFramework landed (provides scores).
 
-### B-25. Semantic Cache Middleware（向量相似度短路）
-- **What**: 在 Retry 之前加一层 `SemanticCacheMiddleware`。相似 prompt 命中阈值直接返回缓存的 Response，跳过 Provider 调用。挂 Redis+Vector / Qdrant。命中后 LlmCallFinished 标 `cache_kind: Semantic`，evaluator 仍跑（监控缓存是否劣化质量）。
-- **Trigger**: 业务流量上来发现"重复思考"占大头；或者 Provider API 延迟开始疼时。当前 downstream consumer 量级用 exact-match L1/L2 cache 够。
-- **Why 推后**: 增加运行时依赖（vector store），第一个用户没要前不上。
+### B-25. Semantic Cache Middleware (vector-similarity short-circuit)
+- **What**: insert a `SemanticCacheMiddleware` layer ahead of Retry. Similar prompts hitting the threshold return the cached Response directly, skipping the Provider call. Backed by Redis+Vector / Qdrant. After a hit, `LlmCallFinished` is marked `cache_kind: Semantic`; the evaluator still runs (to monitor whether caching degrades quality).
+- **Trigger**: when business traffic ramps up and "duplicate thinking" becomes the bulk; or when Provider API latency starts to hurt. The downstream consumer's current scale is fine with the exact-match L1/L2 cache.
+- **Why deferred**: adds a runtime dependency (vector store); don't add until the first user asks.
 
-### B-26. LLM FinOps — Token / Cost 聚合 + Quota 中间件
+### B-26. LLM FinOps — Token / Cost aggregation + Quota middleware
 - **What**:
-  - 内置 Price Card（per-model USD/1M token）
-  - `LlmCallFinished` 加 `cost_usd: f64` 字段
-  - `QuotaMiddleware`：按 tenant / user / session 设 budget，超 → 拦截 OR 自动降级到便宜模型
-- **EventStore SQL 福利**: 有了之后"过去 7 天哪个用户花了多少钱"一句 SQL 就能查
-- **Trigger**: 第二个 user 进来分账时；或者首次出现"被打爆账单"事件。当前 downstream consumer 单用户单机器跑批，没账单焦虑。
-- **依赖**: B-20 EventStore 已落（cost 进 LlmCallFinished payload）。
+  - Built-in Price Card (per-model USD/1M token)
+  - `LlmCallFinished` gains a `cost_usd: f64` field
+  - `QuotaMiddleware`: budget per tenant / user / session, over → block OR auto-downgrade to a cheaper model
+- **EventStore SQL bonus**: once in place, "how much did each user spend over the past 7 days" is a one-line SQL query
+- **Trigger**: when a second user shows up needing cost split; or the first "ran up the bill" incident. The downstream consumer is currently single-user, single-machine batch jobs with no billing anxiety.
+- **Dependencies**: B-20 EventStore landed (cost goes into the LlmCallFinished payload).
 
-### B-27. Pre-flight Guardrails — Input 安全门
-- **What**: 在请求到 Provider 之前的拦截层。Prompt injection 检测（regex / 小分类器）、PII 擦除（手机/信用卡/SSN → 占位符，response 回来再还原）。触发 → HTTP 400，不消耗 Provider token。
-- **跟 ValidationMiddleware 区别**: Guardrail 是 input 层（请求前），Validation 是 output 层（响应后）。混不得：guardrail 是安全门，validation 是契约校验。
-- **Trigger**: 第一个公开/多用户产品上线时；或合规要求出现时。当前 downstream consumer 内部使用，prompt 受信，不挡。
-- **Why 推后**: 加运行时依赖（分类器模型 / 正则库），且只对外部输入有意义；当前没该场景。
+### B-27. Pre-flight Guardrails — Input safety gate
+- **What**: an interception layer before requests reach the Provider. Prompt injection detection (regex / small classifier), PII redaction (phone/credit-card/SSN → placeholders, restored after the response returns). Trigger → HTTP 400, doesn't consume Provider tokens.
+- **Difference from ValidationMiddleware**: Guardrail is an input layer (pre-request); Validation is an output layer (post-response). Don't conflate them: guardrail is a safety gate, validation is contract checking.
+- **Trigger**: first public / multi-user product launch; or when compliance requirements appear. The downstream consumer is internal-use with trusted prompts, not blocked.
+- **Why deferred**: adds runtime dependencies (classifier models / regex libs), and only matters for external input; that scenario doesn't exist now.
 
-### B-28. DPO / SFT 数据导出（数据飞轮）
-- **What**: EventStore 加 `FeedbackReceived` event variant（user 反馈或业务回放信号），`tars dump-trace` CLI 支持 DPO / SFT format 输出。
-- **Why 不做 exporter**: 业务 specific——chosen/rejected 怎么定义、format 用 DPO 还是 SFT 还是 PPO，每家不同。tars 提供数据萃取通道（最薄）+ 留 event variant 位即可，**不内置任何 fine-tuning format converter**。
-- **Trigger**: 第一个想 fine-tune 的 user 出现。当前 downstream consumer 没在做。
-- **现在能做的最薄一步**: 加 `FeedbackReceived` event variant + 在 EventStore schema 留位（30 行），exporter 不做。Brainstorm 期间已经讨论过这条最低投入选项。
+### B-28. DPO / SFT data export (data flywheel)
+- **What**: add a `FeedbackReceived` event variant to EventStore (user feedback or business replay signal); `tars dump-trace` CLI supports DPO / SFT format output.
+- **Why not build the exporter**: business-specific — how chosen/rejected is defined, whether the format is DPO or SFT or PPO, varies by team. tars provides the (thinnest) data extraction channel + reserves the event variant slot, **without any built-in fine-tuning format converter**.
+- **Trigger**: first user wanting to fine-tune. The downstream consumer isn't doing it.
+- **Thinnest step we can do now**: add the `FeedbackReceived` event variant + reserve a slot in the EventStore schema (30 lines), no exporter. This minimum-investment option was discussed during brainstorming.
 
 ---
 
-**Brainstorm 共识**:
+**Brainstorm consensus**:
 
-- Day-2/Day-3 这 8 条全部"未来需要但不挡当前 M9"
-- M9 单独完成 B-20（Validation + Evaluation 一起）= downstream consumer 完整 unblock + 整个 LLM 系统的 observability/quality gating 基础设施
-- M9 之后第一个候选是 **B-21 OTel exporter**——半成品最熟、downstream consumer 多阶 agent 调试当前痛点
-- 长期 tars 演进的"全景图": Control Plane（Config / Router / CB） + Data Plane（Pipeline / Middleware / Provider） + Observability（tracing + EventStore） + Intelligence Plane（EvalRunner / ShadowRunner / 数据萃取）
+- All 8 entries from Day-2/Day-3 are "needed in the future but not blocking current M9"
+- M9 alone completing B-20 (Validation + Evaluation together) = full downstream-consumer unblock + observability/quality-gating infrastructure for the whole LLM system
+- The first candidate after M9 is **B-21 OTel exporter** — most-mature semi-finished item, current pain point for downstream-consumer multi-stage agent debugging
+- Long-term "panoramic view" of tars evolution: Control Plane (Config / Router / CB) + Data Plane (Pipeline / Middleware / Provider) + Observability (tracing + EventStore) + Intelligence Plane (EvalRunner / ShadowRunner / data extraction)
 
 
-### 真实代码 Deep Review 找到的 3 个 gap (2026-05-05)
+### 3 gaps found from a deep review of the real code (2026-05-05)
 
-外部 reviewer 看了 `routing.rs` / `retry.rs` / `middleware.rs` / `provider.rs` 真实代码后指出 3 个 production-real 的 gap。已验证全部命中。处置:
+After an external reviewer read the real code in `routing.rs` / `retry.rs` / `middleware.rs` / `provider.rs`, they pointed out 3 production-real gaps. All verified to land. Disposition:
 
 #### B-31. Routing capability pre-flight check — ✅ shipped (`<unreleased>`)
 - **Where**: `tars-pipeline/src/routing.rs:202-285`
@@ -380,21 +380,21 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **Tests**: 7 new unit tests in `tars-types::chat::tests` (each cap field individually + multi-reason aggregation), 3 new routing tests in `tars-pipeline::routing::tests` (skip-and-try-next / all-skipped-returns-InvalidRequest / pass-through-when-compatible).
 - **Behavior change for callers**: requests with tools/vision/thinking that previously wire-400'd or silently drop'd at non-supporting providers now get clean local skips. downstream consumer dogfood will see fewer mysterious provider errors when routing has heterogeneous candidates.
 
-#### B-32. Context length 主动预检 — ⚠️ 部分 shipped (chars/4 heuristic, full fix pending tokenizer)
-- **What shipped (in B-31 v2)**: `compatibility_check` 加 `ContextWindowExceeded { estimated_prompt_tokens, max_context_tokens }` 检测,用 `chars / 4` 启发式估算 prompt 大小。覆盖 obvious-overflow 场景:200k char request 打给 32k context provider 会被 routing 跳过,不浪费 wire round-trip。
-- **What NOT shipped**: 真 tokenizer-based 精准检测。当前 chars/4 heuristic 在边界场景 (estimate ≈ 80-100% max) 有 ±20% 误差,所以只能可靠抓"明显超"的请求。borderline case 仍走 wire 等 provider 报错。
-- **Trigger for full fix**: 真 tokenizer 集成 (D-5 unfreezes,挂 tiktoken / model-specific tokenizer)。或 downstream consumer 真撞到 borderline case 被频繁 false-negative 拖慢调试。
-- **当前状态**: 80% 实用价值已在 (chars/4 救了 wire round-trip 浪费),20% 精度 case 暂留 wire-level fallback。**够用,trigger 没到不动**。
+#### B-32. Context length pre-flight check — ⚠️ partially shipped (chars/4 heuristic, full fix pending tokenizer)
+- **What shipped (in B-31 v2)**: `compatibility_check` adds a `ContextWindowExceeded { estimated_prompt_tokens, max_context_tokens }` check, estimating prompt size with the `chars / 4` heuristic. Covers obvious-overflow scenarios: a 200k-char request sent to a 32k-context provider is skipped by routing, no wire round-trip wasted.
+- **What NOT shipped**: real tokenizer-based precise detection. The current chars/4 heuristic has ±20% error at the boundary (estimate ≈ 80-100% of max), so it only reliably catches "obviously over" requests. Borderline cases still go to the wire and let the provider error out.
+- **Trigger for full fix**: real tokenizer integration (D-5 unfreezes, hooking up tiktoken / model-specific tokenizer). Or the downstream consumer actually hitting borderline cases and getting frequent false negatives that slow down debugging.
+- **Current state**: 80% of the practical value is already in (chars/4 avoids wire round-trip waste), 20% precision case stays on wire-level fallback. **Sufficient; not moving until the trigger fires**.
 
-#### Middleware 顺序陷阱 (卷进 B-20 W1.2,不单独 entry)
-- **Where**: `middleware.rs:96-98` `PipelineBuilder::layer` 文档说 "first call adds outermost",**只是文档约定,没 build-time 检查**
-- **Gap**: 开发者把 Telemetry 放 Retry 内/外得到完全不同的可观测结果,编译期看不出。已知反模式:
-  - Telemetry 在 Retry 内 → 记 N 次离散尝试,不知道这是同一业务请求
-  - Telemetry 在 Retry 外 → 记 1 次总耗时,不知道内部 retry 几次
-  - CacheLookup 在 Retry 内 → 命中缓存还触发 retry 路径,毫无意义
-  - CircuitBreaker 在 Retry 外 → 熔断后还 retry,违反熔断意图
-  - Validation 在 Retry 外 → ValidationFailed 触发的 retry 走不到外层
-- **Fix**: `PipelineBuilder::build()` 加 `validate_order` 静态检查 — 已知反模式硬编码 lookup 表,违反就 panic with helpful message:
+#### Middleware-order trap (folded into B-20 W1.2, not a separate entry)
+- **Where**: `middleware.rs:96-98` — `PipelineBuilder::layer` docs say "first call adds outermost", **but it's only a doc convention, with no build-time check**
+- **Gap**: a developer placing Telemetry inside vs. outside Retry gets completely different observability results, invisible at compile time. Known anti-patterns:
+  - Telemetry inside Retry → records N discrete attempts, doesn't know they're the same business request
+  - Telemetry outside Retry → records 1 total duration, doesn't know how many internal retries happened
+  - CacheLookup inside Retry → cache hit still goes down the retry path, pointless
+  - CircuitBreaker outside Retry → still retries after tripping, violating circuit-breaker intent
+  - Validation outside Retry → retries triggered by ValidationFailed can't reach the outer layer
+- **Fix**: `PipelineBuilder::build()` gains a `validate_order` static check — known anti-patterns hardcoded in a lookup table; violations panic with a helpful message:
   ```rust
   fn validate_order(&self) -> Result<(), BuildError> {
       const ORDER_RULES: &[(name_outer, name_inner, reason)] = &[
@@ -406,8 +406,8 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
       // check pairs...
   }
   ```
-- **不强类型 typestate**: 保留任意 layer 组合的扩展性,只在已知反模式上拦截。
-- **进 B-20 W1.2** Pipeline.builder() build-time validation 子任务里一起做,**不开新 entry**。
+- **No strong-typed typestate**: keep extensibility for arbitrary layer combinations; only intercept on known anti-patterns.
+- **Folded into B-20 W1.2** as a sub-task of Pipeline.builder() build-time validation, **no new entry**.
 
 ### B-7. `tars-storage` — `ContentStore` + `KVStore` (EventStore done)
 - `EventStore` + `SqliteEventStore` shipped — see CHANGELOG. Two traits still pending:
@@ -459,7 +459,7 @@ Audit run 2026-05-03 against `docs/architecture/01-llm-provider.md`. Code curren
   - `Auth::GoogleAdc { scope: Vec<String> }` — Application Default Credentials for Vertex / Gemini
   - `per_tenant_home` flag on `Auth::Delegate` — multi-tenant CLI HOME isolation (Doc 01 §6.2 + §7)
 - **Why deferred**: All three live in the future `tars-security` crate (Doc 14 M6). The `BasicAuthResolver` in `tars-provider` is documented as "test/personal-mode"; production resolvers swap in.
-- **Trigger**: M6 (Multi-tenant + Postgres + 安全) per Doc 14.
+- **Trigger**: M6 (Multi-tenant + Postgres + security) per Doc 14.
 
 ### D-3. mistral.rs embedded backend (Doc 01 §6.3) — ❄️ Frozen (see D-11)
 - In-process LLM inference via `mistral.rs` crate. Apple Silicon Metal backend especially useful for the Mac Pro node (covers same posture as MLX but Rust-native, no `mlx_lm.server` subprocess).
@@ -482,7 +482,7 @@ Audit run 2026-05-03 against `docs/architecture/01-llm-provider.md`. Code curren
 - **Trigger**: First user TOML-only deployment that needs to flag a capability off (e.g. "this vLLM doesn't actually do strict JSON, please don't route strict-output requests here").
 
 ### D-7. `ContextTooLong { limit, requested }` populated from error message (Doc 01 §11.1)
-- All HTTP adapters currently classify context overflow as `ProviderError::ContextTooLong { limit: 0, requested: 0 }` — typed correctly but with placeholder numbers. Doc 01 §11.1 says these fields enable "上层有明确处理路径（截断 / 摘要）". Without the numbers, callers can't make the truncation decision intelligently.
+- All HTTP adapters currently classify context overflow as `ProviderError::ContextTooLong { limit: 0, requested: 0 }` — typed correctly but with placeholder numbers. Doc 01 §11.1 says these fields enable "the upper layer has an explicit handling path (truncate / summarize)". Without the numbers, callers can't make the truncation decision intelligently.
 - **Where**: `crates/tars-provider/src/backends/{openai,anthropic,gemini}.rs` — `classify_error` paths.
 - **Why deferred**: Each provider's error message format is different and changes without notice. Real fix is "regex over the message body" — hacky but unavoidable.
 - **Trigger**: First time the agent loop hits a long-context request and the truncation policy needs the actual numbers (not just the error class). Until then `0/0` is honest about "we know it overflowed, we don't know by how much".

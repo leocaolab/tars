@@ -1,59 +1,60 @@
-# 文档 04 — Agent Runtime 与 Trajectory Tree
+# Doc 04 — Agent Runtime and Trajectory Tree
 
-> 范围：定义多 Agent 协同的运行时抽象——拓扑、状态模型、消息契约、回溯与恢复机制、Frontend 契约。
+> Scope: defines the runtime abstractions for multi-Agent coordination — topology, state model, message contract, backtrack and recovery mechanisms, Frontend contract.
 >
-> 上游（消费方）：CI Mode / TUI Mode / Web Dashboard 等 Frontend Adapter，详见 Doc 07。
+> Upstream (consumers): CI Mode / TUI Mode / Web Dashboard and other Frontend Adapters, see Doc 07.
 >
-> 下游（依赖）：Doc 02 Middleware Pipeline → Doc 01 LlmProvider；Doc 03 Cache Registry；Doc 05 Tool/MCP（待定）。
+> Downstream (dependencies): Doc 02 Middleware Pipeline → Doc 01 LlmProvider; Doc 03 Cache Registry; Doc 05 Tool/MCP (TBD).
 
 ---
 
-## 1. 设计目标
+## 1. Design Goals
 
-| 目标 | 说明 |
+| Goal | Description |
 |---|---|
-| **DAG 是计划，不是运行时** | 执行 shape 是带回溯、循环、放弃的状态机。Plan as DAG, execute as event-sourced trajectory tree |
-| **崩溃恢复** | 进程死掉重启后能从最后一个 checkpoint 恢复任务，不丢失已完成的工作 |
-| **回溯安全** | 任何已执行的副作用都必须能被补偿（或被设计为不进入中间步骤） |
-| **预算硬约束** | 每个任务有 token / 时长 / agent hops / replan 次数的硬上限，到了直接 abort，不允许失控 |
-| **Frontend 无关** | Runtime 只产出 `TrajectoryEvent` 流，不知道 CI / TUI / Web 的存在 |
-| **多 Agent 强契约** | Agent 间消息走 Rust enum + provider strict structured output，禁止纯文本互喷 |
-| **可观测可重放** | 完整事件日志 + LLM 响应捕获，任何历史任务都能在测试环境复现 |
+| **DAG is the plan, not the runtime** | Execution shape is a state machine with backtrack, loops, and abandonment. Plan as DAG, execute as event-sourced trajectory tree |
+| **Crash recovery** | After a process dies and restarts, tasks resume from the last checkpoint without losing completed work |
+| **Backtrack safety** | Any executed side effect must be compensable (or designed not to occur in intermediate steps) |
+| **Hard budget constraints** | Each task has hard upper bounds on tokens / duration / agent hops / replan count; abort directly when hit, no runaway allowed |
+| **Frontend agnostic** | Runtime emits only a `TrajectoryEvent` stream; it knows nothing about CI / TUI / Web |
+| **Strong contract for multi-Agent** | Inter-Agent messages go through Rust enum + provider strict structured output; raw text exchange is forbidden |
+| **Observable and replayable** | Complete event log + LLM response capture; any historical task can be reproduced in a test environment |
 
-**反目标**：
-- 不做自由 mesh / P2P agent 通信（O(n²) 复杂度，无法 debug）
-- 不让 LLM 决定路由 / 任务完成 / 工具选择（这些必须在代码里确定性决策）
-- 不在 Runtime 层做 prompt 模板渲染（那是 Prompt Builder 的责任，详见 §4.5）
-- 不内嵌特定 Frontend（trace 显示、对话 UI、Markdown 报告生成都是 Adapter 的事）
+**Anti-goals**:
+- No free mesh / P2P agent communication (O(n²) complexity, undebuggable)
+- Don't let LLMs decide routing / task completion / tool selection (these must be deterministic decisions in code)
+- No prompt template rendering at the Runtime layer (that's the Prompt Builder's responsibility, see §4.5)
+- No specific Frontend embedded (trace display, conversation UI, Markdown report generation are Adapter concerns)
 
 ---
 
-## 2. 拓扑：分层编排 + DAG Worker + Critic
+## 2. Topology: Hierarchical Orchestration + DAG Workers + Critic
 
-### 2.1 强制结构
+### 2.1 Mandatory structure
 
 ```
                     ┌────────────────────────┐
                     │  Orchestrator (Planner) │
-                    │  L1 模型 + strict JSON  │
+                    │  L1 model + strict JSON │
                     └────────────┬───────────┘
-                                 │ 下发 task DAG
+                                 │ emit task DAG
                 ┌────────────────┼────────────────┐
                 ▼                ▼                ▼
          ┌──────────┐     ┌──────────┐     ┌──────────┐
-         │ Worker A │     │ Worker B │     │ Worker C │  ← 可并行的 leaf
+         │ Worker A │     │ Worker B │     │ Worker C │  ← parallelizable leaves
          │ L2 / L2' │     │ L2 / L2' │     │ L2 / L2' │
          └────┬─────┘     └────┬─────┘     └────┬─────┘
               └────────────────┼────────────────┘
                                ▼
                     ┌──────────────────────┐
                     │  Aggregator          │
-                    │  纯代码,无 LLM       │
+                    │  pure code, no LLM   │
                     └──────────┬───────────┘
                                ▼
                     ┌──────────────────────┐
-                    │  Critic (独立轮次)    │
-                    │  L3 (Worker 同档)    │
+                    │  Critic (separate    │
+                    │  round, L3 / Worker- │
+                    │  tier model)         │
                     └──────────┬───────────┘
                                │
                   ┌────────────┴────────────┐
@@ -61,27 +62,27 @@
             accept (commit phase)    replan (fork from parent)
 ```
 
-### 2.2 强制规则
+### 2.2 Mandatory rules
 
-1. **Orchestrator 不做 reasoning**——它的输出永远是结构化的 task DAG（schema 约束）。需要思考的工作分发给 Worker。
-2. **Worker 之间不直接通信**——所有协作走 Context Store 的 append-only 事件流（§6）
-3. **Critic 是单独一轮**——不复用 Worker 的对话上下文，避免被推理路径污染
-4. **Aggregator 是纯代码**——不调 LLM，做 schema 拼接、去重、排序等确定性操作
-5. **mesh / P2P 通信被禁止**——任何 "Agent X 直接调用 Agent Y" 在编译期就拒绝
+1. **Orchestrator does no reasoning** — its output is always a structured task DAG (schema-constrained). Work that requires thinking is dispatched to Workers.
+2. **Workers do not communicate with each other directly** — all collaboration goes through the Context Store's append-only event stream (§6).
+3. **Critic is a separate round** — it does not reuse a Worker's conversational context, avoiding contamination by reasoning paths.
+4. **Aggregator is pure code** — no LLM calls; performs deterministic operations like schema concatenation, deduplication, sorting.
+5. **mesh / P2P communication is forbidden** — any "Agent X directly calls Agent Y" is rejected at compile time.
 
-### 2.3 拒绝 mesh 的理由
+### 2.3 Why mesh is rejected
 
-mesh 拓扑（autogen 早期、CrewAI 自由模式）的失败模式：
-- 消息复杂度 O(n²)
-- token 成本指数增长（每条消息要带前序所有消息）
-- debug 不可能（哪个 Agent 的哪句话导致了最终 bug？）
-- 无法 budget 预算（环路无法静态分析）
+Failure modes of mesh topology (early autogen, CrewAI free mode):
+- Message complexity O(n²)
+- Token cost grows exponentially (every message has to carry all preceding messages)
+- Debugging impossible (which Agent's which utterance caused the final bug?)
+- Budgeting impossible (cycles cannot be statically analyzed)
 
-工业级生产环境的多 Agent 系统，最终全部收敛到 hierarchical orchestrator + structured DAG + critic loop 的形态。LangGraph、OpenAI Swarm、CrewAI 的"hierarchical mode" 都是这个形状。
+Production-grade multi-Agent systems eventually all converge to the hierarchical orchestrator + structured DAG + critic loop shape. LangGraph, OpenAI Swarm, CrewAI's "hierarchical mode" are all this shape.
 
 ---
 
-## 3. 核心数据模型
+## 3. Core Data Model
 
 ### 3.1 Trajectory Tree
 
@@ -89,10 +90,10 @@ mesh 拓扑（autogen 早期、CrewAI 自由模式）的失败模式：
 pub struct Trajectory {
     pub id: TrajectoryId,
     pub root_task: TaskId,
-    pub parent: Option<TrajectoryId>,         // 形成树
-    pub branch_reason: BranchReason,           // 为什么从 parent 分出来
+    pub parent: Option<TrajectoryId>,         // forms a tree
+    pub branch_reason: BranchReason,           // why this branched off from parent
     pub status: TrajectoryStatus,
-    pub head_state: StateRef,                  // 指向 event log 的 offset
+    pub head_state: StateRef,                  // points to offset in event log
     pub pending_compensations: Vec<CompensationAction>,
     pub budget_remaining: TaskBudget,
     pub created_at: SystemTime,
@@ -103,14 +104,14 @@ pub enum TrajectoryStatus {
     Active,
     Suspended { reason: SuspendReason },
     Completed { result: TaskResult },
-    Dead { cause: DeathCause },           // 被 backtrack 标记死亡
+    Dead { cause: DeathCause },           // marked dead by backtrack
 }
 
 pub enum BranchReason {
-    Root,                                    // 任务起点
+    Root,                                    // task origin
     Replan { from: TrajectoryId, critic_feedback: String },
-    Fork { from: TrajectoryId, hypothesis: String },     // tree-of-thoughts 风格
-    Recovery { from: TrajectoryId, error: ErrorRef },    // 崩溃恢复时的新分支
+    Fork { from: TrajectoryId, hypothesis: String },     // tree-of-thoughts style
+    Recovery { from: TrajectoryId, error: ErrorRef },    // new branch on crash recovery
 }
 
 pub enum DeathCause {
@@ -122,26 +123,26 @@ pub enum DeathCause {
 }
 ```
 
-### 3.2 事件日志（单一事实源）
+### 3.2 Event log (single source of truth)
 
 ```rust
 pub enum AgentEvent {
-    /// 任务诞生
+    /// Task birth
     TaskCreated { task_id: TaskId, spec: TaskSpec, principal: Principal },
     
-    /// 轨迹生命周期
+    /// Trajectory lifecycle
     TrajectoryStarted { traj: TrajectoryId, parent: Option<TrajectoryId>, reason: BranchReason },
     TrajectorySuspended { traj: TrajectoryId, reason: SuspendReason },
     TrajectoryResumed { traj: TrajectoryId, by: ResumeTrigger },
     TrajectoryAbandoned { traj: TrajectoryId, cause: DeathCause },
     
-    /// Agent 步骤
+    /// Agent step
     StepStarted { 
         traj: TrajectoryId, 
         step_seq: u32,
         agent: AgentId, 
         idempotency_key: String,
-        input_ref: ContentRef,           // 大输入存到 ContentStore,事件里只放引用
+        input_ref: ContentRef,           // large inputs go to ContentStore; events hold only refs
     },
     StepCompleted { 
         traj: TrajectoryId,
@@ -157,14 +158,14 @@ pub enum AgentEvent {
         classification: ErrorClass,
     },
     
-    /// 副作用补偿
+    /// Side-effect compensation
     CompensationExecuted { 
         traj: TrajectoryId,
         compensation: CompensationRef,
         result: CompensationResult,
     },
     
-    /// LLM 原始响应捕获 (replay 必需)
+    /// LLM raw response capture (required for replay)
     LlmResponseCaptured { 
         traj: TrajectoryId,
         step_seq: u32,
@@ -172,7 +173,7 @@ pub enum AgentEvent {
         raw_response: ContentRef,
     },
     
-    /// 检查点 (减少 replay 成本)
+    /// Checkpoint (reduces replay cost)
     Checkpoint { 
         traj: TrajectoryId,
         step_seq: u32,
@@ -181,13 +182,13 @@ pub enum AgentEvent {
 }
 ```
 
-**关键不变量**：
-1. **事件只追加不修改**——所有"修正"通过追加新事件实现（如 `TrajectoryAbandoned` 标记某条轨迹死亡）
-2. **大 payload 走 ContentStore + ContentRef**——事件本身保持小（<4KB），便于按时间扫描和持久化
-3. **`idempotency_key` 在 StepStarted 时确定**——格式 `hash(traj_id + step_seq + input_ref)`，所有外部调用（LLM、tool、DB）携带此 key，replay 时去重
-4. **`LlmResponseCaptured` 与 `StepCompleted` 是两个事件**——前者保留 raw response 用于 replay，后者保存解析/聚合后的最终输出。这样即使解析逻辑后续改了，replay 还能用旧 raw response 重新解析
+**Key invariants**:
+1. **Events are append-only, never mutated** — all "corrections" are realized by appending new events (e.g., `TrajectoryAbandoned` marks a trajectory as dead).
+2. **Large payloads go through ContentStore + ContentRef** — events themselves stay small (<4KB), enabling chronological scans and persistence.
+3. **`idempotency_key` is fixed at StepStarted** — format `hash(traj_id + step_seq + input_ref)`; all external calls (LLM, tool, DB) carry this key for dedup on replay.
+4. **`LlmResponseCaptured` and `StepCompleted` are two separate events** — the former preserves raw response for replay, the latter stores the parsed/aggregated final output. This way, even if parsing logic changes later, replay can re-parse from the old raw response.
 
-### 3.3 ContentStore：把大 payload 与事件解耦
+### 3.3 ContentStore: decoupling large payload from events
 
 ```rust
 #[async_trait]
@@ -198,18 +199,18 @@ pub trait ContentStore: Send + Sync {
 }
 
 pub struct ContentRef {
-    pub hash: [u8; 32],              // SHA-256 内容寻址,自动去重
+    pub hash: [u8; 32],              // SHA-256 content addressing, automatic dedup
     pub size: u64,
     pub mime: String,
     pub backend: ContentBackend,     // Postgres bytea / S3 / FS
 }
 ```
 
-事件日志在 Postgres，ContentStore 可以是同一个 DB（小内容用 bytea），也可以是 S3 / 本地 FS（大内容如 LLM 全文响应、code review 报告）。
+Event log lives in Postgres; ContentStore can be the same DB (small content as bytea) or S3 / local FS (large content like full LLM responses, code review reports).
 
 ---
 
-## 4. Agent 抽象与消息契约
+## 4. Agent Abstraction and Message Contract
 
 ### 4.1 Agent trait
 
@@ -219,26 +220,26 @@ pub trait Agent: Send + Sync {
     fn id(&self) -> &AgentId;
     fn role(&self) -> AgentRole;
     
-    /// 单步执行：纯函数 (state, input) → (output, side_effects)
+    /// Single-step execution: pure function (state, input) → (output, side_effects)
     async fn execute(
         &self,
         ctx: AgentContext,
         input: AgentInput,
     ) -> Result<AgentStepResult, AgentError>;
     
-    /// 声明本 Agent 可能产生的副作用类型
-    /// Runtime 根据这个清单准备补偿能力
+    /// Declares the side-effect kinds this Agent may produce.
+    /// Runtime prepares compensation capabilities based on this list.
     fn declared_side_effects(&self) -> &[SideEffectKind];
 }
 
 pub struct AgentContext {
     pub trajectory: TrajectoryId,
     pub step_seq: u32,
-    pub task_budget: BudgetView,             // 剩余预算
+    pub task_budget: BudgetView,             // remaining budget
     pub principal: Principal,
     pub deadline: Option<Instant>,
     pub cancel: CancellationToken,
-    pub llm_service: Arc<dyn LlmService>,    // Doc 02 的 pipeline
+    pub llm_service: Arc<dyn LlmService>,    // pipeline from Doc 02
     pub context_store: Arc<dyn ContextStore>,
     pub tool_registry: Arc<dyn ToolRegistry>, // Doc 05
 }
@@ -247,61 +248,61 @@ pub enum AgentRole {
     Orchestrator,
     Worker { domain: String },               // "code_review" / "security_audit" / ...
     Critic,
-    Aggregator,                              // 不调 LLM 的纯代码 Agent
+    Aggregator,                              // pure-code Agent, no LLM calls
 }
 
 pub struct AgentStepResult {
     pub output: AgentMessage,
     pub side_effects: Vec<SideEffect>,
     pub usage: Usage,
-    pub raw_llm_response: Option<ContentRef>,  // 用于 replay
+    pub raw_llm_response: Option<ContentRef>,  // for replay
 }
 ```
 
-### 4.2 AgentMessage（强类型消息契约）
+### 4.2 AgentMessage (strongly-typed message contract)
 
-所有 Agent 间通信走同一个 enum。**禁止纯文本互喷**：
+All inter-Agent communication goes through one enum. **Raw text exchange is forbidden**:
 
 ```rust
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum AgentMessage {
-    /// Orchestrator 下发任务
+    /// Orchestrator dispatches a task
     PlanIssued {
         plan_id: PlanId,
         nodes: Vec<PlanNode>,
         edges: Vec<PlanEdge>,
     },
     
-    /// Worker 上报中间产物
+    /// Worker reports an intermediate artifact
     PartialResult {
         agent: AgentId,
         artifact: Artifact,
         confidence: f32,
     },
     
-    /// Worker 需要更多上下文
+    /// Worker needs more context
     NeedsClarification {
         agent: AgentId,
         question: String,
         blocking: bool,
     },
     
-    /// Critic 评审结论
+    /// Critic verdict
     CriticVerdict {
         verdict: Verdict,
         rejected_reasons: Vec<String>,
         replan_hints: Vec<String>,
     },
     
-    /// 失败上报
+    /// Failure report
     Failed {
         agent: AgentId,
         error: AgentError,
         recoverable: bool,
     },
     
-    /// 任务完成
+    /// Task completion
     Completed {
         final_artifact: Artifact,
         total_usage: Usage,
@@ -309,15 +310,15 @@ pub enum AgentMessage {
 }
 ```
 
-**与 LLM 的对接**：每个 Agent 在调 LlmService 时，`req.structured_output = Some(AgentMessage::json_schema_for_role(self.role()))`，让 provider 端 strict mode 直接产出 `AgentMessage` 子结构。Rust 端 `serde_json::from_str` 一步反序列化，零字符串拼接 / 正则提取。
+**LLM integration**: when each Agent calls LlmService, `req.structured_output = Some(AgentMessage::json_schema_for_role(self.role()))`, letting provider-side strict mode emit an `AgentMessage` substructure directly. The Rust side does `serde_json::from_str` for one-shot deserialization, with zero string concatenation / regex extraction.
 
-### 4.3 模型分层（不让 LLM 自己路由）
+### 4.3 Model tiering (don't let the LLM route itself)
 
 ```rust
 impl Agent for OrchestratorAgent {
     async fn execute(&self, ctx: AgentContext, input: AgentInput) -> ... {
         let req = ChatRequest {
-            model: ModelHint::Tier(ModelTier::Default),  // L1 主力档,要求稳定 JSON
+            model: ModelHint::Tier(ModelTier::Default),  // L1 workhorse, requires stable JSON
             structured_output: Some(AgentMessage::schema_for(AgentRole::Orchestrator)),
             ...
         };
@@ -328,77 +329,77 @@ impl Agent for OrchestratorAgent {
 impl Agent for ReasoningWorker {
     fn execute(&self, ctx: AgentContext, input: AgentInput) -> ... {
         let req = ChatRequest {
-            model: ModelHint::Tier(ModelTier::Reasoning),  // L2 顶级模型
+            model: ModelHint::Tier(ModelTier::Reasoning),  // L2 top-tier model
             ...
         };
     }
 }
 
 impl Agent for FastClassifierWorker {
-    // 不用 LLM,直接调 Doc 01 的 ClassifierProvider (DeBERTa)
+    // No LLM; calls Doc 01's ClassifierProvider (DeBERTa) directly
 }
 ```
 
-四档分配：
-- L1（Orchestrator / 工具选择）：稳定 JSON，中等成本（gpt-4o-mini / claude-haiku）
-- L2（Reasoning Worker）：reasoning 主力（claude-opus / o1 / gemini-pro）
-- L2'（Specialized Worker）：领域优化（qwen-coder 跑代码 / gemini-flash 跑长文档）
-- L3（Critic）：与 Worker 同档或低半档
-- L4（路由 / 抽取 / 分类）：本地小模型（DeBERTa / qwen-0.5B / bge-small）
+Four-tier allocation:
+- L1 (Orchestrator / tool selection): stable JSON, mid-cost (gpt-4o-mini / claude-haiku)
+- L2 (Reasoning Worker): reasoning workhorse (claude-opus / o1 / gemini-pro)
+- L2' (Specialized Worker): domain-optimized (qwen-coder for code / gemini-flash for long docs)
+- L3 (Critic): same tier as Worker or half a tier lower
+- L4 (routing / extraction / classification): local small models (DeBERTa / qwen-0.5B / bge-small)
 
-### 4.4 副作用分类
+### 4.4 Side-effect classification
 
 ```rust
 pub enum SideEffectKind {
-    /// 纯计算,无外部副作用 (LLM 推理本身,虽然花钱但语义可重做)
+    /// Pure compute, no external side effects (LLM inference itself: costs money but is semantically reproducible)
     PureCompute,
     
-    /// 在隔离环境的写入 (temp dir / shadow branch / staging table)
-    /// 自动补偿:删除/回滚
+    /// Writes in an isolated environment (temp dir / shadow branch / staging table)
+    /// Auto-compensation: delete/rollback
     IsolatedWrite { resource: ResourceRef, undo: UndoAction },
     
-    /// 创建可逆的云资源 (cache handle / temp bucket)
-    /// 显式补偿:调 delete API
+    /// Creates reversible cloud resources (cache handle / temp bucket)
+    /// Explicit compensation: call delete API
     ReversibleResource { resource: ResourceRef, cleanup: CleanupAction },
     
-    /// 不可逆的外部动作 (git push / 发邮件 / 付款 / 删生产数据)
-    /// 必须延迟到 Commit Phase,不允许出现在中间步骤
+    /// Irreversible external action (git push / send email / payment / delete production data)
+    /// Must be deferred to Commit Phase; not allowed in intermediate steps
     Irreversible { resource: ResourceRef },
 }
 
 pub struct SideEffect {
     pub kind: SideEffectKind,
-    pub idempotency_key: String,          // 重放时去重
+    pub idempotency_key: String,          // dedup on replay
     pub created_at: SystemTime,
 }
 ```
 
-**强制约束**：Runtime 在每次 StepCompleted 后扫描 side_effects，如果发现 `Irreversible` 出现在非 Commit Phase，**直接 panic / 拒绝该步骤**。这是工程纪律层面的硬约束，不是 LLM 自觉。
+**Mandatory constraint**: After each StepCompleted, Runtime scans side_effects; if it finds an `Irreversible` outside of a Commit Phase, it **panics / rejects the step directly**. This is an engineering-discipline-level hard constraint, not LLM self-restraint.
 
 ---
 
-## 5. Context Store：append-only 共享上下文
+## 5. Context Store: append-only shared context
 
 ```rust
 #[async_trait]
 pub trait ContextStore: Send + Sync {
-    /// Agent 完成后追加事件
+    /// Append an event after an Agent finishes
     async fn append(&self, event: AgentEvent) -> Result<EventOffset, StoreError>;
     
-    /// 拉取上游产出 (按 trajectory + 时间窗 / step 范围过滤)
+    /// Pull upstream outputs (filtered by trajectory + time window / step range)
     async fn fetch_for_agent(
         &self,
         traj: TrajectoryId,
-        agent_input_spec: &AgentInputSpec,    // 该 Agent 声明感兴趣的 event 类型
+        agent_input_spec: &AgentInputSpec,    // event types this Agent is interested in
     ) -> Result<Vec<AgentEvent>, StoreError>;
     
-    /// 流式订阅 (Frontend Adapter 用)
+    /// Streaming subscription (for Frontend Adapters)
     async fn subscribe(
         &self,
         traj_filter: TrajectoryFilter,
     ) -> Result<BoxStream<'static, AgentEvent>, StoreError>;
     
-    /// 重放：从指定 offset 起按时间序回放
+    /// Replay: replay in chronological order from a given offset
     async fn replay_from(
         &self,
         traj: TrajectoryId,
@@ -409,11 +410,11 @@ pub trait ContextStore: Send + Sync {
 
 ### 5.1 Context Compactor
 
-Agent 数量一多，原始事件流增长指数级——不能把所有原始事件都塞给下个 Agent。中间引入压缩环节：
+As Agent count grows, the raw event stream grows exponentially — you can't shove all raw events into the next Agent. Insert a compaction stage:
 
 ```rust
 pub trait ContextCompactor: Send + Sync {
-    /// 把 raw 事件流压缩为下一个 Agent 需要的最小必要上下文
+    /// Compact a raw event stream into the minimum necessary context for the next Agent
     async fn compact(
         &self,
         events: Vec<AgentEvent>,
@@ -423,14 +424,14 @@ pub trait ContextCompactor: Send + Sync {
 }
 ```
 
-实现策略：
-- **Schema-aware**：只保留 target agent 声明感兴趣的事件类型
-- **Recency window**：默认只看最近 N 条事件
-- **LLM 压缩 (fallback)**：如果上面两步还超 max_tokens，用 L4 模型做摘要
+Implementation strategies:
+- **Schema-aware**: keep only the event types the target agent has declared interest in
+- **Recency window**: by default, only the most recent N events
+- **LLM compression (fallback)**: if the above two still exceed max_tokens, use an L4 model for summarization
 
-**关键**：压缩本身是 deterministic 的（schema/window 模式），LLM 摘要是降级方案。否则压缩本身引入非确定性，replay 不可重现。
+**Key**: Compaction itself is deterministic (schema/window mode); LLM summarization is a degraded fallback. Otherwise compaction introduces non-determinism and replay isn't reproducible.
 
-### 5.2 持久化形态
+### 5.2 Persistence shape
 
 ```
 Postgres:
@@ -438,24 +439,24 @@ Postgres:
   trajectories    (id UUID, parent UUID, status, budget_remaining JSONB, ...)
   content_refs    (hash BYTEA PRIMARY KEY, size, mime, backend, payload BYTEA NULL)
   
-S3 / FS (大 content):
-  content/{first2}/{remaining30}.bin    -- ContentRef 内容寻址
+S3 / FS (large content):
+  content/{first2}/{remaining30}.bin    -- ContentRef content addressing
 ```
 
-事件日志按 `traj_id` 分区，按 `created_at` 索引。30 天后归档冷存储（S3 Glacier）。
+Event log is partitioned by `traj_id` and indexed by `created_at`. After 30 days, archive to cold storage (S3 Glacier).
 
 ---
 
-## 6. Backtrack：Saga 补偿
+## 6. Backtrack: Saga Compensation
 
-### 6.1 触发场景
+### 6.1 Trigger scenarios
 
-1. **Critic 拒绝**：fork from parent，注入 critic 反馈作为 replan hint
-2. **Step 失败（永久错误）**：trajectory 死亡 + 补偿 + parent 接管
-3. **Agent 卡死（超时）**：同上
-4. **预算耗尽（剩余 < 当前 step 估算）**：suspend，不补偿（保留中间产物）
+1. **Critic rejects**: fork from parent, inject critic feedback as a replan hint
+2. **Step fails (permanent error)**: trajectory dies + compensation + parent takes over
+3. **Agent stuck (timeout)**: same as above
+4. **Budget exhausted (remaining < current step estimate)**: suspend, no compensation (preserve intermediate artifacts)
 
-### 6.2 回溯流程
+### 6.2 Backtrack flow
 
 ```rust
 impl Runtime {
@@ -466,13 +467,13 @@ impl Runtime {
     ) -> Result<TrajectoryId, RuntimeError> {
         let trajectory = self.load_trajectory(traj).await?;
         
-        // 1. 标记当前轨迹死亡 (阻止任何并发写入)
+        // 1. Mark current trajectory dead (blocks any concurrent writes)
         self.event_store.append(AgentEvent::TrajectoryAbandoned { 
             traj, 
             cause: target.death_cause() 
         }).await?;
         
-        // 2. 反向执行补偿
+        // 2. Run compensations in reverse
         for comp in trajectory.pending_compensations.iter().rev() {
             match comp.execute().await {
                 Ok(_) => {
@@ -482,9 +483,9 @@ impl Runtime {
                         result: CompensationResult::Success,
                     }).await?;
                 }
-                Err(e) if e.already_undone() => continue,  // 幂等,跳过
+                Err(e) if e.already_undone() => continue,  // idempotent, skip
                 Err(e) => {
-                    // 补偿失败 = 严重事件,升级人工
+                    // Compensation failure = serious incident, escalate to human
                     self.event_store.append(AgentEvent::CompensationExecuted {
                         traj,
                         compensation: comp.id.clone(),
@@ -496,13 +497,13 @@ impl Runtime {
             }
         }
         
-        // 3. 找 fork 点
+        // 3. Find fork point
         let resume_state = match target {
             BacktrackTarget::ParentTrajectory => trajectory.parent_state(),
             BacktrackTarget::Checkpoint(cp_id) => self.load_checkpoint(cp_id).await?,
         };
         
-        // 4. 开新 trajectory,带 hint 喂给 planner
+        // 4. Open a new trajectory, feed hint to planner
         let new_traj = self.fork_trajectory(
             resume_state,
             BranchReason::Replan {
@@ -516,48 +517,48 @@ impl Runtime {
 }
 ```
 
-### 6.3 补偿失败的处置
+### 6.3 Handling compensation failure
 
-补偿失败比执行失败更可怕——意味着系统进入了不一致状态（部分副作用残留）。处置流程：
+Compensation failure is more terrifying than execution failure — it means the system has entered an inconsistent state (partial side effects remain). Handling flow:
 
-1. 立即冻结相关资源（资源访问短路返回 503，避免基于不一致状态做新决策）
-2. 升级到 oncall（PagerDuty / Slack alert）
-3. 把失败的补偿挂入"待人工处理"队列
-4. 该 trajectory 的下游全部 suspend
+1. Immediately freeze related resources (resource access short-circuits to 503, avoiding new decisions on inconsistent state)
+2. Escalate to oncall (PagerDuty / Slack alert)
+3. Queue the failed compensation onto the "manual handling" queue
+4. Suspend everything downstream of this trajectory
 
-绝不允许"补偿失败但程序继续跑"。
+Never allow "compensation failed but the program keeps running."
 
-### 6.4 回溯深度上限
+### 6.4 Backtrack depth ceiling
 
 ```rust
 pub struct BacktrackPolicy {
-    pub max_backtrack_depth: u8,         // 默认 3
-    pub max_replans_per_task: u8,        // 默认 2
+    pub max_backtrack_depth: u8,         // default 3
+    pub max_replans_per_task: u8,        // default 2
 }
 ```
 
-实际生产中：
-- > 80% 回溯只回 1-2 步
-- > 5 步的回溯通常意味着任务定义有问题，正确做法是 abandon 整个 task + 通知人
+In actual production:
+- > 80% of backtracks only go back 1-2 steps
+- backtracks > 5 steps usually mean the task definition is broken; the right move is to abandon the whole task + notify a human
 
-超过上限直接 suspend，不强行继续。
+Above the ceiling, suspend directly; don't force continuation.
 
 ---
 
-## 7. 恢复：Replay + Checkpoint + Idempotency
+## 7. Recovery: Replay + Checkpoint + Idempotency
 
-### 7.1 进程崩溃恢复
+### 7.1 Process crash recovery
 
-启动时扫描所有 `Active` / `Suspended` trajectory，对每条：
+On startup, scan all `Active` / `Suspended` trajectories; for each:
 
 ```rust
 async fn recover_trajectory(&self, traj: TrajectoryId) -> Result<(), RuntimeError> {
-    // 1. 找最近的 checkpoint,避免从头 replay
+    // 1. Find latest checkpoint to avoid replaying from scratch
     let checkpoint = self.event_store.find_latest_checkpoint(traj).await?;
     let mut state = checkpoint.map(|c| self.load_state(&c.state_snapshot)).await?
         .unwrap_or_else(State::initial);
     
-    // 2. Replay checkpoint 之后的事件
+    // 2. Replay events after the checkpoint
     let events = self.event_store.events_since(traj, checkpoint.offset).await?;
     let mut in_flight: Option<InFlightStep> = None;
     
@@ -578,39 +579,39 @@ async fn recover_trajectory(&self, traj: TrajectoryId) -> Result<(), RuntimeErro
         state.apply(event);
     }
     
-    // 3. 如果有 in-flight step (崩溃发生时正在执行),用 idempotency_key 重新触发
-    //    LLM 调用通过 prompt hash 命中缓存 (Doc 03);tool 调用通过 idempotency_key 去重
+    // 3. If there's an in-flight step (executing at crash time), retrigger via idempotency_key
+    //    LLM calls hit cache via prompt hash (Doc 03); tool calls dedup via idempotency_key
     if let Some(step) = in_flight {
         self.retry_step_with_idempotency(traj, step).await?;
     }
     
-    // 4. 恢复正常调度
+    // 4. Resume normal scheduling
     self.resume_normal_execution(traj, state).await
 }
 ```
 
-**关键不变量**：
-- `idempotency_key = hash(traj_id + step_seq + input_ref)`——稳定，replay 时一致
-- 所有外部调用（LlmService、ToolRegistry、ContextStore）必须接受并尊重 idempotency_key
-- LLM 调用通过 Doc 03 cache 自然去重（同 prompt hash 命中）
+**Key invariants**:
+- `idempotency_key = hash(traj_id + step_seq + input_ref)` — stable, consistent across replay
+- All external calls (LlmService, ToolRegistry, ContextStore) must accept and respect the idempotency_key
+- LLM calls dedup naturally via Doc 03 cache (same prompt hash hits)
 
-### 7.2 Replay 的非确定性陷阱
+### 7.2 The non-determinism trap in replay
 
-`temperature > 0` 的 LLM 调用是非确定的，replay 出的 token 流和原始不一致 → state 发散。两个解：
+LLM calls with `temperature > 0` are non-deterministic; the replayed token stream diverges from the original → state diverges. Two solutions:
 
-**方案 A（默认）**：所有 LLM 响应通过 cache 强制确定化
-- 第一次调用：cache miss + 真实生成 + 写入 cache
-- replay：cache hit，拿到相同响应
+**Option A (default)**: Force determinization of all LLM responses through the cache
+- First call: cache miss + real generation + cache write
+- Replay: cache hit, identical response
 
-**方案 B（更彻底）**：把 LLM raw output 作为事件持久化
-- `AgentEvent::LlmResponseCaptured` 在每次 LLM 调用后追加
-- replay 时检测到该事件，跳过真实 LLM 调用，直接从事件读 raw response
-- 这是 Temporal / Cadence 的正统做法
-- 代价：事件日志膨胀（每次响应可能几十 KB）
+**Option B (more thorough)**: Persist LLM raw output as events
+- `AgentEvent::LlmResponseCaptured` is appended after every LLM call
+- During replay, detect this event, skip the real LLM call, read raw response from the event
+- This is the orthodox approach in Temporal / Cadence
+- Cost: event log bloat (each response can be tens of KB)
 
-我们采用**方案 A 为主 + 方案 B 为备**：cache 是常规路径，LlmResponseCaptured 只在 trace level 启用（debug / 法规审计场景）。
+We adopt **Option A as the main path + Option B as backup**: cache is the regular path, LlmResponseCaptured is enabled only at trace level (debug / regulatory audit scenarios).
 
-### 7.3 Checkpoint 策略
+### 7.3 Checkpoint policy
 
 ```rust
 pub struct CheckpointPolicy {
@@ -618,27 +619,27 @@ pub struct CheckpointPolicy {
 }
 
 pub enum CheckpointStrategy {
-    /// 固定每 N 步打一个 checkpoint
+    /// Fixed: one checkpoint every N steps
     EveryNSteps(u32),
     
-    /// 按 step 耗时加权:LLM 调用步骤后必打,廉价本地步骤跳过
+    /// Cost-weighted: must checkpoint after LLM calls; skip cheap local steps
     Cost { llm_step_must_checkpoint: bool, local_step_threshold_ms: u64 },
     
-    /// 按 trajectory 分支点打 (fork 之前)
+    /// At trajectory fork points (before the fork)
     AtForkPoints,
     
-    /// 组合
+    /// Combination
     Combined(Vec<CheckpointStrategy>),
 }
 ```
 
-默认策略：`Combined([EveryNSteps(5), AtForkPoints, Cost { llm_step_must_checkpoint: true, ... }])`
+Default policy: `Combined([EveryNSteps(5), AtForkPoints, Cost { llm_step_must_checkpoint: true, ... }])`
 
-理由：LLM 调用是最大的恢复成本（钱 + 时间），打完 checkpoint 后崩溃只需重放后续廉价步骤。
+Rationale: LLM calls are the largest recovery cost (money + time); after checkpointing, a crash only requires replaying subsequent cheap steps.
 
 ### 7.4 Suspend / Resume
 
-不是所有"未完成"都是失败——有些是正常等待：
+Not every "incomplete" is a failure — some are normal waits:
 
 ```rust
 pub enum SuspendReason {
@@ -660,7 +661,7 @@ pub enum SuspendReason {
 }
 ```
 
-Resume 是显式 API：
+Resume is an explicit API:
 
 ```rust
 async fn resume(
@@ -679,56 +680,56 @@ pub enum ResumeTrigger {
 
 ---
 
-## 8. 预算包络（TaskBudget）
+## 8. Budget Envelope (TaskBudget)
 
 ```rust
 pub struct TaskBudget {
-    pub max_tokens_total: u64,        // 整个 task 全 Agent 加起来
-    pub max_cost_usd: f64,             // 美金硬上限
-    pub max_wall_clock: Duration,      // 墙钟时间
-    pub max_agent_hops: u8,            // 最多多少次 Agent 调用,通常 ≤10
-    pub max_replans: u8,               // Critic 触发 replan 的次数,通常 ≤2
-    pub max_backtrack_depth: u8,       // 单次任务的回溯深度
+    pub max_tokens_total: u64,        // summed across all Agents in the task
+    pub max_cost_usd: f64,             // hard USD ceiling
+    pub max_wall_clock: Duration,      // wall-clock time
+    pub max_agent_hops: u8,            // max Agent invocations, typically ≤10
+    pub max_replans: u8,               // Critic-triggered replan count, typically ≤2
+    pub max_backtrack_depth: u8,       // backtrack depth per task
     pub fallback: FallbackStrategy,
 }
 
 pub enum FallbackStrategy {
-    /// 直接失败
+    /// Fail outright
     Fail,
     
-    /// 用最后一个有效中间产物 + L1 模型生成总结
+    /// Use the last valid intermediate artifact + L1 model to generate a summary
     BestEffortSummary,
     
-    /// 挂起,通知人
+    /// Suspend, notify human
     SuspendForHuman,
 }
 ```
 
-每次 Agent 调用前在 Middleware 里扣减；超额直接 abort 当前 step + 触发 fallback。
+Decremented in Middleware before each Agent invocation; on overshoot, abort the current step + trigger fallback.
 
 ---
 
-## 9. Cancel 传播
+## 9. Cancel Propagation
 
-延续 Doc 02 §5 的链路，Runtime 是 cancel 的发起方之一：
+Continuing the chain from Doc 02 §5, Runtime is one of the cancel originators:
 
 ```
-Frontend 用户按 Ctrl+C / 点击"停止"
+Frontend user presses Ctrl+C / clicks "Stop"
        │
        ▼
-Frontend Adapter 调 runtime.cancel_task(task_id)
+Frontend Adapter calls runtime.cancel_task(task_id)
        │
        ▼
-Runtime 设置 task 的所有 active trajectories 的 cancel_token
+Runtime sets cancel_token on all active trajectories of the task
        │
        ▼
-正在执行的 Agent 监听 ctx.cancel.cancelled() → 提前返回
+Executing Agents listen on ctx.cancel.cancelled() → return early
        │
        ▼
-LlmService stream Drop → Doc 01 §6.2.1 的 CLI subprocess interrupt
+LlmService stream Drop → CLI subprocess interrupt per Doc 01 §6.2.1
 ```
 
-每个 Agent 必须在长操作（LLM 调用、tool 调用）配合 `tokio::select!` 监听 cancel：
+Each Agent must cooperate during long operations (LLM calls, tool calls) by listening for cancel via `tokio::select!`:
 
 ```rust
 async fn execute(&self, ctx: AgentContext, input: AgentInput) -> Result<...> {
@@ -741,15 +742,15 @@ async fn execute(&self, ctx: AgentContext, input: AgentInput) -> Result<...> {
 
 ---
 
-## 10. 与 Pipeline 的集成
+## 10. Integration with the Pipeline
 
-Agent Runtime 是 Pipeline 的**消费者**，不是 wrapper。每个 Agent 通过 `AgentContext::llm_service` 调用 Pipeline，获得已经过 IAM / Cache / Guard / Routing 处理的 LLM 能力：
+Agent Runtime is a **consumer** of the Pipeline, not a wrapper. Each Agent calls the Pipeline through `AgentContext::llm_service`, getting LLM capability that has already been processed by IAM / Cache / Guard / Routing:
 
 ```rust
 async fn execute(&self, ctx: AgentContext, input: AgentInput) -> Result<...> {
     let req = ChatRequest {
         model: ModelHint::Tier(ModelTier::Reasoning),
-        system: Some(self.build_system_prompt()),     // 详见 §11
+        system: Some(self.build_system_prompt()),     // see §11
         messages: self.build_messages(&input),
         structured_output: Some(self.output_schema()),
         ...
@@ -782,81 +783,81 @@ async fn execute(&self, ctx: AgentContext, input: AgentInput) -> Result<...> {
 }
 ```
 
-Runtime 不知道 Pipeline 内部有几层 Middleware——对它来说就是一个 LlmService。
+Runtime doesn't know how many Middleware layers live inside the Pipeline — to it, it's just an LlmService.
 
 ---
 
-## 11. Prompt Builder 的契约（与 Cache 协同）
+## 11. Prompt Builder Contract (coordinated with Cache)
 
-Doc 03 §10.5 已规定：上层（即 Agent Runtime）必须按 Static Prefix / Project Anchor / Dynamic Suffix 三段式拼装，让 Cache 能跨 session 共享。
+Doc 03 §10.5 already specifies: the upper layer (i.e., Agent Runtime) must assemble in a three-segment Static Prefix / Project Anchor / Dynamic Suffix shape, so Cache can be shared across sessions.
 
-Runtime 提供 `PromptBuilder` 抽象：
+Runtime provides a `PromptBuilder` abstraction:
 
 ```rust
 pub trait PromptBuilder: Send + Sync {
-    /// 完全静态部分 (system + tools schema + 通用规范)
-    /// 月级变动,变动时全公司 cache miss
+    /// Fully static portion (system + tools schema + general conventions)
+    /// Changes monthly; on change, the entire company cache misses
     fn static_prefix(&self) -> &str;
     
-    /// 项目锚定部分 (绑定 commit hash 的代码库 / 文档)
-    /// 随 commit 变动,变动时该项目 cache miss
+    /// Project-anchored portion (codebase / docs bound to a commit hash)
+    /// Changes with commits; on change, that project's cache misses
     fn project_anchor(&self, project: &ProjectRef) -> Result<String, PromptError>;
     
-    /// 动态后缀 (本次请求特有内容)
-    /// 每次都变,绝不进缓存
+    /// Dynamic suffix (content unique to this request)
+    /// Changes every time; never enters cache
     fn dynamic_suffix(&self, input: &AgentInput) -> String;
     
-    /// 拼装为 ChatRequest
+    /// Assemble into a ChatRequest
     fn build(&self, project: &ProjectRef, input: &AgentInput) 
         -> Result<ChatRequest, PromptError>;
 }
 ```
 
-**强制约束**：
-1. `static_prefix()` 字节级稳定——配置变更前不允许调整顺序、空格、Markdown 格式
-2. `project_anchor()` 必须是项目状态的纯函数——同 commit 必须返回同字节串
-3. `dynamic_suffix()` 不能影响 cache key——它在 request 里位置必须固定为 messages 末尾
+**Mandatory constraints**:
+1. `static_prefix()` is byte-stable — order, whitespace, Markdown formatting must not be adjusted before a config change
+2. `project_anchor()` must be a pure function of project state — same commit must return the same byte string
+3. `dynamic_suffix()` must not influence the cache key — its position in the request is fixed at the end of messages
 
-Runtime 启动时校验 PromptBuilder 实现的稳定性（对同输入多次调用，输出字节级一致）；不一致时拒绝启动。
+On startup, Runtime validates PromptBuilder implementation stability (multiple calls with the same input produce byte-identical output); refuses to start on inconsistency.
 
 ---
 
-## 12. Frontend 契约：TrajectoryEvent 流
+## 12. Frontend Contract: TrajectoryEvent stream
 
-Runtime 对外只暴露事件流，不感知消费者：
+Runtime exposes only an event stream externally; it is unaware of the consumer:
 
 ```rust
 #[async_trait]
 pub trait Runtime: Send + Sync {
-    /// 提交新任务
+    /// Submit a new task
     async fn submit(
         &self,
         spec: TaskSpec,
         principal: Principal,
     ) -> Result<TaskHandle, RuntimeError>;
     
-    /// 订阅任务的事件流 (Frontend Adapter 用)
+    /// Subscribe to a task's event stream (for Frontend Adapter)
     fn subscribe(
         &self,
         task: TaskId,
     ) -> BoxStream<'static, TrajectoryEvent>;
     
-    /// 显式控制
+    /// Explicit control
     async fn cancel(&self, task: TaskId) -> Result<(), RuntimeError>;
     async fn suspend(&self, task: TaskId) -> Result<(), RuntimeError>;
     async fn resume(&self, task: TaskId, trigger: ResumeTrigger) -> Result<(), RuntimeError>;
     
-    /// 历史查询
+    /// Historical query
     async fn query(&self, filter: TaskFilter) -> Result<Vec<TaskSnapshot>, RuntimeError>;
 }
 
-/// Frontend 看到的事件 (是 AgentEvent 的子集 + 派生事件)
+/// Events seen by the Frontend (subset of AgentEvent + derived events)
 pub enum TrajectoryEvent {
     TaskStarted { task: TaskId, spec: TaskSpec },
     AgentInvoked { agent: AgentId, input_summary: String },
     AgentCompleted { agent: AgentId, output_summary: String, usage: Usage },
     AgentFailed { agent: AgentId, error: String, will_retry: bool },
-    PartialArtifact { artifact: ArtifactPreview },        // 可流式呈现的中间产物
+    PartialArtifact { artifact: ArtifactPreview },        // streamable intermediate artifact
     TrajectoryForked { from: TrajectoryId, into: TrajectoryId, reason: String },
     BackingOff { reason: String, eta: Duration },
     Suspended { reason: SuspendReason },
@@ -865,7 +866,7 @@ pub enum TrajectoryEvent {
 }
 ```
 
-**TrajectoryEvent 不是 AgentEvent 的一对一暴露**——后者是内部事件溯源的细粒度记录，前者是外部消费者关心的"业务事件"。中间有一个 `EventProjector` 做转换：
+**TrajectoryEvent is not a one-to-one exposure of AgentEvent** — the latter is the fine-grained internal event-sourcing record; the former is the "business event" that external consumers care about. An `EventProjector` performs the conversion in between:
 
 ```rust
 trait EventProjector {
@@ -873,15 +874,15 @@ trait EventProjector {
 }
 ```
 
-这个分离允许 Runtime 内部 schema 演进而不破坏 Frontend Adapter。
+This separation lets the Runtime evolve its internal schema without breaking Frontend Adapters.
 
 ---
 
-## 13. 测试策略
+## 13. Testing Strategy
 
-### 13.1 Replay-based 测试
+### 13.1 Replay-based testing
 
-记录真实任务的事件日志作为 fixture，replay 时断言行为：
+Record real-task event logs as fixtures, assert behavior on replay:
 
 ```rust
 #[tokio::test]
@@ -896,7 +897,7 @@ async fn replays_known_task_deterministically() {
 }
 ```
 
-### 13.2 崩溃恢复测试
+### 13.2 Crash recovery test
 
 ```rust
 #[tokio::test]
@@ -904,7 +905,7 @@ async fn recovers_from_crash_mid_step() {
     let runtime = test_runtime();
     let task = runtime.submit(spec(), principal()).await.unwrap();
     
-    // 模拟崩溃：在第 3 步完成前 abort runtime
+    // Simulate crash: abort runtime before step 3 completes
     let abort = tokio::spawn(async {
         wait_for_step(&runtime, task, 3, StepPhase::Started).await;
         runtime.simulate_crash().await;
@@ -912,7 +913,7 @@ async fn recovers_from_crash_mid_step() {
     
     abort.await.unwrap();
     
-    // 重启 runtime,验证从 step 3 恢复
+    // Restart runtime, verify recovery from step 3
     let runtime2 = test_runtime_resume_from_db().await;
     let final_events: Vec<_> = runtime2.subscribe(task).collect().await;
     
@@ -920,7 +921,7 @@ async fn recovers_from_crash_mid_step() {
 }
 ```
 
-### 13.3 补偿测试
+### 13.3 Compensation test
 
 ```rust
 #[tokio::test]
@@ -932,12 +933,12 @@ async fn backtrack_runs_compensations_in_reverse() {
         .await.unwrap();
     runtime.wait_until_done(task).await;
     
-    // 验证补偿按 R3, R2, R1 顺序执行
+    // Verify compensations ran in order R3, R2, R1
     assert_eq!(*comp_log.lock().unwrap(), vec!["R3", "R2", "R1"]);
 }
 ```
 
-### 13.4 预算硬上限测试
+### 13.4 Hard budget ceiling test
 
 ```rust
 #[tokio::test]
@@ -946,7 +947,7 @@ async fn aborts_when_budget_exhausted() {
     let task = runtime.submit(
         TaskSpec {
             budget: TaskBudget {
-                max_tokens_total: 100,  // 极小,确保第一次 LLM 调用就超
+                max_tokens_total: 100,  // tiny, ensures the first LLM call overshoots
                 ..Default::default()
             },
             ..spec()
@@ -962,56 +963,56 @@ async fn aborts_when_budget_exhausted() {
 
 ---
 
-## 14. 反模式清单
+## 14. Anti-pattern Checklist
 
-1. **不要用 LLM 决定"任务是否完成"**——用确定性的 schema 校验 + Critic 评分阈值。LLM 自评有乐观偏置。
-2. **不要让 Worker 之间直接调用**——所有协作经过 Context Store。可观测性和 replay 依赖这个不变量。
-3. **不要在 prompt 里塞 "你可以调用以下工具，请选择"**——Orchestrator 在代码里决定，不让 LLM 当 router。
-4. **不要忽略 OTel trace 透传**——每个 task 一个 trace_id，每个 agent hop 一个 span。线上 hallucination debug 全靠这个。
-5. **不要让 Critic 和 Worker 共享对话上下文**——Critic 必须冷启动看产出。
-6. **不要在中间步骤做不可逆动作**——所有 git push / 发邮件 / 付款延迟到 Commit Phase。
-7. **不要把 idempotency_key 作为可选字段**——从 Day 1 就强制，事后补几乎不可能。
-8. **不要在事件日志里直接存大 payload**——走 ContentStore + ContentRef，事件保持 < 4KB。
-9. **不要假设 LLM 输出非确定性可以"概率上接受"**——必须通过 cache 或事件捕获强制确定化，否则 replay 不可靠。
-10. **不要让回溯深度无限**——硬上限（max_backtrack_depth），超过 suspend + 通知人。
-11. **不要在补偿失败时静默继续**——升级人工 + 冻结资源。
-12. **不要让 Frontend Adapter 直接读 AgentEvent**——通过 EventProjector 暴露 TrajectoryEvent，保护内部 schema 演进自由。
-13. **不要在 PromptBuilder 里引入时间戳 / 随机数**——任何动态变量必须移到 dynamic_suffix。
-14. **不要让 Agent 自由修改 Context Store**——只能 append 自己产出的事件，不能改其他 Agent 的事件。
-15. **不要让长任务一次性塞满所有 context**——通过 Context Compactor 控制传给下个 Agent 的窗口大小。
-
----
-
-## 15. 与上下游的契约
-
-### 上游 (Frontend Adapter) 承诺
-
-- 通过 `Runtime::submit` 提交完整的 TaskSpec（含 budget、principal、deadline）
-- 通过 `subscribe` 消费 TrajectoryEvent 流
-- 不直接访问 AgentEvent / Trajectory / 内部数据结构
-- 处理 Suspend / Cancel 信号的 UI 状态
-
-### 下游 (Pipeline) 契约
-
-- 每个 Agent 通过 `AgentContext::llm_service` 获取已经过 Middleware 处理的 LLM 能力
-- LLM 响应通过 ChatEvent 流消费，AgentMessageAccumulator 聚合
-- 不绕过 Pipeline 直接调 Provider
-
-### Side trait 契约 (Tool / MCP - Doc 05)
-
-- `ToolRegistry` 提供工具清单和调用入口
-- 工具调用必须接受 idempotency_key
-- 工具必须声明 SideEffectKind，Runtime 据此判断是否允许在中间步骤执行
+1. **Don't use the LLM to decide "is the task done"** — use deterministic schema validation + Critic score thresholds. LLM self-evaluation has optimistic bias.
+2. **Don't let Workers call each other directly** — all collaboration goes through the Context Store. Observability and replay depend on this invariant.
+3. **Don't stuff "you may call the following tools, please choose" into the prompt** — Orchestrator decides in code; don't make the LLM the router.
+4. **Don't ignore OTel trace propagation** — one trace_id per task, one span per agent hop. Production hallucination debug relies entirely on this.
+5. **Don't let Critic and Worker share conversational context** — Critic must look at the output cold.
+6. **Don't perform irreversible actions in intermediate steps** — defer all git push / send email / payment to the Commit Phase.
+7. **Don't make idempotency_key an optional field** — enforce from Day 1; retrofitting is nearly impossible.
+8. **Don't store large payloads directly in the event log** — go through ContentStore + ContentRef; events stay < 4KB.
+9. **Don't assume LLM output non-determinism is "probabilistically acceptable"** — must be forced deterministic via cache or event capture, otherwise replay is unreliable.
+10. **Don't let backtrack depth be unbounded** — hard ceiling (max_backtrack_depth); above that, suspend + notify a human.
+11. **Don't silently continue when compensation fails** — escalate to human + freeze resources.
+12. **Don't let Frontend Adapters read AgentEvent directly** — expose TrajectoryEvent via EventProjector to preserve internal schema-evolution freedom.
+13. **Don't introduce timestamps / random numbers in PromptBuilder** — any dynamic variables must be moved to dynamic_suffix.
+14. **Don't let Agents freely modify the Context Store** — they may only append events they themselves produced; they cannot modify other Agents' events.
+15. **Don't stuff all context into one shot for long tasks** — control the window size handed to the next Agent via the Context Compactor.
 
 ---
 
-## 16. 待办与开放问题
+## 15. Upstream/Downstream Contract
 
-- [ ] Trajectory 树深度的实际上限（Postgres 索引性能 vs 可读性）
-- [ ] Context Compactor 的具体压缩算法选型（schema-aware vs LLM 摘要 vs hybrid）
-- [ ] 与 Temporal/Restate 的对比是否值得直接采用（重 vs 轻）
-- [ ] AgentMessage enum 的版本演进策略（serde 兼容 vs 显式 schema migration）
-- [ ] 跨任务的 Agent 复用（如果两个 task 都需要 same agent，是否共享实例还是按需创建）
-- [ ] Replay 时的 wall clock 模拟（事件里的 created_at 应该被 replay 时尊重还是用当前时间）
-- [ ] 大规模 Trajectory 树的可视化（10+ 分支时 TUI / Web 怎么呈现）
-- [ ] **Best-of-N / Parallel Sampling**: 高级模式——让 Orchestrator 一次出 N 个 plan 并行跑,任一成功即返回。适合代码修复 (N 个 patch 并发跑测试) / 高 stakes 决策 (N 个 critic 投票)。对应 ChatGPT o1 内部机制。成本 N 倍但成功率显著高,可能成 Doc 16 Advanced Patterns 主题。
+### Upstream (Frontend Adapter) commitments
+
+- Submit a complete TaskSpec (including budget, principal, deadline) via `Runtime::submit`
+- Consume TrajectoryEvent stream via `subscribe`
+- Do not access AgentEvent / Trajectory / internal data structures directly
+- Handle UI state for Suspend / Cancel signals
+
+### Downstream (Pipeline) contract
+
+- Each Agent gets Middleware-processed LLM capability via `AgentContext::llm_service`
+- Consume LLM responses through the ChatEvent stream, aggregated by AgentMessageAccumulator
+- Don't bypass the Pipeline to call Provider directly
+
+### Side trait contract (Tool / MCP - Doc 05)
+
+- `ToolRegistry` provides the tool list and invocation entry
+- Tool calls must accept idempotency_key
+- Tools must declare SideEffectKind; Runtime decides whether intermediate-step execution is allowed based on it
+
+---
+
+## 16. TODOs and Open Questions
+
+- [ ] Practical depth ceiling for the Trajectory tree (Postgres index performance vs. readability)
+- [ ] Specific compaction algorithm choice for Context Compactor (schema-aware vs. LLM summarization vs. hybrid)
+- [ ] Whether direct adoption of Temporal/Restate is worth the comparison (heavy vs. light)
+- [ ] Version-evolution strategy for the AgentMessage enum (serde compatibility vs. explicit schema migration)
+- [ ] Cross-task Agent reuse (if two tasks both need the same agent, share an instance or create on demand)
+- [ ] Wall-clock simulation during replay (should the event's created_at be honored on replay, or use current time)
+- [ ] Visualization of large-scale Trajectory trees (with 10+ branches, how do TUI / Web present it)
+- [ ] **Best-of-N / Parallel Sampling**: advanced mode — let the Orchestrator emit N plans and run them in parallel, returning on the first success. Suits code repair (N patches racing tests) / high-stakes decisions (N critics voting). Mirrors ChatGPT o1's internal mechanism. Cost is N×, but success rate is significantly higher; may become the topic of Doc 16 Advanced Patterns.

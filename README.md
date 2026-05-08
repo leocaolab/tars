@@ -147,7 +147,7 @@ p = tars.Pipeline.from_default("anthropic", validators=[
 
 `tars.Reject` is always classified as `Permanent` — `RetryMiddleware` does not retry on validation failures (same prompt → same model → same output; model retry on validation failure is a near-pure gamble that doesn't belong inside the runtime). Callers that want a model resample on validation failure catch `TarsProviderError(kind="validation_failed")` at their own layer with explicit prompt variation.
 
-Buggy validators (raising or returning the wrong type) are caught and translated into the same permanent `TarsProviderError` — the worker is never crashed by user-side bugs. ([Doc 15](./docs/architecture/15-output-validation.md))
+Buggy validators (raising or returning the wrong type) are caught and translated into the same permanent `TarsProviderError` — the worker is never crashed by user-side bugs. ([Doc 15](./docs/architecture/zh/15-output-validation.md))
 
 ---
 
@@ -232,13 +232,13 @@ CLI providers (`claude_cli` / `gemini_cli` / `codex_cli`) reuse the user's exist
 
 1. **Layered, not monolithic.** Each layer is single-responsibility. Replace any one layer without touching the rest. Provider trait → can swap OpenAI to vLLM. Cache trait → can swap mem to Redis. Storage trait → SQLite to Postgres.
 
-2. **Plan as DAG, execute as state machine.** Agent orchestration plans express as DAG; runtime executes as event-sourced state machine with backtrack, retry, and recovery. The two are not mixed. ([Doc 04](./docs/architecture/04-agent-runtime.md))
+2. **Plan as DAG, execute as state machine.** Agent orchestration plans express as DAG; runtime executes as event-sourced state machine with backtrack, retry, and recovery. The two are not mixed. ([Doc 04](./docs/architecture/zh/04-agent-runtime.md))
 
-3. **Tenant isolation is sacred.** Cross-tenant leakage of data, compute, or side effects is a P0 bug. No optimization (cache sharing, model warmup, batch fusing) is allowed to cross a tenant boundary. ([Doc 06](./docs/architecture/06-config-multitenancy.md))
+3. **Tenant isolation is sacred.** Cross-tenant leakage of data, compute, or side effects is a P0 bug. No optimization (cache sharing, model warmup, batch fusing) is allowed to cross a tenant boundary. ([Doc 06](./docs/architecture/zh/06-config-multitenancy.md))
 
 4. **Fail closed.** Every safety layer (auth, IAM, cache lookup, budget, schema validation) defaults to denying when it errors. No "open by default for now."
 
-5. **Observable by construction.** MELT (Metrics / Events / Logs / Traces) is not a layer you add later — every component emits typed signals from day 1, with cardinality control and PII redaction enforced at the layer ([Doc 08](./docs/architecture/08-melt-observability.md)).
+5. **Observable by construction.** MELT (Metrics / Events / Logs / Traces) is not a layer you add later — every component emits typed signals from day 1, with cardinality control and PII redaction enforced at the layer ([Doc 08](./docs/architecture/zh/08-melt-observability.md)).
 
 6. **Trust nothing you didn't compute.** LLM output, user input, tool returns, MCP server responses — all are external and pass through explicit validators before influencing system state.
 
@@ -355,26 +355,34 @@ The B-31 capability pre-flight feature went through five review passes (v1 → v
 
 ## Documentation
 
+Three entry points for three audiences (see [docs/README.md](./docs/README.md) for the full map):
+
+- **[USER-GUIDE.md](./docs/USER-GUIDE.md)** — 5-minute orientation for developers calling tars from their own code
+- **[Comparison](./docs/comparison.md)** — TARS vs LangChain / LiteLLM / Letta / AutoGen / NVIDIA NIM
+- **Architecture docs** (below) — design rationale and trade-off discussion
+
+> **Translation status**: Doc 00 + Doc 17 are in English; Doc 01–16 are currently Chinese-only at `docs/architecture/zh/` (English translation deferred). Architectural cross-refs and code identifiers are language-agnostic; the design discussions are readable via machine translation if needed.
+
 | Doc | Topic |
 |---|---|
 | [00 — Overview](./docs/architecture/00-overview.md) | Architecture map, design philosophy, reading paths by role |
-| [01 — LLM Provider](./docs/architecture/01-llm-provider.md) | 9-class backend abstraction; CLI subprocess reuse; tool-call three-stage; cache directives |
-| [02 — Middleware Pipeline](./docs/architecture/02-middleware-pipeline.md) | 10-layer onion model; IAM front-loaded; dual-channel guard; cancel propagation |
-| [03 — Cache Registry](./docs/architecture/03-cache-registry.md) | L1/L2/L3; content-addressed keys; ref counting; tenant isolation triple defense |
-| [04 — Agent Runtime](./docs/architecture/04-agent-runtime.md) | Trajectory tree; event sourcing; saga compensation; recovery; frontend contract |
-| [05 — Tools / MCP / Skills](./docs/architecture/05-tools-mcp-skills.md) | Three-layer concept separation; MCP integration; three Skill backends |
-| [06 — Config + Multi-tenancy](./docs/architecture/06-config-multitenancy.md) | 5-layer override; lockdown; secret management; tenant lifecycle |
-| [07 — Deployment + Frontends](./docs/architecture/07-deployment-frontend.md) | 4 deployment shapes; CLI/TUI/Web; hybrid control plane |
-| [08 — MELT Observability](./docs/architecture/08-melt-observability.md) | Three data flows; cardinality control; mandatory PII redaction |
-| [09 — Storage Schema](./docs/architecture/09-storage-schema.md) | Postgres + SQLite + Redis + S3; partitioning; tenant cleanup |
-| [10 — Security Model](./docs/architecture/10-security-model.md) | STRIDE threat model; trust boundaries; isolation matrix; prompt injection |
-| [11 — Performance + Capacity](./docs/architecture/11-performance-capacity.md) | SLO definitions; bottleneck analysis; cache ROI; load test method |
-| [12 — API Specification](./docs/architecture/12-api-specification.md) | Rust / HTTP / gRPC / PyO3 / napi-rs / WASM surface |
-| [13 — Operational Runbook](./docs/architecture/13-operational-runbook.md) | On-call playbook; 12 incident scenarios; backup/restore |
-| [14 — Implementation Path](./docs/architecture/14-implementation-path.md) | Milestone roadmap M0 → M14 |
-| [15 — Output Validation](./docs/architecture/15-output-validation.md) | JSON Schema enforcement; loose vs strict mode |
-| [16 — Evaluation Framework](./docs/architecture/16-evaluation-framework.md) | Agent benchmarks; metrics; regression detection |
-| [Comparison](./docs/comparison.md) | TARS vs LangChain / LiteLLM / Letta / AutoGen / NVIDIA NIM |
+| [01 — LLM Provider](./docs/architecture/zh/01-llm-provider.md) [zh] | 9-class backend abstraction; CLI subprocess reuse; tool-call three-stage; cache directives |
+| [02 — Middleware Pipeline](./docs/architecture/zh/02-middleware-pipeline.md) [zh] | 10-layer onion model; IAM front-loaded; dual-channel guard; cancel propagation |
+| [03 — Cache Registry](./docs/architecture/zh/03-cache-registry.md) [zh] | L1/L2/L3; content-addressed keys; ref counting; tenant isolation triple defense |
+| [04 — Agent Runtime](./docs/architecture/zh/04-agent-runtime.md) [zh] | Trajectory tree; event sourcing; saga compensation; recovery; frontend contract |
+| [05 — Tools / MCP / Skills](./docs/architecture/zh/05-tools-mcp-skills.md) [zh] | Three-layer concept separation; MCP integration; three Skill backends |
+| [06 — Config + Multi-tenancy](./docs/architecture/zh/06-config-multitenancy.md) [zh] | 5-layer override; lockdown; secret management; tenant lifecycle |
+| [07 — Deployment + Frontends](./docs/architecture/zh/07-deployment-frontend.md) [zh] | 4 deployment shapes; CLI/TUI/Web; hybrid control plane |
+| [08 — MELT Observability](./docs/architecture/zh/08-melt-observability.md) [zh] | Three data flows; cardinality control; mandatory PII redaction |
+| [09 — Storage Schema](./docs/architecture/zh/09-storage-schema.md) [zh] | Postgres + SQLite + Redis + S3; partitioning; tenant cleanup |
+| [10 — Security Model](./docs/architecture/zh/10-security-model.md) [zh] | STRIDE threat model; trust boundaries; isolation matrix; prompt injection |
+| [11 — Performance + Capacity](./docs/architecture/zh/11-performance-capacity.md) [zh] | SLO definitions; bottleneck analysis; cache ROI; load test method |
+| [12 — API Specification](./docs/architecture/zh/12-api-specification.md) [zh] | Rust / HTTP / gRPC / PyO3 / napi-rs / WASM surface |
+| [13 — Operational Runbook](./docs/architecture/zh/13-operational-runbook.md) [zh] | On-call playbook; 12 incident scenarios; backup/restore |
+| [14 — Implementation Path](./docs/architecture/zh/14-implementation-path.md) [zh] | Milestone roadmap M0 → M14 |
+| [15 — Output Validation](./docs/architecture/zh/15-output-validation.md) [zh] | JSON Schema enforcement; loose vs strict mode |
+| [16 — Evaluation Framework](./docs/architecture/zh/16-evaluation-framework.md) [zh] | Agent benchmarks; metrics; regression detection |
+| [17 — Pipeline Event Store](./docs/architecture/17-pipeline-event-store.md) | Append-only event log feeding evaluation, replay, and audit |
 
 ---
 

@@ -1,33 +1,33 @@
-# Doc 02 — Middleware Pipeline and Request Lifecycle
+# 文档 02 — Middleware Pipeline 与请求生命周期
 
-> Scope: defines the full lifecycle of an LLM request from Runtime entry until response (or rejection), and the Middleware Pipeline abstraction that carries this flow.
+> 范围：定义 LLM 请求从进入 Runtime 到拿到响应（或被拒）的完整生命周期，以及承载这条链路的 Middleware Pipeline 抽象。
 >
-> Upstream: consumes the `LlmProvider` trait defined in Doc 01.
+> 上游：消费 Doc 01 定义的 `LlmProvider` trait。
 >
-> Downstream: invoked by the Agent Runtime (Doc 04); carries all cross-cutting concerns spanning business logic.
+> 下游：被 Agent Runtime（Doc 04）调用，承载所有跨业务的横切关注点。
 
 ---
 
-## 1. Design Goals
+## 1. 设计目标
 
-| Goal | Description |
+| 目标 | 说明 |
 |---|---|
-| **Decoupled concerns** | IAM / Cache / Budget / Guard each have independent implementation, testing, and replacement |
-| **Configurable order** | Onion-layer order is expressed explicitly in config; security-sensitive layers (IAM) can be locked to a fixed position |
-| **Stream-friendly** | Every middleware must handle streams correctly; "buffer the entire stream then forward" is not allowed as a default implementation |
-| **Cancel-safe** | Cancel signals from upper-layer Drop must propagate down to the Provider layer; Doc 01 §6.2.1's CLI interrupt mechanism depends on this |
-| **Multi-tenant isolation** | Every layer perceives tenant_id via RequestContext; tenant config overrides global defaults |
-| **Short-circuitable** | Any layer may decide "do not continue" and return a result or error directly |
-| **Observable** | Every layer's entry/exit has an OTel span; every decision point has a queryable event |
+| **业务关注点解耦** | IAM / Cache / Budget / Guard 各自独立实现、独立测试、独立替换 |
+| **顺序可配置** | 洋葱层顺序在配置中显式表达，安全敏感层（IAM）可强制锁定位置 |
+| **流式友好** | 所有 middleware 必须能正确处理 stream，不允许"缓冲整个流再转发"作为默认实现 |
+| **Cancel 安全** | 上层 Drop 时取消信号必须透传到 Provider 层，Doc 01 §6.2.1 的 CLI 中断机制依赖于此 |
+| **多租户隔离** | 每层都通过 RequestContext 感知 tenant_id，租户配置覆盖全局默认 |
+| **可短路** | 任何一层都可以决定"不继续走下去"，直接返回结果或错误 |
+| **可观测** | 每层进出都有 OTel span，所有决策点都有可查询的事件 |
 
-**Anti-goals**:
-- No prompt assembly / RAG retrieval / Agent orchestration in the Middleware layer — these are upper-layer responsibilities
-- No cross-request mutable business state held by middleware — state is externalized to Cache Registry / Budget Store / etc.
-- No hidden retry or fallback inside middleware — all retries and fallbacks are explicit layers
+**反目标**：
+- 不在 Middleware 层做 prompt 拼装 / RAG 检索 / Agent 编排——这些是上层职责
+- 不让 Middleware 持有跨请求的可变业务状态——状态外置到 Cache Registry / Budget Store / 等专用组件
+- 不在 Middleware 里隐藏 retry 和降级——所有重试和 fallback 是显式的层
 
 ---
 
-## 2. Architecture Overview
+## 2. 架构总览
 
 ```
                   ┌─────────────────────────────────────┐
@@ -38,9 +38,9 @@
    ┌─────────────────────────────────────────────────────────────┐
    │  ▼ inbound                                       outbound ▲ │
    │ ┌─────────────────────────────────────────────────────────┐ │
-   │ │  L1  Telemetry        (outermost, wraps everything)     │ │
+   │ │  L1  Telemetry        (最外层,包裹一切)                  │ │
    │ │ ┌─────────────────────────────────────────────────────┐ │ │
-   │ │ │  L2  Auth & IAM    (before Cache, cannot bypass)    │ │ │
+   │ │ │  L2  Auth & IAM    (Cache 前置,不可绕过)            │ │ │
    │ │ │ ┌─────────────────────────────────────────────────┐ │ │ │
    │ │ │ │  L3  Budget Control                            │ │ │ │
    │ │ │ │ ┌─────────────────────────────────────────────┐ │ │ │ │
@@ -67,27 +67,27 @@
    └─────────────────────────────────────────────────────────────┘
 ```
 
-**Inbound ordering principles**:
-1. **Telemetry outermost** — spans must wrap all failure and short-circuit paths
-2. **Auth and IAM next** — any "optimization that bypasses IAM" is a security hole
-3. **Budget before Cache** — when budget is exhausted, even cache lookups should not happen (minor optimization, but cleaner semantics)
-4. **Cache before Guard** — a cache-hit request already passed Guard validation in the past; no need to repeat
-5. **Guard before Routing** — which provider to pick has no bearing on whether the prompt is legal
-6. **Routing → Circuit Breaker → Retry → Provider** — these three are mutually coupled and combine along the provider dimension
+**入站顺序原则**：
+1. **Telemetry 最外**——span 必须包住所有失败和短路路径
+2. **Auth 与 IAM 紧随**——任何"绕过 IAM 的优化"都是安全漏洞
+3. **Budget 在 Cache 之前**——预算耗尽时连缓存查询都不应该发生（轻微优化，但语义干净）
+4. **Cache 在 Guard 之前**——命中缓存的请求已经在过去通过了 Guard 校验，不需要重复
+5. **Guard 在 Routing 之前**——选哪个 provider 不影响 prompt 是否合法
+6. **Routing → Circuit Breaker → Retry → Provider**——这三层互相耦合，按 provider 维度组合
 
-**Outbound ordering** (naturally the reverse of inbound):
-- L8 Retry decides whether to try again
-- L4 Cache writes the successful response (async, doesn't block return)
-- L3 Budget debits actual consumption (based on Usage)
-- L1 Telemetry closes the span and emits final metrics
+**出站顺序**（自然是入站的反向）：
+- L8 Retry 决定是否再试一次
+- L4 Cache 把成功响应写入（异步，不阻塞返回）
+- L3 Budget 扣减实际消耗（基于 Usage）
+- L1 Telemetry 关闭 span，发射最终指标
 
 ---
 
-## 3. Core Abstractions
+## 3. 核心抽象
 
 ### 3.1 LlmService trait
 
-Every layer of the Pipeline implements the same trait — `LlmService`, which is equivalent to "something that can answer an LLM request". The innermost layer is the Provider adapter; outer layers are progressive wrappings.
+Pipeline 的每一层都实现同一个 trait——`LlmService`，等价于"一个能回答 LLM 请求的东西"。最内层是 Provider 适配器，外层是逐步包装。
 
 ```rust
 #[async_trait]
@@ -100,7 +100,7 @@ pub trait LlmService: Send + Sync {
 }
 ```
 
-Note: the return type is identical to `LlmProvider::stream` in Doc 01 §3 — this is intentional, so Provider can directly impl LlmService and serve as the innermost layer of the pipeline.
+注意：返回类型与 Doc 01 §3 的 `LlmProvider::stream` 完全一致——这是有意的，让 Provider 直接 impl LlmService 即可作为 pipeline 的最内层。
 
 ### 3.2 Middleware trait
 
@@ -108,17 +108,17 @@ Note: the return type is identical to `LlmProvider::stream` in Doc 01 §3 — th
 pub trait Middleware: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     
-    /// Wrap inner service in another layer, return new service
+    /// 把 inner service 包一层,返回新 service
     fn wrap(&self, inner: Arc<dyn LlmService>) -> Arc<dyn LlmService>;
 }
 ```
 
-This is the equivalent of Tower::Layer. Each Middleware takes the inner service and returns the wrapped service. Pipeline construction:
+这是 Tower::Layer 的等价形式。每个 Middleware 拿到内层 service，返回包装后的 service。Pipeline 构建：
 
 ```rust
 pub fn build_pipeline(
     provider_registry: Arc<ProviderRegistry>,
-    middlewares: Vec<Box<dyn Middleware>>,  // order: inner to outer
+    middlewares: Vec<Box<dyn Middleware>>,  // 顺序：从内到外
 ) -> Arc<dyn LlmService> {
     let mut svc: Arc<dyn LlmService> = provider_registry.into_service();
     for mw in middlewares {
@@ -128,7 +128,7 @@ pub fn build_pipeline(
 }
 ```
 
-The caller obtains an `Arc<dyn LlmService>` whose external shape is identical to a single Provider — all middleware is transparent to the caller.
+调用方拿到一个 `Arc<dyn LlmService>`，对外形态和单个 Provider 完全一致——所有 middleware 对调用方透明。
 
 ### 3.3 RequestContext
 
@@ -137,22 +137,22 @@ pub struct RequestContext {
     pub trace_id: TraceId,
     pub tenant_id: TenantId,
     pub session_id: SessionId,
-    pub principal: Principal,                  // caller identity
-    pub deadline: Option<Instant>,             // deadline for the entire request
+    pub principal: Principal,                  // 调用方身份
+    pub deadline: Option<Instant>,             // 整个请求的截止时间
     pub cancel: CancellationToken,             // tokio_util CancellationToken
-    pub budget: BudgetHandle,                  // snapshot of currently available budget
-    pub attributes: HashMap<String, Value>,    // free-form extension slot
+    pub budget: BudgetHandle,                  // 当前可用预算的快照
+    pub attributes: HashMap<String, Value>,    // 自由扩展槽
 }
 ```
 
-**Key design points**:
-- `cancel` is the core of cooperative cancellation. Any layer may listen on `cancel.cancelled()`, and any layer may call `cancel.cancel()` to actively terminate. Doc 01 §6.2.1's CLI cancel guard is implemented by subscribing to this token.
-- `budget` is a reference, not a copy — multiple concurrent requests share the same BudgetHandle, and debits are atomic.
-- `attributes` is intentionally retained — to avoid forcing changes to RequestContext fields whenever middleware needs to pass custom state to each other.
+**关键设计**：
+- `cancel` 是 cooperative cancellation 的核心。任何一层都可以监听 `cancel.cancelled()`，任何一层也可以调 `cancel.cancel()` 主动终止。Doc 01 §6.2.1 的 CLI cancel guard 就是订阅这个 token 实现的。
+- `budget` 是引用而非拷贝——多个并发请求共享同一个 BudgetHandle，扣减是原子的。
+- `attributes` 故意保留——避免 Middleware 之间为了传递自定义状态而被迫改 RequestContext 字段。
 
-### 3.4 Short-circuit return
+### 3.4 短路返回
 
-Some middleware decides during inbound to "stop here and return directly" — e.g. IAM denial, Cache hit, Guard interception. Short-circuiting is implemented by returning a **pre-built stream**:
+某些 Middleware 在入站阶段就决定"不继续了，直接返回"——比如 IAM 拒绝、Cache 命中、Guard 拦截。短路通过返回一个**预制流**实现：
 
 ```rust
 pub fn short_circuit_with_response(
@@ -169,15 +169,15 @@ pub fn short_circuit_with_error(
 }
 ```
 
-When short-circuiting, **inner service is not called**, and outer middleware cannot detect the difference — what they see is a normal event stream (or an error). This preserves abstraction consistency.
+短路时**不调用 inner service**，外层 Middleware 也无法察觉差异——它们看到的就是一个正常的事件流（或一个错误）。这保持了抽象的一致性。
 
 ---
 
-## 4. Detailed Design of Each Layer
+## 4. 各层详细设计
 
 ### 4.1 L1 — Telemetry
 
-**Responsibility**: establish the OTel root span for the entire request; create child spans for each Middleware; convert streaming events into metrics.
+**职责**：为整个请求建立 OTel root span；为每层 Middleware 建子 span；流式事件转 metric。
 
 ```rust
 pub struct TelemetryMiddleware {
@@ -216,7 +216,7 @@ impl LlmService for TelemetryService {
                 e
             })?;
         
-        // Stream wrapping: observe each event, track TTFT, token rate, final usage
+        // 流式包装：观察每个事件,统计 TTFT、token rate、最终 usage
         let mut first_token_emitted = false;
         let stream = inner_stream.inspect(move |event| {
             match event {
@@ -245,17 +245,17 @@ impl LlmService for TelemetryService {
 }
 ```
 
-**Required metrics** (must be collected):
-- `llm.ttft_ms` (time to first token)
+**关键指标**（必须采集）：
+- `llm.ttft_ms`（首 token 延迟）
 - `llm.total_latency_ms`
 - `llm.tokens.input` / `llm.tokens.output` / `llm.tokens.cached`
 - `llm.cost_usd`
-- `llm.stop_reason` (label)
-- `llm.errors` (labeled by ErrorClass)
+- `llm.stop_reason`（label）
+- `llm.errors`（按 ErrorClass label）
 
 ### 4.2 L2 — Auth & IAM
 
-**Responsibility**: verify caller identity; decide whether the caller is authorized to operate on the resources referenced by the current request (tenant, session, referenced code repos).
+**职责**：验证调用方身份；判断调用方是否有权对当前请求资源（tenant、session、引用的代码仓库）操作。
 
 ```rust
 pub struct AuthMiddleware {
@@ -270,23 +270,23 @@ impl LlmService for AuthService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
-        // 1. Authentication: who is the principal?
+        // 1. 认证：principal 是谁?
         if !self.authenticator.verify(&ctx.principal).await? {
             return short_circuit_with_error(ProviderError::Auth("invalid principal".into()));
         }
         
-        // 2. Authorization: can the principal access the resources referenced by req?
-        let resources = req.referenced_resources();   // e.g. "repo:tars", "session:xyz"
+        // 2. 鉴权：principal 能不能访问 req 引用的资源?
+        let resources = req.referenced_resources();   // 比如 "repo:tars", "session:xyz"
         let decision = self.iam_engine.evaluate(&ctx.principal, &resources, "llm:invoke").await?;
         
         if !decision.allowed {
-            // Must intercept before entering Cache Lookup (Doc 03 §IAM precedence)
+            // 必须在进入 Cache Lookup 之前拦截 (Doc 03 §IAM 前置)
             return short_circuit_with_error(ProviderError::Auth(format!(
                 "denied: {}", decision.reason
             )));
         }
         
-        // 3. Record the IAM decision in ctx.attributes so later layers can read it
+        // 3. 把 IAM 决策结果记到 ctx.attributes,后续层可读
         let mut ctx = ctx;
         ctx.attributes.insert("iam.allowed_scopes".into(), decision.scopes.into());
         
@@ -295,23 +295,23 @@ impl LlmService for AuthService {
 }
 ```
 
-**Hard invariants**:
-1. The IAM decision must complete before Cache Lookup. Any optimization of the form "check the cache first and authorize later" is an IDOR vulnerability — see Doc 03.
-2. IAM failures are always `ErrorClass::Permanent`, never retried.
-3. The IAM decision result (allowed scopes, visible projects) is written to `ctx.attributes`; the Cache layer uses it to construct namespace-isolated hash factors.
+**绝对不变量**：
+1. IAM 决策必须在 Cache Lookup 之前完成。任何"先看缓存命中再判权限"的优化都是 IDOR 漏洞——详见 Doc 03。
+2. IAM 失败永远是 `ErrorClass::Permanent`，绝不重试。
+3. IAM 决策结果（允许的 scope、可见的项目）写入 `ctx.attributes`，Cache 层据此构造命名空间隔离的哈希因子。
 
 ### 4.3 L3 — Budget Control
 
-**Responsibility**: check budget before the request leaves; accumulate actual consumption during streaming; actively cancel on exhaustion.
+**职责**：在请求出门前检查预算；流式过程中累计实际消耗；耗尽时主动 cancel。
 
-Budget has three tiers:
-- **RPM / TPM**: requests per minute / tokens per minute (rate limiting, prevents instantaneous bursts)
-- **Daily quota**: total daily allowance (cost control)
-- **Cost ceiling**: monetary upper bound (final defense)
+预算分三档：
+- **RPM / TPM**：每分钟请求数 / token 数（限流，防瞬时打爆）
+- **Daily quota**：每日总额（成本控制）
+- **Cost ceiling**：金额上限（最终防线）
 
 ```rust
 pub struct BudgetMiddleware {
-    store: Arc<dyn BudgetStore>,                 // Redis implementation
+    store: Arc<dyn BudgetStore>,                 // Redis 实现
     estimator: Arc<TokenEstimator>,
 }
 
@@ -322,7 +322,7 @@ impl LlmService for BudgetService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
-        // 1. Pre-reserve: occupy budget using estimated token count
+        // 1. 预扣：用估算 token 数预占预算
         let estimated_input = self.estimator.estimate(&req);
         let estimated_output = req.max_output_tokens.unwrap_or(2048) as u64;
         let estimated_cost = estimate_cost(&req.model, estimated_input, estimated_output);
@@ -340,29 +340,29 @@ impl LlmService for BudgetService {
             return short_circuit_with_error(ProviderError::BudgetExceeded);
         }
         
-        // 2. Call downstream
+        // 2. 调下游
         let inner_stream = match self.inner.clone().call(req, ctx.clone()).await {
             Ok(s) => s,
             Err(e) => {
-                // Release reservation immediately on failure
+                // 失败时立即释放预扣
                 self.store.release(&reservation).await.ok();
                 return Err(e);
             }
         };
         
-        // 3. Stream tracking: accumulate tokens, cancel if mid-stream overage
+        // 3. 流式追踪：累计 token,中途超额则 cancel
         let store = self.store.clone();
         let cancel = ctx.cancel.clone();
         let stream = inner_stream.inspect(move |event| {
             if let Ok(ChatEvent::UsageProgress { partial }) = event {
-                // Some providers report usage mid-stream
+                // 部分 provider 中途汇报 usage
                 if partial.output_tokens > reservation.tokens * 12 / 10 {
-                    // Actual consumption exceeds reservation by 20% → cancel
+                    // 实际消耗超过预扣 20% → cancel
                     cancel.cancel();
                 }
             }
             if let Ok(ChatEvent::Finished { usage, .. }) = event {
-                // Final settlement: release reservation + debit by actual usage
+                // 最终结算：释放预扣 + 按真实 usage 扣减
                 let actual_cost = compute_cost(&usage);
                 tokio::spawn({
                     let store = store.clone();
@@ -379,17 +379,17 @@ impl LlmService for BudgetService {
 }
 ```
 
-**Key design points**:
-- **Two-phase reserve + settle**: avoids "discovering overage halfway through streaming". Reservation is pessimistic (uses max_output_tokens); the actual amount usually doesn't fully consume it.
-- **Mid-stream overage**: if a provider supports `UsageProgress` events (OpenAI and Gemini partially do), abnormal overage can be detected during generation (e.g. max=2048 but already emitted 3000) and cancelled early.
-- **Token estimation uses fast mode** (`chars / 4`); no tokenizer is loaded on the request path — Doc 01 §15 anti-pattern 1.
-- **Commit runs asynchronously**: doesn't block stream return; debit failures are logged and alerted but no more.
+**关键设计**：
+- **预扣 + 实结算**两阶段：避免"流式生成到一半才发现超额"。预扣是悲观的（按 max_output_tokens 算），实际通常不会用满。
+- **流式中途超额**：如果 provider 支持 `UsageProgress` 事件（OpenAI、Gemini 部分支持），可以在生成过程中检测异常超额（比如设置 max=2048 但已经吐了 3000）并提前 cancel。
+- **token 估算用 fast 模式**（`chars / 4`），不在请求路径上加载 tokenizer——Doc 01 §15 反模式 1。
+- **commit 异步执行**：不阻塞流返回，扣减失败只记日志告警。
 
 ### 4.4 L4 — Cache Lookup
 
-**Responsibility**: look up an existing response by IAM-hardened cache key; short-circuit on hit; on miss, continue and asynchronously write back after the response arrives.
+**职责**：根据 IAM 加固的 cache key 查找已有响应；命中则短路返回；未命中则继续，并在响应回来后异步写入。
 
-Detailed implementation in Doc 03; this layer only describes the interface to the Pipeline:
+详细实现见 Doc 03，本层只描述与 Pipeline 的接口：
 
 ```rust
 #[async_trait]
@@ -399,33 +399,33 @@ impl LlmService for CacheLookupService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
-        // 1. Build namespace-isolated cache key (depends on scopes written by previous IAM layer)
+        // 1. 构造命名空间隔离的 cache key (依赖上一层 IAM 写入的 scopes)
         let scopes = ctx.attributes.get("iam.allowed_scopes")
             .ok_or_else(|| ProviderError::Internal("iam scopes missing".into()))?;
         let key = self.compute_key(&req, &ctx.tenant_id, scopes);
         
-        // 2. L1 in-memory lookup
+        // 2. L1 内存查
         if let Some(cached) = self.l1.get(&key).await {
             return short_circuit_with_response(cached);
         }
         
-        // 3. L2 Redis lookup
+        // 3. L2 Redis 查
         if let Some(cached) = self.l2.get(&key).await? {
             self.l1.put(key.clone(), cached.clone()).await;
             return short_circuit_with_response(cached);
         }
         
         // 4. L3 Provider explicit cache (Gemini cachedContent / Anthropic cache_control)
-        //    Inject into req.cache_directives; Provider layer is responsible for using it
+        //    注入到 req.cache_directives,Provider 层负责使用
         let mut req = req;
         if let Some(handle) = self.l3_lookup(&key, &ctx).await? {
             req.cache_directives.push(CacheDirective::UseExplicit { handle });
         }
         
-        // 5. Call downstream
+        // 5. 调下游
         let inner_stream = self.inner.clone().call(req, ctx).await?;
         
-        // 6. Stream wrapping: accumulate response, async write to cache on completion
+        // 6. 流式包装：累积响应,完成后异步写入 cache
         let writer = self.writer.clone();
         let key_for_write = key.clone();
         let mut accumulator = ChatResponseBuilder::new();
@@ -448,9 +448,9 @@ impl LlmService for CacheLookupService {
 }
 ```
 
-### 4.5 L5 — Prompt Guard (dual lane)
+### 4.5 L5 — Prompt Guard（双通道）
 
-**Responsibility**: intercept prompt injection, jailbreak instructions, sensitive content. The previously discussed fast/slow dual lane lands in this layer.
+**职责**：拦截 prompt injection、越狱指令、敏感内容。前面讨论过的快慢双通道在这一层落地。
 
 ```rust
 pub struct PromptGuardMiddleware {
@@ -466,28 +466,28 @@ impl LlmService for PromptGuardService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
-        // 1. Extract text to inspect: only user input, not system / history (avoid wasted work)
+        // 1. 提取要检测的文本：仅用户输入,不含 system / 历史 (避免性能浪费)
         let text_to_check = extract_user_input(&req);
         
-        // 2. Fast lane: serial, must complete in <1ms
+        // 2. Fast lane：串行,<1ms 必须过
         if self.fast.scan(&text_to_check) {
             return short_circuit_with_error(ProviderError::ContentFiltered {
                 category: "fast_heuristic".into(),
             });
         }
         
-        // 3. Slow lane: launch in parallel, race against the downstream LLM call
+        // 3. Slow lane：并行启动,与下游 LLM 调用竞速
         let slow = self.slow.clone();
         let slow_check = tokio::spawn(async move {
             slow.classify(&text_to_check).await
         });
         
-        // 4. Launch downstream
+        // 4. 启动下游
         let inner_stream = self.inner.clone().call(req, ctx.clone()).await?;
         
-        // 5. select! pattern: two legs running in parallel
-        //    - slow lane returns unsafe first → cancel inner stream + return ContentFiltered
-        //    - inner stream finishes naturally → slow lane result is used for audit but doesn't affect return
+        // 5. select! 模式：两条腿并行
+        //    - 慢通道先返回 unsafe → cancel inner stream + 返回 ContentFiltered
+        //    - inner stream 自然结束 → 慢通道结果用于审计但不影响返回
         let cancel = ctx.cancel.clone();
         let stream = async_stream::try_stream! {
             tokio::pin!(slow_check);
@@ -496,19 +496,19 @@ impl LlmService for PromptGuardService {
             
             loop {
                 tokio::select! {
-                    biased;  // prioritize checking the slow lane
+                    biased;  // 优先检查慢通道
                     
                     result = &mut slow_check, if !slow_resolved => {
                         slow_resolved = true;
                         match result {
                             Ok(Ok(classification)) if classification.is_unsafe() => {
-                                // Intercept: cancel downstream, short-circuit return error
+                                // 拦截：取消下游,短路返回错误
                                 cancel.cancel();
                                 Err(ProviderError::ContentFiltered {
                                     category: format!("ml_classifier:{}", classification.label),
                                 })?;
                             }
-                            _ => continue,  // safe or classification failure → continue with inner
+                            _ => continue,  // 安全或分类失败 → 继续走 inner
                         }
                     }
                     
@@ -526,17 +526,17 @@ impl LlmService for PromptGuardService {
 }
 ```
 
-**Key decisions**:
-- **Fast lane serial + slow lane parallel** — hides the 10-30ms ML inference behind the LLM TTFT; legitimate requests pay zero security latency (the optimization mentioned in the discussion)
-- **Intercepted requests waste tens of tokens of prefill** — an acceptable cost
-- **Role-context separation**: classify with an attached `role_hint` ("code review / doc generation / free-form chat") so the classifier can calibrate. Avoids the false positive of "user-submitted malicious-looking code samples being misjudged".
-- **Slow lane failures don't block**: if the classifier is down, degrade to "fast lane only", alert but don't trip business
+**关键决策**：
+- **快通道串行 + 慢通道并行**——把 ML 推理的 10-30ms 隐藏在 LLM TTFT 后面，合法请求 0 安全延迟（讨论中提到的优化）
+- **被拦截的请求浪费几十个 token 的 prefill**——可接受的代价
+- **角色上下文分离**：classify 时附带 `role_hint`（"代码审查 / 文档生成 / 自由对话"），分类器据此校准。避免"用户提交的恶意代码样本被误判"的假阳性。
+- **slow lane 失败不阻塞**：分类器宕机时降级为"仅 fast lane"，告警但不熔断业务
 
 ### 4.6 L6 — Routing
 
-**Responsibility**: pick the ProviderId based on `ModelHint` and RoutingPolicy; rewrite `req.model` to `ModelHint::Explicit(concrete model name)` and pass to downstream.
+**职责**：根据 `ModelHint` 和 RoutingPolicy 选定 ProviderId，把 `req.model` 改写为 `ModelHint::Explicit(具体模型名)` 后传给下游。
 
-Implementation details in Doc 01 §12; this layer just wraps RoutingPolicy as a Middleware:
+实现细节见 Doc 01 §12，本层只是把 RoutingPolicy 包装成 Middleware：
 
 ```rust
 #[async_trait]
@@ -549,7 +549,7 @@ impl LlmService for RoutingService {
         let candidates = self.registry.candidates_for(&req.model);
         let ranked = self.policy.select(&req, &candidates, &self.metrics).await?;
         
-        // Write the preferred provider into ctx; downstream (Circuit Breaker / Provider call) dispatches by it
+        // 把首选 provider 写入 ctx,下游 (Circuit Breaker / Provider 调用) 据此 dispatch
         let mut ctx = ctx;
         ctx.attributes.insert("routing.provider_priority".into(), ranked.into());
         
@@ -558,11 +558,11 @@ impl LlmService for RoutingService {
 }
 ```
 
-Note: Routing doesn't call the Provider directly; it only **selects**. The actual call is performed by the deeper Retry/Fallback layer (which takes the priority list and uses the second on first failure).
+注意：Routing 不直接调 Provider，它只是**选择**，实际调用由更内层的 Retry/Fallback 层负责（拿到 priority 列表，第一个失败用第二个）。
 
 ### 4.7 L7 — Circuit Breaker
 
-**Responsibility**: track each Provider's health; trip the circuit when failure rate exceeds threshold, fail fast instead of queuing.
+**职责**：跟踪每个 Provider 的健康状态；故障率超阈值时断路，快速失败而非排队。
 
 ```rust
 pub struct CircuitBreakerMiddleware {
@@ -581,7 +581,7 @@ impl LlmService for CircuitBreakerService {
             .and_then(|v| v.clone().try_into().ok())
             .ok_or_else(|| ProviderError::Internal("routing priority missing".into()))?;
         
-        // Filter out breakers in Open state
+        // 过滤掉 open 状态的 breaker
         let healthy: Vec<_> = priority.into_iter()
             .filter(|p| self.breakers.get(p).map_or(true, |b| b.state() != CircuitState::Open))
             .collect();
@@ -594,20 +594,20 @@ impl LlmService for CircuitBreakerService {
         ctx.attributes.insert("routing.provider_priority".into(), healthy.into());
         
         self.inner.clone().call(req, ctx).await
-        // Update breaker state on outbound based on response (in stream Finished/Error events)
+        // 出站时根据响应更新 breaker state (在 stream Finished/Error 事件里)
     }
 }
 ```
 
-**Configuration**:
-- `failure_threshold`: failure rate within sliding window (default 50%)
-- `min_requests`: minimum sample size to trip (default 20, prevents cold-start misjudgement)
-- `open_duration`: duration of open state (default 30s)
-- `half_open_max_requests`: probe requests allowed in half-open state (default 3)
+**配置**：
+- `failure_threshold`: 滑动窗口内失败率 (默认 50%)
+- `min_requests`: 触发断路的最小样本数 (默认 20，防止冷启动误判)
+- `open_duration`: open 状态持续时间 (默认 30s)
+- `half_open_max_requests`: 半开状态允许的探测请求数 (默认 3)
 
 ### 4.8 L8 — Retry / Fallback
 
-**Responsibility**: retry recoverable errors within a single provider; switch to the next provider in the priority list once retries are exhausted.
+**职责**：单 provider 内重试可恢复错误；耗尽重试后切换到 priority 列表的下一个 provider。
 
 ```rust
 #[async_trait]
@@ -640,7 +640,7 @@ impl LlmService for RetryService {
                                 continue;
                             }
                             ErrorClass::Retriable | ErrorClass::MaybeRetriable => {
-                                // Switch to next provider
+                                // 切下一个 provider
                                 if idx + 1 < priority.len() {
                                     tracing::warn!(?e, ?provider_id, "fallback to next provider");
                                     break;
@@ -659,14 +659,14 @@ impl LlmService for RetryService {
 }
 ```
 
-**Key decisions**:
-- **Permanent errors are never switched** — 4xx / content filter / budget exhaustion / context too long — switching providers would also fail
-- **Backoff algorithm**: exponential + jitter + respects `retry_after` hints
-- **Streaming responses are not retried mid-stream** — if the stream has already emitted several tokens and then fails, it must be passed up to the caller (partial result + error); silent retry would cause duplicate content
+**关键决策**：
+- **Permanent 错误绝不切换**——4xx / 内容过滤 / 预算耗尽 / context 太长，换 provider 也会失败
+- **退避算法**：指数 + jitter + 尊重 `retry_after` 提示
+- **流式响应不重试 mid-stream**——如果 stream 已经吐了几个 token 然后断，必须传给上层处理（部分结果 + 错误），不能静默重试导致重复内容
 
-### 4.9 Outbound layers (Schema Validation, etc.)
+### 4.9 出站层（Schema Validation 等）
 
-Schema Validation is conceptually an "outbound" layer, but in implementation it is still a Middleware — it wraps the inner stream and validates the complete response when the stream finishes:
+Schema Validation 在概念上是"出站"层，但实现上仍然是 Middleware——它在 inner stream 上加包装，等 stream 结束时校验完整响应：
 
 ```rust
 #[async_trait]
@@ -678,7 +678,7 @@ impl LlmService for SchemaValidationService {
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
         let schema = match &req.structured_output {
             Some(s) => s.clone(),
-            None => return self.inner.clone().call(req, ctx).await,  // no validation needed, pass-through
+            None => return self.inner.clone().call(req, ctx).await,  // 不需要校验,直通
         };
         
         let inner_stream = self.inner.clone().call(req, ctx.clone()).await?;
@@ -694,7 +694,7 @@ impl LlmService for SchemaValidationService {
                     accumulator.push(text);
                 }
                 if let ChatEvent::Finished { .. } = &event {
-                    // Stream finished, validate complete text
+                    // 流结束,校验完整文本
                     let full = accumulator.into_string();
                     match validator.validate(&full, &schema) {
                         Ok(_) => yield event,
@@ -713,18 +713,18 @@ impl LlmService for SchemaValidationService {
 }
 ```
 
-**Schema validation is usually redundant when Provider strict mode is already enabled** — but kept as defense in depth, and it is necessary for scenarios where the Provider does not support strict mode (local Ollama).
+**Schema 校验在 Provider strict mode 已经启用时通常是冗余的**——但作为防御深度保留，并且对于 Provider 不支持 strict mode 的场景（本地 Ollama）是必需的。
 
 ---
 
-## 5. Cancel Signal Propagation
+## 5. Cancel 信号的传播
 
 ```
 Application Layer
        │ creates RequestContext { cancel: CancellationToken::new() }
        ▼
 Middleware L1 (Telemetry)
-       │ inspects cancel, starts span
+       │ inspects cancel,start span
        ▼
 ... (middleware chain) ...
        │
@@ -739,50 +739,50 @@ LlmProvider (CLI backend)
        │ CancelGuard::drop() ──► send Interrupt JSONL ──► subprocess stops
 ```
 
-Every layer must do two things:
-1. **Pass the token**: hand `ctx.cancel.clone()` to the inner service
-2. **Respond to the token**: long operations (including await stream.next()) pair with `select!` to listen for cancel
+每一层都必须做两件事：
+1. **传递 token**：`ctx.cancel.clone()` 移交到 inner service
+2. **响应 token**：长时间操作（包括 await stream.next()）配合 `select!` 监听 cancel
 
-Failure mode: a layer performs a blocking operation (sync IO, blocking mutex) without listening for cancel — the entire chain stalls. In Rust this is expressed explicitly via `tokio::select!` and `CancellationToken::cancelled()`.
-
----
-
-## 6. Special Challenges of Streaming
-
-### 6.1 Mid-stream short-circuit patterns
-
-Three typical short-circuit moments:
-1. **Prompt Guard slow lane judges malicious** (§4.5) → select! pattern
-2. **Budget mid-stream overage** (§4.3) → inspect + cancel.cancel()
-3. **Timeout / upstream actively cancels** (application layer) → deadline + cancel
-
-Unified principle: **short-circuit = cancel + return error event**, not directly closing the stream. This lets upper-layer inspect/observability still see a complete event sequence (including "why it ended early").
-
-### 6.2 Observe vs consume
-
-- **Telemetry / Cost Accounting**: observe events, forward unchanged (`inspect`)
-- **Cache Store**: accumulate a copy and write to cache, forward unchanged (`inspect` + async spawn)
-- **Schema Validation**: accumulate a copy, validate at the end, forward unchanged or replace with error
-- **Prompt Guard**: may cancel + replace stream tail
-
-Only Schema Validation **modifies the stream** in the abnormal case; the others are read-only observation. This distinction makes performance analysis easier: read-only layers are zero-copy; writing layers may introduce allocations.
-
-### 6.3 Cost of stream wrapping
-
-Every layer's `inspect` / `async_stream` introduces one BoxStream wrapping. On the hot path, 10 middleware layers means 10 heap allocations (the streams themselves) + N×event-count vtable calls.
-
-In practice LLM streaming throughput is typically 50-200 events/s, and the wrapping cost is negligible. However:
-- Don't do syscalls (file write, network, lock) inside inspect closures
-- Don't do deep clones inside inspect closures
-- Async tasks (cache write, metrics emit) all `tokio::spawn`, never blocking the stream
+错误模式：某层做了阻塞操作（同步 IO、阻塞 mutex）而没监听 cancel——整条链路就卡住了。在 Rust 里这种问题通过 `tokio::select!` 和 `CancellationToken::cancelled()` 显式表达。
 
 ---
 
-## 7. Configuration Shape
+## 6. 流式处理的特殊挑战
+
+### 6.1 中途短路的实现模式
+
+三种典型短路时机：
+1. **Prompt Guard 慢通道判恶意**（§4.5）→ select! 模式
+2. **Budget 中途超额**（§4.3）→ inspect + cancel.cancel()
+3. **超时 / 上游主动取消**（应用层）→ deadline + cancel
+
+统一原则：**短路 = cancel + 返回错误事件**，不是直接关闭 stream。这样上层 inspect/observability 仍能看到一个完整的事件序列（包括"为什么提前结束"）。
+
+### 6.2 观察 vs 消费
+
+- **Telemetry / Cost Accounting**：观察事件，原样转发（`inspect`）
+- **Cache Store**：累积副本写缓存，原样转发（`inspect` + 异步 spawn）
+- **Schema Validation**：累积副本，最后校验，原样转发或替换为错误
+- **Prompt Guard**：可能 cancel + 替换流尾
+
+只有 Schema Validation 在异常时**修改流**，其他都是只读观察。这个区分让性能分析容易：只读层零拷贝，写层可能引入分配。
+
+### 6.3 流式包装的成本
+
+每层 `inspect` / `async_stream` 都引入一次 BoxStream 包装。在 hot path 上，10 层 middleware 意味着 10 次堆分配（流本身）+ N×事件数 次 vtable 调用。
+
+实测 LLM 流式吞吐通常 50-200 events/s，包装成本可忽略。但是：
+- 不要在 inspect 闭包里做 syscall（写文件、网络、锁）
+- 不要在 inspect 闭包里做 deep clone
+- 异步任务（cache write、metrics emit）一律 `tokio::spawn`，不阻塞流
+
+---
+
+## 7. 配置形态
 
 ```toml
 [pipeline]
-# Order: outer to inner
+# 顺序：从外到内
 order = [
   "telemetry",
   "auth",
@@ -790,13 +790,13 @@ order = [
   "budget",
   "cache_lookup",
   "prompt_guard",
-  "schema_validation",      # outbound logic, but layer position is still on the outside
+  "schema_validation",      # 出站逻辑,但层序仍在外
   "routing",
   "circuit_breaker",
   "retry",
 ]
 
-# Hard-locked positional constraints: violation causes startup failure
+# 强制锁定的位置约束：违反时启动失败
 [pipeline.constraints]
 "iam" = { must_be_before = ["cache_lookup"] }
 "auth" = { must_be_before = ["iam"] }
@@ -835,37 +835,37 @@ open_duration_secs = 30
 half_open_max_requests = 3
 ```
 
-**Tenant-level override**:
+**租户级别覆盖**：
 
 ```toml
 [tenants.acme_corp.middleware.budget]
-default_tpm = 500000          # higher quota for large customers
+default_tpm = 500000          # 大客户更高额度
 default_daily_cost_usd = 500
 ```
 
 ---
 
-## 8. Error Handling and Short-circuit Semantics
+## 8. 错误处理与短路语义
 
-Each Middleware can return three kinds of result on inbound:
-1. **Continue**: normally call `inner.call()` and return the result (stream)
-2. **ShortCircuit success**: return a pre-built response stream (e.g. Cache hit)
-3. **ShortCircuit error**: return Err (e.g. IAM denial, Budget exhaustion)
+每个 Middleware 在入站可能返回三种结果：
+1. **Continue**：正常调 `inner.call()`，把结果（流）返回
+2. **ShortCircuit success**：返回预制响应流（如 Cache hit）
+3. **ShortCircuit error**：返回 Err（如 IAM 拒绝、Budget 耗尽）
 
-When inbound short-circuiting, **inner.call() is not called**, so inner middleware has no perception of it. Outbound short-circuiting (replacing with an error inside the stream) is visible to inner middleware.
+入站短路时**不调用 inner.call()**，因此 inner middleware 完全不感知。出站短路（在流中替换错误）则会被 inner middleware 看到。
 
-General principles for error propagation:
-- Permanent errors (4xx, IAM, content filter) → throw upward immediately, no retry, no switch
-- Recoverable errors (5xx, network, timeout) → absorbed by Retry/Fallback layer
-- Errors inside the stream → emitted as `ChatEvent::Err`; the caller decides whether to surface them
+错误传播的总原则：
+- 永久错误（4xx、IAM、内容过滤）→ 立即向上抛，不重试不切换
+- 可恢复错误（5xx、网络、超时）→ Retry/Fallback 层吸收
+- 流中错误 → 作为 `ChatEvent::Err` 抛出，由调用方决定是否上报
 
 ---
 
-## 9. Testing Strategy
+## 9. 测试策略
 
-### 9.1 Per-layer unit tests
+### 9.1 每层独立单测
 
-Use `MockLlmService` as inner and verify each layer's behavior under various inputs:
+用 `MockLlmService` 作为 inner，验证每层在各种输入下的行为：
 
 ```rust
 #[tokio::test]
@@ -878,13 +878,13 @@ async fn iam_blocks_unauthorized() {
 }
 ```
 
-### 9.2 Order-constraint tests
+### 9.2 顺序约束测试
 
 ```rust
 #[test]
 fn pipeline_rejects_invalid_order() {
     let config = PipelineConfig {
-        order: vec!["cache_lookup", "iam"],  // IAM must come before Cache!
+        order: vec!["cache_lookup", "iam"],  // IAM 必须在 Cache 之前!
         ..Default::default()
     };
     
@@ -893,9 +893,9 @@ fn pipeline_rejects_invalid_order() {
 }
 ```
 
-### 9.3 End-to-end integration tests
+### 9.3 端到端集成测试
 
-Full pipeline + MockProvider, asserting on event-stream shape, ordering, and metrics output:
+完整 pipeline + MockProvider，断言事件流的形状、次序、metrics 输出：
 
 ```rust
 #[tokio::test]
@@ -905,17 +905,17 @@ async fn cache_hit_short_circuits_provider() {
     
     let pipeline = build_test_pipeline(mock_provider);
     
-    // First call - miss, hits provider
+    // 第一次 - miss,命中 provider
     pipeline.call(req.clone(), ctx.clone()).await?.collect::<Vec<_>>().await;
     assert_eq!(provider_call_count.load(Ordering::SeqCst), 1);
     
-    // Second call - hit, must not call provider
+    // 第二次 - hit,不应调 provider
     pipeline.call(req, ctx).await?.collect::<Vec<_>>().await;
     assert_eq!(provider_call_count.load(Ordering::SeqCst), 1);
 }
 ```
 
-### 9.4 Cancel propagation tests
+### 9.4 Cancel 传播测试
 
 ```rust
 #[tokio::test]
@@ -928,9 +928,9 @@ async fn cancel_propagates_to_provider() {
     let cancel = ctx.cancel.clone();
     
     let mut stream = pipeline.call(req, ctx).await?;
-    let _ = stream.next().await;        // grab the first event
-    cancel.cancel();                     // actively cancel
-    drop(stream);                        // Drop triggers Provider cancel
+    let _ = stream.next().await;        // 拿到第一个事件
+    cancel.cancel();                     // 主动取消
+    drop(stream);                        // Drop 触发 Provider cancel
     
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(provider_cancelled.load(Ordering::SeqCst));
@@ -939,57 +939,57 @@ async fn cancel_propagates_to_provider() {
 
 ---
 
-## 10. Anti-pattern Checklist
+## 10. 反模式清单
 
-1. **Don't hold cross-request mutable state in middleware** — externalize it (Cache Store, Budget Store, Metrics Registry).
-2. **Don't perform syscalls on the hot path** (except Cache lookup and metrics emit, both of which must be async).
-3. **Don't ignore the cancel signal** — long operations must use select! together with cancel.cancelled().
-4. **Don't buffer the entire stream then forward in a streaming middleware** — except for cases like Schema Validation that fundamentally need the complete text. Even then, consider incremental validation.
-5. **Don't call the Provider directly from within middleware** — all provider calls go through inner.call() so upper layers (Routing/Retry/Breaker) can intervene.
-6. **Don't let IAM decisions depend on Cache data** — Cache is a performance optimization, not a security boundary.
-7. **Don't retry Permanent errors in the retry middleware** — wastes quota and may trigger provider-side abuse detection.
-8. **Don't let the Telemetry layer handle business logic** — observe only, don't decide. Telemetry failures must never affect the business path.
-9. **Don't have multiple middlewares each parse the same response** — accumulate a copy once and share it across layers (pass a ResponseAccumulator handle via ctx.attributes).
-10. **Don't hard-code ProviderId in middleware config** — abstract via RoutingPolicy to avoid coupling Pipeline to a specific Provider.
-11. **Don't create a new reqwest Client / DB connection per request** — reuse Arc instances; pools are initialized at Middleware construction time.
-12. **Don't leave inter-middleware dependencies implicit** ("this layer assumes the previous one wrote some field to ctx.attributes") — document them or express via a typed Extension container.
+1. **不要在 Middleware 里持有跨请求的可变状态**——状态外置（Cache Store、Budget Store、Metrics Registry）。
+2. **不要在 hot path 做 syscall**（除了 Cache 查询和 metrics emit，且必须 async）。
+3. **不要忽略 cancel signal**——长时间操作必须 select! 配合 cancel.cancelled()。
+4. **不要在 streaming middleware 里缓冲整个流再转发**——除非 Schema Validation 这种本质需要完整文本的场景。即使如此，也要考虑增量校验。
+5. **不要在 middleware 里直接调 Provider**——所有 provider 调用都通过 inner.call()，让上层（Routing/Retry/Breaker）介入。
+6. **不要让 IAM 决策依赖 Cache 数据**——Cache 是性能优化，不是安全边界。
+7. **不要在 retry middleware 里重试 Permanent 错误**——浪费配额，可能触发 provider 侧的滥用检测。
+8. **不要让 Telemetry 层处理业务逻辑**——只观察，不决策。Telemetry 出错绝不应影响业务路径。
+9. **不要让多个 middleware 都尝试解析同一份响应**——累积副本一份，跨层共享（通过 ctx.attributes 传 ResponseAccumulator handle）。
+10. **不要在 Middleware 配置里硬编码 ProviderId**——通过 RoutingPolicy 抽象，避免 Pipeline 与具体 Provider 耦合。
+11. **不要在每次请求都创建新的 reqwest Client / DB connection**——复用 Arc 实例，连接池在 Middleware 构造时初始化。
+12. **不要让 Middleware 之间的依赖隐式**（"这层假设上一层写了 ctx.attributes 某字段"）——文档化或用类型化的 Extension 容器表达。
 
 ---
 
-## 11. Boundaries with Upstream and Downstream
+## 11. 与上下游的边界
 
-### Upstream (Agent Runtime) contract
+### 上游（Agent Runtime）契约
 
-When the Agent Runtime calls the pipeline, it commits to:
-- Provide a complete RequestContext (trace_id, tenant_id, principal, cancel token)
-- Set a reasonable deadline
-- Drop the stream when no longer needed (triggers cancel propagation)
+Agent Runtime 调用 pipeline 时承诺：
+- 提供完整的 RequestContext（trace_id、tenant_id、principal、cancel token）
+- 设置合理的 deadline
+- 在 stream 不再需要时 Drop 它（触发 cancel 传播）
 
-### Downstream (Provider) contract
+### 下游（Provider）契约
 
-When the Pipeline calls a Provider, it commits to:
-- ChatRequest has already gone through prompt assembly, IAM check, and Guard
-- `req.model` is already a concrete model name (`ModelHint::Explicit`)
-- Will not retry requests for which the Provider has returned a Permanent error
+Pipeline 调用 Provider 时承诺：
+- ChatRequest 已经过 prompt 拼装、IAM 校验、Guard 检查
+- `req.model` 已经是具体模型名（`ModelHint::Explicit`）
+- 不会重试 Provider 已经返回 Permanent 错误的请求
 
-### Inter-middleware contracts (via ctx.attributes)
+### Middleware 之间的契约（通过 ctx.attributes）
 
-| Key | Writer | Reader |
+| Key | 写入方 | 读取方 |
 |---|---|---|
 | `iam.allowed_scopes` | L2 Auth | L4 Cache Lookup |
 | `routing.provider_priority` | L6 Routing | L7 Circuit Breaker, L8 Retry |
-| `cache.hit` | L4 Cache | L1 Telemetry (used as a metric label) |
-| `budget.reservation_id` | L3 Budget | L3 Budget (on outbound commit) |
+| `cache.hit` | L4 Cache | L1 Telemetry (作为 metric label) |
+| `budget.reservation_id` | L3 Budget | L3 Budget (出站 commit 时) |
 
-When adding new middleware, register the attributes it reads/writes in the docs to avoid implicit dependencies.
+新增 Middleware 时，必须在文档里登记其读写的 attributes，避免隐式依赖。
 
 ---
 
-## 12. TODOs and Open Questions
+## 12. 待办与开放问题
 
-- [ ] Choice of dependency-injection container at Pipeline startup (hand-rolled vs `shaku` / `dependency-inversion`)
-- [ ] Hot-reload mechanism for multi-tenant config (apply new quotas without restarting the service)
-- [ ] Implementation details of the Budget Store on Redis (Lua-script atomic debit vs WATCH/MULTI)
-- [ ] Auto-retry feedback loop for schema validation failures (currently we throw; in the future we could feed it back into the LLM for self-repair)
-- [ ] Protocol choice between the Telemetry layer and the OpenTelemetry Collector (OTLP gRPC vs HTTP)
-- [ ] Pipeline metrics exposure format (Prometheus pull vs OTel push)
+- [ ] Pipeline 启动时的依赖注入容器选型（hand-rolled vs `shaku` / `dependency-inversion`）
+- [ ] 多租户配置的热加载机制（不重启服务的前提下应用新配额）
+- [ ] Budget Store 的 Redis 实现细节（Lua 脚本原子扣减 vs WATCH/MULTI）
+- [ ] Schema 校验失败的自动重试反馈循环（当前是抛错，未来可以喂回 LLM 让它自修）
+- [ ] Telemetry 层与 OpenTelemetry Collector 的协议选型（OTLP gRPC vs HTTP）
+- [ ] Pipeline metrics 暴露格式（Prometheus pull vs OTel push）

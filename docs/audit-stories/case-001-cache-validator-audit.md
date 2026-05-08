@@ -33,14 +33,14 @@ it requires changing layer order across the Pipeline builder.
 |-----------|---------------------------------------------------------------------------------------------------|
 | T+0       | the consumer flagged multi-caller / multi-chain cache risk in chat                                           |
 | T+5min    | I read `validation.rs:225-232` and `cache.rs:wrap_stream_for_write`, reply "real bug, ~half day" |
-| T+10min   | I file `B-20.W4` ticket, push, tell  consumer "明早 wheel"                                              |
-| T+15min   | User: *"你加入测试了吗？"*                                                                        |
+| T+10min   | I file `B-20.W4` ticket, push, tell consumer "wheel by tomorrow morning"                          |
+| T+15min   | User: *"did you add tests?"*                                                                      |
 | T+20min   | I write two failing tests in `validation/tests.rs`                                                |
 | T+25min   | Test 1 fails as expected ("hello" vs "hello world"); test 2 fails for a different reason         |
 | T+30min   | I trace the second failure: cache hit never reaches Validation. New conclusion: structural fix.   |
 | T+35min   | Update `B-20.W4` to call out two distinct bugs + revise estimate to 1-2 days                      |
 | T+40min   | Commit failing tests with `#[ignore]` (`f751a88`) so they sit in history as a regression gate     |
-| T+1h      | the consumer replied "选 A2" (cut `retriable: bool`, no consumer wants validation-driven retry)            |
+| T+1h      | the consumer replied "go A2" (cut `retriable: bool`, no consumer wants validation-driven retry)            |
 | T+2.5h    | A2 implementation: onion change + drop `retriable` field + delete `#[ignore]` (`f6eaab1`)         |
 | T+3h      | Wheel built, 21 pytest pass, 530 cargo pass, clippy clean, pushed                                 |
 

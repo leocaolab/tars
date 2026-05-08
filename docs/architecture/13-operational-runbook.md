@@ -1,587 +1,587 @@
-# 文档 13 — Operational Runbook
+# Doc 13 — Operational Runbook
 
-> 范围：on-call SRE 应急手册 + 常见故障 playbook + 例行运维操作 + 复盘模板。
+> Scope: on-call SRE incident handbook + common-failure playbooks + routine ops procedures + post-mortem template.
 >
-> **状态**：本文档先于实现完成。实施阶段会有具体命令 / kubectl 操作 / dashboard URL 替换占位符 (`<TBD>` 标记)。但**决策树和流程**应保持稳定。
+> **Status**: this document is finalized ahead of implementation. During implementation, concrete commands / kubectl operations / dashboard URLs will replace the placeholders (marked `<TBD>`). The **decision trees and procedures**, however, should remain stable.
 >
-> 范围限制：仅适用于 Team / SaaS / Hybrid 部署 (有 SRE 团队介入)。Personal 模式由用户自负。
+> Scope limit: applies only to Team / SaaS / Hybrid deployments (where an SRE team is involved). Personal mode is the user's own responsibility.
 
 ---
 
-## 1. 设计目标
+## 1. Design goals
 
-| 目标 | 说明 |
+| Goal | Description |
 |---|---|
-| **凌晨三点也能用** | Playbook 假设 on-call 半睡半醒,前三步必须无脑可执行 |
-| **决策优先于操作** | 先判断"是否真的故障 / 严重程度 / 影响范围",再动手 |
-| **Containment > Eradication > Recovery** | 先止血再修复,优先恢复服务而非追究根因 |
-| **不破坏 audit** | 所有应急操作都有审计记录,即使是紧急权限使用 |
-| **可逆操作优先** | 能回滚的方案优于一次性硬动作 |
-| **沟通透明** | 用户感知的事故必须主动公告,不要被动响应 |
-| **复盘强制** | P0/P1 必须有 post-mortem,P2 按需 |
+| **Usable at 3 a.m.** | Playbooks assume the on-call is half-asleep; the first three steps must be brain-dead executable |
+| **Decision before action** | First judge "is this really a failure / how severe / blast radius", then act |
+| **Containment > Eradication > Recovery** | Stop the bleeding before fixing; prioritize restoring service over root-cause hunting |
+| **Don't break audit** | Every emergency action has an audit record, even emergency-privilege use |
+| **Reversible actions first** | Rollback-able solutions trump one-shot hard moves |
+| **Transparent communication** | User-visible incidents must be proactively announced, not passively responded to |
+| **Post-mortem mandatory** | P0/P1 must have a post-mortem; P2 on-demand |
 
-**反目标**：
-- 不让 runbook 变成"决策树的迷宫"——超过 5 层嵌套的逻辑应该重新设计
-- 不在 runbook 写死 dashboard URL / 命令——用占位符 + 链接到 wiki
-- 不依赖某个特定 SRE 的"经验"——所有知识必须文档化
+**Non-goals**:
+- Don't let the runbook become a "decision-tree maze" — logic nested deeper than 5 levels should be redesigned
+- Don't hard-code dashboard URLs / commands in the runbook — use placeholders + links to the wiki
+- Don't depend on any specific SRE's "experience" — all knowledge must be documented
 
 ---
 
-## 2. 严重等级定义
+## 2. Severity definitions
 
-| 等级 | 定义 | 响应时间 | 通知 |
+| Level | Definition | Response time | Notification |
 |---|---|---|---|
-| **P0 (Critical)** | 多租户服务全停 / 数据泄漏 / 数据损坏 / 严重安全事件 | 5 min ack, 15 min mitigation | 整个团队 + 产品 + 法务 (如安全) |
-| **P1 (High)** | 单租户全停 / 主要功能故障 / 显著性能下降 / SLO 击穿 | 15 min ack, 1h mitigation | On-call + 主管 |
-| **P2 (Medium)** | 边缘功能故障 / 单用户问题 / 非关键告警 | 1h ack, 工作日内修复 | On-call + ticket |
-| **P3 (Low)** | 监控异常但无用户影响 / 文档错误 / 优化建议 | 工作日 ack | Ticket |
+| **P0 (Critical)** | Multi-tenant service fully down / data leak / data corruption / serious security event | 5 min ack, 15 min mitigation | Whole team + product + legal (if security) |
+| **P1 (High)** | Single-tenant fully down / major feature broken / significant performance degradation / SLO breach | 15 min ack, 1h mitigation | On-call + manager |
+| **P2 (Medium)** | Edge feature broken / single-user issue / non-critical alert | 1h ack, fix within working day | On-call + ticket |
+| **P3 (Low)** | Monitoring anomaly with no user impact / doc errors / optimization suggestions | Working-day ack | Ticket |
 
-### 2.1 自动升级规则
+### 2.1 Auto-escalation rules
 
-- P2 累积 5 个相关告警 → 自动升 P1
-- P1 持续 4 小时未 mitigation → 自动升 P0
-- 安全相关任何告警先按 P1 处理,确认严重性后调整
+- P2 with 5 related alerts accumulated → auto-escalate to P1
+- P1 not mitigated for 4 hours → auto-escalate to P0
+- Any security-related alert is handled as P1 first, then adjusted after confirming severity
 
-### 2.2 严重性快速判断 cheatsheet
+### 2.2 Severity quick-judgment cheatsheet
 
 ```
-Q1: 多个租户受影响?            → 是 → 至少 P1
-Q2: 是否数据丢失/损坏/泄漏?    → 是 → P0
-Q3: 用户能正常完成核心工作流?  → 否 → 至少 P1
-Q4: SLO 击穿?                  → 是 → 至少 P1
-Q5: 安全相关?                  → 是 → P1 起步,可能 P0
-其他                            → P2
+Q1: Multiple tenants affected?              → Yes → at least P1
+Q2: Data loss / corruption / leak?          → Yes → P0
+Q3: Can users complete the core workflow?   → No  → at least P1
+Q4: SLO breached?                           → Yes → at least P1
+Q5: Security related?                       → Yes → P1 starting, possibly P0
+Otherwise                                    → P2
 ```
 
 ---
 
-## 3. On-call 职责
+## 3. On-call responsibilities
 
-### 3.1 当班职责
+### 3.1 Shift duties
 
-- **首要**：保持服务可用,止血优先
-- **响应**：所有告警按 SLA 响应
-- **沟通**：维护 incident channel,定期更新状态
-- **记录**：实时记录处置过程,事后整理为 post-mortem
-- **不做**：复杂代码修改 / 长期架构改动 (留给业务时间)
+- **Primary**: keep service available, stop the bleeding first
+- **Respond**: respond to all alerts per SLA
+- **Communicate**: maintain the incident channel, post regular status updates
+- **Record**: record handling steps in real time, organize into post-mortem afterwards
+- **Don't do**: complex code changes / long-term architecture work (leave to business hours)
 
-### 3.2 交接
+### 3.2 Handoff
 
-每天/每班次交接，必须覆盖：
-- 当前 active incident 状态
-- pending 调查的告警
-- 计划内维护
-- 异常但已观察的指标 ("CPU 平均比平时高 10%")
+For every daily/shift handoff, must cover:
+- Current active incident status
+- Pending alert investigations
+- Planned maintenance
+- Anomalous-but-observed metrics ("CPU avg 10% above usual")
 
-交接通过结构化模板 (incident channel pinned message):
+Handoff goes through a structured template (incident channel pinned message):
 
 ```
 === On-call Handoff <date> ===
 Incoming: <name>
 Outgoing: <name>
 
-Active incidents: (链接 ticket)
+Active incidents: (link to ticket)
 - INC-2026-1234 P1 mitigated, RCA pending
 - INC-2026-1235 P2 monitoring
 
 Pending investigations:
-- 租户 acme_corp cache hit rate 异常下降
-- Provider claude_api 偶尔 timeout
+- Tenant acme_corp cache hit rate dropping abnormally
+- Provider claude_api occasional timeout
 
 Watch list:
-- Postgres connection pool 接近上限,可能下午需要扩
-- 计划晚间 19:00 部署 v1.5.2
+- Postgres connection pool nearing limit, may need to scale this afternoon
+- Planned 19:00 deploy of v1.5.2
 
-Notes: (任何 outgoing 想交代的)
+Notes: (anything outgoing wants to mention)
 ```
 
 ### 3.3 Escalation paths
 
 ```
 Tier 1: Primary on-call SRE
-  ↓ 15 min 无响应或无法 mitigation
-Tier 2: Secondary on-call + 工程团队 lead
-  ↓ 30 min 无响应或事件升级 P0
-Tier 3: 工程总监 + CTO (P0 only)
-  ↓ 60 min 仍无解决方案
-Tier 4: 厂商 support (Anthropic/OpenAI/Google) + 客户成功
+  ↓ 15 min no response or unable to mitigate
+Tier 2: Secondary on-call + engineering team lead
+  ↓ 30 min no response or incident escalates to P0
+Tier 3: Engineering director + CTO (P0 only)
+  ↓ 60 min still no resolution
+Tier 4: Vendor support (Anthropic/OpenAI/Google) + customer success
 ```
 
-每 Tier 升级必须 **同时** 通知,不串行等待。
+Each tier escalation must notify **simultaneously**, not wait serially.
 
 ---
 
-## 4. 通用响应流程
+## 4. Generic response procedure
 
-任何 incident 的标准动作：
+Standard actions for any incident:
 
 ### Step 1: Triage (5 min)
 
-- [ ] 确认告警真实性 (不是 false positive)
-- [ ] 评估影响范围：哪些租户 / 多少用户 / 哪些功能
-- [ ] 评级 P0-P3
-- [ ] 创建 incident ticket,获取 INC-ID
-- [ ] 开 incident channel `#incident-<ID>` (P0/P1)
-- [ ] Page 必要的 escalation tier
+- [ ] Confirm the alert is real (not a false positive)
+- [ ] Assess blast radius: which tenants / how many users / which features
+- [ ] Rate P0-P3
+- [ ] Create incident ticket, get INC-ID
+- [ ] Open incident channel `#incident-<ID>` (P0/P1)
+- [ ] Page necessary escalation tier
 
 ### Step 2: Communicate (5 min)
 
-- [ ] 在 incident channel 发起始消息：
+- [ ] Post the kickoff message in the incident channel:
   ```
   🚨 INCIDENT-1234 [P1] declared
-  Summary: <一句话>
-  Impact: <谁受影响>
+  Summary: <one sentence>
+  Impact: <who is affected>
   Lead: <on-call name>
   Status page: updating...
   ```
-- [ ] 更新 status page (面向客户)
-- [ ] 初始通知客户成功 / 销售 (如果客户可见)
+- [ ] Update status page (customer-facing)
+- [ ] Initial notification to customer success / sales (if customer-visible)
 
-### Step 3: Mitigate (优先于 Eradicate)
+### Step 3: Mitigate (before Eradicate)
 
-- [ ] 找到能立即止血的动作 (即使是粗暴的)：
-  - 切流量
-  - 重启服务
-  - 回滚部署
-  - 暂停受影响 tenant
-  - 启用降级模式
-- [ ] 验证 mitigation 有效 (用户感知 + 监控指标)
-- [ ] 更新 incident channel: "MITIGATED at <time>"
+- [ ] Find an action that stops the bleeding immediately (even if crude):
+  - Cut traffic
+  - Restart service
+  - Rollback deployment
+  - Suspend affected tenant
+  - Enable degraded mode
+- [ ] Verify mitigation works (user perception + monitoring metrics)
+- [ ] Update incident channel: "MITIGATED at <time>"
 
-### Step 4: Investigate (mitigation 后)
+### Step 4: Investigate (after mitigation)
 
-- [ ] 收集证据 (logs / metrics / traces) 在 ticket 附件
-- [ ] 找根本原因
-- [ ] 评估是否需要更彻底的修复
+- [ ] Collect evidence (logs / metrics / traces) attached to the ticket
+- [ ] Find the root cause
+- [ ] Assess whether a more thorough fix is needed
 
 ### Step 5: Resolve & Close
 
-- [ ] 永久修复部署 (可能是后续工作)
-- [ ] 验证恢复完整
-- [ ] 更新 status page: resolved
-- [ ] 通知客户
-- [ ] 安排 post-mortem (P0/P1 必须)
+- [ ] Permanent fix deployed (may be follow-up work)
+- [ ] Verify recovery is complete
+- [ ] Update status page: resolved
+- [ ] Notify customers
+- [ ] Schedule post-mortem (mandatory for P0/P1)
 
-### Step 6: Post-mortem (24-72h 内)
+### Step 6: Post-mortem (within 24-72h)
 
-模板见 §15。
+Template in §15.
 
 ---
 
-## 5. 常见故障 Playbook
+## 5. Common-failure playbooks
 
-### 5.1 LLM Provider 完全宕机
+### 5.1 LLM Provider fully down
 
-**症状**：
-- `llm.provider.errors_total{provider=X}` 飙升
-- Circuit breaker for provider X 处于 open 状态
-- 所有 tenant 涉及该 provider 的请求失败
+**Symptoms**:
+- `llm.provider.errors_total{provider=X}` spikes
+- Circuit breaker for provider X is open
+- All tenant requests involving that provider fail
 
 **Triage**:
-1. 看 provider 自己的 status page (`status.openai.com` / `status.anthropic.com` / `status.cloud.google.com`)
-2. 确认是 provider 侧问题还是我们的网络问题:
-   - 在 K8s pod 里 `curl https://api.<provider>.com/v1/models -H "Authorization: ..."`
-   - 如果我们的请求能通,但 SDK 失败 → 我们的 bug
-   - 如果我们的请求也通不,但其他外部测试能通 → 我们的网络问题
-   - 如果其他人测试也通不 → provider outage
+1. Check the provider's own status page (`status.openai.com` / `status.anthropic.com` / `status.cloud.google.com`)
+2. Confirm whether it's a provider-side issue or our network issue:
+   - From a K8s pod run `curl https://api.<provider>.com/v1/models -H "Authorization: ..."`
+   - If our request goes through but the SDK fails → our bug
+   - If our request also fails but other external tests succeed → our network issue
+   - If everyone else's tests also fail → provider outage
 
 **Mitigation**:
-- ✅ Circuit breaker 自动失败转移到 fallback provider (Doc 02 §4.7)
-- ✅ Routing policy 应已切到备用 provider (Doc 02 §4.6)
-- 监控 fallback provider 的负载是否能承担——如果不能,启用降级 (短回复 / 跳过非关键 step)
+- ✅ Circuit breaker auto-fails over to fallback provider (Doc 02 §4.7)
+- ✅ Routing policy should already have switched to backup provider (Doc 02 §4.6)
+- Watch whether the fallback provider's load is sustainable — if not, enable degradation (shorter replies / skip non-critical steps)
 
-**手动干预**（如自动 fallback 不工作）:
+**Manual intervention** (when auto-fallback isn't working):
 
 ```bash
-# 1. 强制 disable 故障 provider (TBD: 实际命令)
+# 1. Force-disable the failing provider (TBD: actual command)
 tars admin provider disable --id <provider_id> --reason "outage" --duration 1h
 
-# 2. 验证流量已切走
-# 看 metric: llm.provider.request_total{provider=<id>} 应该归零
+# 2. Verify traffic has shifted away
+# Check metric: llm.provider.request_total{provider=<id>} should drop to zero
 
-# 3. 通知所有受影响 tenant (如果业务需要)
+# 3. Notify all affected tenants (if business requires)
 ```
 
-**恢复**:
-- Provider 恢复后,enable + 监控 5 min 确认稳定
-- 如果有积压请求,batch 处理避免再次过载
+**Recovery**:
+- After provider recovers, enable + monitor for 5 min to confirm stability
+- If there's a backlog, batch-process it to avoid re-overloading
 
-**预防**:
-- 至少 2 个 provider 配置可作 fallback (每个 tier)
-- Routing policy 包含 `LatencyPolicy` 不是死配置
+**Prevention**:
+- At least 2 providers configured as fallbacks (per tier)
+- Routing policy includes `LatencyPolicy`, not a static config
 
-### 5.2 LLM Provider 限流 (rate limited)
+### 5.2 LLM Provider rate limited
 
-**症状**：
-- `llm.provider.errors_total{kind="rate_limited"}` 上升
-- Headers 中带 `Retry-After`
-- 多租户共享同一 provider 配额时尤其明显
+**Symptoms**:
+- `llm.provider.errors_total{kind="rate_limited"}` rising
+- `Retry-After` in headers
+- Especially obvious when multiple tenants share the same provider quota
 
 **Triage**:
-- 是单个 tenant 暴增导致挤爆 → 见 §5.6
-- 是整体 QPS 突破 provider 总配额 → 真实容量不足
+- A single tenant's spike is crowding out others → see §5.6
+- Overall QPS is breaching the provider's total quota → real capacity shortfall
 
 **Mitigation**:
-1. **短期**：retry middleware 自动按 retry_after 退避
-2. **中期**：申请 provider 配额提升
-3. **长期**：多账号 + Routing 分散
+1. **Short-term**: retry middleware automatically backs off per retry_after
+2. **Mid-term**: request a provider quota increase
+3. **Long-term**: multi-account + Routing dispersion
 
-**强制单租户限流** (如某 tenant 滥用):
+**Force-throttle a single tenant** (if a tenant is abusing):
 ```bash
 tars admin tenant rate-limit --id <tenant> --tpm 1000 --duration 4h
 ```
 
-### 5.3 单租户成本失控 (Budget Runaway)
+### 5.3 Single-tenant cost runaway (Budget Runaway)
 
-**症状**：
-- `budget.soft_limit_exceeded_total{tenant=X}` 告警
-- 该 tenant 的成本曲线斜率异常陡峭
-- 可能伴随 `agent.backtrack_total{tenant=X}` 异常 (任务卡循环)
+**Symptoms**:
+- `budget.soft_limit_exceeded_total{tenant=X}` alert
+- This tenant's cost curve has an abnormally steep slope
+- May coincide with anomalous `agent.backtrack_total{tenant=X}` (task stuck in a loop)
 
 **Triage**:
-1. 是正常增长还是异常? 看历史 baseline
-2. 是 agent 自循环 (Doc 04 §6.4) 还是真实业务?
-3. 是 attack 还是 misconfiguration?
+1. Normal growth or anomalous? Check historical baseline
+2. Agent self-loop (Doc 04 §6.4) or genuine business?
+3. Attack or misconfiguration?
 
-**Mitigation** (按严重性递进):
+**Mitigation** (escalating by severity):
 
 ```
-Soft limit (告警) → 通知 tenant 管理员 (邮件/IM),不阻塞业务
+Soft limit (alert) → notify tenant admin (email/IM), don't block business
 
-Soft limit + 异常增速 (5x baseline) → 自动降级
-  - Routing 切到便宜 model tier
-  - 提示 tenant 检查
+Soft limit + abnormal growth rate (5x baseline) → auto-degrade
+  - Routing switches to cheaper model tier
+  - Prompt tenant to investigate
 
-Hard limit 即将触发 → 主动暂停非关键 task
+Hard limit imminent → proactively suspend non-critical tasks
   tars admin tenant tasks suspend --id <tenant> --filter "priority=low"
 
-Hard limit 触发 → 全租户 budget exceeded
-  - 自动进入 read-only 模式
-  - 通知 tenant 立即沟通
+Hard limit hit → tenant-wide budget exceeded
+  - Auto-enter read-only mode
+  - Notify tenant for immediate communication
 ```
 
-**误判恢复**:
+**Recovery from misjudgment**:
 ```bash
-# 临时调高 budget (需要审批)
+# Temporarily raise budget (requires approval)
 tars admin tenant budget set --id <tenant> --daily 1000 --justification "INC-1234 emergency" --approver <name>
 ```
 
-### 5.4 Cache Redis 故障
+### 5.4 Cache Redis failure
 
-**症状**：
-- `cache.lookup_errors_total` 飙升
-- LLM 请求量增加 (因为 cache miss)
-- 成本突然增加
+**Symptoms**:
+- `cache.lookup_errors_total` spikes
+- LLM request volume rises (because of cache misses)
+- Cost suddenly grows
 
 **Triage**:
-- Redis ping 是否成功? `redis-cli -h <host> ping`
-- 是 master 还是 replica 问题?
-- 网络问题还是 Redis 自身问题?
+- Does Redis ping succeed? `redis-cli -h <host> ping`
+- Master or replica issue?
+- Network problem or Redis itself?
 
 **Mitigation**:
 
-我们的设计 (Doc 03 §4.3) 让 cache 错误不阻塞业务:
-- L1 (内存) 仍工作
-- L2 (Redis) miss 后 fallback 到 Provider
-- 业务能继续,但 **成本会显著增加**
+Our design (Doc 03 §4.3) makes cache errors non-blocking:
+- L1 (in-memory) still works
+- L2 (Redis) miss falls back to Provider
+- Business continues, but **cost rises significantly**
 
 ```
-立即:
-- ✅ 业务自动降级 (cache 全 miss),无需手动操作
+Immediate:
+- ✅ Business auto-degrades (full cache miss), no manual op needed
 
-短期:
-- 触发 budget 告警阈值 (因为成本上升),需要短期调高 (避免误熔断)
+Short-term:
+- Budget alert thresholds will trigger (because of higher cost), need a short-term raise (avoid spurious circuit-breaks)
 
-中期:
-- Redis failover (master 故障) → 等待 sentinel 切换或手动:
+Mid-term:
+- Redis failover (master failure) → wait for sentinel to switch, or manually:
   redis-cli -h <sentinel> SENTINEL FAILOVER tars-master
 ```
 
-**警告**：Redis 长时间宕机 (> 1h) → cost burn rate 可能 10x → 主动通知用户 + 监控 budget
+**Warning**: Redis down for a long time (> 1h) → cost burn rate may reach 10x → proactively notify users + monitor budget
 
-**恢复**:
-- Redis 恢复后,新请求自动开始用 cache
-- 不需要 "warm up"——cache 会随业务自然填充
+**Recovery**:
+- After Redis recovers, new requests will automatically use the cache
+- No "warm up" needed — cache fills naturally with traffic
 
-### 5.5 Postgres 主库故障
+### 5.5 Postgres primary failure
 
-**症状**：
-- `db.query_errors_total` 飙升
-- 写入 100% 失败
-- Read 可能在 replica 上仍工作
+**Symptoms**:
+- `db.query_errors_total` spikes
+- Writes are 100% failing
+- Reads may still work on replicas
 
 **Triage**:
-- pg_isready 检查
-- 监控 replica lag
-- 是否是 master crashed,replica 已自动 promote?
+- pg_isready check
+- Monitor replica lag
+- Did the master crash and a replica auto-promoted?
 
 **Mitigation**:
 
-**A. RDS / 云托管**:
-- 自动 failover 通常 30-120s
-- 期间应用层会拒绝写入 (合理) 或排队 (危险,可能 OOM)
-- 我们的应用应实现 backpressure (Doc 11 §5.2),拒绝而非排队
+**A. RDS / managed cloud**:
+- Auto failover usually 30-120s
+- During the gap, the application layer should refuse writes (correct) or queue (dangerous, possibly OOM)
+- Our app should implement backpressure (Doc 11 §5.2), reject rather than queue
 
-**B. 自管 Postgres + Patroni**:
+**B. Self-managed Postgres + Patroni**:
 ```bash
-# 检查集群状态
+# Check cluster status
 patronictl -c /etc/patroni.yml list
 
-# 强制 failover (如果自动不触发)
+# Force failover (if auto doesn't trigger)
 patronictl -c /etc/patroni.yml failover --master <current-master> --candidate <replica>
 ```
 
-**C. 极端情况:从备份恢复**:
-- 见 §10 备份恢复演练章节
-- 数据丢失窗口 = 最近备份时间 (RPO 1h)
+**C. Extreme case: restore from backup**:
+- See §10 backup-recovery drill section
+- Data loss window = most recent backup time (RPO 1h)
 
-**关键不变量**:
-- 永远不能手动改 Postgres 数据 (即使 emergency)
-  - 例外：紧急权限走 §11.2 流程
-- 永远不能跳过 audit log 写入
+**Key invariants**:
+- Never manually edit Postgres data (even in emergencies)
+  - Exception: emergency privileges go through §11.2 process
+- Never skip the audit log write
 
-### 5.6 单租户暴增 (Hot Tenant)
+### 5.6 Single-tenant burst (Hot Tenant)
 
-**症状**：
-- 单 tenant 的 task 提交速率 100x 平时
-- 占用大部分资源,可能影响其他 tenant
-- 可能是合法 CI 突发,也可能是 attack
+**Symptoms**:
+- A single tenant's task submission rate is 100x normal
+- Hogging most resources, possibly affecting other tenants
+- Could be a legitimate CI burst, or an attack
 
 **Triage**:
-- 看 tenant 的请求来源 IP 分布——单 IP 暴增 → 可能 attack
-- 看请求 spec——重复同样 task → 可能是 bug
-- 联系 tenant 管理员确认
+- Look at the tenant's request source IP distribution — single-IP burst → possibly attack
+- Look at request specs — same task repeated → possibly a bug
+- Contact tenant admin to confirm
 
 **Mitigation**:
 
 ```bash
-# 1. 立即限流该 tenant (我们设计有 per-tenant BoundedExecutor)
+# 1. Immediately throttle this tenant (we have per-tenant BoundedExecutor by design)
 tars admin tenant throttle --id <tenant> --max-concurrent 5 --duration 1h
 
-# 2. 如果是 attack,suspend
+# 2. If it's an attack, suspend
 tars admin tenant suspend --id <tenant> --reason "abnormal_traffic_pattern"
 
-# 3. 通知 tenant
+# 3. Notify the tenant
 ```
 
-**post-mitigation**:
-- 调查是否真 attack,如是→走 security incident (§5.10)
-- 如果合法但超容量,谈话调整 quota 或扩容
+**Post-mitigation**:
+- Investigate whether it really is an attack; if yes → security incident track (§5.10)
+- If legitimate but over-capacity, talk to adjust quota or scale
 
-### 5.7 Subprocess Pool 耗尽 (CLI / MCP)
+### 5.7 Subprocess pool exhausted (CLI / MCP)
 
-**症状**：
-- `tool.subprocess_spawn_failures_total` 上升
-- 报错: `Too many open files` 或 `Cannot allocate memory`
-- 新 task submit 失败
+**Symptoms**:
+- `tool.subprocess_spawn_failures_total` rising
+- Errors: `Too many open files` or `Cannot allocate memory`
+- New task submissions fail
 
 **Triage**:
-- `lsof -p <pid>` 看实际句柄数
-- `ps -ef | grep claude\|mcp-` 看子进程数
-- 是泄漏 (子进程不退) 还是真的负载高?
+- `lsof -p <pid>` to see actual fd count
+- `ps -ef | grep claude\|mcp-` to see subprocess count
+- Is it a leak (subprocesses don't exit) or genuinely high load?
 
 **Mitigation**:
 
 ```bash
-# 1. 立即清理 idle subprocess (我们的 janitor 应每 5 min 跑,可能卡住了)
+# 1. Immediately clean idle subprocesses (our janitor should run every 5 min, may be stuck)
 tars admin subprocess prune --idle-secs 60
 
-# 2. 强制 kill stuck 子进程
+# 2. Force-kill stuck subprocesses
 tars admin subprocess kill --status stuck
 
-# 3. 临时限制新 subprocess 创建
+# 3. Temporarily limit new subprocess creation
 tars admin subprocess limit --max 50 --duration 1h
 ```
 
-**根因调查**:
-- 是某个 MCP server 实现 buggy (不响应 SIGTERM)?
-- 是用户 session 真的需要这么多?
-- ulimit 配置是否合理?
+**Root-cause investigation**:
+- Is some MCP server implementation buggy (unresponsive to SIGTERM)?
+- Does the user session genuinely need that many?
+- Is the ulimit configuration sensible?
 
-### 5.8 Trajectory 卡死 (Stuck Trajectory)
+### 5.8 Trajectory stuck (Stuck Trajectory)
 
-**症状**：
-- 单个 trajectory 跑 > 30 min 仍 active
-- 无新事件追加
-- 可能阻塞资源 (subprocess / connection)
+**Symptoms**:
+- A single trajectory has run > 30 min and is still active
+- No new events appended
+- May be holding resources (subprocess / connection)
 
 **Triage**:
 ```bash
-# 看该 trajectory 的最后事件时间
+# Look at last event time of this trajectory
 tars admin trajectory inspect --id <traj_id>
 
-# 检查 cancel signal 是否传递
-# 看 Doc 02 §5 Cancel 链路
+# Check whether the cancel signal is being delivered
+# See Doc 02 §5 Cancel pipeline
 ```
 
 **Mitigation**:
 
 ```bash
-# 1. 软取消 (尝试 graceful)
+# 1. Soft cancel (try graceful)
 tars admin trajectory cancel --id <traj_id>
 
-# 2. 等 30s,如仍未 dead,强制 abort
+# 2. Wait 30s; if still alive, force abort
 tars admin trajectory abort --id <traj_id> --force
 
-# 3. 如果是 system bug 导致 cancel signal 不传播,重启该 instance
-# (会触发 trajectory recovery 流程,Doc 04 §7)
+# 3. If a system bug is preventing cancel propagation, restart that instance
+# (will trigger trajectory recovery flow, Doc 04 §7)
 ```
 
-**警告**：
-- 强制 abort 会跳过 compensation (Doc 04 §6)
-- 必须人工评估是否需要补偿 (例如已创建的 cloud resource)
-- 写 audit: `EmergencyTrajectoryAbort`
+**Warning**:
+- Force abort skips compensation (Doc 04 §6)
+- Must manually evaluate whether compensation is needed (e.g., for already-created cloud resources)
+- Write audit: `EmergencyTrajectoryAbort`
 
-### 5.9 Compensation 失败 (Doc 04 §6.3)
+### 5.9 Compensation failure (Doc 04 §6.3)
 
-**症状**：
-- `compensation.failed_total` 告警
-- 严重度: P0 (系统进入不一致状态)
-- PagerDuty 立即唤醒
+**Symptoms**:
+- `compensation.failed_total` alert
+- Severity: P0 (system entered an inconsistent state)
+- PagerDuty wakes immediately
 
 **Triage**:
-- 哪个 trajectory? 哪个 compensation 失败?
-- 失败原因: 网络? 权限? 业务规则?
-- 受影响的 resource 是什么状态?
+- Which trajectory? Which compensation failed?
+- Failure cause: network? permissions? business rule?
+- What state are the affected resources in?
 
-**Mitigation** (绝对不要忽略):
+**Mitigation** (absolutely do not ignore):
 
-1. **冻结相关资源**：避免基于不一致状态做新决策
+1. **Freeze related resources**: avoid making new decisions on inconsistent state
    ```bash
    tars admin tenant freeze --id <tenant> --resources <resource_refs>
    ```
 
-2. **手动 inspect**:
+2. **Manual inspect**:
    ```bash
-   # 看 compensation 详情
+   # See compensation details
    tars admin compensation get --id <comp_id>
    
-   # 看 trajectory 完整事件流
+   # See full trajectory event stream
    tars admin trajectory events --id <traj_id>
    ```
 
-3. **手动执行补偿** (如果可能):
-   - 例如:删除 compensation 没删掉的 cloud resource
-   - 必须 audit 记录每一步
+3. **Manually execute compensation** (if possible):
+   - E.g., delete cloud resources that compensation didn't delete
+   - Must audit-record every step
 
-4. **通知**:
-   - 受影响的 tenant 管理员
-   - 安全 / 合规团队 (数据可能不一致)
-   - 工程团队 (修复 bug)
+4. **Notify**:
+   - Affected tenant admin
+   - Security / compliance team (data may be inconsistent)
+   - Engineering team (fix the bug)
 
-5. **标记 trajectory**:
+5. **Mark trajectory**:
    ```bash
    tars admin trajectory mark --id <traj_id> --status "manual_recovery_required"
    ```
 
 **Recovery**:
-- 写详细 post-mortem
-- 修复 bug (compensation 失败的 root cause)
-- 评估是否需要修改架构 (例如把某些 ReversibleResource 提升为 Irreversible 限制 commit phase)
+- Write a detailed post-mortem
+- Fix the bug (root cause of compensation failure)
+- Evaluate whether architectural changes are needed (e.g., promote some ReversibleResource to Irreversible to restrict the commit phase)
 
-### 5.10 Tenant Isolation Breach (P0 安全事件)
+### 5.10 Tenant Isolation Breach (P0 security event)
 
-**症状**：
+**Symptoms**:
 - `security.tenant_isolation_breach` audit event
-- 这种事件**永远不应该发生**——发生即架构 bug 或攻击
+- This event **should never happen** — its occurrence indicates an architectural bug or attack
 
-**响应**: 立即 P0,跳过所有正常流程
+**Response**: immediately P0, skip all normal procedures
 
-1. **保留证据**:
-   - 不要删 / 改任何相关数据
-   - 立即 snapshot 所有相关存储
+1. **Preserve evidence**:
+   - Don't delete / modify any related data
+   - Immediately snapshot all related storage
    ```bash
    tars admin snapshot --tenant <a>,<b> --reason "INC-1234 P0 security"
    ```
 
-2. **隔离**:
-   - 立即 suspend 涉事 tenant (双方,即使 victim 也 suspend 防止 attacker 继续读)
-   - 切断该 instance 的流量 (其他 instance 继续服务)
+2. **Isolate**:
+   - Immediately suspend the involved tenants (both, even the victim, to prevent the attacker from continuing to read)
+   - Cut traffic to that instance (other instances continue serving)
 
-3. **通知**:
-   - **必须** 通知:CTO + 法务 + 安全 lead
-   - **可能必须** 通知:受影响客户 (法律评估)
-   - **可能必须** 通知:监管机构 (GDPR 72h 通知期等)
+3. **Notify**:
+   - **Must** notify: CTO + legal + security lead
+   - **May be required** to notify: affected customers (legal review)
+   - **May be required** to notify: regulators (GDPR 72h notification window, etc.)
 
-4. **取证**:
-   - 完整 audit log dump
-   - 相关 trace_id 的所有 events
-   - Cache key fingerprint 比对
+4. **Forensics**:
+   - Full audit log dump
+   - All events for the relevant trace_id
+   - Cache key fingerprint comparison
 
-5. **修复**:
-   - 修复后**必须** 三人 review 才能上线
-   - 修复后**必须** 加 regression test (Doc 10 §16.2 fuzz)
+5. **Fix**:
+   - After fix, **must** have three-person review before going live
+   - After fix, **must** add regression test (Doc 10 §16.2 fuzz)
 
-**绝对不能做**:
-- 删除任何 audit 记录 (即使包含 PII)
-- 直接 hot fix 上线 (必须 review)
-- 单方面通知客户 (必须法务先评估)
+**Absolutely must not**:
+- Delete any audit record (even if it contains PII)
+- Hot-fix directly to production (must review)
+- Unilaterally notify customers (legal must evaluate first)
 
-### 5.11 数据存储满
+### 5.11 Data storage full
 
-**症状**：
+**Symptoms**:
 - `db.disk_usage_percent` > 90%
-- 写入开始 fail
-- 备份开始失败
+- Writes start failing
+- Backups start failing
 
 **Triage**:
-- 哪个表占空间最多? `SELECT pg_size_pretty(pg_total_relation_size(...))`
-- 是 retention policy 没跑还是真的增长太快?
-- 是 application bug (写入异常多)?
+- Which table takes the most space? `SELECT pg_size_pretty(pg_total_relation_size(...))`
+- Did the retention policy fail to run, or is growth genuinely too fast?
+- Is this an application bug (writing abnormally much)?
 
 **Mitigation**:
 
 ```bash
-# 短期:扩容
+# Short-term: scale up
 tars admin db expand --target 200GB
 
-# 立即清理 (如果 retention 没跑)
+# Immediate cleanup (if retention didn't run)
 tars admin db cleanup --apply-retention-policy
 
-# 紧急释放 (drop 旧 partition)
+# Emergency release (drop old partition)
 tars admin db drop-partition --before 2025-12-01
 ```
 
-### 5.12 部署回滚
+### 5.12 Deployment rollback
 
-**触发条件**:
-- 新版本部署后 P0/P1 incident
-- 错误率 / 延迟显著恶化
-- 关键 SLO 击穿
+**Trigger conditions**:
+- P0/P1 incident after a new version is deployed
+- Error rate / latency significantly worsened
+- Critical SLO breached
 
-**Step**:
+**Steps**:
 
 ```bash
-# 1. 立即 stop ongoing rollout (如果 canary)
+# 1. Immediately stop ongoing rollout (if canary)
 kubectl rollout pause deployment/tars-server
 
-# 2. 回滚到上一版
+# 2. Rollback to previous version
 kubectl rollout undo deployment/tars-server
 
-# 3. 验证回滚成功
+# 3. Verify rollback succeeded
 kubectl rollout status deployment/tars-server
 
-# 4. 验证 metric 恢复
-# 看 dashboard: error_rate / latency / saturation
+# 4. Verify metrics recover
+# Check dashboard: error_rate / latency / saturation
 
-# 5. 通知 incident channel
+# 5. Notify incident channel
 ```
 
 **Post-rollback**:
-- 不要立即重新部署"修复版"——先彻底分析
-- 在 staging 完整复现问题再尝试
-- 至少 24h 观察期再考虑下次部署
+- Don't immediately redeploy a "fixed" version — analyze thoroughly first
+- Fully reproduce the issue in staging before retrying
+- At least 24h observation period before considering the next deploy
 
 ---
 
-## 6. 例行运维操作
+## 6. Routine ops procedures
 
-### 6.1 租户 Provisioning
+### 6.1 Tenant provisioning
 
-详见 Doc 06 §8.1，操作步骤：
+See Doc 06 §8.1 for details. Procedure:
 
 ```bash
-# 1. 创建 tenant (走审批流程)
+# 1. Create tenant (go through approval flow)
 tars admin tenant create \
   --display-name "Acme Corp" \
   --owner-email admin@acme.com \
@@ -589,160 +589,160 @@ tars admin tenant create \
   --quota-tpm 100000 \
   --quota-daily-cost-usd 100
 
-# 2. 输出 tenant_id,记下
+# 2. Output tenant_id, record it
 
-# 3. 设置初始 secret (admin 自己操作,不让 tenant 知道)
+# 3. Set initial secret (admin does this themselves; tenant should not see it)
 tars admin secret set \
   --tenant <tenant_id> \
   --key "anthropic_api_key" \
   --from-vault "secret/data/customers/acme/anthropic"
 
-# 4. 验证 health
+# 4. Verify health
 tars admin tenant health --id <tenant_id>
 
-# 5. 给 tenant admin 发 onboarding 文档
+# 5. Send onboarding doc to tenant admin
 ```
 
-### 6.2 租户 Suspend
+### 6.2 Tenant suspend
 
 ```bash
-# 软 suspend (默认)
+# Soft suspend (default)
 tars admin tenant suspend \
   --id <tenant_id> \
   --reason "billing_overdue" \
   --notify-tenant true
 
-# 验证已生效
-tars admin tenant status --id <tenant_id>  # 应显示 "suspended"
+# Verify it's effective
+tars admin tenant status --id <tenant_id>  # should show "suspended"
 
-# 验证 in-flight 请求被排干
+# Verify in-flight requests have drained
 tars admin tenant tasks list --id <tenant_id> --status active
-# 应该 60s 内逐渐归零
+# Should gradually go to zero within 60s
 ```
 
-### 6.3 租户 Delete (GDPR)
+### 6.3 Tenant delete (GDPR)
 
-详见 Doc 06 §8.3,严格按 30 天延迟流程。**不允许跳过延迟期**。
+See Doc 06 §8.3. Strictly follow the 30-day delay procedure. **Skipping the delay period is not allowed.**
 
-### 6.4 配置热加载
+### 6.4 Hot config reload
 
 ```bash
-# 1. 准备新配置 (在 git PR 中 review)
+# 1. Prepare new config (review in a git PR)
 git checkout -b config-update-2026-05-02
 
-# 2. 编辑 /etc/tars/config.toml
+# 2. Edit /etc/tars/config.toml
 
 # 3. PR review + merge
 
-# 4. CI 自动触发 reload (或手动)
+# 4. CI auto-triggers reload (or manual)
 tars admin config reload
 
-# 5. 验证生效
+# 5. Verify in effect
 tars admin config show --diff-from-previous
 ```
 
-### 6.5 Secret Rotation
+### 6.5 Secret rotation
 
 ```bash
-# 1. 在 Vault 写入新 secret (新 path 或 new version)
+# 1. Write new secret to Vault (new path or new version)
 vault kv put secret/tars/openai/v2 api_key="sk-new..."
 
-# 2. 更新配置引用
-# 编辑 config:
+# 2. Update config reference
+# Edit config:
 #   auth = { source = "vault", path = "secret/data/tars/openai/v2" }
 
-# 3. 配置 reload
+# 3. Config reload
 tars admin config reload
 
-# 4. 监控 5-10 min,确认无 auth error
+# 4. Monitor for 5-10 min, confirm no auth errors
 
-# 5. revoke 旧 secret
+# 5. Revoke the old secret
 vault kv delete secret/tars/openai/v1
 ```
 
-### 6.6 Provider 配置变更
+### 6.6 Provider config changes
 
 ```bash
-# 添加新 provider
+# Add a new provider
 tars admin provider add \
   --id "groq_llama3" \
   --type "openai_compat" \
   --base-url "https://api.groq.com/openai/v1" \
   --auth-secret "secret/data/tars/groq"
 
-# 修改 routing policy (谨慎)
-# 通过 config reload (不是直接 admin API),保留 git 痕迹
+# Modify routing policy (carefully)
+# Via config reload (not direct admin API), to preserve git trail
 ```
 
 ---
 
-## 7. 例行健康检查
+## 7. Routine health checks
 
-### 7.1 每日 (自动化)
+### 7.1 Daily (automated)
 
-- [ ] Backup 完整性 (`pg_verify_backup` + S3 checksum)
-- [ ] 备份恢复演练 (在 staging,选 1 个 tenant 数据)
-- [ ] Cardinality metric 检查 (Doc 08 §5.5)
-- [ ] Provider quota 使用率
+- [ ] Backup integrity (`pg_verify_backup` + S3 checksum)
+- [ ] Backup-restore drill (in staging, restoring 1 tenant's data)
+- [ ] Cardinality metric checks (Doc 08 §5.5)
+- [ ] Provider quota usage
 - [ ] Disk usage trend
-- [ ] Compensation 失败累计 (应为 0)
-- [ ] 安全告警累计
+- [ ] Compensation failure tally (should be 0)
+- [ ] Security alert tally
 
-### 7.2 每周
+### 7.2 Weekly
 
-- [ ] 性能 baseline 对比 (Doc 11 §10)
-- [ ] Cost per tenant 异常检测
-- [ ] L3 cache 容量趋势
-- [ ] 死 trajectory 清理
-- [ ] CVE 扫描 (Doc 10 §14.1)
+- [ ] Performance baseline comparison (Doc 11 §10)
+- [ ] Cost-per-tenant anomaly detection
+- [ ] L3 cache capacity trend
+- [ ] Dead-trajectory cleanup
+- [ ] CVE scan (Doc 10 §14.1)
 - [ ] On-call handoff review
 
-### 7.3 每月
+### 7.3 Monthly
 
-- [ ] DR 演练 (从备份完整恢复一个 tenant)
-- [ ] Audit log 完整性抽查
-- [ ] 容量规划 review (Doc 11 §4)
-- [ ] Provider 账单对账 (与我们的 billing_events)
-- [ ] Tenant quota review (有无人长期超预算需要谈)
+- [ ] DR drill (full restore of one tenant from backup)
+- [ ] Audit log integrity spot-check
+- [ ] Capacity-planning review (Doc 11 §4)
+- [ ] Provider invoice reconciliation (against our billing_events)
+- [ ] Tenant quota review (anyone chronically over budget who needs a conversation)
 
-### 7.4 每季度
+### 7.4 Quarterly
 
-- [ ] 第三方 pentest (Doc 10 §16.3)
+- [ ] Third-party pentest (Doc 10 §16.3)
 - [ ] Red team exercise (Doc 10 §16.4)
-- [ ] Postgres VACUUM FULL (低峰期)
-- [ ] Long-term metric retention 审查
-- [ ] 供应链审查 (cargo audit + SBOM diff)
+- [ ] Postgres VACUUM FULL (low-traffic window)
+- [ ] Long-term metric retention review
+- [ ] Supply-chain review (cargo audit + SBOM diff)
 
-### 7.5 每年
+### 7.5 Annually
 
-- [ ] 完整 SOC2 / ISO27001 audit
-- [ ] DR 演练 (整个 region 失败模拟)
-- [ ] 主签名 key 轮换
-- [ ] 团队 incident response 演练 (game day)
+- [ ] Full SOC2 / ISO27001 audit
+- [ ] DR drill (whole-region failure simulation)
+- [ ] Master signing-key rotation
+- [ ] Team incident-response exercise (game day)
 
 ---
 
-## 8. 监控 Dashboard 速查
+## 8. Monitoring dashboard quick reference
 
-`<TBD: Grafana / Datadog 仪表盘 URL>`
+`<TBD: Grafana / Datadog dashboard URLs>`
 
-**核心 dashboard**:
-- **Service Overview**: 整体可用性 / 错误率 / 延迟 / QPS
-- **Per-Provider**: 每个 LLM provider 的健康度
-- **Per-Tenant**: 各租户的 spend / usage / SLO
+**Core dashboards**:
+- **Service Overview**: overall availability / error rate / latency / QPS
+- **Per-Provider**: each LLM provider's health
+- **Per-Tenant**: each tenant's spend / usage / SLO
 - **Cache Performance**: hit rate / latency / size
-- **Cost Tracking**: 实时 spend / projected monthly / cache savings
+- **Cost Tracking**: real-time spend / projected monthly / cache savings
 - **Subprocess Health**: pool size / spawn rate / kill rate
 - **Storage**: DB size / Redis usage / S3 growth
-- **Security**: auth failures / IAM denies / breach attempts (应为 0)
+- **Security**: auth failures / IAM denies / breach attempts (should be 0)
 
-每个 alert 在 ticket 里**必须** 链接到对应的 dashboard panel。
+Every alert in a ticket **must** link to the corresponding dashboard panel.
 
 ---
 
-## 9. 通信模板
+## 9. Communication templates
 
-### 9.1 Status Page 更新
+### 9.1 Status page updates
 
 **Investigating**:
 ```
@@ -772,7 +772,7 @@ We will publish a post-mortem within 5 business days.
 Updated: <time>
 ```
 
-### 9.2 Customer Notification (高接触客户)
+### 9.2 Customer notification (high-touch customers)
 
 ```
 Subject: [Action Required / FYI] Service Incident <INC-ID>
@@ -800,7 +800,7 @@ Apologies for the inconvenience.
 - <oncall lead> on behalf of TARS Operations
 ```
 
-### 9.3 Internal Incident Channel Updates (每 30 min)
+### 9.3 Internal incident-channel updates (every 30 min)
 
 ```
 [INC-1234] Status update <time>
@@ -812,214 +812,214 @@ Apologies for the inconvenience.
 
 ---
 
-## 10. 备份与恢复演练
+## 10. Backup and recovery drill
 
-### 10.1 备份清单
+### 10.1 Backup inventory
 
 ```
-Postgres: 每小时 incremental + 每日 full → S3 跨区
-Redis: RDB 每小时 → S3
-S3 ContentRef: cross-region replication 实时
-Secrets: Vault 自身备份 (Vault enterprise 内置)
-Audit log: 实时 mirror 到 SIEM (Splunk)
+Postgres: hourly incremental + daily full → cross-region S3
+Redis: RDB hourly → S3
+S3 ContentRef: real-time cross-region replication
+Secrets: Vault's own backup (built into Vault enterprise)
+Audit log: real-time mirror to SIEM (Splunk)
 ```
 
-### 10.2 恢复演练 (季度必做)
+### 10.2 Recovery drill (mandatory quarterly)
 
-**目标**: 验证从备份能恢复到指定时间点。
+**Goal**: verify we can restore from backup to a specified point in time.
 
-**步骤**:
+**Steps**:
 
 ```bash
-# 1. 在 isolated 环境准备
+# 1. Prepare an isolated environment
 make staging-clean
 
-# 2. 选择恢复时间点 (例如 7 天前)
+# 2. Pick a recovery point in time (e.g., 7 days ago)
 RESTORE_TIME="2026-04-25T10:00:00Z"
 
-# 3. 从 S3 拉备份
+# 3. Pull backup from S3
 aws s3 cp s3://tars-prod-backup/postgres/2026-04-25/full.dump ./
 
-# 4. 恢复 Postgres
+# 4. Restore Postgres
 pg_restore -h staging-db --create --dbname=postgres ./full.dump
 
-# 5. Apply WAL 到指定时间点 (point-in-time recovery)
-# (TBD: 详细命令依赖 RDS 设置)
+# 5. Apply WAL up to the specified point in time (point-in-time recovery)
+# (TBD: detailed command depends on RDS setup)
 
-# 6. 恢复 Redis (从 RDB)
+# 6. Restore Redis (from RDB)
 redis-cli -h staging-redis SHUTDOWN
 cp /backup/redis-2026-04-25.rdb /var/lib/redis/dump.rdb
 systemctl start redis
 
-# 7. 启动应用
+# 7. Start the application
 kubectl apply -f staging/
 
-# 8. 验证
+# 8. Verify
 tars admin verify --comprehensive
-# 应输出:
+# Should output:
 #   ✓ DB schema correct
 #   ✓ Tenant data accessible
 #   ✓ Cache hit rate > 0
 #   ✓ Sample task can run end-to-end
 
-# 9. 清理 staging
+# 9. Clean staging
 make staging-clean
 
-# 10. 记录:
-#   - 总耗时 (RTO 目标 4h)
-#   - 数据丢失窗口 (RPO 目标 1h)
-#   - 任何意外问题
+# 10. Record:
+#   - Total time taken (RTO target 4h)
+#   - Data loss window (RPO target 1h)
+#   - Any unexpected issues
 ```
 
 **Acceptance criteria**:
 - RTO < 4h
 - RPO < 1h
-- 无人工 hack (全自动化)
+- No manual hacks (fully automated)
 
 ---
 
-## 11. 紧急权限 (Break-glass)
+## 11. Emergency privileges (Break-glass)
 
-### 11.1 何时使用
+### 11.1 When to use
 
-- P0 incident 且常规 admin 不够
-- 生产环境直接操作
-- 例:手动改 DB / 直接调 provider API / 执行未审批的脚本
+- P0 incident and normal admin isn't enough
+- Direct production-environment operation
+- E.g., manually edit DB / direct provider-API call / run unapproved scripts
 
-### 11.2 流程
+### 11.2 Procedure
 
-详见 Doc 10 §15.3,实操步骤:
+See Doc 10 §15.3. Operational steps:
 
 ```bash
-# 1. Request emergency access (双人 approve)
+# 1. Request emergency access (two-person approve)
 tars admin emergency request \
   --justification "INC-1234: need to manually trigger compensation for traj X" \
   --duration 1h \
   --approver-needed 2
 
-# 2. 等审批 (PagerDuty 通知第二位 admin)
+# 2. Wait for approval (PagerDuty notifies the second admin)
 
-# 3. 拿到临时 token
+# 3. Receive a temporary token
 export TARS_EMERGENCY_TOKEN="..."
 
-# 4. 执行操作 (所有动作自动 audit)
+# 4. Execute operations (every action is auto-audited)
 tars admin <whatever-needed>
 
-# 5. token 自动 expire (默认 4h)
+# 5. Token auto-expires (default 4h)
 
-# 6. Post-incident: 写紧急权限使用报告 (季度 review)
+# 6. Post-incident: write an emergency-privilege usage report (quarterly review)
 ```
 
-### 11.3 滥用检测
+### 11.3 Abuse detection
 
-- 紧急权限使用频率监控,某人/某月 > 3 次需要谈话
-- 紧急权限+无对应 incident ticket = 严重违规
-- 季度 audit committee review 所有使用记录
+- Monitor emergency-privilege use frequency; > 3 times per person/month requires a conversation
+- Emergency privileges + no corresponding incident ticket = serious violation
+- Quarterly audit committee reviews all use records
 
 ---
 
-## 12. Vendor / Provider 沟通
+## 12. Vendor / Provider communication
 
-### 12.1 Provider Outage
+### 12.1 Provider outage
 
-如果 LLM provider 宕机超过 1h,我们应该:
-
-```
-1. 在 incident channel @ 客户成功 + 销售
-2. 向 provider 开 critical ticket
-3. 跟踪 provider 的 status page 更新
-4. 评估是否切到 backup provider 长期运行 (cost impact)
-5. 准备给客户的 SLA credit (如需)
-```
-
-### 12.2 Provider 配额耗尽
+If an LLM provider is down for more than 1h, we should:
 
 ```
-1. 立即向 provider 申请 quota 临时提升 (大账户通常 < 4h 响应)
-2. 启用 routing 偏向其他 provider
-3. 评估是否需要长期 quota 提升 (跟商务谈)
+1. @ customer success + sales in the incident channel
+2. Open a critical ticket with the provider
+3. Track provider's status page updates
+4. Evaluate whether to switch to a backup provider for long-term operation (cost impact)
+5. Prepare SLA credits for customers (if needed)
 ```
 
-### 12.3 上游 SDK / Library bug
-
-如果发现 reqwest / sqlx / pyo3 等关键库的 bug:
+### 12.2 Provider quota exhausted
 
 ```
-1. 在我们的 codebase 加临时 workaround
-2. 向上游 GitHub issue 报告 (附最小复现)
-3. 跟踪修复进度
-4. 修复后第一时间升级
+1. Immediately request a temporary quota increase from the provider (large accounts usually < 4h response)
+2. Enable routing bias toward other providers
+3. Evaluate whether a long-term quota increase is needed (talk with sales)
 ```
 
----
+### 12.3 Upstream SDK / library bug
 
-## 13. SLA / SLO 影响处理
-
-### 13.1 SLO 击穿决策
+If a bug is found in a critical library like reqwest / sqlx / pyo3:
 
 ```
-单次 incident 击穿 SLO:
-  → 评估 error budget 剩余
-  → 如果 budget > 50% → 继续按计划部署
-  → 如果 budget < 50% → 减缓部署节奏,优先稳定性 work
-  → 如果 budget < 0 → 部署冻结,所有 work 转向稳定性
-
-连续多次击穿 SLO:
-  → 上升到产品讨论
-  → 调整 SLO (如果不合理) 或调整产品策略
-```
-
-### 13.2 SLA 违约 (面向客户)
-
-如果触发 SLA 条款 (例如 99.5% 月度可用性):
-
-```
-1. 计算 credit (按合同条款)
-2. 主动通知客户 (不要被动)
-3. 写 post-mortem 给客户
-4. 客户成功跟进商务影响
+1. Add a temporary workaround in our codebase
+2. Report a GitHub issue upstream (with minimal repro)
+3. Track the fix's progress
+4. Upgrade as soon as the fix lands
 ```
 
 ---
 
-## 14. 例行变更管理
+## 13. SLA / SLO impact handling
 
-### 14.1 变更分级
+### 13.1 SLO breach decisions
 
-| 级别 | 例子 | 审批 |
+```
+A single incident breaches the SLO:
+  → Assess remaining error budget
+  → If budget > 50% → continue deploys as planned
+  → If budget < 50% → slow deploy cadence, prioritize stability work
+  → If budget < 0  → deploy freeze, all work shifts to stability
+
+Repeated SLO breaches:
+  → Escalate to product discussion
+  → Adjust SLO (if unreasonable) or adjust product strategy
+```
+
+### 13.2 SLA violation (customer-facing)
+
+If SLA terms are triggered (e.g., 99.5% monthly availability):
+
+```
+1. Compute credit (per contract terms)
+2. Proactively notify the customer (not passively)
+3. Write a post-mortem for the customer
+4. Customer success follows up on commercial impact
+```
+
+---
+
+## 14. Routine change management
+
+### 14.1 Change classification
+
+| Level | Examples | Approval |
 |---|---|---|
-| Standard | Docker image patch / log level 调整 | 自助 |
-| Normal | 新 provider 上线 / 新 routing rule | Lead approve |
-| Emergency | 修复 P0 的 hot fix | Director approve + post-fact review |
-| Significant | 数据库 schema 重大变更 / 架构调整 | CAB review |
+| Standard | Docker image patch / log level adjustment | Self-service |
+| Normal | New provider go-live / new routing rule | Lead approve |
+| Emergency | Hot fix for a P0 | Director approve + post-fact review |
+| Significant | Major DB schema change / architectural change | CAB review |
 
-### 14.2 变更窗口
+### 14.2 Change windows
 
-- 工作日 (Mon-Thu) 09:00-16:00 (本地时区)
-- 严禁周五下午 / 周末 / 节假日前后 (除非 P0)
-- 变更前 24h 在 #ops-changes 公告
+- Working days (Mon-Thu) 09:00-16:00 (local timezone)
+- Strictly forbidden Friday afternoon / weekends / right before/after holidays (unless P0)
+- Announce in #ops-changes 24h before the change
 
-### 14.3 Canary 部署
+### 14.3 Canary deployment
 
 ```
 1. Deploy to 1 canary instance (5% traffic)
-2. 观察 30 min: error_rate / latency / cost
-3. 任何指标恶化 → 立即 rollback
-4. 通过 → 25% → 50% → 100% (每档 30 min 观察)
-5. 完成后 24h 观察期
+2. Observe for 30 min: error_rate / latency / cost
+3. Any metric worsening → immediate rollback
+4. Pass → 25% → 50% → 100% (30 min observation per stage)
+5. After completion, 24h observation period
 ```
 
 ---
 
-## 15. Post-mortem 模板
+## 15. Post-mortem template
 
-P0/P1 必须在 incident 解决后 5 个工作日内完成。
+P0/P1 must complete within 5 business days after incident resolution.
 
 ```markdown
 # Post-Mortem: <Incident ID> - <Short Title>
 
 ## TL;DR
-<2 句话:发生了什么 + 影响>
+<Two sentences: what happened + impact>
 
 ## Severity & Timeline
 - Severity: P0 / P1 / ...
@@ -1035,18 +1035,18 @@ P0/P1 必须在 incident 解决后 5 个工作日内完成。
 - SLA impact: <calculation>
 
 ## Root Cause
-<完整解释 - 不只是 "what" 还要 "why" 和 "为什么没被 catch">
+<Full explanation — not just "what" but also "why" and "why it wasn't caught">
 
 ## Detection
-- 怎么发现的? (alert / customer report / random discovery)
-- 改进点: 怎么能更早发现?
+- How was it discovered? (alert / customer report / random discovery)
+- Improvements: how can we detect earlier?
 
 ## Response
-<时间线: t+0 / t+5 / t+15 ...>
-<什么决策正确? 什么走弯路了?>
+<Timeline: t+0 / t+5 / t+15 ...>
+<What decisions were correct? What was a detour?>
 
 ## Resolution
-<最终修复方案>
+<Final fix>
 
 ## What Went Well
 - ...
@@ -1055,7 +1055,7 @@ P0/P1 必须在 incident 解决后 5 个工作日内完成。
 - ...
 
 ## Lucky Factors
-<没有这些幸运因素会更糟的事>
+<Things that would have made it worse if not for these strokes of luck>
 
 ## Action Items
 | ID | Description | Owner | Priority | Due |
@@ -1064,7 +1064,7 @@ P0/P1 必须在 incident 解决后 5 个工作日内完成。
 | 2  | Refactor compensation handler | Bob | P2 | 2026-06-01 |
 
 ## Lessons Learned
-<给未来的人看的智慧总结>
+<Wisdom summary for future readers>
 
 ## Appendix
 - Incident channel link
@@ -1072,69 +1072,69 @@ P0/P1 必须在 incident 解决后 5 个工作日内完成。
 - Customer communications sent
 ```
 
-**复盘文化原则** (Blameless):
-- 关注**系统**和**流程**,不是个人
-- 不写 "X 应该更小心"——而是 "我们的工具应该让 X 不可能犯错"
-- 鼓励诚实,即使是自己的错误
-- Action items 必须有 owner + due date + 跟踪到完成
+**Post-mortem culture principles** (Blameless):
+- Focus on **systems** and **processes**, not individuals
+- Don't write "X should have been more careful" — write "our tooling should have made it impossible for X to make the mistake"
+- Encourage honesty, even about your own mistakes
+- Action items must have owner + due date + tracking to completion
 
 ---
 
-## 16. 反模式清单
+## 16. Anti-pattern checklist
 
-1. **不要在 incident 中"安静地处理"**——必须 open channel,即使你以为很快能解决。
-2. **不要跳过 mitigation 直接做 root cause analysis**——先止血。
-3. **不要在 P0 期间做大改动**——只做最小止血,大修复事后做。
-4. **不要忽略 post-mortem action items**——每周 review,长期未做要 escalate。
-5. **不要让一个人独自承担 P0**——开放 channel,其他人能 lurk 帮忙。
-6. **不要用紧急权限做"普通"事情**——它是 break-glass 不是日常工具。
-7. **不要在没演练过的情况下信任备份**——必须季度演练。
-8. **不要在 incident 期间隐瞒信息给客户**——透明 + 真诚比"完美故事"重要。
-9. **不要用错误的严重等级**——宁可 over-classify 然后降级,也不要 under-classify 漏响应。
-10. **不要修改 audit log 即使在 emergency**——append-only 的承诺不能破。
-11. **不要在 staging 验证不充分就推 production**——任何 hot fix 也要至少 smoke test。
-12. **不要让 on-call 一个人决定大变更**——单点失败,需要至少二人 approve。
-13. **不要忽略"小"告警的累积**——P3 告警频繁可能预示 P1 即将发生。
-14. **不要在 post-mortem 指责个人**——blameless 文化是组织韧性的基础。
-15. **不要让 runbook 过期**——每季度 review,outdated 的 playbook 比没有更危险。
-
----
-
-## 17. 与上下游的契约
-
-### 上游 (业务 / 客户) 承诺
-
-- 在 SLA 范围内提供服务 (可用性 / 延迟 / 数据完整性)
-- Incident 透明沟通
-- Post-mortem 适当脱敏后分享
-- SLA 违约时按合同提供 credit
-
-### 下游 (Provider / 基础设施) 依赖
-
-- LLM Provider: 公布 status page + 按 SLA 履约
-- Cloud Provider (AWS/GCP): 按 SLA 履约,DR 能力
-- Vault: 高可用,99.99%+
-- SIEM: 事件实时摄入
-
-### 团队内部
-
-- 工程团队: bug fix SLA,新功能完整 oncall handoff
-- 产品团队: 听取 SLO 数据指导优先级
-- 销售团队: SLA 谈判与 SRE 沟通能力规划
-- 法务团队: 合规事件第一时间介入
+1. **Do not "handle quietly" during an incident** — must open a channel even if you think you can solve it quickly.
+2. **Do not skip mitigation and go straight to root-cause analysis** — stop the bleeding first.
+3. **Do not make large changes during a P0** — make only the minimal stop-the-bleeding change; major fixes go after the fact.
+4. **Do not ignore post-mortem action items** — review weekly; long-overdue items must be escalated.
+5. **Do not let one person carry a P0 alone** — open the channel; others can lurk and help.
+6. **Do not use emergency privileges for "ordinary" things** — it's break-glass, not a daily tool.
+7. **Do not trust backups you haven't drilled** — quarterly drills are mandatory.
+8. **Do not hide information from customers during an incident** — transparency + honesty trumps a "perfect story".
+9. **Do not use the wrong severity** — better to over-classify and downgrade than under-classify and miss the response.
+10. **Do not modify the audit log even in an emergency** — append-only is a promise that cannot be broken.
+11. **Do not push to production with insufficient staging validation** — even hot fixes need at least a smoke test.
+12. **Do not let on-call decide major changes alone** — single point of failure; require at least two-person approval.
+13. **Do not ignore the accumulation of "small" alerts** — frequent P3 alerts may foreshadow an imminent P1.
+14. **Do not blame individuals in post-mortems** — blameless culture is the foundation of organizational resilience.
+15. **Do not let the runbook go stale** — quarterly review; an outdated playbook is more dangerous than none.
 
 ---
 
-## 18. 待办与开放问题
+## 17. Contracts with upstream and downstream
 
-- [ ] 实际命令填充 (`tars admin ...` 都是占位符,实施后替换)
-- [ ] Dashboard URL 填充 (Grafana 部署后)
-- [ ] PagerDuty / OpsGenie 集成配置
-- [ ] Status page 选型 (statuspage.io / 自建)
-- [ ] Game day 演练剧本 (季度)
-- [ ] Chaos engineering 集成 (Litmus / Chaos Mesh)
-- [ ] AI 辅助的 incident triage (LLM 看 alert + log 给假设)
-- [ ] Auto-remediation playbook (哪些可以无人工自动修)
+### Upstream (business / customer) commitments
+
+- Provide service within SLA (availability / latency / data integrity)
+- Transparent incident communication
+- Share post-mortems (appropriately redacted)
+- Provide credit per contract on SLA violation
+
+### Downstream (provider / infrastructure) dependencies
+
+- LLM Provider: publish status page + meet SLA
+- Cloud Provider (AWS/GCP): meet SLA, DR capability
+- Vault: high availability, 99.99%+
+- SIEM: real-time event ingestion
+
+### Internal teams
+
+- Engineering team: bug-fix SLA, full on-call handoff for new features
+- Product team: take in SLO data to guide priorities
+- Sales team: SLA negotiation coordinated with SRE capacity planning
+- Legal team: engage immediately on compliance events
+
+---
+
+## 18. TODOs and open questions
+
+- [ ] Fill in actual commands (`tars admin ...` are placeholders, replace post-implementation)
+- [ ] Fill in dashboard URLs (after Grafana is deployed)
+- [ ] PagerDuty / OpsGenie integration setup
+- [ ] Status page selection (statuspage.io / self-hosted)
+- [ ] Game day exercise scripts (quarterly)
+- [ ] Chaos engineering integration (Litmus / Chaos Mesh)
+- [ ] AI-assisted incident triage (LLM looks at alert + log and proposes hypotheses)
+- [ ] Auto-remediation playbook (which can be auto-fixed without humans)
 - [ ] Customer-visible incident metrics (status.tars.example.com)
-- [ ] 多语言客户沟通模板 (英 / 中 / 日 / 法 等)
-- [ ] On-call 培训材料与认证流程
+- [ ] Multi-language customer-communication templates (English / Chinese / Japanese / French / etc.)
+- [ ] On-call training material and certification process
