@@ -559,6 +559,7 @@ mod tests {
             seed: None,
             cache_directives: vec![],
             thinking: Default::default(),
+            enable_chat_template_thinking: None,
         };
         let s = serialize_messages_for_cli(&req);
         assert!(s.contains("[user]\nfirst user turn"));

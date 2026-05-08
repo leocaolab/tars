@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::chat::CompatibilityReason;
+use crate::ids::ProviderId;
+
 #[derive(Debug, Error)]
 pub enum ProviderError {
     /// Authentication / credentials problem.
@@ -59,6 +62,61 @@ pub enum ProviderError {
     #[error("subprocess died: exit={exit_code:?} stderr={stderr}")]
     CliSubprocessDied { exit_code: Option<i32>, stderr: String },
 
+    /// Model emitted a tool_use for a tool that isn't registered.
+    /// Surfaced by the Session auto-loop when it can't find a handler
+    /// for the model's chosen tool name. **Permanent class** — retrying
+    /// is futile because the model will keep emitting the same name;
+    /// the caller's ToolRegistry needs the missing tool added (or the
+    /// system prompt updated to stop suggesting it).
+    #[error("model called unknown tool: {name}")]
+    UnknownTool { name: String },
+
+    /// Routing layer exhausted its fallback chain because every
+    /// candidate was incompatible with the request's feature set
+    /// (tools / thinking / context / etc.) — see
+    /// [`crate::CompatibilityReason`]. Surfaced by `RoutingService`
+    /// when **no candidate was even contacted** (every one was
+    /// skipped via local capability check).
+    ///
+    /// **Permanent class** — retry won't help because the request
+    /// shape is fundamentally incompatible with every provider in
+    /// the chain. Caller needs to either (a) widen the candidate
+    /// list to include a provider with the missing capability, or
+    /// (b) modify the request to drop the unsupported feature.
+    ///
+    /// Each entry in `skipped` carries the candidate id + the
+    /// specific reasons that candidate was skipped, so callers (and
+    /// log aggregators) can branch / facet on the structured detail
+    /// rather than parse the message string.
+    #[error(
+        "no candidate could honour request capabilities; tried {} providers",
+        skipped.len()
+    )]
+    NoCompatibleCandidate {
+        skipped: Vec<(ProviderId, Vec<CompatibilityReason>)>,
+    },
+
+    /// `ValidationMiddleware` rejected the response from an
+    /// `OutputValidator::Reject` outcome. `validator` is the
+    /// `OutputValidator::name()` of the rejecter; `reason` is
+    /// the `Reject.reason` payload; `retriable` flips the error
+    /// class so [`RetryMiddleware`] either retries (Retriable) or
+    /// gives up (Permanent).
+    ///
+    /// **Why retriable matters**: validation rejections fall on a
+    /// spectrum. "Output is valid JSON but the model wandered off
+    /// topic" → retriable (sample again, model is non-deterministic).
+    /// "Output's structured-tag set has fields the rubric doesn't
+    /// allow" → permanent (no retry will help; caller's prompt or
+    /// rubric needs fixing). Validator implementation decides
+    /// per-rejection.
+    #[error("validation failed: {validator}: {reason}")]
+    ValidationFailed {
+        validator: String,
+        reason: String,
+        retriable: bool,
+    },
+
     /// Catch-all for adapter bugs. Should be rare.
     #[error("internal: {0}")]
     Internal(String),
@@ -82,8 +140,12 @@ impl ProviderError {
             RateLimited { .. } | ModelOverloaded | Network(_) | CircuitOpen { .. } => {
                 ErrorClass::Retriable
             }
+            ValidationFailed { retriable: true, .. } => ErrorClass::Retriable,
             Auth(_) | InvalidRequest(_) | ContextTooLong { .. }
-            | ContentFiltered { .. } | BudgetExceeded => ErrorClass::Permanent,
+            | ContentFiltered { .. } | BudgetExceeded
+            | UnknownTool { .. }
+            | NoCompatibleCandidate { .. }
+            | ValidationFailed { retriable: false, .. } => ErrorClass::Permanent,
             Parse(_) | Internal(_) | CliSubprocessDied { .. } => {
                 ErrorClass::MaybeRetriable
             }

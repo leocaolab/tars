@@ -226,11 +226,17 @@ impl AnthropicAdapter {
             // Anthropic's `system` is top-level, not a message role.
             // If a System message arrives here it's typically because
             // a caller serialized a transcript verbatim — flatten it
-            // into a user-role text block prefixed with "[system]".
-            Message::System { content } => json!({
-                "role": "user",
-                "content": Self::translate_content(content),
-            }),
+            // into a user-role text block prefixed with "[system]" so
+            // it isn't indistinguishable from a real user turn.
+            Message::System { content } => {
+                let mut blocks: Vec<Value> =
+                    content.iter().map(Self::translate_block).collect();
+                blocks.insert(0, json!({"type": "text", "text": "[system]"}));
+                json!({
+                    "role": "user",
+                    "content": Value::Array(blocks),
+                })
+            }
         }
     }
 
@@ -255,12 +261,17 @@ impl AnthropicAdapter {
                 last["cache_control"] = json!({"type": "ephemeral"});
             }
         }
-        // Add marker to the last block of the last user message
-        // (covers RAG context use cases).
+        // Add marker to the last block of the last *user* message
+        // (covers RAG context use cases). If the conversation ends on
+        // an assistant turn, attaching cache_control there would
+        // cache assistant output instead of user-supplied context,
+        // wasting the budget; walk back to the most recent user msg.
         if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-            if let Some(last_msg) = messages.last_mut() {
+            if let Some(last_user) = messages.iter_mut().rev().find(|m| {
+                m.get("role").and_then(|r| r.as_str()) == Some("user")
+            }) {
                 if let Some(blocks) =
-                    last_msg.get_mut("content").and_then(|c| c.as_array_mut())
+                    last_user.get_mut("content").and_then(|c| c.as_array_mut())
                 {
                     if let Some(last_block) = blocks.last_mut() {
                         last_block["cache_control"] = json!({"type": "ephemeral"});
@@ -291,7 +302,9 @@ impl HttpAdapter for AnthropicAdapter {
                 h.insert(
                     "x-api-key",
                     HeaderValue::from_str(k).map_err(|e| {
-                        ProviderError::Internal(format!("bad x-api-key header: {e}"))
+                        // Invalid header chars in the key are an auth-
+                        // credential problem, not a backend bug.
+                        ProviderError::Auth(format!("malformed x-api-key value: {e}"))
                     })?,
                 );
             }
@@ -310,9 +323,41 @@ impl HttpAdapter for AnthropicAdapter {
             .explicit()
             .ok_or_else(|| ProviderError::InvalidRequest("model must be explicit".into()))?;
 
+        if req.messages.is_empty() {
+            return Err(ProviderError::InvalidRequest(
+                "anthropic: messages array must contain at least one message".into(),
+            ));
+        }
+
+        // Anthropic rejects requests with duplicate tool names with a
+        // 400; surface a clear error before the round-trip.
+        let mut seen = std::collections::HashSet::new();
+        for t in &req.tools {
+            if !seen.insert(t.name.as_str()) {
+                return Err(ProviderError::InvalidRequest(format!(
+                    "anthropic: duplicate tool name `{}` in request",
+                    t.name
+                )));
+            }
+        }
+        // Reserved synthetic tool name used for structured-output
+        // emulation must not collide with a caller-supplied tool.
+        if req.structured_output.is_some()
+            && req.tools.iter().any(|t| t.name == STRUCTURED_OUTPUT_TOOL)
+        {
+            return Err(ProviderError::InvalidRequest(format!(
+                "anthropic: tool name `{STRUCTURED_OUTPUT_TOOL}` is reserved for structured-output emulation"
+            )));
+        }
+
         let messages: Vec<Value> = req.messages.iter().map(Self::translate_message).collect();
 
         let max_tokens = req.max_output_tokens.unwrap_or(4096);
+        if max_tokens == 0 {
+            return Err(ProviderError::InvalidRequest(
+                "anthropic: max_output_tokens must be > 0".into(),
+            ));
+        }
 
         let mut body = json!({
             "model": model,
@@ -367,6 +412,11 @@ impl HttpAdapter for AnthropicAdapter {
                 tars_types::ToolChoice::None => json!({"type": "none"}),
                 tars_types::ToolChoice::Required => json!({"type": "any"}),
                 tars_types::ToolChoice::Specific(name) => {
+                    if !req.tools.iter().any(|t| &t.name == name) {
+                        return Err(ProviderError::InvalidRequest(format!(
+                            "anthropic: tool_choice references unknown tool `{name}`"
+                        )));
+                    }
                     json!({"type": "tool", "name": name})
                 }
             };
@@ -516,14 +566,25 @@ impl HttpAdapter for AnthropicAdapter {
             }
             "content_block_stop" => {
                 let index = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                // Finalize any tool call at this index. If it wasn't a
-                // tool block, finalize returns an error which we ignore.
-                if let Ok((id, _name, parsed)) = buf.finalize(index) {
-                    out.push(ChatEvent::ToolCallEnd {
-                        index,
-                        id,
-                        parsed_args: parsed,
-                    });
+                // Finalize any tool call at this index. Non-tool
+                // content blocks (text / thinking) return an error
+                // here because they were never registered with the
+                // buffer; that's the expected path, log at trace.
+                match buf.finalize(index) {
+                    Ok((id, _name, parsed)) => {
+                        out.push(ChatEvent::ToolCallEnd {
+                            index,
+                            id,
+                            parsed_args: parsed,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::trace!(
+                            index,
+                            error = %e,
+                            "anthropic: content_block_stop finalize miss (likely text/thinking block)",
+                        );
+                    }
                 }
             }
             "message_delta" => {
@@ -538,11 +599,23 @@ impl HttpAdapter for AnthropicAdapter {
                         stop_reason: stop,
                         usage: parse_usage(&u),
                     });
+                    buf.mark_finished();
                 }
             }
-            "message_stop" => {
-                // Authoritative end. If no Finished was emitted yet
-                // (defensive), emit a synthetic one.
+            // Authoritative end. message_delta may have failed to emit
+            // Finished (missing stop_reason or usage in the delta
+            // payload, mid-stream provider quirk), which would leave
+            // consumers waiting forever. Emit a synthetic Finished as a
+            // last resort.
+            "message_stop" if !buf.finished_emitted() => {
+                tracing::warn!(
+                    "anthropic: message_stop without prior Finished; emitting synthetic terminator",
+                );
+                out.push(ChatEvent::Finished {
+                    stop_reason: StopReason::Other,
+                    usage: Usage::default(),
+                });
+                buf.mark_finished();
             }
             _ => {} // unknown events are tolerated
         }
@@ -616,6 +689,14 @@ fn parse_usage(u: &serde_json::Map<String, Value>) -> Usage {
         .get("cache_creation_input_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    // Anthropic doesn't currently break out thinking tokens in the
+    // usage block (they're folded into output_tokens) but probe a
+    // couple of likely spellings to future-proof.
+    let thinking = u
+        .get("thinking_tokens")
+        .or_else(|| u.get("output_thinking_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     Usage {
         input_tokens: api_input
             .saturating_add(cached)
@@ -623,7 +704,7 @@ fn parse_usage(u: &serde_json::Map<String, Value>) -> Usage {
         output_tokens: output,
         cached_input_tokens: cached,
         cache_creation_tokens: creation,
-        thinking_tokens: 0,
+        thinking_tokens: thinking,
     }
 }
 

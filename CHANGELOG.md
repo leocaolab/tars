@@ -19,6 +19,457 @@ is authoritative. This file aggregates.
 
 ---
 
+## M8 — Python bindings (`tars-py`) (in progress 2026-05-04)
+
+PyO3 + maturin-built wheel exposing tars to Python (and, via the
+same shape, future TS / Go bindings). First non-Rust consumer is
+ARC, migrating from a hand-rolled `LLMClient` + 80-line `Session`
+to `tars.Pipeline` + `tars.Session`. Long-term ARC goes full Rust
+but Python is a permanent first-class surface — design treats it as
+such, not as a throwaway scaffold.
+
+### Stage 1 — `from_str` + typed exceptions (`<unreleased>`)
+
+- **`Pipeline.from_str(toml, provider_id)` / `Provider.from_str`** —
+  inline TOML constructors, no tmpfile round-trip required for
+  tests / programmatic config. Backed by `ConfigManager::load_from_str`
+  which already existed in `tars-config`.
+- **Exception hierarchy** — `TarsError` (base) → `TarsConfigError` /
+  `TarsProviderError` / `TarsRuntimeError`. `TarsProviderError`
+  carries structured `kind` (`"rate_limited"`, `"auth"`, `"network"`,
+  `"unknown_tool"`, ...), `retry_after: float | None`,
+  `is_retriable: bool`, plus optional `tool_name` for the
+  `unknown_tool` variant. Caller branches without parsing message
+  strings. Mapping lives in `tars-py/src/errors.rs`.
+
+### Stage 2 — User-level config + builtins + `tars init` (`<unreleased>`)
+
+- **`~/.tars/config.toml` is the user-level default config path.**
+  Follows developer-tool convention (`~/.gitconfig`, `~/.cargo/`,
+  `~/.aws/`, `~/.claude/`) rather than XDG / `~/Library/Application
+  Support`. Same path on macOS / Linux / Windows. Implementation in
+  new `tars-config::paths::default_config_path()`. Python: `tars.
+  default_config_path()`.
+- **`Pipeline.from_default(provider_id)` / `Provider.from_default`** —
+  zero-arg config resolution. ARC + future tools call this and don't
+  need to know the path.
+- **Built-in provider merge at load time** — `ConfigManager::load_*`
+  now layers `built_in_provider_defaults()` under the user TOML.
+  Empty `[providers]` is no longer a validation error; users can
+  resolve `mlx` / `vllm` / `openai` / etc. by id with zero TOML.
+  `Config.user_provider_ids: HashSet<ProviderId>` captures the
+  pre-merge user-declared set so the CLI's implicit-pick logic
+  doesn't see "ambiguous (8 builtins)" when the user wrote one
+  provider — we filter to user-declared for that path.
+- **`vllm` builtin** added (was missing — `mlx` / `llamacpp` /
+  `openai` / `anthropic` / `gemini` / `claude_cli` / `gemini_cli`
+  were already there, vLLM was the lone gap given that ARC ran on
+  vLLM historically).
+- **`tars init` CLI** — bootstraps `~/.tars/config.toml` with a
+  starter template (LM Studio, MLX, vLLM commented; cloud providers
+  + auth-via-env-var commented). `--force` to overwrite, `--path`
+  to redirect (test fixtures).
+
+### Stage 3 — `Session` (multi-turn + tool loop + atomic rollback) (`<unreleased>`)
+
+Layer-2 stateful container above `Pipeline`. Drop-in compatible
+with ARC's existing `Session(client, system, max_history_chars)`
+shape; adds turn-aware trim and the tool-dispatch auto-loop ARC
+hadn't yet written.
+
+- **`tars-runtime::Session`** — `Session::new(pipeline, capabilities,
+  SessionOptions { system, budget, tools, default_max_output_tokens,
+  model })`. PyO3 wrap as `tars.Session`.
+- **`Turn`** holds the full message chain for one logical exchange:
+  leading user → 0..N (assistant tool_use → user tool_result) rounds
+  → final assistant text. `is_complete()` validates these
+  invariants at turn-close + on future deserialize. Mid-loop
+  incompleteness is valid in-flight state; `is_complete()` on a
+  mid-loop turn correctly returns false.
+- **Budget** — three modes. `Chars(usize)` (default, 400_000 ≈
+  100k tokens at 4:1 ratio, matches ARC's known-good default).
+  `Tokens { limit, tokenizer: Arc<dyn Tokenizer> }` (opt-in
+  precise). `ContextRatio(f32)` — sugar that reads
+  `capabilities.max_context_tokens × ratio` so the caller doesn't
+  have to pick a number.
+- **Trim runs exactly once per `send()` entry**, before any model
+  call. Drops oldest *whole* turns until under budget — never
+  splits a turn (would orphan a `tool_use` without its
+  `tool_result`, which Anthropic + OpenAI both 400 on at the wire).
+  Auto-loop continuations (multi-round tool use within one turn)
+  do NOT re-trim. Enforced by a release-mode `assert_eq!` on the
+  turn count delta — programmer-error class, kept in prod because
+  silent desync of `turns` is harder to diagnose than a panic.
+- **Atomic Turn rollback via Drop guard** — `TurnGuard` uses the
+  scoped commit-pattern: default Drop = rollback (`turns.truncate
+  (boundary)`); success path calls `guard.commit()` which
+  `mem::forget`s the guard. Catches `?` early-return, panic, and
+  tokio cancellation uniformly. Strictly safer than an
+  `armed: bool` flag because there's no way to forget a single
+  `armed = false` and silently keep a half-Turn.
+- **Auto tool loop** — when `ToolRegistry` is set, `send()`
+  dispatches tools and re-invokes the model until the model
+  returns a text-only reply. Parallel tool_calls are dispatched
+  in order and packaged into one user message with N
+  `tool_result` blocks (Anthropic's protocol requires all parallel
+  results in one message). Manual mode is reachable by leaving the
+  registry empty and consuming `Response.tool_calls` from caller
+  side.
+- **`UnknownTool { name }` ProviderError variant** — surfaced when
+  the model emits a `tool_use` for a tool not in the registry.
+  Class = `Permanent` (retrying is futile — model will keep
+  emitting the same name; caller's registry needs the tool added).
+  Python `kind = "unknown_tool"` + `e.tool_name` attribute lets
+  ARC render "did you forget to register tool X?".
+- **BudgetWarning de-dup** — first mid-turn over-budget emits a
+  `tracing::warn!` once; subsequent occurrences in the same
+  Session are counted silently. `Drop for Session` emits a summary
+  if count > 1. `reset()` / `fork()` clear the counter (logical
+  fresh start). No time-based rate-limit (agentic-loop firing
+  cadence is too irregular for time windows to mean anything).
+- **`fork()` / `reset()`** — fork is cheap-clone of conversation
+  state (messages, budget, tools registry); `reset()` clears
+  history but preserves system / model / budget / tools.
+- **`history_version: u64`** counter on Session, bumped on visible
+  history mutations (successful send, reset). NOT bumped on
+  rollback (truncating back to pre-send is observably
+  unchanged). NOT bumped during in-flight tool loops. Borrowed
+  from codex-rs's `ContextManager.history_version`. Useful for
+  cache invalidation and `(session_id, history_version)` log
+  correlation. `fork()` preserves the parent value so caches can
+  recognize shared prefixes.
+
+### Routing capability pre-flight check (B-31, `<unreleased>`)
+
+External code review (2026-05-05) found `RoutingService::call` was
+dispatching requests to fallback candidates **without checking
+capabilities**. Requests with tools / vision / thinking / oversized
+context against a non-supporting candidate would silently drop
+features or wire-400. Fixed by adding a local pre-flight check.
+
+Reviewed twice; second-pass review caught 5 design improvements
+(Vec<String>→typed enum, `#[non_exhaustive]`, context-window check,
+PyO3 expose, structured tracing fields) — all fixed before unreleased
+flips. Final shape:
+
+- **`tars_types::CompatibilityReason`** — typed enum with 6 variants
+  (`ToolUseUnsupported{tool_count}` / `StructuredOutputUnsupported` /
+  `ThinkingUnsupported{mode}` / `VisionUnsupported` /
+  `ContextWindowExceeded{estimated_prompt_tokens, max_context_tokens}` /
+  `MaxOutputTokensExceeded{requested, max}`). Each variant carries
+  structured fields for programmatic branching. `Display` impl gives
+  human-readable messages. `kind() -> &'static str` returns stable
+  snake_case tag for telemetry / metric labels (independent of enum
+  variant names which we may rename internally). Marked
+  `#[non_exhaustive]` so future variants (e.g. `MaybeWithCaveat`)
+  don't break SemVer.
+- **`tars_types::CompatibilityCheck`** — 2-state verdict
+  (`Compatible` / `Incompatible { reasons: Vec<CompatibilityReason> }`).
+  Also `#[non_exhaustive]`.
+- **`tars_types::ChatRequest::compatibility_check(&Capabilities)
+  -> CompatibilityCheck`** — aggregates ALL incompatibilities in one
+  pass (no early-exit on first failure, so caller sees the full list).
+  Includes context-window overflow check via `chars/4` heuristic
+  (partial fix for B-32 — full fix needs tokenizer / D-5 unfreeze).
+- **`RoutingService::call` integration** — candidates that fail the
+  check are skipped with structured `tracing::warn!` (fields:
+  `candidate_id`, `chain_position`, `chain_total`, `trace_id`,
+  `reason_kinds: Vec<&'static str>`) — log-aggregation friendly. When
+  *all* candidates are skipped, returns
+  `ProviderError::InvalidRequest("no candidate could honour request
+  capabilities; skipped: <id>: [<Display>]; …")` (Permanent class).
+- **Python surface (`tars-py`)**:
+  - `Pipeline.check_compatibility(model=..., user=..., tools=...,
+    max_output_tokens=..., ...)` — pre-flight from Python WITHOUT
+    making a model call. Lets ARC short-circuit to a different
+    provider before incurring a network round-trip.
+  - `CompatibilityResult` pyclass with `.is_compatible: bool`,
+    `.reasons: list[CompatibilityReason]`, `__bool__` ergonomic, and
+    informative `__repr__`.
+  - `CompatibilityReason` pyclass with `.kind: str`, `.message: str`,
+    `.detail: dict | None` (kind-specific structured fields).
+- **Test coverage**: 17 tests in `tars-types::chat::tests` (each
+  capability axis + multi-reason aggregation + boundary cases:
+  baseline-caps + zero-caps adversarial + Display rendering); 3
+  routing-level tests (skip-and-try-next / all-skipped /
+  pass-through-when-compatible); end-to-end Python smoke verifying
+  bool/repr/detail surface.
+- **Why 2-state not 3-state** (vs codex's `SafetyCheck`): per-candidate
+  check doesn't have global view. Routing layer aggregates skip
+  reasons across the chain and synthesizes the "no candidate works"
+  verdict — that's where global-permanent rejection belongs, not in
+  the per-candidate helper.
+
+### Lightweight `check_capabilities_for` config-time API (B-31 v3, `<unreleased>`)
+
+Third-pass review pointed out `check_compatibility(model, user, ...)`
+requires inventing a real prompt to query — wasteful for config-time
+"does this provider support tools at all?" sanity checks. Added a
+declarative companion API.
+
+- **`tars_types::CapabilityRequirements`** — declarative requirements
+  struct (`requires_tools` / `requires_vision` / `requires_thinking`
+  / `requires_structured_output` / `estimated_max_prompt_tokens` /
+  `estimated_max_output_tokens`). All fields default to "I don't
+  need this"; setting `estimated_max_*_tokens=0` disables that
+  check (caller doesn't yet know).
+- **`tars_types::Capabilities::check_requirements(&Requirements)
+  -> CompatibilityCheck`** — same `CompatibilityCheck` verdict as
+  `ChatRequest::compatibility_check`, so downstream branching code
+  is shared. Aggregates ALL incompatibilities (no early-exit).
+- **`tars-py::Pipeline.check_capabilities_for(requires_tools=False,
+  ...)`** — Python config-time API; no real prompt required.
+- **Use case (ARC role-init pattern)**:
+  ```python
+  for role, provider_id in role_to_provider.items():
+      p = tars.Pipeline.from_default(provider_id)
+      r = p.check_capabilities_for(
+          requires_tools=True,
+          requires_thinking=(role == "planner"),
+          estimated_max_output_tokens=8_000,
+      )
+      if not r:
+          log.fatal(f"role={role} can't satisfy: {[x.kind for x in r.reasons]}")
+          sys.exit(1)
+  ```
+  Avoids the "configure → fail at runtime → fall back" loop. Smoke
+  shows real misconfig (`qwen_coder_local` lacks thinking →
+  detected at startup, not after first request).
+- **Test coverage**: 5 unit tests (default-empty / tool-axis / full-set
+  aggregation / 0-means-skip / full-caps-passes-everything).
+
+### Typed `NoCompatibleCandidate` + `TarsRoutingExhaustedError` subclass (B-31 v4, `<unreleased>`)
+
+Fourth-pass review: routing-exhausted error currently arrives as a
+generic `TarsProviderError(kind="invalid_request")` with the skipped
+candidate list mashed into the message string. ARC would have to
+regex-parse the message to react. Replaced with end-to-end typed
+data + dedicated exception subclass.
+
+- **`tars_types::ProviderError::NoCompatibleCandidate { skipped:
+  Vec<(ProviderId, Vec<CompatibilityReason>)> }`** — new variant
+  carrying the typed skipped list. Class = `Permanent`. Display
+  message: `"no candidate could honour request capabilities; tried
+  N providers"`.
+- **`RoutingService::call`** — now returns this variant when all
+  candidates were skipped via capability pre-flight. Routing tests
+  updated to match on `NoCompatibleCandidate { skipped }` directly
+  rather than parsing strings.
+- **`tars-py::TarsRoutingExhaustedError`** — new Python exception
+  subclass: `TarsError → TarsProviderError → TarsRoutingExhaustedError`.
+  - Caller branch: `except TarsRoutingExhaustedError` for typed
+    access; `except TarsProviderError` for generic catch-all
+    (`isinstance` still matches due to subclass).
+  - Attribute `e.skipped_candidates: list[tuple[provider_id_str,
+    list[CompatibilityReason]]]` — re-uses the same
+    `CompatibilityReason` Python class as `Pipeline.check_compatibility`
+    so caller's reason-handling code is uniform.
+- **`provider_kind`** mapping adds `"no_compatible_candidate"` for
+  retry middleware telemetry / Python `e.kind` access.
+- **Why subclass not attribute**: `hasattr(e, "skipped_candidates")`
+  on generic TarsProviderError adds a check noise + tempts callers
+  to forget. Subclass + `isinstance` is idiomatic Python.
+
+### Typed `CapabilityRequirements` pyclass (B-31 v5, `<unreleased>`)
+
+Fifth-pass review: `Pipeline.check_capabilities_for(**kwargs)`'s
+loose-kwargs API was as-untyped-as-Any. Field name typo
+(`requires_struuctured_output=True`) silently accepted by `**unpack`,
+surfacing as a runtime "unexpected keyword argument" far from the
+typo site. ARC was about to mirror the field set as a local
+dataclass, which works but creates drift risk on tars upgrades.
+
+Shipped: typed pyclass as the single source of truth.
+
+- **`tars.CapabilityRequirements`** — frozen pyclass with the same
+  axes as `tars_types::CapabilityRequirements` (Rust). Construction
+  via kwargs, fields enforced (typo → `TypeError` at construction
+  call site, not deep in `Pipeline.complete`).
+- **Methods**: `is_empty()` for the factory pattern (skip pre-flight
+  if no axes set), `to_kwargs()` for incremental adoption (build
+  typed, pass via existing kwargs API), `__eq__` + `__hash__` for
+  `dict[CapabilityRequirements, role]` and set-member patterns,
+  `__repr__` for debugging.
+- **`Pipeline.check_capabilities(requirements)`** — new typed-input
+  variant of `check_capabilities_for(**kwargs)`. Same
+  `CompatibilityResult` return; chooses based on caller's source
+  of truth (mid-call quick check vs role-init mapping table).
+- **Both APIs preserved** — kwargs form `check_capabilities_for`
+  remains for one-off inline use; typed `check_capabilities` is
+  the recommended shape for `dict[role, requirements]` factories.
+- **Single source of truth**: when tars adds a new capability axis,
+  pyclass picks it up automatically on next wheel build. Consumers
+  importing `tars.CapabilityRequirements` get the new field
+  without touching their code; consumers mirroring locally would
+  silently miss it.
+- **Pattern reference (ARC role-init)**:
+  ```python
+  from tars import CapabilityRequirements, Pipeline
+  ROLE_REQUIREMENTS: dict[str, CapabilityRequirements] = {
+      "critic":  CapabilityRequirements(requires_tools=True),
+      "planner": CapabilityRequirements(requires_thinking=True),
+      "agent":   CapabilityRequirements(),  # no specific reqs
+  }
+  for role, reqs in ROLE_REQUIREMENTS.items():
+      if reqs.is_empty():
+          continue
+      p = Pipeline.from_default(provider_for_role[role])
+      r = p.check_capabilities(reqs)
+      if not r:
+          log.fatal(f"{role} unsupported", missing=[x.kind for x in r.reasons])
+          sys.exit(1)
+  ```
+
+### B-20 Wave 1 — Rust-only Validator framework (`<unreleased>`)
+
+Implements [Doc 15 — Output Validation](./docs/15-output-validation.md)
+Wave 1 (Rust side; PyO3 binding lands in W2). After-call validators
+run between Retry and Provider; rejections surface as
+`ProviderError::ValidationFailed` and bubble through normal
+ErrorClass machinery.
+
+- **`tars_types::ValidationOutcome`** — 4-variant enum
+  (`Pass` / `Filter { response, dropped }` / `Reject { reason,
+  retriable }` / `Annotate { metrics }`), `#[non_exhaustive]`.
+- **`tars_types::ValidationSummary` + `OutcomeSummary`** —
+  per-call aggregated record. Reject doesn't appear in summary
+  (call returned Err, no Response to attach to).
+- **`tars_types::ProviderError::ValidationFailed { validator,
+  reason, retriable }`** — new variant. `retriable=true` →
+  `ErrorClass::Retriable` (RetryMiddleware retries naturally);
+  `retriable=false` → `Permanent`.
+- **`tars_types::SharedValidationOutcome`** — Arc<Mutex<...>>
+  side-channel on `RequestContext.validation_outcome`. Mirrors
+  Stage 4's SharedTelemetry pattern. ValidationMiddleware writes
+  the summary + post-Filter ChatResponse here; caller reads
+  after stream drain. Avoids polluting the ChatEvent enum with
+  end-of-stream metadata variants.
+- **`tars_pipeline::OutputValidator` trait** — pure-function
+  contract (`fn validate(req, resp) -> ValidationOutcome`).
+  Document at trait level: deterministic, no IO, no side
+  effects. Validators that need IO go to evaluator framework
+  (Doc 16 / W3) where async + non-determinism are first-class.
+- **`tars_pipeline::ValidationMiddleware`** — wraps inner stream:
+  drains, runs validators in order, re-emits.
+  - Empty validator list → pass-through, no drain.
+  - Filter chains (each validator sees prior Filter's output).
+  - Reject short-circuits (subsequent validators don't run).
+  - Annotate accumulates metrics in summary, response unchanged.
+  - Layer name "validation" appended to `RequestContext.telemetry.
+    layers`.
+- **3 built-in validators**:
+  - `JsonShapeValidator` — `serde_json::from_str` parse check.
+    Default `retriable=true` (model non-determinism); override
+    via `with_retriable(false)` for permanent-shape rejections.
+  - `NotEmptyValidator` — guards against empty responses (safety
+    filter trips, token cutoff, abort). Field selectable
+    (`Text` / `Thinking`).
+  - `MaxLengthValidator` — defends against runaway generation /
+    prompt injection. Two modes: `Reject` or `Truncate` (Filter
+    in-place, drops tail with audit-list entry).
+- **17 unit tests in `tars-pipeline::validation::tests`**: each
+  built-in validator's Pass/Reject/Filter outcomes; middleware
+  behaviour for chain-order + Filter chaining + Reject
+  short-circuit + Annotate accumulation + empty-chain
+  passthrough + layer trace.
+
+**Known caveat**: ValidationMiddleware sits between Retry and
+Provider per Doc 15 §2 (so retriable rejections retry through
+RetryMiddleware). With Cache positioned outside Retry, cache
+hits short-circuit before reaching Validation — validators
+**do not rerun on cache hit** in this layout. The "cache stores
+raw, hit reruns validator" design from earlier brainstorm
+requires reordering layers (Validation outside Cache); deferred
+to a follow-up after real multi-caller-cache trigger appears.
+Single-caller / single-validator-chain configurations (ARC's
+current shape) work correctly.
+
+### Output-Validation × Cache interaction rule (locked, B-20 W1 implementation)
+
+Decision documented for B-20 Wave 1 implementation:
+**cache stores raw (pre-validation) Response. Cache hit ALWAYS
+reruns validators on cached payload.** Validators are pure
+(same input → same output per Doc 15 §3.1 trait contract), so
+re-running on cache hit is local CPU only — far cheaper than a
+wire round-trip. Multi-caller sharing the same cache works
+correctly because each caller's validator chain operates on raw
+output.
+
+**Validator failure does NOT bypass cache** — failed-validator
+runs leave the raw response in cache. Repeated cache hits
+deterministically fail validation (validator is pure). Caller
+who wants force-fresh on validation fail uses an explicit
+`skip_cache=True` kwarg (future). Eliminates cache-poisoning
+worry while keeping the trait contract clean.
+
+### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
+
+B-15 in TODO. Adds a `.telemetry` field on every `Response` carrying
+the operational data callers need for log aggregation, without
+forcing them through tracing-subscriber installation gymnastics.
+
+- **New types in `tars-types`**: `TelemetryAccumulator` (cache_hit /
+  retry_count / retry_attempts / provider_latency_ms /
+  pipeline_total_ms / layers), `RetryAttempt` (error_kind,
+  retry_after_ms), `SharedTelemetry = Arc<Mutex<...>>` alias,
+  `new_shared_telemetry()` factory.
+- **`RequestContext.telemetry: SharedTelemetry`** — every middleware
+  along the chain holds an Arc clone, writes its observation through
+  the Mutex. Caller pre-creates the handle, keeps an Arc clone
+  outside the chain, reads it back after stream drain.
+- **Middleware writers**:
+  - `TelemetryMiddleware` (outermost): pushes layer name "telemetry";
+    stream-end finalize sets `pipeline_total_ms` (success and
+    error paths both stamp).
+  - `CacheLookupMiddleware`: pushes "cache_lookup"; on hit sets
+    `cache_hit=true`. Distinct from `Usage.cached_input_tokens`
+    (which is the *provider's* prompt cache) — this field is "we
+    avoided the provider call entirely".
+  - `RetryMiddleware`: pushes "retry"; per failed-and-retried attempt
+    appends a `RetryAttempt { error_kind, retry_after_ms }` and
+    bumps `retry_count`. Final-attempt failures don't append (they
+    return Err to the caller, no retry).
+  - `ProviderService` (innermost): pushes "provider"; wraps stream
+    to time HTTP+SSE wall; accumulates into `provider_latency_ms`
+    so multi-attempt retry totals reflect total provider time.
+- **Python surface** (`tars-py`):
+  - `Response.telemetry: Telemetry` — frozen pyclass with all fields.
+  - `Telemetry.retry_attempts: list[RetryAttempt]` — `RetryAttempt`
+    has `kind: str` (snake-case matching `TarsProviderError.kind`)
+    and `retry_after_ms: int | None`.
+  - `Session.send` returns `(ChatResponse, TelemetryAccumulator)`
+    internally; tars-py's `Session.send` packages both into
+    `Response` so callers see telemetry on Session calls too.
+    Telemetry across the auto-loop's multiple model calls is
+    aggregated under one shared handle (one `Telemetry` per
+    `send`, not per model call).
+- **Smoke verified**: layers populate outermost-first
+  (`['telemetry', 'cache_lookup', 'retry', 'provider']`);
+  `provider_latency_ms ≤ pipeline_total_ms`; Session integration
+  works; failure paths surface via `TarsProviderError` (no Response
+  to attach telemetry — by design).
+
+### `response_schema` kwarg — constrained decoding (`<unreleased>`)
+
+`Pipeline.complete()` / `Provider.complete()` accept
+`response_schema=<dict>` triggering provider-side constrained
+decoding. Cuts JSON-malformed-output failures at the source
+rather than papering over them with lenient parsers (jsonrepair
+etc. — explicitly NOT adopted; codex follows the same path).
+
+- Adapter wiring already existed in tars-provider — OpenAI →
+  `response_format={type:"json_schema",strict:true}`, Anthropic →
+  forced tool_use emulation, Gemini → `response_schema`. Stage-1-of-
+  Doc-tier 1 work was just exposing the kwarg in the Python entry.
+- `ChatRequest::structured_output: Option<JsonSchema>` is the
+  already-existing field; tars-py converts the Python dict via
+  JSON round-trip and wraps in `JsonSchema::strict("Response", v)`.
+- Smoke (LM Studio + Qwen3-Coder-30B): 3/3 valid JSON with schema,
+  0/3 directly parseable without (model wraps in ` ```json...``` `
+  markdown by default).
+
+---
+
 ## M3 — Agent Runtime (DONE 2026-05-03)
 
 Doc 14 §9 deliverable. **Fully done.** Storage primitive, runtime

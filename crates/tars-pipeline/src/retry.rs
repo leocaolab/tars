@@ -116,6 +116,10 @@ impl LlmService for RetryService {
         let cfg = &self.config;
         let mut backoff = cfg.initial_backoff;
         let mut attempt: u32 = 0;
+        // Record this layer in the telemetry trace.
+        if let Ok(mut t) = ctx.telemetry.lock() {
+            t.layers.push("retry".into());
+        }
         loop {
             attempt += 1;
             // Honour cancellation between attempts (the very first try
@@ -161,6 +165,20 @@ impl LlmService for RetryService {
                 "retry: backing off",
             );
 
+            // Telemetry: record this failed attempt before we sleep.
+            // `retry_count` increments AFTER the wait commits — so it
+            // tracks "attempts retried", which is the natural caller
+            // intuition (if the next attempt also fails terminally,
+            // retry_count still reflects the count of *retries that
+            // happened* before the final failure).
+            if let Ok(mut t) = ctx.telemetry.lock() {
+                t.retry_count = t.retry_count.saturating_add(1);
+                t.retry_attempts.push(tars_types::RetryAttempt {
+                    error_kind: provider_error_kind(&err).into(),
+                    retry_after_ms: Some(wait.as_millis() as u64),
+                });
+            }
+
             // Cancel-aware sleep.
             tokio::select! {
                 biased;
@@ -175,6 +193,30 @@ impl LlmService for RetryService {
             // Exponential backoff for the next attempt — never above max.
             backoff = (backoff.mul_f64(cfg.multiplier)).min(cfg.max_backoff);
         }
+    }
+}
+
+/// Snake-case kind tag matching `tars-py`'s `TarsProviderError.kind`
+/// scheme so the telemetry kind strings are consistent across all the
+/// surfaces (Rust logs, Python catch blocks, telemetry attributes).
+fn provider_error_kind(err: &ProviderError) -> &'static str {
+    use ProviderError::*;
+    match err {
+        Auth(_) => "auth",
+        RateLimited { .. } => "rate_limited",
+        BudgetExceeded => "budget_exceeded",
+        InvalidRequest(_) => "invalid_request",
+        ContentFiltered { .. } => "content_filtered",
+        ContextTooLong { .. } => "context_too_long",
+        ModelOverloaded => "model_overloaded",
+        CircuitOpen { .. } => "circuit_open",
+        Network(_) => "network",
+        Parse(_) => "parse",
+        CliSubprocessDied { .. } => "cli_subprocess_died",
+        UnknownTool { .. } => "unknown_tool",
+        NoCompatibleCandidate { .. } => "no_compatible_candidate",
+        ValidationFailed { .. } => "validation_failed",
+        Internal(_) => "internal",
     }
 }
 

@@ -25,6 +25,8 @@ tars-config = { path = "../tars-config" }
 tars-provider = { path = "../tars-provider" }
 tars-pipeline = { path = "../tars-pipeline" }
 tars-cache = { path = "../tars-cache" }
+tars-runtime = { path = "../tars-runtime" }
+serde_json.workspace = true
 
 # Async — process-wide tokio runtime owned by tars-py for blocking
 # Python `complete()` calls onto async LlmService.call.

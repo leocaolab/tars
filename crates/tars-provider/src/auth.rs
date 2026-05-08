@@ -11,9 +11,16 @@
 //! Provider layer is self-contained.
 
 use std::sync::Arc;
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use thiserror::Error;
+
+/// Hard cap on credential payload size (env var or file). 64 KiB is far
+/// larger than any real API key / OAuth token, but small enough that a
+/// misconfigured `/dev/zero` or runaway file can't OOM the process.
+const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 
 pub use tars_types::Auth;
 use tars_types::{ProviderError, RequestContext, SecretRef};
@@ -103,23 +110,45 @@ impl AuthResolver for BasicAuthResolver {
                     // a config review. Suppress in test builds where
                     // it's the expected path.
                     #[cfg(not(test))]
-                    tracing::warn!(
-                        "auth: resolving SecretRef::Inline credential — intended for test/dev use only; \
-                         use SecretRef::Env or SecretRef::File in production",
-                    );
-                    Ok(ResolvedAuth::ApiKey(value.expose().to_string()))
+                    {
+                        static WARNED: AtomicBool = AtomicBool::new(false);
+                        if WARNED
+                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            tracing::warn!(
+                                "auth: resolving SecretRef::Inline credential — intended for test/dev use only; \
+                                 use SecretRef::Env or SecretRef::File in production",
+                            );
+                        }
+                    }
+                    let raw = value.expose();
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        return Err(AuthError::Missing(
+                            "inline credential is empty".into(),
+                        ));
+                    }
+                    Ok(ResolvedAuth::ApiKey(trimmed.to_string()))
                 }
                 SecretRef::Env { var } => match std::env::var(var) {
                     Ok(v) => {
+                        if v.len() > MAX_CREDENTIAL_BYTES {
+                            return Err(AuthError::Internal(format!(
+                                "env var `{var}` exceeds credential size cap ({} bytes > {MAX_CREDENTIAL_BYTES})",
+                                v.len()
+                            )));
+                        }
                         // An empty / whitespace-only env var produces
                         // mysterious 401s downstream — surface it as a
                         // missing credential here.
-                        if v.trim().is_empty() {
+                        let trimmed = v.trim();
+                        if trimmed.is_empty() {
                             return Err(AuthError::Missing(format!(
                                 "env var `{var}` is set but empty"
                             )));
                         }
-                        Ok(ResolvedAuth::ApiKey(v))
+                        Ok(ResolvedAuth::ApiKey(trimmed.to_string()))
                     }
                     // Audit `tars-provider-src-auth-1`: VarError has
                     // two distinct cases — surfacing them separately
@@ -134,17 +163,39 @@ impl AuthResolver for BasicAuthResolver {
                     )),
                 },
                 SecretRef::File { path } => {
-                    let raw = std::fs::read_to_string(path).map_err(|e| {
+                    // Cap the read size: a misconfigured path pointing
+                    // at /dev/zero or a multi-GB file must not OOM the
+                    // process. Read up to MAX+1 bytes; if we hit the
+                    // limit, reject the file.
+                    use tokio::io::AsyncReadExt;
+                    let mut file = tokio::fs::File::open(path).await.map_err(|e| {
+                        AuthError::Io(format!("opening {}: {e}", path.display()))
+                    })?;
+                    let mut buf = Vec::with_capacity(256);
+                    let mut limited = (&mut file).take((MAX_CREDENTIAL_BYTES as u64) + 1);
+                    limited.read_to_end(&mut buf).await.map_err(|e| {
                         AuthError::Io(format!("reading {}: {e}", path.display()))
                     })?;
-                    let trimmed = raw.trim_end_matches(['\n', '\r']).to_string();
-                    if trimmed.trim().is_empty() {
+                    if buf.len() > MAX_CREDENTIAL_BYTES {
+                        return Err(AuthError::Internal(format!(
+                            "credential file `{}` exceeds size cap ({MAX_CREDENTIAL_BYTES} bytes)",
+                            path.display()
+                        )));
+                    }
+                    let raw = String::from_utf8(buf).map_err(|e| {
+                        AuthError::Internal(format!(
+                            "credential file `{}` is not valid UTF-8: {e}",
+                            path.display()
+                        ))
+                    })?;
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
                         return Err(AuthError::Missing(format!(
                             "credential file `{}` is empty",
                             path.display()
                         )));
                     }
-                    Ok(ResolvedAuth::ApiKey(trimmed))
+                    Ok(ResolvedAuth::ApiKey(trimmed.to_string()))
                 }
             },
         }
@@ -235,6 +286,102 @@ mod tests {
             ResolvedAuth::ApiKey(k) => assert_eq!(k, "secret-from-file"),
             _ => panic!("expected ApiKey"),
         }
-        std::fs::remove_file(&path).ok();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn file_strips_surrounding_whitespace() {
+        // Audit `tars-provider-src-auth-7`: a file like "  secret  \n"
+        // must not leak whitespace into the API key.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "tars-auth-ws-test-{}-{}",
+            std::process::id(),
+            "ws"
+        ));
+        std::fs::write(&path, "  secret-key  \n").unwrap();
+        let r = BasicAuthResolver;
+        let v = r
+            .resolve(&Auth::file(&path), &RequestContext::test_default())
+            .await
+            .unwrap();
+        match v {
+            ResolvedAuth::ApiKey(k) => assert_eq!(k, "secret-key"),
+            _ => panic!("expected ApiKey"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn file_empty_returns_missing() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("tars-auth-empty-{}", std::process::id()));
+        std::fs::write(&path, "   \n\r\n").unwrap();
+        let r = BasicAuthResolver;
+        let err = r
+            .resolve(&Auth::file(&path), &RequestContext::test_default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Missing(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn file_missing_returns_io_error() {
+        let path = std::env::temp_dir().join(format!(
+            "tars-auth-missing-{}-{}",
+            std::process::id(),
+            "nope"
+        ));
+        // Make sure it isn't there.
+        let _ = std::fs::remove_file(&path);
+        let r = BasicAuthResolver;
+        let err = r
+            .resolve(&Auth::file(&path), &RequestContext::test_default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Io(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn file_oversized_returns_internal() {
+        // Audit `tars-provider-src-auth-8`: a credential file larger
+        // than the cap must be rejected, not loaded into memory.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("tars-auth-big-{}", std::process::id()));
+        let big = vec![b'a'; 64 * 1024 + 16];
+        std::fs::write(&path, &big).unwrap();
+        let r = BasicAuthResolver;
+        let err = r
+            .resolve(&Auth::file(&path), &RequestContext::test_default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Internal(_)), "got {err:?}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn inline_empty_returns_missing() {
+        // Audit `tars-provider-src-auth-5`: an empty inline credential
+        // must be rejected at resolution time, not produce a 401 later.
+        let r = BasicAuthResolver;
+        let err = r
+            .resolve(&Auth::inline("   "), &RequestContext::test_default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Missing(_)));
+    }
+
+    #[tokio::test]
+    async fn inline_strips_surrounding_whitespace() {
+        let r = BasicAuthResolver;
+        let v = r
+            .resolve(&Auth::inline("  sk-x  "), &RequestContext::test_default())
+            .await
+            .unwrap();
+        match v {
+            ResolvedAuth::ApiKey(k) => assert_eq!(k, "sk-x"),
+            _ => panic!("expected ApiKey"),
+        }
     }
 }

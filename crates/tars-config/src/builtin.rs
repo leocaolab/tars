@@ -33,6 +33,7 @@ pub fn built_in_provider_defaults() -> HashMap<ProviderId, ProviderConfig> {
         (ProviderId::new("gemini_cli"), default_gemini_cli()),
         (ProviderId::new("mlx"), default_mlx()),
         (ProviderId::new("llamacpp"), default_llamacpp()),
+        (ProviderId::new("vllm"), default_vllm()),
     ]
     .into_iter()
     .collect()
@@ -108,6 +109,22 @@ pub fn default_mlx() -> ProviderConfig {
         auth: Auth::None,
         default_model: "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit".into(),
         extras: HttpProviderExtras::default(),
+        capabilities: Default::default(),
+    }
+}
+
+/// Default vLLM: `localhost:8000`, no auth, a 32B coder. vLLM ships an
+/// OpenAI-compatible server, but the dedicated `Vllm` variant lets us
+/// distinguish "running on a vLLM cluster" from generic openai-compat
+/// in logs / capability defaults. Override `default_model` to match
+/// whatever you served with `--model`.
+pub fn default_vllm() -> ProviderConfig {
+    ProviderConfig::Vllm {
+        base_url: None,
+        auth: Auth::None,
+        default_model: "Qwen/Qwen2.5-Coder-32B-Instruct".into(),
+        extras: HttpProviderExtras::default(),
+        capabilities: Default::default(),
     }
 }
 
@@ -120,6 +137,7 @@ pub fn default_llamacpp() -> ProviderConfig {
         auth: Auth::None,
         default_model: "Qwen2.5-Coder-7B-Q5_K_M".into(),
         extras: HttpProviderExtras::default(),
+        capabilities: Default::default(),
     }
 }
 
@@ -231,13 +249,15 @@ mod tests {
                 auth: Auth::None,
                 default_model: "Qwen/Qwen2.5-Coder-32B-Instruct".into(),
                 extras: HttpProviderExtras::default(),
+                capabilities: Default::default(),
             },
         )]
         .into_iter()
         .collect();
         let merged = merge_builtin_with_user(user);
-        // 7 built-ins + 1 new
-        assert_eq!(merged.len(), 8);
+        // 8 built-ins (openai, anthropic, gemini, claude_cli, gemini_cli,
+        // mlx, llamacpp, vllm) + 1 user-added.
+        assert_eq!(merged.len(), 9);
         assert!(merged.contains_key(&ProviderId::new("local_qwen")));
     }
 

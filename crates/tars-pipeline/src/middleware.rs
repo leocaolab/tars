@@ -194,7 +194,9 @@ mod tests {
             )
             .await
             .unwrap();
-        while s.next().await.is_some() {}
+        while let Some(ev) = s.next().await {
+            ev.unwrap();
+        }
 
         let trace = ctx
             .attributes

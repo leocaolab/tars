@@ -33,3 +33,4 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "te
 serde_json.workspace = true
 wiremock.workspace = true
 tars-config = { path = "../tars-config" }
+tracing-subscriber.workspace = true

@@ -149,10 +149,18 @@ fn build_one(
             auth,
             default_model: _,
             extras,
-        } => OpenAiProviderBuilder::new(id, auth.clone())
-            .base_url(base_url.clone())
-            .extras(extras.clone())
-            .build(http, auth_resolver),
+            capabilities,
+        } => {
+            let mut builder = OpenAiProviderBuilder::new(id, auth.clone())
+                .base_url(base_url.clone())
+                .extras(extras.clone());
+            if !capabilities.is_empty() {
+                let mut caps = crate::backends::openai::default_openai_capabilities();
+                capabilities.apply_to(&mut caps);
+                builder = builder.capabilities(caps);
+            }
+            builder.build(http, auth_resolver)
+        }
 
         ProviderConfig::Anthropic {
             base_url,
@@ -191,11 +199,13 @@ fn build_one(
             auth,
             default_model: _,
             extras,
+            capabilities,
         } => vllm(
             id,
             base_url.clone(),
             auth.clone(),
             extras.clone(),
+            capabilities.clone(),
             http,
             auth_resolver,
         ),
@@ -205,11 +215,13 @@ fn build_one(
             auth,
             default_model: _,
             extras,
+            capabilities,
         } => mlx(
             id,
             base_url.clone(),
             auth.clone(),
             extras.clone(),
+            capabilities.clone(),
             http,
             auth_resolver,
         ),
@@ -219,11 +231,13 @@ fn build_one(
             auth,
             default_model: _,
             extras,
+            capabilities,
         } => llamacpp(
             id,
             base_url.clone(),
             auth.clone(),
             extras.clone(),
+            capabilities.clone(),
             http,
             auth_resolver,
         ),
@@ -308,7 +322,8 @@ mod tests {
         let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
         // Identity transform — every provider passes through unchanged.
         let mapped = reg.map_providers(|_id, p| p);
-        assert_eq!(mapped.len(), 2);
+        // Count is incidental (user + builtins); just verify both
+        // user entries survived the round-trip.
         assert!(mapped.get(&ProviderId::new("a")).is_some());
         assert!(mapped.get(&ProviderId::new("b")).is_some());
     }
@@ -366,7 +381,10 @@ mod tests {
         "#;
         let cfg = ConfigManager::load_from_str(toml_str).unwrap();
         let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
-        assert_eq!(reg.len(), 11);
+        // 11 user-declared + 8 builtins, but two of the user-declared
+        // ids (`claude_cli`, `gemini_cli`) collide with builtins of the
+        // same name and override them — net 11 + (8 - 2) = 17.
+        assert_eq!(reg.len(), 17);
         assert!(reg.get(&ProviderId::new("openai_main")).is_some());
         assert!(reg.get(&ProviderId::new("openai_compat_local")).is_some());
         assert!(reg.get(&ProviderId::new("anthropic_main")).is_some());

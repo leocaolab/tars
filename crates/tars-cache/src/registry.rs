@@ -101,15 +101,15 @@ pub struct MemoryCacheRegistry {
 
 impl MemoryCacheRegistry {
     pub fn new(config: MemoryCacheRegistryConfig) -> Self {
+        // Single global TTL applied to every entry. moka's plain
+        // `insert` doesn't take a per-entry TTL — per-entry overrides
+        // would require an `Expiry` policy impl plus a per-value TTL
+        // field, which is deliberate non-goal for M1's L1. Callers
+        // passing `policy.l1_ttl` get a debug log in `write` and the
+        // entry still uses `default_ttl`. L2 (Sqlite) honours
+        // `l1_ttl` on its own builder.
         let inner: MokaCache<[u8; 32], Arc<CachedResponse>> = MokaCache::builder()
             .max_capacity(config.max_entries)
-            // Per-entry TTL via `expire_after`, which moka honours when
-            // we set the value's `time_to_live` on insert. We keep a
-            // single TTL set at builder time and let the policy's
-            // `l1_ttl` override on a per-write basis through
-            // `insert_with_ttl` below (since 0.12.5 moka exposes
-            // `entry_by_ref().value().value(...)` style for per-entry
-            // TTLs; the simpler `time_to_live` here is the global cap).
             .time_to_live(config.default_ttl)
             .build();
         Self { inner, default_ttl: config.default_ttl }
@@ -199,6 +199,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 usage: Usage::default(),
                 cache_hit: CacheHitInfo::default(),
+                validation_summary: Default::default(),
             },
             cached_at: SystemTime::now(),
             origin_provider: ProviderId::new("test_p"),
@@ -241,9 +242,10 @@ mod tests {
         let k = key(1);
         r.write(k.clone(), value("hi"), &CachePolicy::default()).await.unwrap();
         r.invalidate(&k).await.unwrap();
-        // moka's invalidate is async-applied; sync via a tiny yield.
-        // entry_count() may still report 1 momentarily, but a lookup
-        // is the contract test.
+        // The lookup-path removal is synchronous w.r.t. the awaited
+        // `invalidate`, so this assertion is the authoritative
+        // contract test. `entry_count()` may lag because moka applies
+        // its eviction bookkeeping via background sync.
         assert!(r.lookup(&k, &CachePolicy::default()).await.unwrap().is_none());
     }
 
@@ -254,5 +256,81 @@ mod tests {
         r.write(key(2), value("b"), &CachePolicy::default()).await.unwrap();
         assert_eq!(r.lookup(&key(1), &CachePolicy::default()).await.unwrap().unwrap().response.text, "a");
         assert_eq!(r.lookup(&key(2), &CachePolicy::default()).await.unwrap().unwrap().response.text, "b");
+    }
+
+    #[tokio::test]
+    async fn entries_expire_after_default_ttl() {
+        let r = MemoryCacheRegistry::new(MemoryCacheRegistryConfig {
+            max_entries: 100,
+            default_ttl: Duration::from_millis(100),
+        });
+        let k = key(1);
+        r.write(k.clone(), value("hi"), &CachePolicy::default()).await.unwrap();
+        assert!(
+            r.lookup(&k, &CachePolicy::default()).await.unwrap().is_some(),
+            "entry must be present immediately after write",
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            r.lookup(&k, &CachePolicy::default()).await.unwrap().is_none(),
+            "entry must be evicted after default_ttl elapses",
+        );
+    }
+
+    #[tokio::test]
+    async fn per_write_l1_ttl_override_is_silently_ignored() {
+        // Documents the limitation called out in the audit comment in
+        // `write`: callers may pass `policy.l1_ttl`, and we log + drop
+        // it. The default_ttl of the registry wins.
+        let r = MemoryCacheRegistry::new(MemoryCacheRegistryConfig {
+            max_entries: 100,
+            default_ttl: Duration::from_secs(300),
+        });
+        let k = key(1);
+        let policy_short = CachePolicy {
+            l1_ttl: Some(Duration::from_millis(50)),
+            ..CachePolicy::default()
+        };
+        r.write(k.clone(), value("hi"), &policy_short).await.unwrap();
+        // Sleep well past the requested-but-ignored override.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            r.lookup(&k, &CachePolicy::default()).await.unwrap().is_some(),
+            "MemoryCacheRegistry honours only the constructor-time \
+             default_ttl; a shorter per-write l1_ttl must not expire \
+             the entry early",
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_eviction_caps_size_at_max_entries() {
+        let r = MemoryCacheRegistry::new(MemoryCacheRegistryConfig {
+            max_entries: 2,
+            default_ttl: Duration::from_secs(300),
+        });
+        for i in 1u8..=5 {
+            r.write(key(i), value(&format!("v{i}")), &CachePolicy::default())
+                .await
+                .unwrap();
+        }
+        // moka applies eviction via background sync; force it.
+        r.inner.run_pending_tasks().await;
+        assert!(
+            r.entry_count() <= 2,
+            "cache must cap at max_entries=2 (got {})",
+            r.entry_count(),
+        );
+
+        // At least one of the early keys must be gone.
+        let mut survivors = 0;
+        for i in 1u8..=5 {
+            if r.lookup(&key(i), &CachePolicy::default()).await.unwrap().is_some() {
+                survivors += 1;
+            }
+        }
+        assert!(
+            survivors <= 2,
+            "at most max_entries survivors expected, got {survivors}",
+        );
     }
 }

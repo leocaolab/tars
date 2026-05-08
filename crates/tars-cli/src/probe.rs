@@ -98,6 +98,7 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
 
     let model = args
         .model
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| provider_cfg.default_model().to_string());
     let prompt = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
 
@@ -106,7 +107,7 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
         .context("building provider registry from config")?;
     let provider = registry.get(&provider_id).ok_or_else(|| {
         anyhow::anyhow!(
-            "registry missing provider `{provider_id}` (validated config but build failed?)",
+            "config entry exists for `{provider_id}` but registry.get() returned None",
         )
     })?;
 
@@ -166,7 +167,9 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
             }
             Err(e) => {
                 eprintln!("[evt {event_count:>2}] ERROR       {e:?}");
-                bail!("provider error mid-stream after {event_count} events");
+                return Err(e).with_context(|| {
+                    format!("provider error mid-stream after {event_count} events")
+                });
             }
         }
     }
@@ -186,7 +189,12 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
         bail!("stream ended without a Finished event ({event_count} events received)");
     }
     if full_text.is_empty() {
-        bail!("provider returned no text (saw {event_count} events but no Delta)");
+        bail!(
+            "provider returned no text for prompt {:?} using model {} \
+             (saw {event_count} events but no Delta)",
+            prompt,
+            model,
+        );
     }
 
     Ok(())

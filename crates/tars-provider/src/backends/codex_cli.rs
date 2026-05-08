@@ -977,6 +977,7 @@ mod tests {
             seed: None,
             cache_directives: vec![],
             thinking: Default::default(),
+            enable_chat_template_thinking: None,
         };
         let serialized = serialize_messages_for_cli(&req);
         assert!(serialized.starts_with("[system]\nbe brief\n\n[user]\nfirst user\n\n"));

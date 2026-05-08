@@ -37,15 +37,20 @@ pub mod principal;
 pub mod response;
 pub mod schema;
 pub mod secret;
+pub mod telemetry;
 pub mod tools;
 pub mod usage;
+pub mod validation;
 
 pub use auth::Auth;
 pub use cache::{systemtime_millis, CacheDirective, CacheHitInfo, ProviderCacheHandle};
 pub use capabilities::{
     Capabilities, Modality, PromptCacheKind, StructuredOutputMode,
 };
-pub use chat::{ChatRequest, ContentBlock, ImageData, Message};
+pub use chat::{
+    CapabilityRequirements, ChatRequest, CompatibilityCheck, CompatibilityReason, ContentBlock,
+    ImageData, Message,
+};
 pub use context::{CancellationToken, RequestContext};
 pub use error::{ErrorClass, ProviderError};
 pub use events::{ChatChunk, ChatEvent, PartialUsage, StopReason};
@@ -59,5 +64,10 @@ pub use principal::{Principal, PrincipalKind, Scope};
 pub use response::{ChatResponse, ChatResponseBuilder};
 pub use schema::JsonSchema;
 pub use secret::{SecretRef, SecretString};
+pub use telemetry::{new_shared_telemetry, RetryAttempt, SharedTelemetry, TelemetryAccumulator};
 pub use tools::{ToolCall, ToolChoice, ToolSpec};
+pub use validation::{
+    new_shared_validation_outcome, OutcomeSummary, SharedValidationOutcome, ValidationOutcome,
+    ValidationOutcomeRecord, ValidationSummary,
+};
 pub use usage::{CostUsd, Pricing, Usage};

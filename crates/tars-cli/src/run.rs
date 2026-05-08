@@ -73,7 +73,7 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
 
     let req = build_request(&args, &dispatch.model_label);
 
-    let cache_registry = build_cache(args.dispatch.cache_path.as_deref());
+    let cache_registry = build_cache(args.dispatch.cache_path.as_deref())?;
     let cache_factory = CacheKeyFactory::new(1);
 
     let pipeline = Pipeline::builder_with_inner(dispatch.inner.clone())

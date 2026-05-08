@@ -46,10 +46,12 @@ impl CacheError {
     /// from a real failure. The middleware uses this to decide whether
     /// to log loudly or quietly skip caching.
     pub fn is_not_cacheable(&self) -> bool {
-        matches!(
-            self,
-            Self::NonDeterministic | Self::UnresolvedTier | Self::UncacheableEnsemble
-        )
+        // Full match (not `matches!`) so adding a new variant forces an
+        // explicit cacheable-vs-not-cacheable classification at compile time.
+        match self {
+            Self::NonDeterministic | Self::UnresolvedTier | Self::UncacheableEnsemble => true,
+            Self::Serialize(_) | Self::Backend(_) => false,
+        }
     }
 }
 
@@ -68,5 +70,33 @@ mod tests {
         // can't silently misclassify it.
         let serde_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
         assert!(!CacheError::Serialize(serde_err).is_not_cacheable());
+    }
+
+    #[test]
+    fn display_messages_are_stable() {
+        // Operators rely on these strings in tracing output; pin them so
+        // a typo in an `#[error(...)]` attribute can't slip through review.
+        assert_eq!(
+            CacheError::NonDeterministic.to_string(),
+            "not cacheable: temperature must be explicitly 0.0"
+        );
+        assert_eq!(
+            CacheError::UnresolvedTier.to_string(),
+            "not cacheable: ModelHint::Tier must be resolved by Routing first"
+        );
+        assert_eq!(
+            CacheError::UncacheableEnsemble.to_string(),
+            "not cacheable: ModelHint::Ensemble has no single cache identity"
+        );
+        assert_eq!(
+            CacheError::Backend("redis timeout".into()).to_string(),
+            "backend: redis timeout"
+        );
+        let serde_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let serde_msg = serde_err.to_string();
+        assert_eq!(
+            CacheError::Serialize(serde_err).to_string(),
+            format!("serialize: {serde_msg}")
+        );
     }
 }

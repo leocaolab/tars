@@ -11,6 +11,8 @@ use std::time::Instant;
 pub use tokio_util::sync::CancellationToken;
 
 use crate::ids::{PrincipalId, SessionId, TenantId, TraceId};
+use crate::telemetry::{new_shared_telemetry, SharedTelemetry};
+use crate::validation::{new_shared_validation_outcome, SharedValidationOutcome};
 
 #[derive(Clone, Debug)]
 pub struct RequestContext {
@@ -26,6 +28,19 @@ pub struct RequestContext {
     /// Free-form attributes used by middleware to pass values to inner
     /// layers without bloating the strongly-typed fields.
     pub attributes: Arc<RwLock<HashMap<String, serde_json::Value>>>,
+    /// Per-call telemetry accumulator written by middleware and read
+    /// by the caller after the response stream completes. See
+    /// [`crate::telemetry::TelemetryAccumulator`]. Always present —
+    /// middleware writes are unconditional, callers ignore the slot
+    /// if they don't need it.
+    pub telemetry: SharedTelemetry,
+    /// Per-call validation outcome side-channel. `ValidationMiddleware`
+    /// writes the aggregated summary + (if any Filter ran) the
+    /// post-Filter `ChatResponse`. Caller reads after stream drain
+    /// and either uses the filtered response in place of the streamed
+    /// one, or substitutes `summary` onto the response builder.
+    /// See [`crate::validation::SharedValidationOutcome`].
+    pub validation_outcome: SharedValidationOutcome,
 }
 
 impl RequestContext {
@@ -40,6 +55,8 @@ impl RequestContext {
             deadline: None,
             cancel: CancellationToken::new(),
             attributes: Arc::new(RwLock::new(HashMap::new())),
+            telemetry: new_shared_telemetry(),
+            validation_outcome: new_shared_validation_outcome(),
         }
     }
 

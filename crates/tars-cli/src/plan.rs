@@ -72,7 +72,7 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
     // pay off for planning calls (planner is deterministic ⇒ great
     // cache target; transient errors should retry; telemetry is
     // useful for debugging prompt drift).
-    let cache_registry = build_cache(args.dispatch.cache_path.as_deref());
+    let cache_registry = build_cache(args.dispatch.cache_path.as_deref())?;
     let cache_factory = CacheKeyFactory::new(1);
     let pipeline = Pipeline::builder_with_inner(dispatch.inner.clone())
         .layer(TelemetryMiddleware::new())

@@ -41,22 +41,17 @@ pub fn mlx(
     base_url: Option<String>,
     auth: Auth,
     extras: HttpProviderExtras,
+    capability_overrides: tars_config::CapabilitiesOverrides,
     http: Arc<HttpProviderBase>,
     auth_resolver: Arc<dyn AuthResolver>,
 ) -> Arc<dyn LlmProvider> {
     let url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-    let normalized_auth = match auth {
-        Auth::Secret { secret: tars_types::SecretRef::Inline { ref value } }
-            if value.is_empty() =>
-        {
-            Auth::None
-        }
-        other => other,
-    };
-    OpenAiProviderBuilder::new(id, normalized_auth)
+    let mut caps = mlx_default_capabilities();
+    capability_overrides.apply_to(&mut caps);
+    OpenAiProviderBuilder::new(id, normalize_auth(auth))
         .base_url(url)
         .extras(extras)
-        .capabilities(mlx_default_capabilities())
+        .capabilities(caps)
         .build(http, auth_resolver)
 }
 
@@ -71,9 +66,27 @@ pub fn mlx_local(
         None,
         Auth::None,
         HttpProviderExtras::default(),
+        tars_config::CapabilitiesOverrides::default(),
         http,
         auth_resolver,
     )
+}
+
+/// Coerce an empty-string inline credential to [`Auth::None`].
+///
+/// `mlx_lm.server` doesn't authenticate by default. Without this, the
+/// OpenAI adapter would build a `Bearer ` (empty) header that some
+/// gateways reject. Lifted out of [`mlx`] so it can be unit-tested
+/// directly — `LlmProvider` doesn't expose its resolved auth.
+fn normalize_auth(auth: Auth) -> Auth {
+    match auth {
+        Auth::Secret { secret: tars_types::SecretRef::Inline { ref value } }
+            if value.is_empty() =>
+        {
+            Auth::None
+        }
+        other => other,
+    }
 }
 
 /// Conservative defaults tuned for Apple Silicon hosts running 8B–32B
@@ -125,14 +138,39 @@ mod tests {
         assert!(caps.supports_tool_use);
     }
 
+    #[test]
+    fn normalize_auth_coerces_empty_inline_to_none() {
+        assert!(matches!(normalize_auth(Auth::inline(String::new())), Auth::None));
+    }
+
+    #[test]
+    fn normalize_auth_preserves_non_empty_inline() {
+        match normalize_auth(Auth::inline("sk-test")) {
+            Auth::Secret { secret: tars_types::SecretRef::Inline { value } } => {
+                assert_eq!(value.expose(), "sk-test");
+            }
+            other => panic!("expected inline secret to be preserved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_auth_preserves_none_and_delegate() {
+        assert!(matches!(normalize_auth(Auth::None), Auth::None));
+        assert!(matches!(normalize_auth(Auth::Delegate), Auth::Delegate));
+    }
+
     #[tokio::test]
-    async fn mlx_normalizes_empty_inline_auth_to_none() {
+    async fn mlx_with_empty_inline_auth_constructs_provider() {
+        // Smoke test: end-to-end construction with empty inline auth
+        // shouldn't panic — the normalize step keeps the OpenAI builder
+        // from seeing a malformed credential.
         let http = HttpProviderBase::default_arc().unwrap();
         let _ = mlx(
             "mlx_t",
             None,
             Auth::inline(String::new()),
             HttpProviderExtras::default(),
+            tars_config::CapabilitiesOverrides::default(),
             http,
             basic(),
         );

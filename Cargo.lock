@@ -1913,7 +1913,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tars-cache"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "dirs",
@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "tars-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1955,8 +1955,9 @@ dependencies = [
 
 [[package]]
 name = "tars-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "dirs",
  "figment",
  "serde",
  "serde_json",
@@ -1969,7 +1970,7 @@ dependencies = [
 
 [[package]]
 name = "tars-melt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "thiserror 1.0.69",
@@ -1979,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "tars-pipeline"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1993,12 +1994,13 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 
 [[package]]
 name = "tars-provider"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2023,14 +2025,16 @@ dependencies = [
 
 [[package]]
 name = "tars-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "pyo3",
+ "serde_json",
  "tars-cache",
  "tars-config",
  "tars-pipeline",
  "tars-provider",
+ "tars-runtime",
  "tars-types",
  "thiserror 1.0.69",
  "tokio",
@@ -2039,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "tars-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2061,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "tars-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "dirs",
@@ -2077,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "tars-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -2092,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "tars-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "reqwest",

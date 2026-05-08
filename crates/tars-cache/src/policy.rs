@@ -82,4 +82,22 @@ mod tests {
     fn off_disables_everything() {
         assert!(!CachePolicy::off().any_enabled());
     }
+
+    #[test]
+    fn any_enabled_covers_all_eight_states() {
+        for bits in 0u8..8 {
+            let l1 = bits & 0b001 != 0;
+            let l2 = bits & 0b010 != 0;
+            let l3 = bits & 0b100 != 0;
+            let p = CachePolicy {
+                l1,
+                l2,
+                l3,
+                l1_ttl: None,
+                l2_ttl: None,
+                l3_ttl: None,
+            };
+            assert_eq!(p.any_enabled(), l1 || l2 || l3, "bits={bits:03b}");
+        }
+    }
 }

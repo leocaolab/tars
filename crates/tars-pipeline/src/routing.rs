@@ -49,7 +49,8 @@ use async_trait::async_trait;
 use tars_provider::registry::ProviderRegistry;
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_types::{
-    ChatRequest, ErrorClass, ModelHint, ModelTier, ProviderError, ProviderId, RequestContext,
+    ChatRequest, CompatibilityCheck, CompatibilityReason, ErrorClass, ModelHint, ModelTier,
+    ProviderError, ProviderId, RequestContext,
 };
 
 use crate::service::LlmService;
@@ -199,22 +200,71 @@ impl LlmService for RoutingService {
         }
 
         let mut last_err: Option<ProviderError> = None;
-        for id in &candidates {
+        // Track skip reasons across the chain so the final error
+        // (when *all* candidates were skipped) carries useful context.
+        let mut skipped_with_reasons: Vec<(ProviderId, Vec<CompatibilityReason>)> = Vec::new();
+        let total_candidates = candidates.len();
+        for (idx, id) in candidates.iter().enumerate() {
             let provider = match self.registry.get(id) {
                 Some(p) => p,
                 None => {
                     tracing::warn!(
-                        provider_id = %id,
+                        candidate_id = %id,
+                        chain_position = idx,
+                        chain_total = total_candidates,
+                        trace_id = %ctx.trace_id,
                         "routing: candidate not in registry; skipping",
                     );
                     continue;
                 }
             };
 
+            // Capability pre-flight check (B-31). Cheap local
+            // comparison: avoids a wire round-trip when the candidate
+            // can't honour the request's feature set (tools / vision /
+            // thinking / structured_output / context_window /
+            // max_output_tokens). The provider would otherwise either
+            // silently drop the feature or 400 at the wire — both worse
+            // than a clean local skip.
+            //
+            // We do NOT short-circuit the chain on incompatibility:
+            // the next candidate may have stronger capabilities. Only
+            // when *all* candidates are skipped do we surface an
+            // InvalidRequest error with the collected reasons.
             let resolved = resolve_model_for_provider(req.clone(), &provider);
+            match resolved.compatibility_check(provider.capabilities()) {
+                CompatibilityCheck::Compatible => {}
+                CompatibilityCheck::Incompatible { reasons } => {
+                    // Structured kinds first so log aggregation /
+                    // dashboards can facet on `reasons.kinds` directly
+                    // without parsing the human message.
+                    let kinds: Vec<&'static str> =
+                        reasons.iter().map(|r| r.kind()).collect();
+                    tracing::warn!(
+                        candidate_id = %id,
+                        chain_position = idx,
+                        chain_total = total_candidates,
+                        trace_id = %ctx.trace_id,
+                        reason_kinds = ?kinds,
+                        "routing: candidate skipped (capability mismatch); trying next",
+                    );
+                    skipped_with_reasons.push((id.clone(), reasons));
+                    continue;
+                }
+                // `#[non_exhaustive]` forces this — future variants
+                // (e.g. MaybeWithCaveat) treated as Compatible by
+                // default; routing layer doesn't yet know how to
+                // degrade gracefully, so let the call go through
+                // and let the provider do its thing.
+                _ => {}
+            }
+
             tracing::debug!(
                 policy = self.policy.name(),
-                provider_id = %id,
+                candidate_id = %id,
+                chain_position = idx,
+                chain_total = total_candidates,
+                trace_id = %ctx.trace_id,
                 model = %resolved.model.label(),
                 "routing: dispatching",
             );
@@ -226,14 +276,19 @@ impl LlmService for RoutingService {
                     if class == ErrorClass::Permanent {
                         // No other provider will fix this — return now.
                         tracing::debug!(
-                            provider_id = %id,
+                            candidate_id = %id,
+                            chain_position = idx,
+                            trace_id = %ctx.trace_id,
                             error = %e,
                             "routing: permanent error; halting fallback chain",
                         );
                         return Err(e);
                     }
                     tracing::warn!(
-                        provider_id = %id,
+                        candidate_id = %id,
+                        chain_position = idx,
+                        chain_total = total_candidates,
+                        trace_id = %ctx.trace_id,
                         error_class = ?class,
                         error = %e,
                         "routing: candidate failed; trying next",
@@ -241,6 +296,18 @@ impl LlmService for RoutingService {
                     last_err = Some(e);
                 }
             }
+        }
+
+        // If we exhausted candidates purely through capability skips
+        // (no wire-level errors), surface the structured
+        // `NoCompatibleCandidate` variant. This carries the typed
+        // skipped list end-to-end (no message-string parsing required
+        // by downstream consumers). Permanent class — retrying the
+        // same request against the same fallback list won't help.
+        if last_err.is_none() && !skipped_with_reasons.is_empty() {
+            return Err(ProviderError::NoCompatibleCandidate {
+                skipped: skipped_with_reasons,
+            });
         }
 
         Err(last_err.unwrap_or_else(|| {
@@ -421,17 +488,29 @@ mod tests {
     ) -> Result<LlmEventStream, ProviderError> {
         // ProviderRegistry isn't a trait — for routing-policy unit
         // tests we recreate the dispatch loop here against the fake.
-        // The actual RoutingService is exercised end-to-end in
-        // tests/integration.rs once the CLI wires it up.
+        // **Mirror prod's capability pre-flight** (B-31): keep the
+        // test harness in sync with the real RoutingService::call
+        // semantics so behavioral tests on this fake exercise the
+        // same logic as the production path.
         let candidates = policy
             .select(&req, &dummy_provider_registry())
             .await?;
         let mut last_err: Option<ProviderError> = None;
+        let mut skipped: Vec<(ProviderId, Vec<CompatibilityReason>)> = Vec::new();
         for id in &candidates {
             let provider = match fake.map.get(id).cloned() {
                 Some(p) => p,
                 None => continue,
             };
+            // Capability pre-flight (mirror RoutingService::call).
+            match req.compatibility_check(provider.capabilities()) {
+                CompatibilityCheck::Compatible => {}
+                CompatibilityCheck::Incompatible { reasons } => {
+                    skipped.push((id.clone(), reasons));
+                    continue;
+                }
+                _ => {}
+            }
             match provider.stream(req.clone(), ctx.clone()).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) if e.class() == ErrorClass::Permanent => return Err(e),
@@ -439,6 +518,9 @@ mod tests {
                     last_err = Some(e);
                 }
             }
+        }
+        if last_err.is_none() && !skipped.is_empty() {
+            return Err(ProviderError::NoCompatibleCandidate { skipped });
         }
         Err(last_err.unwrap_or_else(|| {
             ProviderError::Internal("no candidate produced a result".into())
@@ -638,6 +720,133 @@ mod tests {
         .unwrap();
         drain(stream).await;
         assert_eq!(calls_real.load(Ordering::SeqCst), 1);
+    }
+
+    // ── Capability pre-flight tests (B-31) ─────────────────────────
+
+    /// Provider with a custom capability set — same shape as
+    /// `scripted()` but lets the test pin specific cap fields.
+    fn scripted_with_caps(
+        id: &str,
+        outcome: ScriptedOutcome,
+        capabilities: tars_types::Capabilities,
+    ) -> (Arc<ScriptedProvider>, Arc<AtomicU32>) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let p = Arc::new(ScriptedProvider {
+            id: ProviderId::new(id),
+            outcome,
+            calls: calls.clone(),
+            capabilities,
+        });
+        (p, calls)
+    }
+
+    /// Build a Capabilities pinning supports_tool_use to a value, all
+    /// other features baseline.
+    fn caps_with_tools(tools: bool) -> tars_types::Capabilities {
+        let mut c = tars_types::Capabilities::text_only_baseline(
+            tars_types::Pricing::default(),
+        );
+        c.supports_tool_use = tools;
+        c
+    }
+
+    #[tokio::test]
+    async fn capability_skip_skips_incompatible_candidate() {
+        // chain: [no_tools (skip), supports_tools (call)] — request has tools.
+        // Expected: no_tools never called; supports_tools called once.
+        let (p_skip, calls_skip) =
+            scripted_with_caps("no_tools", ScriptedOutcome::Ok, caps_with_tools(false));
+        let (p_ok, calls_ok) =
+            scripted_with_caps("with_tools", ScriptedOutcome::Ok, caps_with_tools(true));
+        let fake = FakeRegistry::new(vec![
+            (ProviderId::new("no_tools"), p_skip as _),
+            (ProviderId::new("with_tools"), p_ok as _),
+        ]);
+        let policy = StaticPolicy::new(vec![
+            ProviderId::new("no_tools"),
+            ProviderId::new("with_tools"),
+        ]);
+
+        let mut req = req(ModelHint::Explicit("any".into()));
+        req.tools.push(tars_types::ToolSpec {
+            name: "x".into(),
+            description: "x".into(),
+            input_schema: tars_types::JsonSchema::loose(serde_json::json!({})),
+        });
+
+        let stream = drive_routing(&fake, &policy, req, RequestContext::test_default())
+            .await
+            .expect("routing should succeed via the tool-supporting provider");
+        drain(stream).await;
+        assert_eq!(calls_skip.load(Ordering::SeqCst), 0,
+            "incompatible provider must NOT be called");
+        assert_eq!(calls_ok.load(Ordering::SeqCst), 1,
+            "compatible provider should serve the request");
+    }
+
+    #[tokio::test]
+    async fn capability_skip_returns_invalid_request_when_all_skipped() {
+        // chain: [no_tools, no_tools_either] — request has tools.
+        // Expected: both skipped, routing returns InvalidRequest with
+        // each candidate's reason in the message.
+        let (p_a, _) =
+            scripted_with_caps("a", ScriptedOutcome::Ok, caps_with_tools(false));
+        let (p_b, _) =
+            scripted_with_caps("b", ScriptedOutcome::Ok, caps_with_tools(false));
+        let fake = FakeRegistry::new(vec![
+            (ProviderId::new("a"), p_a as _),
+            (ProviderId::new("b"), p_b as _),
+        ]);
+        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]);
+
+        let mut req = req(ModelHint::Explicit("any".into()));
+        req.tools.push(tars_types::ToolSpec {
+            name: "x".into(),
+            description: "x".into(),
+            input_schema: tars_types::JsonSchema::loose(serde_json::json!({})),
+        });
+
+        let result = drive_routing(&fake, &policy, req, RequestContext::test_default())
+            .await;
+        let err = match result {
+            Ok(_) => panic!("expected error, got Ok stream"),
+            Err(e) => e,
+        };
+        match err {
+            ProviderError::NoCompatibleCandidate { skipped } => {
+                assert_eq!(skipped.len(), 2, "expected both candidates skipped");
+                let ids: Vec<&str> = skipped.iter().map(|(id, _)| id.as_ref()).collect();
+                assert!(ids.contains(&"a"));
+                assert!(ids.contains(&"b"));
+                // Each candidate carries a typed `tool_use` reason.
+                for (_, reasons) in &skipped {
+                    assert!(reasons.iter().any(|r| r.kind() == "tool_use"));
+                }
+            }
+            other => panic!("expected NoCompatibleCandidate, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn capability_skip_doesnt_block_compatible_request() {
+        // Chain: [no_tools, no_tools] — request WITHOUT tools.
+        // Expected: first provider serves the request normally.
+        let (p_a, calls_a) =
+            scripted_with_caps("a", ScriptedOutcome::Ok, caps_with_tools(false));
+        let fake = FakeRegistry::new(vec![(ProviderId::new("a"), p_a as _)]);
+        let policy = StaticPolicy::new(vec![ProviderId::new("a")]);
+
+        let stream = drive_routing(
+            &fake,
+            &policy,
+            req(ModelHint::Explicit("any".into())),
+            RequestContext::test_default(),
+        )
+        .await
+        .expect("text-only request should be served by a text-only provider");
+        drain(stream).await;
+        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
     }
 
     // Suppress dead_code warnings on test-only helpers we keep around

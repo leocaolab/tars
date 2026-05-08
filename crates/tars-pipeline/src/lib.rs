@@ -47,6 +47,7 @@ mod retry;
 mod routing;
 mod service;
 mod telemetry;
+mod validation;
 
 pub use cache::{set_cache_policy, CacheLookupMiddleware};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
@@ -55,6 +56,10 @@ pub use retry::{RetryConfig, RetryMiddleware};
 pub use routing::{RoutingPolicy, RoutingService, StaticPolicy, TierPolicy};
 pub use service::{LlmService, ProviderService};
 pub use telemetry::TelemetryMiddleware;
+pub use validation::{
+    builtin::{JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, OnExceed, ResponseField},
+    OutputValidator, ValidationMiddleware,
+};
 
 // Re-export the few tars-types items that show up in middleware
 // signatures so callers don't need a separate `use tars_types::…`.

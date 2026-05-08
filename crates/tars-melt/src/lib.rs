@@ -84,9 +84,18 @@ impl TelemetryConfig {
             2 => "tars=debug,info".to_string(),
             _ => "tars=trace,debug".to_string(),
         };
-        let format = std::env::var("TARS_LOG_FORMAT")
-            .map(|s| TelemetryFormat::from_env_string(&s))
-            .unwrap_or_default();
+        let format = match std::env::var("TARS_LOG_FORMAT") {
+            Ok(s) => TelemetryFormat::from_env_string(&s),
+            Err(std::env::VarError::NotPresent) => TelemetryFormat::default(),
+            Err(e) => {
+                // NotUnicode etc. — surface so the operator notices their
+                // intent was lost rather than silently getting Pretty.
+                eprintln!(
+                    "tars-melt: TARS_LOG_FORMAT could not be read: {e} — defaulting to pretty",
+                );
+                TelemetryFormat::default()
+            }
+        };
         Self {
             level,
             format,
@@ -100,9 +109,19 @@ impl TelemetryConfig {
 pub enum TelemetryError {
     /// `try_init` ran AFTER another subscriber was already installed.
     /// Not actually fatal in tests; callers handling this can fall
-    /// through to "the existing subscriber wins".
-    #[error("a global tracing subscriber is already installed")]
-    AlreadyInstalled,
+    /// through to "the existing subscriber wins". Carries the attempted
+    /// service+level so an operator debugging "why didn't my config
+    /// take" knows what was rejected.
+    #[error(
+        "a global tracing subscriber is already installed \
+         (attempted service={service:?}, level={level:?})"
+    )]
+    AlreadyInstalled { service: String, level: String },
+    /// `config.level` failed `EnvFilter` parsing. We refuse to install
+    /// rather than panic: the directive came from a caller and may be
+    /// user-supplied.
+    #[error("invalid filter directive {directive:?}: {reason}")]
+    InvalidFilter { directive: String, reason: String },
 }
 
 /// RAII handle for the installed telemetry stack. M1: empty marker.
@@ -128,9 +147,18 @@ impl TelemetryGuard {
 /// pure protocol output (the LLM response in `tars run`).
 pub fn init(config: TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
     // RUST_LOG always wins over our derived default — operators
-    // expect the standard env var to work.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&config.level));
+    // expect the standard env var to work. If RUST_LOG is set but
+    // malformed, fall through to config.level (operator misconfig
+    // shouldn't kill the process).
+    let filter = match EnvFilter::try_from_default_env() {
+        Ok(f) => f,
+        Err(_) => EnvFilter::try_new(&config.level).map_err(|e| {
+            TelemetryError::InvalidFilter {
+                directive: config.level.clone(),
+                reason: e.to_string(),
+            }
+        })?,
+    };
 
     let span_events = if config.include_span_events {
         FmtSpan::NEW | FmtSpan::CLOSE
@@ -157,14 +185,23 @@ pub fn init(config: TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
             .try_init(),
     };
 
+    // Sanitize service for stderr/Pretty output: a manually-constructed
+    // config with newlines or ANSI escapes in `service` could otherwise
+    // forge log records or break log parsing. JSON mode escapes for us
+    // but Pretty %Display does not.
+    let safe_service = sanitize_service(&config.service);
+
     if result.is_err() {
-        return Err(TelemetryError::AlreadyInstalled);
+        return Err(TelemetryError::AlreadyInstalled {
+            service: safe_service,
+            level: config.level,
+        });
     }
 
     // Stamp the service identity once via a top-level info!. Logs
     // aggregators key off this for filtering / dashboards.
     tracing::info!(
-        service = %config.service,
+        service = %safe_service,
         format = ?config.format,
         version = env!("CARGO_PKG_VERSION"),
         "telemetry initialized",
@@ -172,13 +209,38 @@ pub fn init(config: TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
     Ok(TelemetryGuard::new())
 }
 
-/// Best-effort init that swallows `AlreadyInstalled`. Useful when a
-/// library wants telemetry on but tolerates "the binary already set
-/// one up". `TelemetryError` only has the AlreadyInstalled variant
-/// today, so the swallow is exhaustive; if the enum ever grows a
-/// genuine fatal variant the build breaks here on purpose.
+/// Replace control characters (newlines, ANSI ESC, etc.) in a service
+/// identifier so they can't forge fake log records when the Pretty
+/// formatter writes the value to stderr verbatim.
+fn sanitize_service(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '_' } else { c })
+        .collect()
+}
+
+/// Best-effort init that surfaces every error to stderr but never
+/// returns it. Useful when a library wants telemetry on but tolerates
+/// "the binary already set one up".
+///
+/// The match is exhaustive on purpose: adding a new `TelemetryError`
+/// variant must force a compile error here so we make a deliberate
+/// choice about whether it should be swallowed or escalated, instead
+/// of silently disappearing through `.ok()`.
 pub fn init_or_warn(config: TelemetryConfig) -> Option<TelemetryGuard> {
-    init(config).ok()
+    match init(config) {
+        Ok(g) => Some(g),
+        Err(e @ TelemetryError::AlreadyInstalled { .. }) => {
+            // Expected in libraries / nested test binaries — log and move on.
+            eprintln!("tars-melt: {e}");
+            None
+        }
+        Err(e @ TelemetryError::InvalidFilter { .. }) => {
+            // Operator misconfig — very much worth shouting about,
+            // but still not fatal to the whole process.
+            eprintln!("tars-melt: {e}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -187,11 +249,21 @@ mod tests {
 
     #[test]
     fn verbosity_levels_map_to_filter_strings() {
-        assert!(TelemetryConfig::from_verbosity(0).level.contains("warn"));
-        assert!(TelemetryConfig::from_verbosity(1).level.contains("info"));
-        assert!(TelemetryConfig::from_verbosity(2).level.contains("debug"));
-        assert!(TelemetryConfig::from_verbosity(3).level.contains("trace"));
-        assert!(TelemetryConfig::from_verbosity(99).level.contains("trace"));
+        // Substring is too loose ("warnings" / "beware" pass) and tells
+        // us nothing about whether EnvFilter actually accepts the
+        // directive. Pin both: exact string AND a real parse.
+        for (verbose, expected) in [
+            (0u8, "warn"),
+            (1, "tars=info,warn"),
+            (2, "tars=debug,info"),
+            (3, "tars=trace,debug"),
+            (99, "tars=trace,debug"),
+        ] {
+            let cfg = TelemetryConfig::from_verbosity(verbose);
+            assert_eq!(cfg.level, expected, "verbosity={verbose}");
+            EnvFilter::try_new(&cfg.level)
+                .unwrap_or_else(|e| panic!("verbosity={verbose} produced unparsable filter {:?}: {e}", cfg.level));
+        }
     }
 
     #[test]
@@ -219,21 +291,30 @@ mod tests {
     /// that. We just need to know *our wiring* doesn't panic.
     #[test]
     fn init_or_warn_does_not_panic_first_or_second_call() {
-        let _g1 = init_or_warn(TelemetryConfig::from_verbosity(0));
-        // Second call: subscriber already global, returns None.
+        // This is the only test in the crate that calls `init_*`, so
+        // the first call lands on a fresh global and must succeed;
+        // the second hits the `AlreadyInstalled` path. If a future
+        // refactor breaks `init_or_warn` so it always returns `None`,
+        // the first assertion catches it.
+        let g1 = init_or_warn(TelemetryConfig::from_verbosity(0));
+        assert!(g1.is_some(), "first install should succeed on a fresh global");
         let g2 = init_or_warn(TelemetryConfig::from_verbosity(0));
         assert!(g2.is_none(), "second install should be skipped");
     }
 
+    // NOTE: `#[must_use]` is a lint, not a runtime property — it cannot
+    // be observed at runtime, so a `#[test]` cannot meaningfully verify
+    // it. The previous test here just checked `type_name` and would
+    // pass even after the attribute was removed; deleting it removes
+    // false confidence. The attribute lives on `TelemetryGuard` above
+    // and is enforced by the compiler at every call site.
+
     #[test]
-    fn telemetry_guard_is_must_use() {
-        // Compile-time check that `#[must_use]` annotation sticks.
-        // This test exists so the attribute can't be dropped silently.
-        fn _consume(_: TelemetryGuard) {}
-        // `let _ = init(...)?;` would warn if must_use is honoured —
-        // we don't want to actually install in a unit test, so the
-        // assertion is just "the type carries the marker".
-        let attrs = std::any::type_name::<TelemetryGuard>();
-        assert!(attrs.contains("TelemetryGuard"));
+    fn invalid_filter_is_reported_not_panicked() {
+        // Sanity-check that a malformed directive surfaces as
+        // `InvalidFilter` rather than panicking inside `EnvFilter::new`.
+        // We bypass the global subscriber by avoiding `init` (which
+        // would race), and just exercise the parse path directly.
+        assert!(EnvFilter::try_new("=== not a directive ===").is_err());
     }
 }

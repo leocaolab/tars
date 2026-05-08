@@ -51,9 +51,37 @@ impl LlmService for ProviderService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
+        // Telemetry: this is the innermost layer. Record it AND wrap
+        // the stream to time the actual provider work (HTTP open +
+        // SSE drain). When called from inside RetryMiddleware, the
+        // outer call may invoke us multiple times — `provider_latency_ms`
+        // accumulates across attempts so it reflects total provider
+        // wall time across the whole call.
+        if let Ok(mut t) = ctx.telemetry.lock() {
+            t.layers.push("provider".into());
+        }
+        let started = std::time::Instant::now();
+        let telemetry = ctx.telemetry.clone();
+
         // `LlmProvider::stream` also takes `Arc<Self>`; clone the
         // inner Arc rather than dereffing through `&self`.
-        self.provider.clone().stream(req, ctx).await
+        let inner = self.provider.clone().stream(req, ctx).await?;
+
+        // Wrap the stream so we time-stamp end-of-stream into telemetry.
+        let observed = async_stream::stream! {
+            use futures::StreamExt;
+            let mut s = inner;
+            while let Some(ev) = s.next().await {
+                yield ev;
+            }
+            // Stream end — accumulate provider latency.
+            let elapsed = started.elapsed().as_millis() as u64;
+            if let Ok(mut t) = telemetry.lock() {
+                let prev = t.provider_latency_ms.unwrap_or(0);
+                t.provider_latency_ms = Some(prev.saturating_add(elapsed));
+            }
+        };
+        Ok(Box::pin(observed))
     }
 }
 

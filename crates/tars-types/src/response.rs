@@ -7,6 +7,7 @@ use crate::cache::CacheHitInfo;
 use crate::events::{ChatEvent, StopReason};
 use crate::tools::ToolCall;
 use crate::usage::Usage;
+use crate::validation::ValidationSummary;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChatResponse {
@@ -21,6 +22,15 @@ pub struct ChatResponse {
     pub stop_reason: Option<StopReason>,
     pub usage: Usage,
     pub cache_hit: CacheHitInfo,
+    /// Per-call validator outcomes (Doc 15). Empty when the pipeline
+    /// didn't include `ValidationMiddleware`. `#[serde(default)]` so
+    /// pre-validation EventStore dumps still deserialize cleanly.
+    #[serde(default, skip_serializing_if = "is_empty_validation_summary")]
+    pub validation_summary: ValidationSummary,
+}
+
+fn is_empty_validation_summary(s: &ValidationSummary) -> bool {
+    s.outcomes.is_empty() && s.validators_run.is_empty() && s.total_wall_ms == 0
 }
 
 impl ChatResponse {
@@ -46,6 +56,7 @@ impl ChatResponse {
             stop_reason,
             usage,
             cache_hit: _, // overridden by argument
+            validation_summary: _, // discard: validators rerun on hit (Doc 15 §4)
         } = self;
 
         let mut out = Vec::with_capacity(3 + tool_calls.len() * 2);
@@ -194,6 +205,7 @@ mod tests {
                 ..Default::default()
             },
             cache_hit: CacheHitInfo::default(),
+            validation_summary: Default::default(),
         };
         let events = original.clone().into_events(CacheHitInfo {
             cached_input_tokens: 8,
@@ -225,6 +237,7 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             usage: Usage::default(),
             cache_hit: CacheHitInfo::default(),
+            validation_summary: Default::default(),
         };
         let events = r.into_events(CacheHitInfo::default());
         // Just Started + Finished — no empty Delta to confuse consumers.

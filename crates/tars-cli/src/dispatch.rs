@@ -165,6 +165,13 @@ fn build_tier_dispatch(
             "routing: tier `{tier:?}` first candidate `{first}` not in registry"
         )
     })?;
+    for c in candidates.iter().skip(1) {
+        if registry.get(c).is_none() {
+            anyhow::bail!(
+                "routing: tier `{tier:?}` candidate `{c}` not in registry"
+            );
+        }
+    }
     let model_label = args
         .model
         .clone()
@@ -226,17 +233,25 @@ pub fn pick_provider(cfg: &Config, requested: Option<&str>) -> Result<ProviderId
         }
         return Ok(pid);
     }
-    let mut iter = cfg.providers.iter();
+    // Implicit pick considers user-declared providers only — ambient
+    // builtins are always present after the load-time merge, so
+    // counting them would make every config "ambiguous". The user's
+    // mental model is "I wrote one provider in my TOML, use it."
+    let mut iter = cfg.user_declared();
     let only = iter.next();
     let extras = iter.next();
     match (only, extras) {
         (Some((id, _)), None) => Ok(id.clone()),
-        (None, _) => anyhow::bail!("no providers configured"),
+        (None, _) => anyhow::bail!(
+            "no providers declared in config; add a `[providers.NAME]` section, \
+             or pass `--provider <BUILTIN_ID>` (mlx / vllm / openai / anthropic / \
+             gemini / claude_cli / gemini_cli / llamacpp)"
+        ),
         (Some(_), Some(_)) => {
             let configured: Vec<String> =
-                cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
+                cfg.user_declared().map(|(id, _)| id.to_string()).collect();
             anyhow::bail!(
-                "multiple providers configured ({}); pass --provider <ID>",
+                "multiple providers declared ({}); pass --provider <ID>",
                 configured.join(", "),
             );
         }
@@ -249,9 +264,11 @@ pub fn pick_default_model(cfg: &Config, provider_id: &ProviderId) -> Option<Stri
 
 /// Build the cache backend per the `--cache-path` flag and platform.
 /// SQLite at the resolved path by default; `:memory:` sentinel for
-/// process-isolated tests; in-memory L1 with a warning when there's
-/// no XDG cache dir or sqlite open fails.
-pub fn build_cache(explicit: Option<&Path>) -> Arc<dyn CacheRegistry> {
+/// process-isolated tests. Default-path failures (no XDG dir, sqlite
+/// open error) degrade to in-memory L1 with a warning. Explicit-path
+/// failures error out — silently demoting a user's `--cache-path` to
+/// in-memory hides a config or permissions bug.
+pub fn build_cache(explicit: Option<&Path>) -> Result<Arc<dyn CacheRegistry>> {
     fn warn_to_memory(reason: &str) -> Arc<dyn CacheRegistry> {
         tracing::warn!(
             "cache: {reason}; using in-memory L1 only (no cross-process hits)"
@@ -259,17 +276,22 @@ pub fn build_cache(explicit: Option<&Path>) -> Arc<dyn CacheRegistry> {
         MemoryCacheRegistry::default_arc()
     }
 
-    let path = match explicit {
-        Some(p) if p == Path::new(":memory:") => return MemoryCacheRegistry::default_arc(),
-        Some(p) => p.to_path_buf(),
+    let (path, is_explicit) = match explicit {
+        Some(p) if p == Path::new(":memory:") => return Ok(MemoryCacheRegistry::default_arc()),
+        Some(p) => (p.to_path_buf(), true),
         None => match tars_cache::default_personal_cache_path() {
-            Some(p) => p,
-            None => return warn_to_memory("no XDG cache dir on this platform"),
+            Some(p) => (p, false),
+            None => return Ok(warn_to_memory("no XDG cache dir on this platform")),
         },
     };
     match open_at_path(&path) {
-        Ok(reg) => reg,
-        Err(e) => warn_to_memory(&format!("opening sqlite cache at {path:?} failed: {e}")),
+        Ok(reg) => Ok(reg),
+        Err(e) if is_explicit => Err(e).with_context(|| {
+            format!("opening sqlite cache at explicit --cache-path {path:?}")
+        }),
+        Err(e) => Ok(warn_to_memory(&format!(
+            "opening sqlite cache at {path:?} failed: {e}"
+        ))),
     }
 }
 
@@ -337,7 +359,14 @@ mod tests {
     #[test]
     fn parse_tier_accepts_known_values() {
         assert_eq!(parse_tier("fast").unwrap(), ModelTier::Fast);
+        assert_eq!(parse_tier("Fast").unwrap(), ModelTier::Fast);
+        assert_eq!(parse_tier("default").unwrap(), ModelTier::Default);
+        assert_eq!(parse_tier("DEFAULT").unwrap(), ModelTier::Default);
+        assert_eq!(parse_tier("reasoning").unwrap(), ModelTier::Reasoning);
         assert_eq!(parse_tier("REASONING").unwrap(), ModelTier::Reasoning);
+        assert_eq!(parse_tier("local").unwrap(), ModelTier::Local);
+        assert_eq!(parse_tier("Local").unwrap(), ModelTier::Local);
         assert!(parse_tier("nonsense").is_err());
+        assert!(parse_tier("").is_err());
     }
 }

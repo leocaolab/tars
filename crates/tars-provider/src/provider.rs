@@ -58,14 +58,19 @@ pub trait LlmProvider: Send + Sync + 'static {
     /// Estimate token count for a request. `fast = true` allows
     /// chars/4 estimation (suitable for budget checks); `false`
     /// requires loading the real tokenizer.
+    ///
+    /// The default implementation only supports `fast = true`. Adapters
+    /// that have a real tokenizer must override this and honor `fast = false`.
     async fn count_tokens(
         &self,
         req: &ChatRequest,
         fast: bool,
     ) -> Result<u64, ProviderError> {
-        // Default: char-based fast estimation regardless of `fast` flag.
-        // Adapters with proper tokenizers should override.
-        let _ = fast;
+        if !fast {
+            return Err(ProviderError::Internal(
+                "count_tokens(fast=false) requires a real tokenizer; this provider only supports fast estimation".into(),
+            ));
+        }
         let mut chars: usize = req.system.as_deref().map_or(0, str::len);
         for m in &req.messages {
             for block in m.content() {

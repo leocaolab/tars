@@ -53,12 +53,21 @@ impl RoutingConfig {
                 ));
                 continue;
             }
+            let mut seen = std::collections::HashSet::new();
             for id in candidates {
                 if !known_providers.contains(id) {
                     sink.push(crate::error::ValidationError::new(
                         format!("routing.tiers.{tier:?}").to_lowercase(),
                         format!(
                             "references unknown provider `{id}` — add a [providers.{id}] section or remove this entry"
+                        ),
+                    ));
+                }
+                if !seen.insert(id) {
+                    sink.push(crate::error::ValidationError::new(
+                        format!("routing.tiers.{tier:?}").to_lowercase(),
+                        format!(
+                            "duplicate provider `{id}` in candidate list — each provider should appear at most once per tier"
                         ),
                     ));
                 }
@@ -88,6 +97,10 @@ mod tests {
             cfg.tiers.get(&ModelTier::Fast).unwrap(),
             &vec![ProviderId::new("c")]
         );
+        // Verify Serialize→Deserialize round-trips back to the same struct.
+        let reserialized = toml::to_string(&cfg).unwrap();
+        let cfg2: RoutingConfig = toml::from_str(&reserialized).unwrap();
+        assert_eq!(cfg.tiers, cfg2.tiers);
     }
 
     #[test]
@@ -108,9 +121,12 @@ mod tests {
         known.insert(ProviderId::new("real_provider"));
         let mut errs = Vec::new();
         cfg.validate(&known, &mut errs);
-        // Only the dangling reference produces an error.
+        // Only the dangling reference produces an error — `real_provider`
+        // must not be flagged, and the error must point at the right key.
         assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].key, "routing.tiers.reasoning");
         assert!(errs[0].message.contains("typo_id"));
+        assert!(!errs[0].message.contains("real_provider"));
     }
 
     #[test]
@@ -120,7 +136,32 @@ mod tests {
         let cfg = RoutingConfig { tiers };
         let mut errs = Vec::new();
         cfg.validate(&std::collections::HashSet::new(), &mut errs);
-        assert!(errs.iter().any(|e| e.message.contains("empty")));
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].key, "routing.tiers.fast");
+        assert!(errs[0].message.contains("empty"));
+    }
+
+    #[test]
+    fn validate_flags_duplicate_provider() {
+        let mut tiers = HashMap::new();
+        tiers.insert(
+            ModelTier::Default,
+            vec![
+                ProviderId::new("a"),
+                ProviderId::new("a"),
+                ProviderId::new("b"),
+            ],
+        );
+        let cfg = RoutingConfig { tiers };
+        let mut known = std::collections::HashSet::new();
+        known.insert(ProviderId::new("a"));
+        known.insert(ProviderId::new("b"));
+        let mut errs = Vec::new();
+        cfg.validate(&known, &mut errs);
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].key, "routing.tiers.default");
+        assert!(errs[0].message.contains("duplicate"));
+        assert!(errs[0].message.contains('a'));
     }
 
     #[test]
@@ -130,6 +171,12 @@ mod tests {
             random_typo = "boom"
         "#;
         let r: Result<RoutingConfig, _> = toml::from_str(toml_str);
-        assert!(r.is_err());
+        let err = r.unwrap_err().to_string();
+        // Verify rejection is specifically because of the unknown field,
+        // not a syntax / type error masquerading as success.
+        assert!(
+            err.contains("random_typo") || err.contains("unknown field"),
+            "expected unknown-field error, got: {err}",
+        );
     }
 }

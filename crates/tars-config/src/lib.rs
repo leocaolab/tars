@@ -24,14 +24,16 @@
 pub mod builtin;
 pub mod error;
 pub mod manager;
+pub mod paths;
 pub mod providers;
 pub mod routing;
 
 pub use builtin::{
     built_in_provider_defaults, default_anthropic, default_claude_cli, default_gemini,
-    default_gemini_cli, default_openai, merge_builtin_with_user,
+    default_gemini_cli, default_openai, default_vllm, merge_builtin_with_user,
 };
 pub use error::ConfigError;
 pub use manager::{Config, ConfigManager};
-pub use providers::{CodexSandboxConfig, ProviderConfig, ProvidersConfig};
+pub use paths::default_config_path;
+pub use providers::{CapabilitiesOverrides, CodexSandboxConfig, ProviderConfig, ProvidersConfig};
 pub use routing::RoutingConfig;

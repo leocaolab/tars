@@ -20,6 +20,7 @@ mod bench;
 mod config_loader;
 mod dispatch;
 mod event_store;
+mod init;
 mod plan;
 mod probe;
 mod run;
@@ -65,6 +66,9 @@ enum Command {
     Bench(bench::BenchArgs),
     /// Inspect the trajectory event log written by `tars run` / `tars plan` / `tars run-task`.
     Trajectory(trajectory::TrajectoryArgs),
+    /// Bootstrap a starter user-level config at `~/.tars/config.toml`.
+    /// Idempotent (`--force` to overwrite). New users run this first.
+    Init(init::InitArgs),
 }
 
 #[tokio::main]
@@ -74,9 +78,32 @@ async fn main() -> ExitCode {
     // workspace lands the same formatter / env-filter / span shape.
     // The guard is bound to `_telemetry` so `Drop` runs at process
     // exit (M1 no-op; M5 will flush the OTel exporter).
-    let mut config = TelemetryConfig::from_verbosity(cli.verbose);
-    config.service = "tars-cli".into();
-    let _telemetry = tars_melt::init_or_warn(config);
+    //
+    // Use the fallible `init()` (not `init_or_warn`) so that if the
+    // subscriber fails to install, the user sees it — otherwise
+    // `-v/-vv/-vvv` would silently have no effect.
+    let mut tcfg = TelemetryConfig::from_verbosity(cli.verbose);
+    tcfg.service = "tars-cli".into();
+    let _telemetry = match tars_melt::init(tcfg) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            eprintln!(
+                "error: failed to initialize telemetry: {e}\n\
+                 verbose flags (-v/-vv/-vvv) will not take effect"
+            );
+            return ExitCode::from(1);
+        }
+    };
+
+    let cmd_name = match &cli.command {
+        Command::Run(_) => "run",
+        Command::Plan(_) => "plan",
+        Command::RunTask(_) => "run-task",
+        Command::Probe(_) => "probe",
+        Command::Bench(_) => "bench",
+        Command::Trajectory(_) => "trajectory",
+        Command::Init(_) => "init",
+    };
 
     let result: Result<()> = match cli.command {
         Command::Run(args) => run::execute(args, cli.config).await,
@@ -84,14 +111,38 @@ async fn main() -> ExitCode {
         Command::RunTask(args) => run_task::execute(args, cli.config).await,
         Command::Probe(args) => probe::execute(args, cli.config).await,
         Command::Bench(args) => bench::execute(args, cli.config).await,
-        Command::Trajectory(args) => trajectory::execute(args).await,
+        Command::Trajectory(args) => {
+            // `--config` is global on the parser for ergonomics, but
+            // trajectory operates only on the event-store sqlite file
+            // (see `--events-path`). Surface that mismatch instead of
+            // silently ignoring the flag.
+            if cli.config.is_some() {
+                tracing::warn!(
+                    "--config is ignored by `tars trajectory` \
+                     (use --events-path / TARS_EVENTS_PATH instead)"
+                );
+            }
+            trajectory::execute(args).await
+        }
+        Command::Init(args) => {
+            // `--config` is a global flag for ergonomics on other
+            // subcommands; `init` writes its own target so it never
+            // reads the global one. `--path` on InitArgs is the
+            // subcommand-local override.
+            if cli.config.is_some() {
+                tracing::warn!(
+                    "--config is ignored by `tars init` (use --path to redirect output)"
+                );
+            }
+            init::execute(args).await
+        }
     };
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             // anyhow's Debug renders the chain (caused by ...).
-            eprintln!("error: {e:?}");
+            eprintln!("error in `tars {cmd_name}`: {e:?}");
             ExitCode::from(1)
         }
     }

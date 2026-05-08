@@ -47,6 +47,7 @@ pub fn llamacpp(
     base_url: Option<String>,
     auth: Auth,
     extras: HttpProviderExtras,
+    capability_overrides: tars_config::CapabilitiesOverrides,
     http: Arc<HttpProviderBase>,
     auth_resolver: Arc<dyn AuthResolver>,
 ) -> Arc<dyn LlmProvider> {
@@ -59,10 +60,12 @@ pub fn llamacpp(
         }
         other => other,
     };
+    let mut caps = llamacpp_default_capabilities();
+    capability_overrides.apply_to(&mut caps);
     OpenAiProviderBuilder::new(id, normalized_auth)
         .base_url(url)
         .extras(extras)
-        .capabilities(llamacpp_default_capabilities())
+        .capabilities(caps)
         .build(http, auth_resolver)
 }
 
@@ -77,6 +80,7 @@ pub fn llamacpp_local(
         None,
         Auth::None,
         HttpProviderExtras::default(),
+        tars_config::CapabilitiesOverrides::default(),
         http,
         auth_resolver,
     )
@@ -139,6 +143,7 @@ mod tests {
             None,
             Auth::inline(String::new()),
             HttpProviderExtras::default(),
+            tars_config::CapabilitiesOverrides::default(),
             http,
             basic(),
         );

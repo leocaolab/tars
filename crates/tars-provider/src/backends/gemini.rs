@@ -147,8 +147,18 @@ impl LlmProvider for GeminiProvider {
         // with the key folded in, and don't set any auth headers.
         // Adapter handles model-name→URL with the key already present.
         let resolved = match auth {
-            ResolvedAuth::ApiKey(k) | ResolvedAuth::Bearer(k) => {
+            ResolvedAuth::ApiKey(k) => {
+                if k.is_empty() {
+                    return Err(ProviderError::Auth(
+                        "Gemini API key is empty".into(),
+                    ));
+                }
                 ResolvedAuthWithKey::Key(k)
+            }
+            ResolvedAuth::Bearer(_) => {
+                return Err(ProviderError::Auth(
+                    "Gemini bearer auth (Vertex AI ADC) is not yet supported; use an API key".into(),
+                ));
             }
             ResolvedAuth::None => {
                 return Err(ProviderError::Auth(
@@ -195,7 +205,11 @@ impl HttpAdapter for GeminiAdapterWithKey {
             "{trimmed}/{API_VERSION}/models/{model}:streamGenerateContent?alt=sse&key={}",
             urlencoding(&self.key)
         ))
-        .map_err(|e| ProviderError::Internal(format!("bad gemini url: {e}")))
+        .map_err(|e| {
+            ProviderError::Internal(format!(
+                "bad gemini url for model '{model}' (base_url='{trimmed}'): {e}"
+            ))
+        })
     }
 
     fn build_headers(&self, _auth: &ResolvedAuth) -> Result<HeaderMap, ProviderError> {
@@ -251,11 +265,11 @@ impl GeminiAdapter {
         }
     }
 
-    fn translate_message(m: &Message) -> Value {
+    fn translate_message(m: &Message) -> Result<Value, ProviderError> {
         match m {
             Message::User { content } => {
                 let parts: Vec<Value> = content.iter().map(Self::translate_part).collect();
-                json!({"role": "user", "parts": parts})
+                Ok(json!({"role": "user", "parts": parts}))
             }
             Message::Assistant { content, tool_calls } => {
                 let mut parts: Vec<Value> = content.iter().map(Self::translate_part).collect();
@@ -267,36 +281,51 @@ impl GeminiAdapter {
                         }
                     }));
                 }
-                json!({"role": "model", "parts": parts})
+                Ok(json!({"role": "model", "parts": parts}))
             }
-            Message::Tool { tool_call_id: _, content, is_error: _ } => {
-                // Gemini's functionResponse needs the function's *name*, but we
-                // only have the tool_call_id at this layer. Convention: caller
-                // sets `name@id` as the id, OR pipeline rewrites Tool messages
-                // to embed name. For now, derive name from first text block
-                // if present (common pattern: agents stuff `name=...` there).
-                // Fallback: empty string — Gemini will reject; surface clean error.
+            Message::Tool { tool_call_id, content, is_error } => {
+                // Gemini's functionResponse needs the function's *name*, but
+                // tars's canonical Message::Tool only carries the
+                // `tool_call_id`. Convention: callers targeting Gemini must
+                // encode the function name as `<name>@<id>` so this layer
+                // can recover it. Reject with a clear, actionable error
+                // when the convention is missing — Gemini's own 400 is
+                // cryptic ("functionResponse.name is required").
+                let name = match tool_call_id.split_once('@') {
+                    Some((n, _)) if !n.is_empty() => n,
+                    _ => {
+                        return Err(ProviderError::InvalidRequest(format!(
+                            "Gemini tool result requires `<name>@<id>` tool_call_id; got `{tool_call_id}`"
+                        )));
+                    }
+                };
                 let text = content
                     .first()
                     .and_then(|b| b.as_text())
                     .unwrap_or("")
                     .to_string();
-                json!({
+                // Encode failure into the response object so the model
+                // doesn't mistake a failed call for a successful one.
+                // Gemini doesn't have a dedicated `is_error` flag for
+                // functionResponse, so we surface it inside `response`.
+                let response = if *is_error {
+                    json!({"error": text})
+                } else {
+                    json!({"output": text})
+                };
+                Ok(json!({
                     "role": "user",
                     "parts": [{
                         "functionResponse": {
-                            "name": "",
-                            "response": {"output": text},
+                            "name": name,
+                            "response": response,
                         }
                     }]
-                })
+                }))
             }
             Message::System { content } => {
-                // Inline system messages are rare since `request.system`
-                // takes precedence. Forward as user role to keep history
-                // valid (agents that *want* this should flatten).
                 let parts: Vec<Value> = content.iter().map(Self::translate_part).collect();
-                json!({"role": "user", "parts": parts})
+                Ok(json!({"role": "user", "parts": parts}))
             }
         }
     }
@@ -325,7 +354,11 @@ impl HttpAdapter for GeminiAdapter {
         Url::parse(&format!(
             "{trimmed}/{API_VERSION}/models/{model}:streamGenerateContent?alt=sse"
         ))
-        .map_err(|e| ProviderError::Internal(format!("bad gemini url: {e}")))
+        .map_err(|e| {
+            ProviderError::Internal(format!(
+                "bad gemini url for model '{model}' (base_url='{trimmed}'): {e}"
+            ))
+        })
     }
 
     fn build_headers(&self, _auth: &ResolvedAuth) -> Result<HeaderMap, ProviderError> {
@@ -335,12 +368,24 @@ impl HttpAdapter for GeminiAdapter {
     }
 
     fn translate_request(&self, req: &ChatRequest) -> Result<Value, ProviderError> {
-        let _ = req
-            .model
-            .explicit()
-            .ok_or_else(|| ProviderError::InvalidRequest("model must be explicit".into()))?;
+        let _ = req.model.explicit().ok_or_else(|| {
+            ProviderError::InvalidRequest(format!(
+                "model must be explicit, got: {:?}",
+                req.model
+            ))
+        })?;
 
-        let contents: Vec<Value> = req.messages.iter().map(Self::translate_message).collect();
+        if req.messages.is_empty() {
+            return Err(ProviderError::InvalidRequest(
+                "messages cannot be empty".into(),
+            ));
+        }
+
+        let contents: Vec<Value> = req
+            .messages
+            .iter()
+            .map(Self::translate_message)
+            .collect::<Result<_, _>>()?;
 
         let mut body = json!({
             "contents": contents,
@@ -383,8 +428,10 @@ impl HttpAdapter for GeminiAdapter {
         }
 
         if let Some(sys) = &req.system {
+            // Gemini's `systemInstruction` is a Content but role is
+            // implicit ("system") — passing role: "user" here is
+            // misleading and contradicts the file-level header doc.
             body["systemInstruction"] = json!({
-                "role": "user",
                 "parts": [{"text": sys}],
             });
         }
@@ -396,10 +443,22 @@ impl HttpAdapter for GeminiAdapter {
                 tars_types::ToolChoice::Auto => json!({"mode": "AUTO"}),
                 tars_types::ToolChoice::None => json!({"mode": "NONE"}),
                 tars_types::ToolChoice::Required => json!({"mode": "ANY"}),
-                tars_types::ToolChoice::Specific(name) => json!({
-                    "mode": "ANY",
-                    "allowed_function_names": [name],
-                }),
+                tars_types::ToolChoice::Specific(name) => {
+                    if name.is_empty() {
+                        return Err(ProviderError::InvalidRequest(
+                            "ToolChoice::Specific name is empty".into(),
+                        ));
+                    }
+                    if !req.tools.iter().any(|t| &t.name == name) {
+                        return Err(ProviderError::InvalidRequest(format!(
+                            "ToolChoice::Specific(`{name}`) not present in tools list"
+                        )));
+                    }
+                    json!({
+                        "mode": "ANY",
+                        "allowed_function_names": [name],
+                    })
+                }
             };
             body["toolConfig"] = json!({"functionCallingConfig": mode});
         }
@@ -466,7 +525,12 @@ impl HttpAdapter for GeminiAdapter {
             out.push(ChatEvent::started(model_version));
         }
 
-        for cand in candidates {
+        // ChatEvent contract: exactly one Finished event per response.
+        // Gemini may return >1 candidate when n>1 sampling is requested,
+        // but our request never asks for that — and emitting one
+        // Finished per candidate would break downstream consumers.
+        // Process only candidates[0]; ignore the rest.
+        if let Some(cand) = candidates.first() {
             // Track whether this candidate contained any tool call so we
             // can override Gemini's generic `STOP` finishReason → ToolUse
             // when appropriate. Gemini doesn't have a dedicated
@@ -482,7 +546,13 @@ impl HttpAdapter for GeminiAdapter {
                 .and_then(|p| p.as_array())
                 .cloned()
                 .unwrap_or_default();
-            for (idx, part) in parts.into_iter().enumerate() {
+            // Tool-call index is a counter over functionCall parts only —
+            // not the part position in the array. Mixing text parts and
+            // functionCall parts would otherwise produce non-sequential
+            // tool indices that downstream tool-buffer logic expects to
+            // be 0..N.
+            let mut fc_idx: usize = 0;
+            for part in parts.into_iter() {
                 let is_thought = part
                     .get("thought")
                     .and_then(|t| t.as_bool())
@@ -506,7 +576,12 @@ impl HttpAdapter for GeminiAdapter {
                         .unwrap_or("")
                         .to_string();
                     let args = fc.get("args").cloned().unwrap_or(Value::Object(Default::default()));
-                    let call_id = format!("gemini-call-{idx}");
+                    // Embed the function name in the id so that downstream
+                    // Tool messages can recover it via the `<name>@<id>`
+                    // convention required by `translate_message`.
+                    let call_id = format!("{name}@gemini-call-{fc_idx}");
+                    let idx = fc_idx;
+                    fc_idx += 1;
                     out.push(ChatEvent::ToolCallStart {
                         index: idx,
                         id: call_id.clone(),
@@ -521,13 +596,12 @@ impl HttpAdapter for GeminiAdapter {
                     });
                     buf.on_start(idx, call_id.clone(), name);
                     buf.on_delta(idx, &args_str);
-                    if let Ok((id, _name, parsed)) = buf.finalize(idx) {
-                        out.push(ChatEvent::ToolCallEnd {
-                            index: idx,
-                            id,
-                            parsed_args: parsed,
-                        });
-                    }
+                    let (id, _name, parsed) = buf.finalize(idx)?;
+                    out.push(ChatEvent::ToolCallEnd {
+                        index: idx,
+                        id,
+                        parsed_args: parsed,
+                    });
                 }
             }
 
@@ -666,7 +740,7 @@ mod tests {
     #[test]
     fn translates_assistant_to_model_role() {
         let m = Message::assistant_text("hello");
-        let v = GeminiAdapter::translate_message(&m);
+        let v = GeminiAdapter::translate_message(&m).unwrap();
         assert_eq!(v["role"], "model");
         assert_eq!(v["parts"][0]["text"], "hello");
     }
@@ -674,8 +748,119 @@ mod tests {
     #[test]
     fn translates_user_to_user_role() {
         let m = Message::user_text("hi");
-        let v = GeminiAdapter::translate_message(&m);
+        let v = GeminiAdapter::translate_message(&m).unwrap();
         assert_eq!(v["role"], "user");
+    }
+
+    #[test]
+    fn tool_message_without_name_in_id_is_invalid_request() {
+        let m = Message::Tool {
+            tool_call_id: "abc-123".into(),
+            content: vec![tars_types::ContentBlock::text("ok")],
+            is_error: false,
+        };
+        let err = GeminiAdapter::translate_message(&m).unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn tool_message_extracts_name_from_id_and_encodes_error() {
+        let m = Message::Tool {
+            tool_call_id: "search@call-1".into(),
+            content: vec![tars_types::ContentBlock::text("boom")],
+            is_error: true,
+        };
+        let v = GeminiAdapter::translate_message(&m).unwrap();
+        assert_eq!(v["parts"][0]["functionResponse"]["name"], "search");
+        assert_eq!(
+            v["parts"][0]["functionResponse"]["response"]["error"],
+            "boom"
+        );
+    }
+
+    #[test]
+    fn empty_messages_rejected_early() {
+        let mut req = ChatRequest::user(
+            tars_types::ModelHint::Explicit("gemini-2.5-pro".into()),
+            "hi",
+        );
+        req.messages.clear();
+        let err = adapter().translate_request(&req).unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn tool_choice_specific_unknown_name_rejected() {
+        let mut req = ChatRequest::user(
+            tars_types::ModelHint::Explicit("gemini-2.5-pro".into()),
+            "hi",
+        );
+        req.tools = vec![tars_types::ToolSpec {
+            name: "real_tool".into(),
+            description: "".into(),
+            input_schema: tars_types::JsonSchema::strict("X", serde_json::json!({"type":"object"})),
+        }];
+        req.tool_choice = tars_types::ToolChoice::Specific("ghost".into());
+        let err = adapter().translate_request(&req).unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidRequest(_)));
+    }
+
+    #[test]
+    fn system_instruction_has_no_role_field() {
+        let req = ChatRequest::user(
+            tars_types::ModelHint::Explicit("gemini-2.5-pro".into()),
+            "hi",
+        )
+        .with_system("be brief");
+        let body = adapter().translate_request(&req).unwrap();
+        assert!(body["systemInstruction"].get("role").is_none());
+    }
+
+    #[test]
+    fn parse_event_uses_only_first_candidate() {
+        let mut buf = ToolCallBuffer::new();
+        let raw = SseEvent {
+            event: "message".into(),
+            data: r#"{"candidates":[
+                {"content":{"parts":[{"text":"a"}]},"finishReason":"STOP"},
+                {"content":{"parts":[{"text":"b"}]},"finishReason":"STOP"}
+            ]}"#.into(),
+        };
+        let events = adapter().parse_event(&raw, &mut buf).unwrap();
+        let finished = events.iter().filter(|e| e.is_terminal()).count();
+        assert_eq!(finished, 1, "exactly one Finished event expected");
+        let has_b = events.iter().any(|e| matches!(e, ChatEvent::Delta { text } if text == "b"));
+        assert!(!has_b, "second candidate must be ignored");
+    }
+
+    #[test]
+    fn parse_event_tool_call_id_embeds_name() {
+        let mut buf = ToolCallBuffer::new();
+        let raw = SseEvent {
+            event: "message".into(),
+            data: r#"{"candidates":[
+                {"content":{"parts":[
+                    {"text":"thinking..."},
+                    {"functionCall":{"name":"search","args":{"q":"x"}}}
+                ]},"finishReason":"STOP"}
+            ]}"#.into(),
+        };
+        let events = adapter().parse_event(&raw, &mut buf).unwrap();
+        let start = events.iter().find_map(|e| match e {
+            ChatEvent::ToolCallStart { index, id, name } => {
+                Some((*index, id.clone(), name.clone()))
+            }
+            _ => None,
+        });
+        let (idx, id, name) = start.expect("ToolCallStart present");
+        assert_eq!(idx, 0, "function-call counter resets across mixed parts");
+        assert_eq!(name, "search");
+        assert!(id.starts_with("search@"), "id must embed name: {id}");
+        let stop = events.iter().find_map(|e| match e {
+            ChatEvent::Finished { stop_reason, .. } => Some(*stop_reason),
+            _ => None,
+        });
+        assert_eq!(stop, Some(StopReason::ToolUse));
     }
 
     #[test]

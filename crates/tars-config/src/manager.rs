@@ -1,10 +1,13 @@
 //! Top-level [`Config`] container + [`ConfigManager`] for loading from
 //! a TOML file. v0.1: single-file load, full validation, no hot-reload.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tars_types::ProviderId;
 
+use crate::builtin::merge_builtin_with_user;
 use crate::error::{ConfigError, ValidationError};
 use crate::providers::ProvidersConfig;
 use crate::routing::RoutingConfig;
@@ -23,6 +26,21 @@ pub struct Config {
     /// dispatch (existing behaviour).
     #[serde(default)]
     pub routing: RoutingConfig,
+
+    /// IDs that came from the user's TOML, captured *before* the
+    /// builtin-merge step so callers can distinguish "explicitly
+    /// declared by the user" from "ambient builtin default".
+    ///
+    /// Used by the CLI's implicit-pick logic: with builtins always
+    /// merged in, a user with a single declared provider still expects
+    /// `tars run` (no `--provider`) to use it rather than fail with
+    /// "ambiguous (8 providers)". This field gives that filter a
+    /// reliable basis without sprinkling a second config layer
+    /// throughout the codebase.
+    ///
+    /// Skipped in serialization — it's an internal post-load annotation.
+    #[serde(skip)]
+    pub user_provider_ids: HashSet<ProviderId>,
 }
 
 impl Config {
@@ -32,10 +50,21 @@ impl Config {
         let mut errs = Vec::new();
         self.providers.validate(&mut errs);
         // Routing references must point at known provider IDs.
-        let known: std::collections::HashSet<_> =
-            self.providers.iter().map(|(id, _)| id.clone()).collect();
+        let known: HashSet<_> = self.providers.iter().map(|(id, _)| id.clone()).collect();
         self.routing.validate(&known, &mut errs);
         if errs.is_empty() { Ok(()) } else { Err(errs) }
+    }
+
+    /// Iterator over only the providers the user *explicitly* declared
+    /// in their TOML — excludes ambient builtin defaults that were
+    /// merged in at load time. Use this for "what did the user actually
+    /// want" decisions; use `providers.iter()` for "anything resolvable".
+    pub fn user_declared(
+        &self,
+    ) -> impl Iterator<Item = (&ProviderId, &crate::ProviderConfig)> {
+        self.providers
+            .iter()
+            .filter(|(id, _)| self.user_provider_ids.contains(id))
     }
 }
 
@@ -57,10 +86,11 @@ impl ConfigManager {
             path: path.clone(),
             source,
         })?;
-        let cfg: Config = toml::from_str(&raw).map_err(|e| ConfigError::Parse {
+        let mut cfg: Config = toml::from_str(&raw).map_err(|e| ConfigError::Parse {
             path: path.clone(),
             source: Box::new(e),
         })?;
+        merge_builtins_into(&mut cfg);
         cfg.validate().map_err(ConfigError::validation_failed)?;
         Ok(cfg)
     }
@@ -68,13 +98,30 @@ impl ConfigManager {
     /// Parse-only — useful for tests and programmatic configuration
     /// (e.g. tests embedding TOML inline).
     pub fn load_from_str(src: &str) -> Result<Config, ConfigError> {
-        let cfg: Config = toml::from_str(src).map_err(|e| ConfigError::Parse {
+        let mut cfg: Config = toml::from_str(src).map_err(|e| ConfigError::Parse {
             path: PathBuf::from("<inline>"),
             source: Box::new(e),
         })?;
+        merge_builtins_into(&mut cfg);
         cfg.validate().map_err(ConfigError::validation_failed)?;
         Ok(cfg)
     }
+}
+
+/// Layer the built-in provider defaults under whatever the user
+/// declared. User entries with the same id win (per
+/// `merge_builtin_with_user`'s semantics). Lets users start with an
+/// empty `[providers]` table — built-ins like `mlx`, `vllm`, `openai`
+/// are then resolvable by id without any explicit declaration.
+///
+/// Captures the pre-merge user-declared id set into
+/// `cfg.user_provider_ids` so callers can later distinguish "explicit"
+/// from "ambient default".
+fn merge_builtins_into(cfg: &mut Config) {
+    let user = std::mem::take(&mut cfg.providers).providers;
+    cfg.user_provider_ids = user.keys().cloned().collect();
+    let merged = merge_builtin_with_user(user);
+    cfg.providers = ProvidersConfig::from_map(merged);
 }
 
 #[cfg(test)]
@@ -89,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn load_minimal_config_from_str() {
+    fn load_minimal_config_includes_user_and_builtins() {
         let toml_str = r#"
             [providers.openai_main]
             type = "openai"
@@ -97,11 +144,15 @@ mod tests {
             default_model = "gpt-4o"
         "#;
         let cfg = ConfigManager::load_from_str(toml_str).unwrap();
-        assert_eq!(cfg.providers.len(), 1);
+        // User entry present.
+        assert!(cfg.providers.get(&tars_types::ProviderId::new("openai_main")).is_some());
+        // Built-ins also merged in (`mlx`, `vllm`, etc.).
+        assert!(cfg.providers.get(&tars_types::ProviderId::new("mlx")).is_some());
+        assert!(cfg.providers.get(&tars_types::ProviderId::new("vllm")).is_some());
     }
 
     #[test]
-    fn load_from_file_round_trip() {
+    fn load_from_file_round_trip_preserves_user_provider() {
         let toml_str = r#"
             [providers.local_qwen]
             type = "openai_compat"
@@ -110,21 +161,23 @@ mod tests {
         "#;
         let f = tempfile_with_contents(toml_str);
         let cfg = ConfigManager::load_from_file(f.path()).unwrap();
-        assert_eq!(cfg.providers.len(), 1);
+        assert!(cfg.providers.get(&tars_types::ProviderId::new("local_qwen")).is_some());
     }
 
     #[test]
-    fn empty_providers_block_fails_validation() {
+    fn empty_providers_block_yields_builtins_only() {
+        // Previous behavior: empty `[providers]` failed validation.
+        // New behavior (per Stage-2 builtin-merge): empty user table
+        // is fine, the loader fills in built-in defaults so callers
+        // can resolve `mlx` / `vllm` / `openai` etc. without writing
+        // any TOML at all.
         let toml_str = r#"
             [providers]
         "#;
-        let err = ConfigManager::load_from_str(toml_str).unwrap_err();
-        match err {
-            ConfigError::ValidationFailed { errors } => {
-                assert!(errors.iter().any(|e| e.key == "providers"));
-            }
-            _ => panic!("wrong error variant: {err:?}"),
-        }
+        let cfg = ConfigManager::load_from_str(toml_str).expect("empty providers + builtins should validate");
+        assert!(cfg.providers.get(&tars_types::ProviderId::new("openai")).is_some());
+        assert!(cfg.providers.get(&tars_types::ProviderId::new("mlx")).is_some());
+        assert!(cfg.providers.get(&tars_types::ProviderId::new("vllm")).is_some());
     }
 
     #[test]

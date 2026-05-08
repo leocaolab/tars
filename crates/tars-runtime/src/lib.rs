@@ -41,6 +41,7 @@ mod message;
 mod orchestrator;
 mod prompt;
 mod runtime;
+mod session;
 mod task;
 mod worker;
 
@@ -54,5 +55,8 @@ pub use message::{AgentMessage, VerdictKind};
 pub use orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep};
 pub use prompt::PromptBuilder;
 pub use runtime::{execute_agent_step, AgentExecutionError, LocalRuntime, Runtime};
+pub use session::{
+    Budget, Session, SessionError, SessionOptions, Tokenizer, Tool, ToolRegistry, Turn,
+};
 pub use task::{run_task, RunTaskConfig, RunTaskError, StepOutcome, TaskOutcome};
 pub use worker::{WorkerAgent, WorkerError};

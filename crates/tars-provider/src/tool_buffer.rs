@@ -34,6 +34,11 @@ pub struct ToolCallBuffer {
     /// stream this buffer belongs to. Lets adapters call
     /// [`Self::take_started`] once and skip the rest.
     started_emitted: bool,
+    /// Whether a `Finished` event has already been emitted on this
+    /// stream. Adapters can use this to detect protocol-level
+    /// `*_stop`-style terminators that arrive without an upstream
+    /// finish payload, and emit a synthetic Finished as a last resort.
+    finished_emitted: bool,
     /// Stop reason captured from a `finish_reason` chunk that didn't
     /// carry usage data; will be paired with a later usage-only chunk.
     /// Audit `tars-provider-src-backends-openai-{7,22}` — previously a
@@ -70,6 +75,19 @@ impl ToolCallBuffer {
             self.started_emitted = true;
             true
         }
+    }
+
+    /// Mark Finished as emitted. Called by adapters right after they
+    /// push a `ChatEvent::Finished` so the matching `*_stop`-style
+    /// event handler can decide whether a synthetic terminator is
+    /// needed.
+    pub fn mark_finished(&mut self) {
+        self.finished_emitted = true;
+    }
+
+    /// Whether `mark_finished` was called previously on this buffer.
+    pub fn finished_emitted(&self) -> bool {
+        self.finished_emitted
     }
 
     pub fn on_start(&mut self, index: usize, id: String, name: String) {

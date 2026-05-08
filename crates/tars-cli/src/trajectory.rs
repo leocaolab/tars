@@ -17,6 +17,7 @@
 //!     so `tars trajectory show ID | jq -c 'select(.type=="step_failed")'`
 //!     just works.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -57,14 +58,21 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
     let store: Arc<dyn EventStore> = store_arc;
     let runtime = LocalRuntime::new(store);
 
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
     match args.command {
-        TrajectoryCommand::List => list(&runtime).await,
-        TrajectoryCommand::Show { id } => show(&runtime, &TrajectoryId::new(id)).await,
+        TrajectoryCommand::List => list(&runtime, &mut out).await,
+        TrajectoryCommand::Show { id } => {
+            show(&runtime, &TrajectoryId::new(id), &mut out).await
+        }
     }
 }
 
-async fn list(runtime: &LocalRuntime) -> Result<()> {
-    let mut ids = runtime.list_trajectories().await?;
+async fn list(runtime: &LocalRuntime, out: &mut dyn Write) -> Result<()> {
+    let mut ids = runtime
+        .list_trajectories()
+        .await
+        .context("failed to list trajectories")?;
     if ids.is_empty() {
         eprintln!("(no trajectories recorded yet)");
         return Ok(());
@@ -72,7 +80,7 @@ async fn list(runtime: &LocalRuntime) -> Result<()> {
     // Stable order so `diff <(tars trajectory list)` is meaningful.
     ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
-    println!("{:<34} {:>6}  STATUS", "ID", "EVENTS");
+    writeln!(out, "{:<34} {:>6}  STATUS", "ID", "EVENTS").context("stdout write")?;
     // Audit `tars-cli-src-trajectory-1`: per-trajectory replay()
     // failures used to bail out via `?`, which meant one corrupted
     // row hid every other (working) trajectory from the user. Now
@@ -94,7 +102,8 @@ async fn list(runtime: &LocalRuntime) -> Result<()> {
                 } else {
                     "active"
                 };
-                println!("{:<34} {:>6}  {}", id.as_str(), count, status);
+                writeln!(out, "{:<34} {:>6}  {}", id.as_str(), count, status)
+                    .context("stdout write")?;
             }
             Err(e) => {
                 had_errors = true;
@@ -103,7 +112,8 @@ async fn list(runtime: &LocalRuntime) -> Result<()> {
                     error = %e,
                     "trajectory list: replay failed; row marked <error>",
                 );
-                println!("{:<34} {:>6}  <error>", id.as_str(), "?");
+                writeln!(out, "{:<34} {:>6}  <error>", id.as_str(), "?")
+                    .context("stdout write")?;
             }
         }
     }
@@ -116,8 +126,11 @@ async fn list(runtime: &LocalRuntime) -> Result<()> {
     Ok(())
 }
 
-async fn show(runtime: &LocalRuntime, id: &TrajectoryId) -> Result<()> {
-    let events = runtime.replay(id).await?;
+async fn show(runtime: &LocalRuntime, id: &TrajectoryId, out: &mut dyn Write) -> Result<()> {
+    let events = runtime
+        .replay(id)
+        .await
+        .context("failed to replay trajectory events")?;
     if events.is_empty() {
         anyhow::bail!(
             "no events recorded for trajectory `{}` — \
@@ -125,12 +138,10 @@ async fn show(runtime: &LocalRuntime, id: &TrajectoryId) -> Result<()> {
             id,
         );
     }
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    use std::io::Write as _;
-    for ev in events {
-        let json = serde_json::to_string(&ev).context("encode event for output")?;
-        writeln!(out, "{json}").context("stdout write")?;
+    for (i, ev) in events.iter().enumerate() {
+        let json = serde_json::to_string(ev)
+            .with_context(|| format!("encode event #{i} for output"))?;
+        writeln!(out, "{json}").with_context(|| format!("stdout write for event #{i}"))?;
     }
     Ok(())
 }
@@ -138,22 +149,23 @@ async fn show(runtime: &LocalRuntime, id: &TrajectoryId) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tars_runtime::AgentEvent;
     use tempfile::TempDir;
 
-    async fn fixture_runtime(dir: &TempDir) -> Arc<LocalRuntime> {
+    async fn fixture(dir: &TempDir) -> (Arc<dyn EventStore>, Arc<LocalRuntime>) {
         let path = dir.path().join("events.sqlite");
         let store: Arc<dyn EventStore> = tars_storage::open_event_store_at_path(&path).unwrap();
-        LocalRuntime::new(store)
+        let rt = LocalRuntime::new(Arc::clone(&store));
+        (store, rt)
     }
 
     #[tokio::test]
-    async fn list_renders_active_vs_completed_vs_abandoned() {
+    async fn list_renders_active_completed_abandoned_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let rt = fixture_runtime(&dir).await;
-        // Active trajectory.
+        let (_store, rt) = fixture(&dir).await;
+
         let _a = rt.create_trajectory(None, "active").await.unwrap();
-        // Completed trajectory.
         let b = rt.create_trajectory(None, "to-complete").await.unwrap();
         rt.append(
             &b,
@@ -161,7 +173,6 @@ mod tests {
         )
         .await
         .unwrap();
-        // Abandoned trajectory.
         let c = rt.create_trajectory(None, "to-abandon").await.unwrap();
         rt.append(
             &c,
@@ -170,20 +181,60 @@ mod tests {
         .await
         .unwrap();
 
-        let listed = rt.list_trajectories().await.unwrap();
-        assert_eq!(listed.len(), 3);
-        // We don't capture stdout in this test (would need a different
-        // CLI shape); we just assert the runtime queries the right
-        // shape so the formatter can render. The actual rendering is
-        // covered by manual smoke (next step in the smoke matrix).
+        let mut out: Vec<u8> = Vec::new();
+        list(&rt, &mut out).await.unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+
+        assert!(rendered.contains("STATUS"), "header missing: {rendered}");
+        assert!(rendered.contains(" active"), "active row missing: {rendered}");
+        assert!(rendered.contains(" completed"), "completed row missing: {rendered}");
+        assert!(rendered.contains(" abandoned"), "abandoned row missing: {rendered}");
+    }
+
+    #[tokio::test]
+    async fn list_marks_corrupted_row_as_error_without_hiding_others() {
+        // Regression test for the bug documented at the top of `list()`:
+        // one corrupted trajectory used to bail out via `?` and hide
+        // every other row.
+        let dir = tempfile::tempdir().unwrap();
+        let (store, rt) = fixture(&dir).await;
+
+        // One healthy trajectory.
+        let _a = rt.create_trajectory(None, "healthy").await.unwrap();
+        // One corrupted trajectory: bypass the runtime and write a
+        // payload that won't deserialize back into `AgentEvent`, so
+        // `replay()` returns `RuntimeError::Serde`.
+        let bad_id = TrajectoryId::new("corrupted-traj-id");
+        store
+            .append(&bad_id, &[json!({"not": "an AgentEvent"})])
+            .await
+            .unwrap();
+
+        let mut out: Vec<u8> = Vec::new();
+        list(&rt, &mut out).await.unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+
+        assert!(
+            rendered.contains("<error>"),
+            "corrupted row should render as <error>: {rendered}"
+        );
+        assert!(
+            rendered.contains("corrupted-traj-id"),
+            "corrupted id should still appear in the table: {rendered}"
+        );
+        assert!(
+            rendered.contains(" active"),
+            "healthy row should still appear despite sibling failure: {rendered}"
+        );
     }
 
     #[tokio::test]
     async fn show_errors_for_unknown_trajectory() {
         let dir = tempfile::tempdir().unwrap();
-        let rt = fixture_runtime(&dir).await;
+        let (_store, rt) = fixture(&dir).await;
         let unknown = TrajectoryId::new("definitely-not-a-real-id");
-        let result = show(&rt, &unknown).await;
+        let mut out: Vec<u8> = Vec::new();
+        let result = show(&rt, &unknown, &mut out).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("no events"));

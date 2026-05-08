@@ -110,7 +110,7 @@ pub async fn execute(args: RunTaskArgs, config_path: Option<PathBuf>) -> Result<
     // Same pipeline shape `tars plan` uses — Telemetry + Cache + Retry
     // pay off here too (cache especially: temperature=0 across all 3
     // agents means deterministic re-runs hit the cache cleanly).
-    let cache_registry = build_cache(args.dispatch.cache_path.as_deref());
+    let cache_registry = build_cache(args.dispatch.cache_path.as_deref())?;
     let cache_factory = CacheKeyFactory::new(1);
     let pipeline = Pipeline::builder_with_inner(dispatch.inner.clone())
         .layer(TelemetryMiddleware::new())

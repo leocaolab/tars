@@ -93,7 +93,7 @@ impl OpenAiProviderBuilder {
     }
 }
 
-fn default_openai_capabilities() -> Capabilities {
+pub fn default_openai_capabilities() -> Capabilities {
     use std::collections::HashSet;
     let mut modalities = HashSet::new();
     modalities.insert(Modality::Text);
@@ -387,6 +387,17 @@ impl HttpAdapter for OpenAiAdapter {
             });
         }
 
+        // Per-request thinking control via the OpenAI-compat
+        // `chat_template_kwargs` field. mlx_lm.server / vLLM / Qwen3
+        // chat templates accept `enable_thinking: bool` here; OpenAI
+        // proper ignores unknown body fields, so this is harmless to
+        // send on the standard endpoint. Only emit when the caller
+        // explicitly set the override — `None` means "no preference,
+        // let the server's chat-template default decide."
+        if let Some(enable) = req.enable_chat_template_thinking {
+            body["chat_template_kwargs"] = json!({"enable_thinking": enable});
+        }
+
         Ok(body)
     }
 
@@ -472,10 +483,19 @@ impl HttpAdapter for OpenAiAdapter {
             // thinking_tokens accumulator picks it up. Ordering: most
             // models emit reasoning BEFORE content per chunk, so emit
             // ThinkingDelta first when both are present.
-            if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str())
-                && !reasoning.is_empty()
+            //
+            // Two field names in the wild: `reasoning_content`
+            // (OpenAI spec / DeepSeek-R1 / many LM Studio models) and
+            // `reasoning` (mlx_lm.server / some Qwen-thinking variants).
+            // Accept both; prefer the spec name when present.
+            let reasoning = delta
+                .get("reasoning_content")
+                .and_then(|r| r.as_str())
+                .or_else(|| delta.get("reasoning").and_then(|r| r.as_str()));
+            if let Some(text) = reasoning
+                && !text.is_empty()
             {
-                out.push(ChatEvent::ThinkingDelta { text: reasoning.to_string() });
+                out.push(ChatEvent::ThinkingDelta { text: text.to_string() });
             }
             if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                 if !content.is_empty() {
@@ -758,6 +778,7 @@ mod tests {
             seed: None,
             cache_directives: vec![],
             thinking: Default::default(),
+            enable_chat_template_thinking: None,
         };
         let body = a.translate_request(&req).unwrap();
         let messages = body["messages"].as_array().unwrap();

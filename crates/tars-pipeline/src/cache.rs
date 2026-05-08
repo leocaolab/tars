@@ -96,6 +96,10 @@ impl LlmService for CacheLookupService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
+        // Telemetry: layer trace.
+        if let Ok(mut t) = ctx.telemetry.lock() {
+            t.layers.push("cache_lookup".into());
+        }
         let policy = read_policy(&ctx);
         if !policy.any_enabled() {
             // Cache fully off — skip key compute too (it's not free).
@@ -109,7 +113,12 @@ impl LlmService for CacheLookupService {
                 return self.inner.clone().call(req, ctx).await;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "cache: key computation failed, treating as miss");
+                tracing::warn!(
+                    error = %e,
+                    model = %req.model.label(),
+                    msg_count = req.messages.len(),
+                    "cache: key computation failed, treating as miss",
+                );
                 return self.inner.clone().call(req, ctx).await;
             }
         };
@@ -122,6 +131,13 @@ impl LlmService for CacheLookupService {
                     label = %key.debug_label,
                     "cache: hit",
                 );
+                // Telemetry: record the middleware-cache hit. (Distinct
+                // from `Usage.cached_input_tokens` which is the
+                // *provider's* prompt cache. Both can be true; this
+                // field is "we avoided the provider call entirely".)
+                if let Ok(mut t) = ctx.telemetry.lock() {
+                    t.cache_hit = true;
+                }
                 let cache_hit = CacheHitInfo {
                     // Surface the original input-token count as the
                     // "cached" figure — gives a direct read on "cost
@@ -138,6 +154,8 @@ impl LlmService for CacheLookupService {
             Err(e) => {
                 tracing::warn!(
                     error = %e,
+                    key = %key.hex(),
+                    label = %key.debug_label,
                     "cache: lookup failed; treating as miss (Doc 03 §4.3)",
                 );
             }
@@ -235,6 +253,7 @@ fn wrap_stream_for_write(
             return;
         }
 
+        let stop_reason = response.stop_reason;
         let value = CachedResponse {
             cached_at: std::time::SystemTime::now(),
             origin_provider,
@@ -242,10 +261,19 @@ fn wrap_stream_for_write(
             response,
         };
         let label = key.debug_label.clone();
+        let key_hex = key.hex();
+        // Cache write is fire-and-forget by design (Doc 03 §4.3): the
+        // response has already streamed to the client, so a write
+        // failure can't be surfaced to the caller. We log loud with
+        // enough context (key hex, label, stop reason) for an operator
+        // to correlate against telemetry. A future SLO/metric layer can
+        // tap this site too — keep the log shape stable.
         if let Err(e) = registry.write(key, value, &policy).await {
             tracing::warn!(
                 error = %e,
+                key = %key_hex,
                 label = %label,
+                stop_reason = ?stop_reason,
                 "cache: write failed (degraded silently)",
             );
         }
@@ -265,6 +293,26 @@ fn is_cacheable_outcome(response: &ChatResponse) -> bool {
 /// Helper for callers (tars-cli, future tars-server) — sets the
 /// `cache.policy` attribute on a context. Saves them from importing
 /// the constant.
+///
+/// # Silent failure modes
+///
+/// This returns `()`, not `Result`, but it can fail silently in two
+/// ways. Both are logged at `error` level with the originating cause:
+///
+/// 1. **JSON encode failure** — `policy` cannot be serialized. Should
+///    be impossible for a well-formed `CachePolicy` value, but the
+///    branch exists for completeness.
+/// 2. **`ctx.attributes` `RwLock` poisoned** — a previous task panicked
+///    while holding the write side. The caller's policy is **not**
+///    applied; the context keeps whatever policy was already there
+///    (default if none).
+///
+/// Callers that need a hard guarantee that their policy was applied
+/// (e.g. compliance-driven cache disable) should write to
+/// `ctx.attributes` themselves and surface the lock-poisoning error,
+/// or check the resulting policy via [`read_policy`] in their own
+/// audit path. The signature stays `()` here because policy-setting
+/// is an advisory hint, not a request-critical operation.
 pub fn set_cache_policy(ctx: &RequestContext, policy: &CachePolicy) {
     let value = match serde_json::to_value(policy) {
         Ok(v) => v,
@@ -487,5 +535,150 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 2);
         // Sanity check: registry stayed empty.
         let _ = json!(null); // keep the import live in this minimal test
+    }
+
+    // ── Audit `tars-pipeline-src-cache-5`: `read_policy` falls back
+    // to default when the `cache.policy` attribute is malformed. ────
+    #[test]
+    fn read_policy_with_malformed_attribute_falls_back_to_default() {
+        let ctx = ctx();
+        {
+            let mut attrs = ctx.attributes.write().unwrap();
+            attrs.insert(POLICY_ATTR.into(), json!("not-a-policy-object"));
+        }
+        let p = read_policy(&ctx);
+        let d = CachePolicy::default();
+        assert_eq!(p.l1, d.l1);
+        assert_eq!(p.l2, d.l2);
+        assert_eq!(p.l3, d.l3);
+    }
+
+    // ── Audit `tars-pipeline-src-cache-1`: `read_policy` falls back
+    // to default if `ctx.attributes` is RwLock-poisoned. ─────────────
+    #[test]
+    fn read_policy_with_poisoned_lock_falls_back_to_default() {
+        let ctx = ctx();
+        // Poison the lock by panicking inside a write guard on another
+        // thread. `Arc<RwLock<...>>` is shared via clone of `ctx`.
+        let attrs = ctx.attributes.clone();
+        let h = std::thread::spawn(move || {
+            let _g = attrs.write().unwrap();
+            panic!("poison the lock");
+        });
+        let _ = h.join();
+        // Sanity: lock should now be poisoned.
+        assert!(ctx.attributes.read().is_err());
+
+        let p = read_policy(&ctx);
+        let d = CachePolicy::default();
+        assert_eq!(p.l1, d.l1);
+        assert_eq!(p.l2, d.l2);
+        assert_eq!(p.l3, d.l3);
+    }
+
+    // ── Audit `tars-pipeline-src-cache-1` (set side): same poisoned
+    // lock, `set_cache_policy` is a no-op (does not panic). ──────────
+    #[test]
+    fn set_cache_policy_with_poisoned_lock_is_a_noop() {
+        let ctx = ctx();
+        let attrs = ctx.attributes.clone();
+        let h = std::thread::spawn(move || {
+            let _g = attrs.write().unwrap();
+            panic!("poison the lock");
+        });
+        let _ = h.join();
+        // Should not panic — error is logged and the call returns.
+        set_cache_policy(&ctx, &CachePolicy::off());
+    }
+
+    // ── Audit `tars-pipeline-src-cache-6`: registry lookup error is
+    // treated as a miss; inner service is still called. ─────────────
+    #[tokio::test]
+    async fn registry_lookup_error_is_treated_as_miss() {
+        use tars_cache::{CacheError, CacheKey, CachedResponse};
+
+        struct ErroringRegistry;
+        #[async_trait]
+        impl CacheRegistry for ErroringRegistry {
+            async fn lookup(
+                &self,
+                _key: &CacheKey,
+                _policy: &CachePolicy,
+            ) -> Result<Option<CachedResponse>, CacheError> {
+                Err(CacheError::Backend("simulated lookup failure".into()))
+            }
+            async fn write(
+                &self,
+                _key: CacheKey,
+                _value: CachedResponse,
+                _policy: &CachePolicy,
+            ) -> Result<(), CacheError> {
+                Ok(())
+            }
+            async fn invalidate(&self, _key: &CacheKey) -> Result<(), CacheError> {
+                Ok(())
+            }
+            fn entry_count(&self) -> u64 {
+                0
+            }
+        }
+
+        let registry: Arc<dyn CacheRegistry> = Arc::new(ErroringRegistry);
+        let mock = MockProvider::new("p", CannedResponse::text("ok"));
+        let (pipeline, counter) = build_pipeline_with_cache(registry, mock);
+
+        let s = pipeline.clone().call(deterministic_request("p"), ctx()).await.unwrap();
+        let events = drain(s).await;
+        // Inner service called despite the registry erroring.
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        // Stream still completed normally.
+        assert!(matches!(events.last(), Some(ChatEvent::Finished { .. })));
+        // The Started event should not be a cache hit.
+        match &events[0] {
+            ChatEvent::Started { cache_hit, .. } => {
+                assert!(!cache_hit.replayed_from_cache);
+            }
+            other => panic!("expected Started, got {other:?}"),
+        }
+    }
+
+    // ── Audit `tars-pipeline-src-cache-4`: a stream that opens
+    // successfully but yields an error mid-stream must NOT be
+    // written to the cache. Drives `wrap_stream_for_write` directly
+    // so we control the Ok/Err mix the mock can't express. ──────────
+    #[tokio::test]
+    async fn mid_stream_error_skips_cache_write() {
+        use futures::stream;
+
+        let registry = MemoryCacheRegistry::default_arc();
+        let factory = CacheKeyFactory::new(1);
+        let req = deterministic_request("midstream");
+        let ctx = ctx();
+        let key = factory.compute(&req, &ctx).expect("compute key");
+
+        let events: Vec<Result<ChatEvent, ProviderError>> = vec![
+            Ok(ChatEvent::started("m")),
+            Ok(ChatEvent::Delta { text: "partial".into() }),
+            Err(ProviderError::Internal("boom".into())),
+            // Even a Finished after Err should not rescue the write.
+            Ok(ChatEvent::Finished {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+        ];
+        let inner: LlmEventStream = Box::pin(stream::iter(events));
+
+        let wrapped = wrap_stream_for_write(
+            inner,
+            registry.clone(),
+            key,
+            CachePolicy::default(),
+            ProviderId::new("mock_origin"),
+        );
+        // Drain — discard items, we only care about the side effect.
+        let mut s = Box::pin(wrapped);
+        while let Some(_item) = s.next().await {}
+
+        assert_eq!(registry.entry_count(), 0, "errored stream must not be cached");
     }
 }

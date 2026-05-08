@@ -380,6 +380,7 @@ mod tests {
                 stop_reason: Some(StopReason::EndTurn),
                 usage: Usage::default(),
                 cache_hit: CacheHitInfo::default(),
+                validation_summary: Default::default(),
             },
             cached_at: SystemTime::now(),
             origin_provider: ProviderId::new("test_p"),

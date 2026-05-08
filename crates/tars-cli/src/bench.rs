@@ -26,6 +26,7 @@
 //! block (so it's easy to paste / pipe / diff between runs). Status
 //! / iteration progress goes to stderr.
 
+use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,6 +49,12 @@ use crate::config_loader;
 const DEFAULT_PROMPT: &str = "Write a small Rust function that returns the nth Fibonacci number using \
 iteration. Include a doc comment explaining the parameter and return value. Do NOT include `fn main()` \
 or example code — just the function.";
+
+/// Hard upper bound on a single iteration's stream consumption. Bench
+/// is a measurement tool; if a provider hangs (network partition,
+/// server deadlock, infinite stream), we want a clear error rather
+/// than a process that blocks forever.
+const ITER_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Args, Debug)]
 pub struct BenchArgs {
@@ -173,8 +180,14 @@ pub async fn execute(args: BenchArgs, config_path: Option<PathBuf>) -> Result<()
                 s.decode_tok_per_sec(),
             ),
             Err(e) => {
-                eprintln!("FAILED: {e:?}");
-                anyhow::bail!("warmup iteration failed; aborting before measured runs");
+                eprintln!("FAILED");
+                return Err(e).with_context(|| {
+                    format!(
+                        "warmup iteration {}/{} failed; aborting before measured runs",
+                        i + 1,
+                        args.warmup,
+                    )
+                });
             }
         }
     }
@@ -215,26 +228,37 @@ async fn run_one(
 
     let mut ttfb: Option<Duration> = None;
     let mut last_usage = tars_types::Usage::default();
-    while let Some(ev) = stream.next().await {
-        let ev = ev.context("stream item errored")?;
-        match ev {
-            // TTFB = first generated token (visible OR reasoning).
-            // Reasoning-only output streams (o1 / DeepSeek-R1 in
-            // some configs) would otherwise never fire a Delta and
-            // TTFB would falsely fall back to total.
-            ChatEvent::Delta { .. } | ChatEvent::ThinkingDelta { .. }
-                if ttfb.is_none() =>
-            {
-                ttfb = Some(started_at.elapsed());
+    let consume = async {
+        while let Some(ev) = stream.next().await {
+            let ev = ev.context("stream item errored")?;
+            match ev {
+                // TTFB = first generated token (visible OR reasoning).
+                // Reasoning-only output streams (o1 / DeepSeek-R1 in
+                // some configs) would otherwise never fire a Delta and
+                // TTFB would falsely fall back to total.
+                ChatEvent::Delta { .. } | ChatEvent::ThinkingDelta { .. }
+                    if ttfb.is_none() =>
+                {
+                    ttfb = Some(started_at.elapsed());
+                }
+                ChatEvent::Finished { usage, .. } => {
+                    last_usage = usage;
+                }
+                // ThinkingDelta / Started / tool events: don't count as TTFB
+                // (TTFB is "first user-visible token") and don't terminate.
+                _ => {}
             }
-            ChatEvent::Finished { usage, .. } => {
-                last_usage = usage;
-            }
-            // ThinkingDelta / Started / tool events: don't count as TTFB
-            // (TTFB is "first user-visible token") and don't terminate.
-            _ => {}
         }
-    }
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(ITER_TIMEOUT, consume)
+        .await
+        .with_context(|| {
+            format!(
+                "stream did not complete within {}s — provider hung or stalled",
+                ITER_TIMEOUT.as_secs(),
+            )
+        })??;
     let total = started_at.elapsed();
     Ok(Sample {
         // Fall back to total if no Delta arrived (possible for empty
@@ -280,9 +304,14 @@ fn print_summary(provider_id: &str, model: &str, samples: &[Sample]) {
     let mut ins: Vec<u64> = valid.iter().map(|s| s.in_tokens).collect();
     let thinking_total: u64 = valid.iter().map(|s| s.thinking_tokens).sum();
 
-    ttfbs_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    totals_s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    decodes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // `partial_cmp` would panic on NaN. Current code paths can't
+    // produce NaN (Duration::as_secs_f64 is finite; decode_tok_per_sec
+    // guards div-by-zero), but a fallback to `Equal` keeps stats
+    // generation robust if a future calculation slips one in.
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(Ordering::Equal);
+    ttfbs_ms.sort_by(cmp);
+    totals_s.sort_by(cmp);
+    decodes.sort_by(cmp);
     outs.sort_unstable();
     ins.sort_unstable();
 
