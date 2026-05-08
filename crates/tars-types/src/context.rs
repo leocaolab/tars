@@ -43,7 +43,7 @@ pub struct RequestContext {
     pub validation_outcome: SharedValidationOutcome,
     /// Free-form cohort tags. Propagated to `PipelineEvent.tags` so
     /// SQL rollups can `WHERE 'dogfood_2026_05_08' = ANY(tags)`.
-    /// LangSmith borrow — see Doc 17 §4 (cohort).
+    /// See Doc 17 §4 (cohort).
     ///
     /// Caller convenience: [`RequestContext::with_tags`] returns a
     /// new context with these set; usually called once at session /

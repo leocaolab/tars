@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Python bindings for tars — drop-in replacement for ARC's Python LLMClient + future agent runtime."
+description = "Python bindings for tars — drop-in replacement for a Python LLMClient + future agent runtime."
 
 # `cdylib` produces the .so/.pyd that Python imports.
 # `rlib` so other Rust crates in the workspace can use it (test harness etc).

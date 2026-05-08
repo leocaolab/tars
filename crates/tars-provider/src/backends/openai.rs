@@ -3,7 +3,7 @@
 //! Also serves OpenAI-compatible endpoints (vLLM, llama.cpp server,
 //! Groq, Together, DeepSeek) by overriding `base_url`.
 //!
-//! Mirrors the Python `OpenAIClient` (in `arc/app/llm/openai_client.py`)
+//! Mirrors the Python `OpenAIClient` (the equivalent Python OpenAI client)
 //! semantics for `max_tokens` vs `max_completion_tokens` routing and
 //! usage tracking, but is async + streaming.
 
@@ -66,7 +66,7 @@ impl OpenAiProviderBuilder {
     }
 
     /// Attach user-config-supplied http_headers / env_http_headers /
-    /// query_params (Doc 01 §6.1 + codex-rs `ModelProviderInfo` parity).
+    /// query_params (Doc 01 §6.1).
     pub fn extras(mut self, extras: HttpProviderExtras) -> Self {
         self.extras = extras;
         self

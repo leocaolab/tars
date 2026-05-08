@@ -4,7 +4,7 @@
 >
 > 上游：Doc 02 Middleware Pipeline 负责产出 `Response`；Doc 09 Storage Schema 中的 `tars-storage::EventStore` 是评估事件的持久化层。
 >
-> 下游：所有需要"看 LLM 系统行为趋势"的 consumer——ARC 的 dogfood 仪表板、agouflow、未来的 admin dashboard、release 实验对比、root-cause 调查。
+> 下游：所有需要"看 LLM 系统行为趋势"的 consumer——downstream consumer 的 dogfood 仪表板、未来的 admin dashboard、release 实验对比、root-cause 调查。
 >
 > **明确不做的事**：本文档讨论的是**评估**（产指标、写时间序列、不影响 Response），不是**校验**（改 / 拒 Response）。这两件事在 Doc 15 已经明确切开。一个 dimension score 突然下降是诊断信号，不是 production gate；要做 gate 走 Doc 15 的 OutputValidator。
 
@@ -669,7 +669,7 @@ WHERE event_type = 'EvaluationFailed'
 ORDER BY ts_ms DESC;
 ```
 
-我们提供 `tars-eval::sql::common_queries` 模块作为模板,consumer 拿来直接套,不必每个 ARC / agouflow / future 自己写 `json_each` 展开。
+我们提供 `tars-eval::sql::common_queries` 模块作为模板,consumer 拿来直接套,不必每个 downstream consumer 自己写 `json_each` 展开。
 
 ---
 
@@ -999,7 +999,7 @@ pub struct FieldFilledRateEvaluator {
 }
 ```
 
-输出：`<name>` 维度，非空字段比例。例：ARC 的 evidence tag 完整率。
+输出：`<name>` 维度，非空字段比例。例：downstream consumer 的 evidence tag 完整率。
 
 #### `RegexMatchCountEvaluator`
 
@@ -1107,10 +1107,10 @@ pub struct SnippetGroundingEvaluator {
 
 ## 9. 使用范式
 
-### 9.1 ARC dogfood 用例
+### 9.1 downstream consumer dogfood 用例
 
 ```python
-# arc/eval/registry.py — caller 注册自己的 evaluators
+# consumer/eval/registry.py — caller 注册自己的 evaluators
 import tars
 
 EVALUATORS = [
@@ -1126,8 +1126,8 @@ EVALUATORS = [
     tars.eval.LengthEvaluator(field="text", name="response"),
 ]
 
-# 启动 runner (一次, 在 arc 启动时):
-event_store = tars.SqliteEventStore("./arc.db")
+# 启动 runner (一次, 在  consumer 启动时):
+event_store = tars.SqliteEventStore("./events.db")
 runner = tars.eval.OnlineEvaluatorRunner(event_store, EVALUATORS)
 asyncio.create_task(runner.run())  # background
 
@@ -1139,7 +1139,7 @@ critic_pipeline = tars.Pipeline.from_default("qwen_coder_local")
 仪表板查询：
 
 ```python
-# arc/eval/dashboard.py — 读 EventStore 出趋势数据
+# consumer/eval/dashboard.py — 读 EventStore 出趋势数据
 def schema_compliance_last_24h() -> list[(datetime, float)]:
     return event_store.query("""
         SELECT bucket, AVG(value) FROM (
@@ -1224,14 +1224,14 @@ pub struct RubricGroundingEvaluator { ... }
 | **W2.4** | Built-in evaluators：Schema / RubricGrounding / FieldFilledRate / RegexMatchCount / Length / SnippetGrounding | 1.5 天 |
 | **W2.5** | tars-py 暴露：`tars.eval.Evaluator` base class + Built-in 一一映射 + `Pipeline.with_event_store` API | 1 天 |
 | **W2.6** | SQL 查询模板模块 `tars-eval::sql::common_queries` + 文档示例 | 0.5 天 |
-| **W2.7** | 单元 + 集成测试 + ARC dogfood 切换 evaluator + CHANGELOG | 1 天 |
+| **W2.7** | 单元 + 集成测试 + downstream consumer dogfood 切换 evaluator + CHANGELOG | 1 天 |
 | **总计** | | **~7.5 天** |
 
 ### 11.2 落地后立刻动作
 
-1. ARC 把 `_known_rule_ids` 的 metric 部分（demote count）做成 `RubricGroundingEvaluator` instance，old inline 逻辑删——validation 部分迁到 Doc 15 那边
-2. ARC dogfood 仪表板从手挑数字 → SQL on EventStore
-3. ARC 加一个 `EvidenceFilledRateEvaluator`，立刻看到 evidence 字段填充率
+1. downstream consumer 把 `_known_rule_ids` 的 metric 部分（demote count）做成 `RubricGroundingEvaluator` instance，old inline 逻辑删——validation 部分迁到 Doc 15 那边
+2. downstream consumer dogfood 仪表板从手挑数字 → SQL on EventStore
+3. downstream consumer 加一个 `EvidenceFilledRateEvaluator`，立刻看到 evidence 字段填充率
 4. tars 这边监控 OnlineEvaluatorRunner 的 lag——`LlmCallFinished` 写入到 `EvaluationScored` 写入的时间差，p95 应该 < 1s
 
 ### 11.3 v1 不做（推到 v2）

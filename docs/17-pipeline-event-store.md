@@ -27,7 +27,7 @@ no cross-stream join required at the storage layer.
 
 Each is a query that becomes possible *only* with this in place:
 
-- **arc dogfood regression gate**: cohort A (`tags: ["dogfood_2026_05_05"]`)
+- **downstream-consumer dogfood regression gate**: cohort A (`tags: ["dogfood_2026_05_05"]`)
   vs cohort B — did `validation_summary.outcomes.snippet_grounded.dropped`
   rate change after a model swap?
 - **Cross-stream observability**: when a quality metric drops, did
@@ -77,7 +77,7 @@ pub enum PipelineEvent {
     EvaluationScored(EvaluationScored),
     /// Catchall for forward-compat — old readers deserialise unknown
     /// variants into `Other` instead of failing the whole record.
-    /// Borrowed from codex-rs `ResponseItem::Other` pattern (5 years
+    /// Existing established pattern `ResponseItem::Other` pattern (5 years
     /// of versionless schema evolution rests on this).
     Other(serde_json::Value),
 }
@@ -113,7 +113,7 @@ pub struct LlmCallFinished {
     // outcome
     pub result: CallResult,                // Ok | Error{kind}
 
-    // cohort (LangSmith borrow — see B-20 W1.1 borrow points)
+    // cohort ( — see B-20 W1.1 borrow points)
     pub tags: Vec<String>,
 }
 
@@ -166,10 +166,10 @@ tenant-agnostic on purpose — it's a 32-byte hash with no body
 recoverable, used for "this prompt template appeared 10000 times
 across tenants" rollups. Fingerprint ≠ body pointer.
 
-## 6.1 BodyStore physical layout (codex-rs borrow)
+## 6.1 BodyStore physical layout 
 
 `BodyStore` is a trait. v1 impl is single-table SQLite; trait shape
-keeps room for codex-rs's date-partitioned strategy as v2:
+keeps room for an established date-partitioned strategy as v2:
 
 ```rust
 #[async_trait]
@@ -236,7 +236,7 @@ touch the schema or anything that imports it.
   `OnlineEvaluatorRunner`'s scheduling, not the event-emit path —
   metric rollups need full samples.
 
-### 8.1 PersistenceMode (codex-rs borrow)
+### 8.1 PersistenceMode 
 
 Two modes, per-tenant configurable, default `Limited`:
 
@@ -259,7 +259,7 @@ mode decides "if we emit, how much detail goes in." Both compose:
 default tenant gets `Always` × `Limited`; debug-window tenant gets
 `Always` × `Extended`; high-QPS prod gets `Rate(0.01)` × `Limited`.
 
-Borrowed from codex-rs `EventPersistenceMode::{Limited, Extended}`
+Existing established pattern `EventPersistenceMode::{Limited, Extended}`
 (`recorder.rs` policy module). Same intuition: most consumers want a
 small dial, "everything OR essentials"; finer field-level control is
 overkill for v1.
@@ -291,8 +291,7 @@ overkill for v1.
 9. `OnlineEvaluatorRunner` consumes `LlmCallFinished`, dispatches to
    `Evaluator` impls, emits `EvaluationScored`.
 10. `EventSampler` trait + `AlwaysEmit` / `Rate(f64)` /
-    `OnDimDrop{watch_dim, threshold}` impls (per Doc 16 §4 LangSmith
-    borrow).
+    `OnDimDrop{watch_dim, threshold}` impls (per Doc 16 §4).
 
 **Phase 3 — Offline / replay tooling** (post-W3):
 11. CLI: `tars event query <filters>` for ad-hoc inspection.
@@ -315,7 +314,7 @@ Tagged with the decision needed.
 | Q5 | `ContentRef` body store + cache-registry body store: same physical store or separate? | Same. Both are "tenant-scoped CAS by sha256(tenant + body)"; deduping the implementation removes a class of "which one am I writing to" bugs. |
 | Q6 | Failed-call event has `response_ref: None` — does it also store the `ProviderError` chain detail? | `result: CallResult::Error { kind }` + `telemetry.retry_attempts` cover the patterns evaluators want. Full error chain only in the per-attempt log line, not the event. |
 | Q7 | TTL defaults — 90d events / 7d bodies — per-tenant override at what layer? | `tars-config` `[tenant.{id}.retention]` block; absent = global default. Implementation deferred to M6 multi-tenant. |
-| Q8 | Schema versioning — bump `LlmCallFinished` adding a field — back-compat? | `#[serde(default)]` on every new field, `#[non_exhaustive]` enum, **plus `Other(serde_json::Value)` catchall variant** (codex-rs borrow — old readers don't fail on unknown variants). No explicit version field until a breaking change forces one. |
+| Q8 | Schema versioning — bump `LlmCallFinished` adding a field — back-compat? | `#[serde(default)]` on every new field, `#[non_exhaustive]` enum, **plus `Other(serde_json::Value)` catchall variant** (— old readers don't fail on unknown variants). No explicit version field until a breaking change forces one. |
 | Q9 | `BodyStore` v1 physical layout — single SQLite table, date-partitioned, or pluggable? | Pluggable trait. v1 impl is single-table SQLite (simplest); trait commits to `purge_before` / `purge_tenant` ops so v2 (codex-style date-partitioned sqlite-per-day or S3 + lifecycle rules) can replace without consumer changes. |
 
 Most defaults are safe to ship as Phase 1 lands; Q1 and Q2 are the

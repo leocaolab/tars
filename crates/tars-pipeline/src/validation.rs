@@ -9,7 +9,7 @@
 //! either putting Validation back inside Retry (re-introducing the
 //! cache×filter corruption W4 fixes) or duplicating retry logic inside
 //! ValidationMiddleware itself, both for a use case (model resample on
-//! validation failure) that real consumers (arc 2026-05-08 dogfood)
+//! validation failure) that real consumers (2026-05-08 dogfood feedback)
 //! don't have. Callers who do need a model retry on validation failure
 //! catch `ValidationFailed` at their own layer.
 //!

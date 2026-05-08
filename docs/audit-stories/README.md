@@ -25,25 +25,25 @@ Each story aims to teach one transferable habit. Specifically:
 ## Index
 
 - [`case-001-cache-validator-audit.md`](./case-001-cache-validator-audit.md)
-  — arc-flagged "single-validator-chain assumption" turned out to be a
+  — Consumer-flagged "single-validator-chain assumption" turned out to be a
   structural bug; writing two failing tests changed the W4 estimate
   from 0.5d to 1-2d (chose A2 path, shipped same day).
-  Companion (consumer side, when arc writes it):
-  `arc/docs/design-review-corpus/case-003-*` — the dogfood-prep flag
+  Companion (consumer side, when  consumer writes it):
+  `consumer-side docs/design-review-corpus/case-003-*` — the dogfood-prep flag
   → tars audit → fix shipped → ready-to-dogfood story.
 
 ## Cross-repo numbering
 
-Case numbers in this directory are **independent of arc's
+Case numbers in this directory are **independent of the consumer's
 `design-review-corpus/case-NNN-*`**. The two repos own different
 review cadences and their numbering happens to drift.
 
 Cross-references when a case has a companion:
 
-| tars audit-story | arc case |
+| tars audit-story |  consumer case |
 |---|---|
-| (when written) — B-31 v5 "upstream typed schema collapses downstream defenses" | [`arc/docs/design-review-corpus/case-001-tars-preflight-api`](https://github.com/example/arc) — same incident, consumer-side review of how tars-py shipping `CapabilityRequirements` as a frozen pyclass + `check_capabilities_for` cleaned up arc's hand-written dataclass + drift guard. |
-| `case-001-cache-validator-audit.md` (this dir) | (pending) `arc/docs/design-review-corpus/case-003-*` — dogfood-prep flag → audit → W4 fix |
+| (when written) — B-31 v5 "upstream typed schema collapses downstream defenses" | [`consumer-side docs/design-review-corpus/case-001-tars-preflight-api`](https://github.com/example/consumer) — same incident, consumer-side review of how tars-py shipping `CapabilityRequirements` as a frozen pyclass + `check_capabilities_for` cleaned up the consumer's hand-written dataclass + drift guard. |
+| `case-001-cache-validator-audit.md` (this dir) | (pending) `consumer-side docs/design-review-corpus/case-003-*` — dogfood-prep flag → audit → W4 fix |
 
 ## When to add a new entry
 

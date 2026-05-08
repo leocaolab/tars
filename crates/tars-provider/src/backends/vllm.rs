@@ -1,6 +1,6 @@
 //! vLLM backend — OpenAI-compatible local inference server.
 //!
-//! Mirrors the Python `VLLMClient` (in `arc/app/llm/vllm_client.py`):
+//! Mirrors the Python `VLLMClient` (the equivalent Python vLLM client):
 //! it's just an [`OpenAiProvider`] with a different `base_url` and
 //! sensible defaults for "local server with no auth".
 //!

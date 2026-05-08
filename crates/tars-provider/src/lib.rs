@@ -21,7 +21,7 @@ pub mod provider;
 pub mod registry;
 pub mod tool_buffer;
 // Audit `tars-provider-src-transport-1` + TODO O-1: the `transport`
-// module was a codex-rs-borrowed `HttpTransport` trait with no
+// module was a speculative `HttpTransport` trait with no
 // in-tree call site (every backend goes straight through
 // `HttpProviderBase.client`). The trigger condition O-1 set —
 // "we hit `tars-pipeline` MVP without anyone needing it" — has

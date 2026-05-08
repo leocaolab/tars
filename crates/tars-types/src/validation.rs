@@ -54,7 +54,7 @@ pub enum ValidationOutcome {
     ///
     /// **Why no `retriable` flag**: the W1 design carried an
     /// `retriable: bool` to let validators ask for a model resample.
-    /// Real consumers (arc 2026-05-08 dogfood) all wire validators
+    /// Real consumers (2026-05-08 dogfood feedback) all wire validators
     /// as Filter (drop bad findings, keep batch) and never use the
     /// retry path — same prompt → same model → same output, model
     /// retry on validation failure is a near-pure gamble. Cutting

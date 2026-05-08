@@ -5,10 +5,10 @@
 //! [`HttpAdapter`] (build_url / build_headers / translate_request /
 //! parse_event / classify_error). This module provides that base.
 //!
-//! Borrowed pattern from `codex-rs/codex-client/src/sse.rs`: the SSE
-//! consumption loop wraps every `stream.next()` with a per-chunk idle
-//! timeout. Without that a server that opens the connection then stalls
-//! forever can hang the client indefinitely.
+//! Approach: the SSE consumption loop wraps every `stream.next()`
+//! with a per-chunk idle timeout. Without that a server that opens
+//! the connection then stalls forever can hang the client
+//! indefinitely.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,9 +28,9 @@ use crate::auth::ResolvedAuth;
 use crate::provider::LlmEventStream;
 use crate::tool_buffer::ToolCallBuffer;
 
-/// Hard upper bound on user-configured retry counts. Borrowed from
-/// codex-rs's `MAX_REQUEST_MAX_RETRIES` — a defensive cap so a typo
-/// like `request_max_retries = 999999` can't silently turn the runtime
+/// Hard upper bound on user-configured retry counts — a defensive
+/// cap so a typo like `request_max_retries = 999999` can't silently
+/// turn the runtime
 /// into a retry storm.
 pub const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 pub const MAX_STREAM_MAX_RETRIES: u64 = 100;
@@ -46,7 +46,7 @@ const DEFAULT_STREAM_IDLE_MS: u64 = 300_000;
 /// `stream_idle_timeout`: cap on time WITHOUT receiving an SSE chunk
 /// once the stream is open. The whole response can take many minutes
 /// for a long generation; what matters is whether bytes are still
-/// flowing. Default is 5 minutes (matches codex-rs default).
+/// flowing. Default is 5 minutes.
 #[derive(Clone, Debug)]
 pub struct HttpProviderConfig {
     pub connect_timeout: Duration,
@@ -203,8 +203,7 @@ where
     let status = response.status();
     if !status.is_success() {
         // Snapshot headers before the body read consumes the response.
-        // `classify_error` needs them for Retry-After parsing
-        // (TODO L-4 / opencode parity).
+        // `classify_error` needs them for Retry-After parsing.
         let headers = response.headers().clone();
         // True bounded read — stream chunks and stop at the cap so a
         // 1 GB hostile error body can't OOM us. Audit
@@ -328,8 +327,6 @@ pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
 /// [`crate::pipeline::RetryMiddleware`] (when `respect_retry_after`
 /// is set) sleeps for that duration on the next attempt.
 ///
-/// Borrowed pattern from opencode's `session/retry.ts::delay()`
-/// (TODO L-4).
 pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     if let Some(v) = headers.get("retry-after-ms").and_then(|v| v.to_str().ok())
         && let Ok(ms) = v.trim().parse::<u64>()

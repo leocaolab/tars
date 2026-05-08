@@ -1,8 +1,8 @@
 //! Static HTTP extras a provider may declare in config and apply at request build time.
 //!
-//! Mirrors the `http_headers / env_http_headers / query_params` fields
-//! on `codex-rs/model-provider-info::ModelProviderInfo` so users can
-//! declaratively customise providers without code changes:
+//! Three fields — `http_headers / env_http_headers / query_params` —
+//! that let users declaratively customise providers without code
+//! changes:
 //!
 //! ```toml
 //! [providers.openai_main]
@@ -17,7 +17,7 @@
 //! - **`http_headers`** is set verbatim at adapter build time.
 //! - **`env_http_headers`** is resolved at request build time so a
 //!   process that exports the env var after start sees the new value.
-//!   Empty/missing env vars produce no header (matches codex-rs).
+//!   Empty/missing env vars produce no header.
 //! - **`query_params`** is appended to the adapter's URL in stable
 //!   (sorted-by-key) order so URL fingerprints stay reproducible.
 

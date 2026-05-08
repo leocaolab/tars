@@ -221,7 +221,7 @@ fn estimate_prompt_chars(req: &ChatRequest) -> usize {
 /// layer whether a particular provider can honour the request as-is.
 ///
 /// We deliberately use a 2-state enum rather than 3-state
-/// (Compatible / Skip / Reject — see codex-rs `safety::SafetyCheck`):
+/// (Compatible / Skip / Reject):
 /// per-candidate compatibility doesn't tell us whether *all*
 /// candidates will fail. The routing layer collects reasons across
 /// skipped candidates and surfaces "no compatible candidate"

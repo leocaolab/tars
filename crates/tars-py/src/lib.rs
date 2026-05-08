@@ -760,7 +760,7 @@ impl Pipeline {
     /// # Inline / quick check:
     /// r = p.check_capabilities_for(requires_tools=True)
     ///
-    /// # Typed (recommended for ARC role-init):
+    /// # Typed (recommended):
     /// reqs = tars.CapabilityRequirements(
     ///     requires_tools=True,
     ///     requires_thinking=(role == "planner"),
@@ -808,7 +808,7 @@ impl Pipeline {
     /// dataclass-style construction.
     ///
     /// `tars.CapabilityRequirements` is the single source of truth
-    /// for the requirement axes; ARC and other consumers should
+    /// for the requirement axes; Consumers should
     /// build their `role → CapabilityRequirements` mapping using
     /// this class rather than mirroring fields locally (which
     /// drifts on tars upgrades).
@@ -842,7 +842,7 @@ impl Pipeline {
 ///   all consumers of this type automatically pick up the new field
 ///   on rebuild; no per-consumer mirror to drift.
 ///
-/// Consumers (ARC) building their `role → requirements` mapping
+/// Consumers building their `role → requirements` mapping
 /// should import this type rather than declare a local mirror:
 ///
 /// ```python

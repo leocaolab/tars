@@ -2,8 +2,8 @@
 logs/
 selfplay_log.txt
 
-# arc CLI per-invocation log (touched whenever `arc run` fires; never useful in-tree)
-arc.log.jsonl
+# Per-invocation log dumps from downstream consumer CLIs
+*.log.jsonl
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -224,6 +224,7 @@ Cargo.lock.bak
 .claude/settings.local.json
 
 # Gemini CLI local data
+.consumer-state/
 .arc/
 
 # === Secrets / live config (extra belt-and-suspenders) ===
@@ -244,5 +245,5 @@ config.local.toml
 **/config.local.toml
 
 
-# Per-run log dumps (arc.log.jsonl is the existing case; future tools may emit similar)
+# Per-run log dumps emitted by downstream consumers
 *.log.jsonl

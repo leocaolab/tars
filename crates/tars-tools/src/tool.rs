@@ -37,8 +37,7 @@ pub struct ToolContext {
 /// Title is for trajectory-log readability + future TUI consumers
 /// who need a one-line "what just happened" without parsing the
 /// content blob. Empty string means "no title; consumers should fall
-/// back to the content head". Borrowed from opencode's
-/// `ExecuteResult.title` (TODO L-3).
+/// back to the content head".
 ///
 /// We model failure two ways:
 /// - [`ToolError`] — execution couldn't be attempted (bad args, tool

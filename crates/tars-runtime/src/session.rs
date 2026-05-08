@@ -71,8 +71,9 @@ pub enum Budget {
 
 impl Default for Budget {
     fn default() -> Self {
-        // ~100k tokens at the typical 4 chars/token ratio. Same as ARC's
-        // 80-line Session default — known-good in production.
+        // ~100k tokens at the typical 4 chars/token ratio. Same as the
+        // original Python consumer's 80-line Session default — known-good
+        // in production.
         Self::Chars(400_000)
     }
 }
@@ -333,7 +334,7 @@ pub struct Session {
     /// (those mutations are still part of one in-progress turn that
     /// either commits or rolls back atomically).
     ///
-    /// Borrowed from codex-rs's `ContextManager.history_version`.
+    /// Mirrors a known-good `ContextManager.history_version` pattern.
     /// Useful for caches keyed on history (token counters, prompt
     /// cache pre-hash) and for log correlation: a (session_id,
     /// history_version) pair uniquely identifies "which snapshot
@@ -537,7 +538,7 @@ impl Session {
     }
 
     /// Convenience: like `send` but returns just the assistant text.
-    /// `arc.LLMClient.chat`-shaped wrapper.
+    /// Python `LLMClient.chat`-shaped wrapper.
     pub async fn send_text(
         &mut self,
         user_text: &str,

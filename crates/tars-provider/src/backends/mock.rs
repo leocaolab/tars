@@ -1,6 +1,6 @@
 //! In-memory mock provider for testing.
 //!
-//! Mirrors the Python `MockClient` (in `arc/app/llm/mock_client.py`) —
+//! Mirrors the Python `MockClient` (the equivalent Python mock client) —
 //! records the last request, returns a canned response. Adds streaming
 //! semantics: the canned [`ChatEvent`] sequence is replayed verbatim,
 //! so tests can exercise the streaming path.

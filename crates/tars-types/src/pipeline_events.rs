@@ -25,8 +25,8 @@ use crate::validation::ValidationSummary;
 /// Top-level event variant. `#[non_exhaustive]` plus a catchall
 /// `Other` variant give two layers of forward-compat: old readers
 /// don't fail on unknown variants, and new variants can be added
-/// without SemVer break (codex-rs borrow — see Doc 17 §4 + the
-/// rollout-survey audit story when written).
+/// without SemVer break (forward-compat catchall pattern; see
+/// Doc 17 §4).
 ///
 /// Variants box their inner structs (`LlmCallFinished` is ~600 bytes;
 /// boxing keeps the enum's stack footprint to a pointer) so consumers
@@ -110,7 +110,7 @@ pub struct LlmCallFinished {
     // ── cohort ──────────────────────────────────────────────────
     /// Free-form tags from `RequestContext::with_tags(...)` /
     /// `Session::tagged(...)`. Cohort SQL: `WHERE 'dogfood_X' =
-    /// ANY(tags)`. LangSmith borrow.
+    /// ANY(tags)`.
     pub tags: Vec<String>,
 }
 

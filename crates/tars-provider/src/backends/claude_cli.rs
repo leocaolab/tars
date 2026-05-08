@@ -1,7 +1,7 @@
 //! Claude Code CLI as an LLM Provider — subscription path.
 //!
 //! Mirrors the Python `ClaudeSubprocessClient` in
-//! `arc/app/llm/claude_subprocess_client.py`:
+//! the equivalent Python subprocess client:
 //!
 //! - Shells out to `claude -p - --model X --output-format json
 //!   --disable-slash-commands` and feeds the prompt on stdin.

@@ -4,9 +4,9 @@
 //! parser, so any wiring bug between layers shows up here even though
 //! every constituent crate has its own unit tests.
 //!
-//! Pattern borrowed from `codex-rs/codex-api/tests/sse_end_to_end.rs`:
-//! build SSE bodies inline (no fixture files to keep in sync), let
-//! wiremock replay them, assert on the parsed `ChatEvent` stream.
+//! Approach: build SSE bodies inline (no fixture files to keep in
+//! sync), let wiremock replay them, assert on the parsed `ChatEvent`
+//! stream.
 //!
 //! See the sibling unit tests in `src/retry.rs` and `src/middleware.rs`
 //! for trait-level fakes (`FailNTimes`, `TagLayer`); this file

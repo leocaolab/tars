@@ -7,7 +7,7 @@ on this repo gets a one-page tour of "where are we" without grepping
 git log or wading through TODO.md's deferred / frozen lists.
 
 For things deliberately **not** done, see [TODO.md](./TODO.md):
-- Overengineering items (O-1..O-10) — borrowed-or-built scaffolds we
+- Overengineering items (O-1..O-10) — scaffolds we
   carry on a trigger-or-delete contract.
 - Audit deferrals (A-1, A-4) — non-critical findings revisitable
   on touch.
@@ -23,8 +23,8 @@ is authoritative. This file aggregates.
 
 PyO3 + maturin-built wheel exposing tars to Python (and, via the
 same shape, future TS / Go bindings). First non-Rust consumer is
-ARC, migrating from a hand-rolled `LLMClient` + 80-line `Session`
-to `tars.Pipeline` + `tars.Session`. Long-term ARC goes full Rust
+downstream consumer, migrating from a hand-rolled `LLMClient` + 80-line `Session`
+to `tars.Pipeline` + `tars.Session`. Long-term downstream consumer goes full Rust
 but Python is a permanent first-class surface — design treats it as
 such, not as a throwaway scaffold.
 
@@ -51,7 +51,7 @@ such, not as a throwaway scaffold.
   new `tars-config::paths::default_config_path()`. Python: `tars.
   default_config_path()`.
 - **`Pipeline.from_default(provider_id)` / `Provider.from_default`** —
-  zero-arg config resolution. ARC + future tools call this and don't
+  zero-arg config resolution. downstream consumer + future tools call this and don't
   need to know the path.
 - **Built-in provider merge at load time** — `ConfigManager::load_*`
   now layers `built_in_provider_defaults()` under the user TOML.
@@ -63,7 +63,7 @@ such, not as a throwaway scaffold.
   provider — we filter to user-declared for that path.
 - **`vllm` builtin** added (was missing — `mlx` / `llamacpp` /
   `openai` / `anthropic` / `gemini` / `claude_cli` / `gemini_cli`
-  were already there, vLLM was the lone gap given that ARC ran on
+  were already there, vLLM was the lone gap given that downstream consumer ran on
   vLLM historically).
 - **`tars init` CLI** — bootstraps `~/.tars/config.toml` with a
   starter template (LM Studio, MLX, vLLM commented; cloud providers
@@ -73,8 +73,8 @@ such, not as a throwaway scaffold.
 ### Stage 3 — `Session` (multi-turn + tool loop + atomic rollback) (`<unreleased>`)
 
 Layer-2 stateful container above `Pipeline`. Drop-in compatible
-with ARC's existing `Session(client, system, max_history_chars)`
-shape; adds turn-aware trim and the tool-dispatch auto-loop ARC
+with downstream consumer's existing `Session(client, system, max_history_chars)`
+shape; adds turn-aware trim and the tool-dispatch auto-loop downstream consumer
 hadn't yet written.
 
 - **`tars-runtime::Session`** — `Session::new(pipeline, capabilities,
@@ -87,7 +87,7 @@ hadn't yet written.
   incompleteness is valid in-flight state; `is_complete()` on a
   mid-loop turn correctly returns false.
 - **Budget** — three modes. `Chars(usize)` (default, 400_000 ≈
-  100k tokens at 4:1 ratio, matches ARC's known-good default).
+  100k tokens at 4:1 ratio, matches downstream consumer's known-good default).
   `Tokens { limit, tokenizer: Arc<dyn Tokenizer> }` (opt-in
   precise). `ContextRatio(f32)` — sugar that reads
   `capabilities.max_context_tokens × ratio` so the caller doesn't
@@ -120,7 +120,7 @@ hadn't yet written.
   Class = `Permanent` (retrying is futile — model will keep
   emitting the same name; caller's registry needs the tool added).
   Python `kind = "unknown_tool"` + `e.tool_name` attribute lets
-  ARC render "did you forget to register tool X?".
+  downstream consumer render "did you forget to register tool X?".
 - **BudgetWarning de-dup** — first mid-turn over-budget emits a
   `tracing::warn!` once; subsequent occurrences in the same
   Session are counted silently. `Drop for Session` emits a summary
@@ -133,8 +133,8 @@ hadn't yet written.
 - **`history_version: u64`** counter on Session, bumped on visible
   history mutations (successful send, reset). NOT bumped on
   rollback (truncating back to pre-send is observably
-  unchanged). NOT bumped during in-flight tool loops. Borrowed
-  from codex-rs's `ContextManager.history_version`. Useful for
+  unchanged). NOT bumped during in-flight tool loops. Adopted
+  from an established `ContextManager.history_version`. Useful for
   cache invalidation and `(session_id, history_version)` log
   correlation. `fork()` preserves the parent value so caches can
   recognize shared prefixes.
@@ -181,7 +181,7 @@ flips. Final shape:
 - **Python surface (`tars-py`)**:
   - `Pipeline.check_compatibility(model=..., user=..., tools=...,
     max_output_tokens=..., ...)` — pre-flight from Python WITHOUT
-    making a model call. Lets ARC short-circuit to a different
+    making a model call. Lets downstream consumer short-circuit to a different
     provider before incurring a network round-trip.
   - `CompatibilityResult` pyclass with `.is_compatible: bool`,
     `.reasons: list[CompatibilityReason]`, `__bool__` ergonomic, and
@@ -219,7 +219,7 @@ declarative companion API.
   is shared. Aggregates ALL incompatibilities (no early-exit).
 - **`tars-py::Pipeline.check_capabilities_for(requires_tools=False,
   ...)`** — Python config-time API; no real prompt required.
-- **Use case (ARC role-init pattern)**:
+- **Use case (downstream consumer role-init pattern)**:
   ```python
   for role, provider_id in role_to_provider.items():
       p = tars.Pipeline.from_default(provider_id)
@@ -242,7 +242,7 @@ declarative companion API.
 
 Fourth-pass review: routing-exhausted error currently arrives as a
 generic `TarsProviderError(kind="invalid_request")` with the skipped
-candidate list mashed into the message string. ARC would have to
+candidate list mashed into the message string. downstream consumer would have to
 regex-parse the message to react. Replaced with end-to-end typed
 data + dedicated exception subclass.
 
@@ -276,7 +276,7 @@ Fifth-pass review: `Pipeline.check_capabilities_for(**kwargs)`'s
 loose-kwargs API was as-untyped-as-Any. Field name typo
 (`requires_struuctured_output=True`) silently accepted by `**unpack`,
 surfacing as a runtime "unexpected keyword argument" far from the
-typo site. ARC was about to mirror the field set as a local
+typo site. downstream consumer was about to mirror the field set as a local
 dataclass, which works but creates drift risk on tars upgrades.
 
 Shipped: typed pyclass as the single source of truth.
@@ -302,7 +302,7 @@ Shipped: typed pyclass as the single source of truth.
   importing `tars.CapabilityRequirements` get the new field
   without touching their code; consumers mirroring locally would
   silently miss it.
-- **Pattern reference (ARC role-init)**:
+- **Pattern reference (downstream consumer role-init)**:
   ```python
   from tars import CapabilityRequirements, Pipeline
   ROLE_REQUIREMENTS: dict[str, CapabilityRequirements] = {
@@ -381,7 +381,7 @@ hits short-circuit before reaching Validation — validators
 raw, hit reruns validator" design from earlier brainstorm
 requires reordering layers (Validation outside Cache); deferred
 to a follow-up after real multi-caller-cache trigger appears.
-Single-caller / single-validator-chain configurations (ARC's
+Single-caller / single-validator-chain configurations (downstream consumer's
 current shape) work correctly.
 
 ### Output-Validation × Cache interaction rule (locked, B-20 W1 implementation)
@@ -405,7 +405,7 @@ worry while keeping the trait contract clean.
 > **Note (W4, 2026-05-08)**: this contract was **not actually
 > honored by W1's implementation** — `ValidationMiddleware` sat
 > *inside* Cache in the onion, so Cache stored post-Filter events
-> and cache hits short-circuited before Validation. arc raised the
+> and cache hits short-circuited before Validation. the consumer raised the
 > "single-validator-chain assumption" flag during 2026-05-08 dogfood
 > prep; tars-side audit + failing regression tests confirmed the
 > deeper bug. **Now correctly enforced after W4 below**: Validation
@@ -434,7 +434,7 @@ must be 2-element).
 
 ### B-20 Wave 4 — Cache × Validator interaction fix (A2 path) (`<unreleased>`)
 
-Followup to W1. Two bugs surfaced when arc 2026-05-08 dogfood prep
+Followup to W1. Two bugs surfaced when downstream consumer (2026-05-08) dogfood prep
 flagged a "single-validator-chain assumption" concern; tars-side
 audit + failing regression tests confirmed both:
 
@@ -448,7 +448,7 @@ audit + failing regression tests confirmed both:
    This wasn't fixable by changing re-emit logic alone — fundamental
    onion-order issue.
 
-**Fix — A2 path**: chosen after consulting arc on real consumer
+**Fix — A2 path**: chosen after consulting the consumer on real consumer
 needs (zero use cases for `Reject(retriable=True)` model resample;
 all validators are deterministic Filter chains).
 
@@ -533,7 +533,7 @@ response bodies go to a separate tenant-scoped CAS body store.
 - **`Pipeline.complete(..., tags=[...])`** + `RequestContext::with_tags(...)` —
   free-form cohort tags propagate from caller to
   `PipelineEvent.tags`. Cohort SQL: `WHERE 'dogfood_2026_05_08' =
-  ANY(tags)`. LangSmith borrow.
+  ANY(tags)`. .
 - **`tars events` CLI** — `tars events list [--tenant X] [--since 1d]
   [--tag T] [--limit N]` for one-line-per-event summaries; `tars
   events show <event_id> [--with-bodies]` for full payload + body
@@ -542,8 +542,8 @@ response bodies go to a separate tenant-scoped CAS body store.
 - **`PersistenceMode { Limited, Extended }`** — defined in
   `tars-types`; trait point in place but actual mode-switching logic
   is Phase 2. Default `Limited` (current behaviour). Codex-rs
-  borrow.
-- **codex-rs borrows in this commit**: `Other` catchall variant
+
+- **s in this commit**: `Other` catchall variant
   pattern (5 years of versionless schema evolution rest on it),
   `EventPersistenceMode::{Limited, Extended}` dial,
   date-partitioned-storage trait shape (purge_before / purge_tenant
@@ -551,7 +551,7 @@ response bodies go to a separate tenant-scoped CAS body store.
 - **What's deliberately NOT in Phase 1**: `EventStore::subscribe()`
   (live consumer for OnlineEvaluatorRunner), the runner itself,
   per-tag rate sampling, `OnDimDrop` watchdog. All move to Phase 2
-  or — based on arc 2026-05-08 dogfood-prep feedback — get
+  or — based on downstream consumer (2026-05-08) dogfood-prep feedback — get
   re-evaluated against "is this just batch SQL + cron?" before being
   built.
 
@@ -560,9 +560,9 @@ body_store / pipeline_event_store / event_emitter; 7 new pytest
 covering event-store integration + tags propagation + dir-creation
 edge cases. cargo + clippy clean (`-D warnings`).
 
-Driven by: arc 2026-05-08 W3 main-body prep; tags surface
+Driven by: downstream consumer 2026-05-08 W3 main-body prep; tags surface
 specifically promoted from "nice-to-have" to "today blocker" once
-arc reported they were running cloud + local + smoke batches into
+Consumer reported they were running cloud + local + smoke batches into
 the same `pipeline_events.db` and using `provider_id` + timestamp as
 a coarse cohort proxy.
 
@@ -585,7 +585,7 @@ for dogfood reports + regression gating.
 3 new pytest tests cover Filter dropped-list propagation, the
 no-validators empty case, and class export.
 
-> Driven by arc's dogfood report regression gate: without a
+> Driven by the consumer's dogfood report regression gate: without a
 > structured `validation_summary` Python callers had no
 > cross-run-comparable view of "the snippet validator dropped 3 of 19
 > findings". `r.telemetry.layers` told them *whether* validation
@@ -708,9 +708,9 @@ at the relevant git revision).
   none-vs-empty distinction, external SHA256 match, serde
   round-trip, and migration safety for old payloads.
 
-### opencode-borrow P1 wave: L-1 + L-3 + L-4 (`7290e27` / `c5d8e5d`)
+### Tool prompt assets + ToolResult.title + Retry-After parsing: L-1 + L-3 + L-4 (`7290e27` / `c5d8e5d`)
 
-First three `defer > delete > implement` items from the opencode
+Three `defer > delete > implement` items from this commit
 survey (TODO L-1..L-12). All three were "do now" tier — small
 cost, immediate value, no dependencies.
 
@@ -718,8 +718,7 @@ cost, immediate value, no dependencies.
 - `Tool::description()` returns `include_str!("read_file.txt").trim_end()`
   via a `LazyLock<String>` instead of an inline `&'static str`.
 - New sibling files: `crates/tars-tools/src/builtins/read_file.txt`
-  + `list_dir.txt`. Mirrors opencode's tool/<name>.txt pattern.
-- **Wins**: prompt diffs review separately from Rust changes; clean
+  + `list_dir.txt`. Tool prompt assets stored as `*.txt` next to the tool source.- **Wins**: prompt diffs review separately from Rust changes; clean
   per-prompt git history; future i18n via per-locale `.txt` swap.
 - **Security posture**: `include_str!` is a compile-time embed — the
   prompts are baked into the signed binary, no runtime mutation
@@ -841,7 +840,7 @@ fixes across 7 files:
   ctor with `debug_assert` against an empty error list — prevents
   the "config validation failed (0)" footgun.
 - **tars-config/builtin.rs**: better panic messages in tests
-  (expect/got context instead of bare `panic!`); borrow on match
+  (expect/got context instead of bare `panic!`); 
   arms to avoid moves before formatted-panic branches.
 - **tars-provider/auth.rs**: empty/whitespace env vars + empty
   credential files now surface as `AuthError::Missing` instead of
@@ -1072,7 +1071,7 @@ milestone Doc 14 §9 specifies.
   (`{kind, reason, suggestions}` all required) avoids `oneOf`
   gymnastics that OpenAI strict mode handles awkwardly; mapped to
   typed `VerdictKind` in the typed helper. `PartialResultRef<'a>`
-  borrowed view so the owned message stays available for the
+  view-borrow so the owned message stays available for the
   trajectory log. `CriticError` separates Decode failure from
   semantically-broken-but-parseable (`InvalidVerdict` — e.g. `kind=reject`
   with empty `reason`). Critic system prompt biases toward
@@ -1386,7 +1385,7 @@ audit-fix base everything else builds on.
   `Mlx` / `Llamacpp` / `ClaudeCli` / `GeminiCli` / `Mock`).
 - `#[serde(deny_unknown_fields)]` everywhere — typos at the TOML
   layer fail loud.
-- `built_in_provider_defaults()` table (codex-rs pattern) + user
+- `built_in_provider_defaults()` table  + user
   config merging via `merge_builtin_with_user()`.
 - `ConfigManager::load_from_file/str()` + structured
   `ValidationError` collection (no fail-fast — operators want the

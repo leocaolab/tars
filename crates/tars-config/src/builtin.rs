@@ -1,6 +1,5 @@
 //! Built-in provider defaults — common providers preconfigured so user
-//! TOML can stay minimal. Pattern adapted from
-//! `codex-rs/model-provider-info::built_in_model_providers`.
+//! TOML can stay minimal.
 //!
 //! User config **extends** the built-in set rather than replacing it.
 //! See [`merge_builtin_with_user`] for the merge semantics: by default
@@ -40,8 +39,8 @@ pub fn built_in_provider_defaults() -> HashMap<ProviderId, ProviderConfig> {
 }
 
 /// Default OpenAI: `OPENAI_API_KEY`, `gpt-4o`, plus the standard
-/// `OpenAI-Organization` / `OpenAI-Project` env-headers (mirrors
-/// codex-rs's defaults — they're set if exported, ignored otherwise).
+/// `OpenAI-Organization` / `OpenAI-Project` env-headers (set if
+/// exported, ignored otherwise).
 pub fn default_openai() -> ProviderConfig {
     ProviderConfig::Openai {
         base_url: None,

@@ -3,7 +3,7 @@
 //! v1 (Doc 15 Wave 1) ships three: `JsonShapeValidator`,
 //! `NotEmptyValidator`, `MaxLengthValidator`. These are the
 //! deterministic / cheap / generic-mechanism set that 80% of consumers
-//! need. ARC-specific or business-leaning validators
+//! need. Application-specific or business-leaning validators
 //! (`RuleIdWhitelistValidator`, `EvidenceTagValidator`,
 //! `RegexBannedValidator`) are NOT here — consumers compose them via
 //! the trait. See Doc 15 §5 for full philosophy.
