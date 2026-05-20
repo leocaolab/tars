@@ -83,6 +83,26 @@ pub trait LlmProvider: Send + Sync + 'static {
     fn cost(&self, usage: &Usage) -> CostUsd {
         self.capabilities().pricing.cost_for(usage)
     }
+
+    /// If this provider supports the vendor's batch API, return a handle
+    /// to its [`crate::batch::BatchSubmitter`] surface. Default `None`
+    /// — backends that implement `BatchSubmitter` override this to
+    /// return `Some(self)`. See `docs/roadmap.md §5` for the rationale.
+    ///
+    /// Callers do:
+    /// ```ignore
+    /// let p: Arc<dyn LlmProvider> = registry.get(&id).unwrap();
+    /// match p.as_batch_submitter() {
+    ///     Some(b) => b.submit(items).await?,
+    ///     None => /* this provider has no batch surface — sync only */,
+    /// }
+    /// ```
+    fn as_batch_submitter(
+        self: Arc<Self>,
+    ) -> Option<Arc<dyn crate::batch::BatchSubmitter>> {
+        let _ = self; // suppress unused-self warning
+        None
+    }
 }
 
 /// Convenience helper: turn any `Stream<Item=Result<ChatEvent, ProviderError>> + Send + 'static`

@@ -24,6 +24,7 @@
 //! See `docs/architecture/01-llm-provider.md` for the full design rationale.
 
 pub mod auth;
+pub mod batch;
 pub mod cache;
 pub mod capabilities;
 pub mod chat;
@@ -45,6 +46,7 @@ pub mod usage;
 pub mod validation;
 
 pub use auth::Auth;
+pub use batch::{BatchResultItem, BatchStatus};
 pub use cache::{CacheDirective, CacheHitInfo, ProviderCacheHandle, systemtime_millis};
 pub use capabilities::{Capabilities, Modality, PromptCacheKind, StructuredOutputMode};
 pub use chat::{
@@ -57,8 +59,8 @@ pub use error::{ErrorClass, ProviderError};
 pub use events::{ChatChunk, ChatEvent, PartialUsage, StopReason};
 pub use http_extras::HttpProviderExtras;
 pub use ids::{
-    AgentId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId, TenantId, TraceId,
-    TrajectoryId,
+    AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId,
+    TenantId, TraceId, TrajectoryId,
 };
 pub use model::{ModelHint, ModelTier, ThinkingMode};
 pub use pipeline_events::{

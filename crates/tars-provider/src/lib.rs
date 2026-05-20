@@ -16,6 +16,7 @@
 
 pub mod auth;
 pub mod backends;
+pub mod batch;
 pub mod http_base;
 pub mod provider;
 pub mod registry;
@@ -28,6 +29,7 @@ pub mod tool_buffer;
 // fired, so the module was deleted on 2026-05-03 (commit follows).
 
 pub use auth::{Auth, AuthError, AuthResolver, BasicAuthResolver, ResolvedAuth, basic};
+pub use batch::{BatchSubmitter, MockBatchSubmitter};
 pub use http_base::{HttpAdapter, HttpProviderBase, HttpProviderConfig};
 pub use provider::{LlmEventStream, LlmProvider};
 pub use registry::{ProviderRegistry, RegistryError};

@@ -100,6 +100,14 @@ string_id!(
     AgentId,
     "Agent instance identifier (Doc 04 §4 — `orchestrator`, `worker:code_review`, etc.)."
 );
+string_id!(
+    BatchJobId,
+    "Batch job identifier returned by the provider on submit (Doc 01 §6.3 / roadmap §5)."
+);
+string_id!(
+    BatchItemId,
+    "Per-item identifier inside a batch — caller-chosen, echoed back in results so each output can be matched to its input. Maps to Anthropic's `custom_id` and OpenAI's `custom_id` on batch lines."
+);
 
 #[cfg(test)]
 mod tests {
