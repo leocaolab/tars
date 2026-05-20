@@ -19,7 +19,7 @@ that uses it, then the bigger access-pattern shift (batch).
 | 2 | [Fallback / degrade middleware](#2-fallback--degrade-middleware) | 1-2 weeks | ✅ shipped (commit 2b10167) | small |
 | 3 | [Per-call budget middleware](#3-per-call-budget-middleware) | 1 week | ✅ shipped | small |
 | 4 | [Tenant budget middleware (stateful)](#4-tenant-budget-middleware-stateful) | 2-3 weeks | ✅ shipped | medium |
-| 5 | [Batch mode (BatchSubmitter trait)](#5-batch-mode-batchsubmitter-trait) | 3-4 weeks | sketched | medium |
+| 5 | [Batch mode (BatchSubmitter trait)](#5-batch-mode-batchsubmitter-trait) | 3-4 weeks | ✅ shipped (Anthropic + OpenAI); ⛔ Gemini deferred | medium |
 
 Features 1+2 are paired — `max_wait` without fallback creates dead
 paths, and fallback without `max_wait` makes "wait 30 minutes" a
@@ -437,6 +437,37 @@ loop {
 - Auto-retry of failed jobs — caller decides on per-item retry policy
 - Mixing batch + sync in one logical call — two APIs, caller routes
 - Item-level cancellation — vendor API constraint, not ours
+
+### Gemini deferral (Phase 4)
+
+The `GeminiProvider` implements `BatchSubmitter` as a **stub that
+returns `ProviderError::InvalidRequest`** from all four methods.
+`as_batch_submitter()` returns `Some(self)` so callers pattern-match
+uniformly across providers, but the surface is explicitly unusable.
+
+Reason: Gemini has two batch paths and tars supports neither today —
+
+- **GenAI API batch** (`generativelanguage.googleapis.com/v1beta/batches`)
+  uses Long-Running Operations (resource names like `batches/abc`,
+  polling via `operations`). Requires an LRO abstraction layer the
+  other vendors don't need. Feasible but not yet built.
+- **Vertex AI Batch Prediction** lives on `aiplatform.googleapis.com`,
+  needs service-account auth + a GCS bucket for input/output files.
+  **Explicitly out of scope** — the current `GeminiProvider` uses
+  API-key auth and we don't want to grow a second auth code path
+  for a single feature.
+
+Re-opening this is contributor-welcome — needs someone to pin the
+GenAI batch API spec (it has shifted as the API matured) and add LRO
+polling support. The trait is uniform across vendors, so a real
+Gemini impl is a drop-in replacement for the stub.
+
+### Usage cookbook
+
+For copy-pasteable submit / poll / fetch / cancel recipes, vendor
+differences, polling cadence guidance, error mapping tables, and the
+known-gap list (tool calls in batch responses, image/vision, Gemini),
+see [`recipes/batch.md`](./recipes/batch.md).
 
 ---
 

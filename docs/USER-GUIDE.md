@@ -407,6 +407,9 @@ For per-call cost caps, per-tenant budgets, provider fallback, and
 rate-limit handling, see
 [`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md).
 
+For offline batch processing (~50% pricing, 24h SLA) on Anthropic /
+OpenAI, see [`recipes/batch.md`](./recipes/batch.md).
+
 ## When NOT to use tars
 
 - **You only call one provider, one model, one prompt shape.** A
