@@ -23,6 +23,7 @@ tars-melt = { path = "../tars-melt" }
 tars-storage = { path = "../tars-storage" }
 tars-runtime = { path = "../tars-runtime" }
 tars-tools = { path = "../tars-tools" }
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 # Async

@@ -19,6 +19,7 @@ use tars_melt::{TelemetryConfig, TelemetryFormat};
 mod bench;
 mod config_loader;
 mod dispatch;
+mod eval;
 mod event_store;
 mod events;
 mod init;
@@ -98,6 +99,10 @@ enum Command {
     /// per-provider breakdown, errors). See
     /// `docs/eval-and-arc-llm-roadmap.md §1.1`.
     RunReport(run_report::RunReportArgs),
+    /// Eval subcommands: corpus replay (now), judge / diff (future).
+    /// See `docs/eval-and-arc-llm-roadmap.md §1.3`.
+    #[command(subcommand_value_name = "COMMAND")]
+    Eval(eval::EvalArgs),
     /// Bootstrap a starter user-level config at `~/.tars/config.toml`.
     /// Idempotent (`--force` to overwrite). New users run this first.
     Init(init::InitArgs),
@@ -146,6 +151,7 @@ async fn main() -> ExitCode {
         Command::Bench(_) => "bench",
         Command::Trajectory(_) => "trajectory",
         Command::RunReport(_) => "run-report",
+        Command::Eval(_) => "eval",
         Command::Init(_) => "init",
         Command::Events(_) => "events",
     };
@@ -178,6 +184,7 @@ async fn main() -> ExitCode {
             }
             run_report::execute(args).await
         }
+        Command::Eval(args) => eval::execute(args, cli.config).await,
         Command::Init(args) => {
             // `--config` is a global flag for ergonomics on other
             // subcommands; `init` writes its own target so it never

@@ -1955,6 +1955,7 @@ dependencies = [
  "clap",
  "dirs",
  "futures",
+ "serde",
  "serde_json",
  "tars-cache",
  "tars-config",
