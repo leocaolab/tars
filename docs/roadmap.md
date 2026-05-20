@@ -1,29 +1,69 @@
 # tars roadmap — cost & reliability for production agent serving
 
-> Status: live planning doc. Features below are scoped to land in
-> sequence; PRs reference this doc by section number.
+> **Status: v1 closed — all 5 features shipped.** Gemini batch is
+> deferred-with-stub; everything else is fully implemented + tested.
+> See [What's next](#whats-next-beyond-this-roadmap) for the next
+> set of larger gaps.
+>
 > Last updated 2026-05-20.
 
 The features in this doc share one motivation: **make tars usable
 for safety-critical production agent serving at predictable cost**.
 The driving use case is Cando Rail's "Peter the Safety Agent"
 (LangChain + GPT-4.1, <$0.05/draft, expert-in-the-loop) — a
-representative production agent that we currently don't fully support.
+representative production agent we couldn't support without these
+features.
 
-Order of work is bottom-up: type/error infra first, then middleware
+Order of work was bottom-up: type/error infra first, then middleware
 that uses it, then the bigger access-pattern shift (batch).
 
-| # | Feature | Effort | Status | Tracks |
+| # | Feature | Effort | Status | Commit(s) |
 |---|---|---|---|---|
-| 1 | [Rate-limit max_wait + cancel propagation](#1-rate-limit-max-wait--cancel-propagation) | 1-2 days | ✅ shipped (commit 2b10167) | small |
-| 2 | [Fallback / degrade middleware](#2-fallback--degrade-middleware) | 1-2 weeks | ✅ shipped (commit 2b10167) | small |
-| 3 | [Per-call budget middleware](#3-per-call-budget-middleware) | 1 week | ✅ shipped | small |
-| 4 | [Tenant budget middleware (stateful)](#4-tenant-budget-middleware-stateful) | 2-3 weeks | ✅ shipped | medium |
-| 5 | [Batch mode (BatchSubmitter trait)](#5-batch-mode-batchsubmitter-trait) | 3-4 weeks | ✅ shipped (Anthropic + OpenAI); ⛔ Gemini deferred | medium |
+| 1 | [Rate-limit max_wait + cancel propagation](#1-rate-limit-max-wait--cancel-propagation) | 1-2 days | ✅ shipped | `2b10167` |
+| 2 | [Fallback / degrade middleware](#2-fallback--degrade-middleware) | 1-2 weeks | ✅ shipped | `2b10167` |
+| 3 | [Per-call budget middleware](#3-per-call-budget-middleware) | 1 week | ✅ shipped | `8088499` |
+| 4 | [Tenant budget middleware (stateful)](#4-tenant-budget-middleware-stateful) | 2-3 weeks | ✅ shipped | `c92ec8e` |
+| 5 | [Batch mode (BatchSubmitter trait)](#5-batch-mode-batchsubmitter-trait) | 3-4 weeks | ✅ Anthropic + OpenAI / ⛔ Gemini deferred | `48fb341` `f038fd8` `e81aa2a` `342cfc3` |
 
-Features 1+2 are paired — `max_wait` without fallback creates dead
-paths, and fallback without `max_wait` makes "wait 30 minutes" a
-plausible default. Ship them in the same release.
+Features 1+2 paired — `max_wait` without fallback creates dead
+paths, fallback without `max_wait` makes "wait 30 minutes" a
+plausible default. Shipped in the same release.
+
+## v1 outcomes — what production agents can do now
+
+What Cando-Peter (or a similar production agent) can compose today
+without any app-level workarounds:
+
+```rust
+let pipeline = Pipeline::builder(opus.clone())
+    .layer(TelemetryMiddleware::new())                                // observability for everything
+    .layer(CacheLookupMiddleware::new(cache))                         // free on hit
+    .layer(PerCallBudgetMiddleware::new(0.05, opus.capabilities()))   // <$0.05/call hard cap
+    .layer(TenantBudgetMiddleware::new(store, opus.capabilities()))   // aggregate per-tenant
+    .layer(FallbackMiddleware::builder()                              // typed degrade
+        .fallback_to_provider(sonnet, FallbackTrigger::cost_related())
+        .fallback_to_provider(local,  FallbackTrigger::availability())
+        .build())
+    .layer(RetryMiddleware::default())                                // short flakes; bubbles long waits to Fallback
+    .build();
+
+// Offline / bulk path (50% pricing, 24h SLA):
+let submitter = opus.as_batch_submitter().unwrap();
+let job = submitter.submit(items).await?;
+// ... poll status, fetch results ...
+```
+
+**Quantitative tally** of what landed:
+- **5 new middlewares** (`PerCallBudgetMiddleware`, `TenantBudgetMiddleware`, `FallbackMiddleware`, plus the `RetryMiddleware.max_wait` extension)
+- **2 new traits** (`BudgetStore`, `BatchSubmitter`) + their reference impls
+- **2 vendor batch implementations** (Anthropic + OpenAI), 1 stub (Gemini)
+- **~60 new unit / wiremock tests** across the four cost middlewares + the three batch backends
+- **3 new user-facing docs** (`recipes/cost-and-reliability.md`, `recipes/batch.md`, `roadmap.md` itself)
+
+> **Using these in practice**: copy-paste recipes for composing the
+> full stack live in [`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md)
+> and [`recipes/batch.md`](./recipes/batch.md). This file is the
+> **design** doc; those are the **usage** docs.
 
 > **Using these in practice**: copy-paste recipes for composing the
 > full stack live in [`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md).
@@ -470,6 +510,30 @@ known-gap list (tool calls in batch responses, image/vision, Gemini),
 see [`recipes/batch.md`](./recipes/batch.md).
 
 ---
+
+## What's next — beyond this roadmap
+
+The cost & reliability roadmap is closed. The bigger gaps that
+prevent tars from covering more production agent use cases —
+identified by mapping tars's current surface against the Cando-Peter
+case study — are tracked in **separate planning docs** because they
+each warrant their own scope discipline:
+
+| Gap | Why it's not here | Size |
+|---|---|---|
+| **Realtime / voice transport** | `Modality::Audio` reserved in the type system but **0** runtime support. Peter's Workflow 2 (in-meeting voice agent) blocked entirely. Whole new access pattern (WebSocket bidirectional audio) — doesn't fit `LlmEventStream` | 6+ weeks |
+| **LLM-as-judge eval runner** | `EvaluationScored` schema exists in `tars-types::pipeline_events`; doc-comment marks it "not yet emitted — Phase 2 / W3." Caller-side LLM-as-judge harnesses (like Peter's gold-standard comparison) currently can't emit through the pipeline event store | 2-3 weeks |
+| **RAG primitives / retrieval recipe** | tars stays out of vector-store land per `comparison.md` §LangChain. But Peter's "human-titled chunks beat generic similarity" finding is a recipe nobody can find today. Could ship as a `docs/recipes/retrieval.md` without owning a vector store | days (doc only) |
+| **Built-in tools library** | Today: only `ListDirTool` + `ReadFileTool`. Production agents reach for HTTP fetch, shell exec, SQL, web search before they reach for batch. | 1-2 weeks |
+| **Gemini batch (real impl)** | Phase 4 stub returns `InvalidRequest`. Needs GenAI batch API spec pinning + LRO polling. Vertex AI batch explicitly out of scope (different auth path) | 1-2 weeks |
+
+The first two appear to be the highest-leverage next moves. Voice
+unblocks an entirely new class of use cases; eval runner unlocks
+production-quality evaluation loops without app-side plumbing.
+
+If/when prioritized, each gets its own roadmap doc following the
+template of this one: motivation, current state, design with scope
+discipline, API sketch, test obligations.
 
 ## What this roadmap is NOT
 
