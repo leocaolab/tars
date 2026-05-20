@@ -16,11 +16,13 @@ use serde_json::{Value, json};
 use url::Url;
 
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message, Modality, ProviderError,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatEvent, ChatRequest,
+    ChatResponse, ChatResponseBuilder, ContentBlock, Message, Modality, ProviderError,
     ProviderId, RequestContext, StopReason, StructuredOutputMode, Usage,
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};
+use crate::batch::BatchSubmitter;
 use crate::http_base::{
     HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent, stream_via_adapter,
 };
@@ -147,6 +149,442 @@ impl LlmProvider for OpenAiProvider {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
         stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, ctx).await
     }
+
+    fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn BatchSubmitter>> {
+        Some(self)
+    }
+}
+
+// ─── BatchSubmitter — OpenAI Batch API ──────────────────────────────
+//
+// Reference: <https://platform.openai.com/docs/api-reference/batch>
+//
+// Two-step submission (different from Anthropic's one-step):
+//   1) POST /files  (multipart, purpose=batch) → file_id
+//   2) POST /batches { input_file_id, endpoint, completion_window } → job
+//
+// Results come back as a separate output file (output_file_id on the
+// batch object); fetch via GET /files/{id}/content. Errors during the
+// batch surface in an error_file_id similarly.
+//
+// Per-line JSONL shape (input):
+//   {"custom_id": "...", "method":"POST", "url":"/v1/chat/completions",
+//    "body": <chat completion request body>}
+//
+// Per-line JSONL shape (output):
+//   {"custom_id": "...", "response": {"status_code":200,"body":{...}}, "error": null}
+//   or {"custom_id": "...", "response": null, "error":{...}}
+
+#[async_trait]
+impl BatchSubmitter for OpenAiProvider {
+    async fn submit(
+        &self,
+        items: Vec<(BatchItemId, ChatRequest)>,
+    ) -> Result<BatchJobId, ProviderError> {
+        if items.is_empty() {
+            return Err(ProviderError::InvalidRequest(
+                "batch submit: items list must not be empty".into(),
+            ));
+        }
+
+        // 1) Build the JSONL input file content.
+        let mut jsonl = String::with_capacity(items.len() * 256);
+        for (item_id, req) in &items {
+            let body = self.adapter.translate_request(req)?;
+            let line = serde_json::to_string(&json!({
+                "custom_id": item_id.as_str(),
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": body,
+            }))
+            .map_err(|e| ProviderError::Internal(format!("batch input serialize: {e}")))?;
+            jsonl.push_str(&line);
+            jsonl.push('\n');
+        }
+
+        // 2) Upload the JSONL as a "batch" purpose file via multipart.
+        let auth = self
+            .auth_resolver
+            .resolve(&self.auth, &RequestContext::test_default())
+            .await?;
+        let auth_only = openai_auth_only_headers(&auth)?;
+
+        let file_part = reqwest::multipart::Part::bytes(jsonl.into_bytes())
+            .file_name("batch.jsonl")
+            .mime_str("application/jsonl")
+            .map_err(|e| ProviderError::Internal(format!("multipart part: {e}")))?;
+        let form = reqwest::multipart::Form::new()
+            .text("purpose", "batch")
+            .part("file", file_part);
+
+        let upload_url = self.adapter.files_url("")?;
+        let upload_resp = self
+            .http
+            .client
+            .post(upload_url)
+            .headers(auth_only.clone())
+            .multipart(form)
+            .send()
+            .await
+            .map_err(ProviderError::from)?;
+        if !upload_resp.status().is_success() {
+            let status = upload_resp.status();
+            let h = upload_resp.headers().clone();
+            let text = upload_resp.text().await.unwrap_or_default();
+            return Err(self.adapter.classify_error(status, &h, &text));
+        }
+        let file_v: Value = upload_resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::Parse(format!("file upload: response not JSON: {e}")))?;
+        let input_file_id = file_v
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ProviderError::Parse("file upload: response missing `id`".into())
+            })?
+            .to_string();
+
+        // 3) Create the batch referencing that file.
+        let create_url = self.adapter.batches_url("")?;
+        let headers = self.adapter.build_headers(&auth)?; // JSON content-type
+        let body = json!({
+            "input_file_id": input_file_id,
+            "endpoint": "/v1/chat/completions",
+            "completion_window": "24h",
+        });
+        let resp = self
+            .http
+            .client
+            .post(create_url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(ProviderError::from)?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let h = resp.headers().clone();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(self.adapter.classify_error(status, &h, &text));
+        }
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::Parse(format!("batch create: response not JSON: {e}")))?;
+        let id = v
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ProviderError::Parse("batch create: response missing `id`".into()))?;
+        Ok(BatchJobId::new(id))
+    }
+
+    async fn status(&self, id: &BatchJobId) -> Result<BatchStatus, ProviderError> {
+        let v = self.fetch_batch_object(id).await?;
+        translate_openai_batch_status(&v)
+    }
+
+    async fn results(
+        &self,
+        id: &BatchJobId,
+    ) -> Result<Vec<BatchResultItem>, ProviderError> {
+        let v = self.fetch_batch_object(id).await?;
+        let status = translate_openai_batch_status(&v)?;
+        if !status.is_terminal() {
+            return Err(ProviderError::InvalidRequest(format!(
+                "batch results: job {id} is not yet terminal (status: {status:?})"
+            )));
+        }
+        // For Completed: read output_file_id and download it. For
+        // Failed/Expired/Cancelled there's typically no output file
+        // (errors live in error_file_id which we currently surface as
+        // an Err on each item-less response). Return empty for now;
+        // callers should branch on status() before results().
+        let output_file_id = v.get("output_file_id").and_then(|s| s.as_str());
+        let Some(output_file_id) = output_file_id else {
+            return Ok(Vec::new());
+        };
+
+        let auth = self
+            .auth_resolver
+            .resolve(&self.auth, &RequestContext::test_default())
+            .await?;
+        let headers = openai_auth_only_headers(&auth)?;
+        let url = self
+            .adapter
+            .files_url(&format!("/{output_file_id}/content"))?;
+        let resp = self
+            .http
+            .client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(ProviderError::from)?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let h = resp.headers().clone();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(self.adapter.classify_error(status, &h, &text));
+        }
+        let text = resp.text().await.map_err(ProviderError::from)?;
+        parse_openai_batch_results(&text)
+    }
+
+    async fn cancel(&self, id: &BatchJobId) -> Result<(), ProviderError> {
+        let auth = self
+            .auth_resolver
+            .resolve(&self.auth, &RequestContext::test_default())
+            .await?;
+        let headers = self.adapter.build_headers(&auth)?;
+        let url = self
+            .adapter
+            .batches_url(&format!("/{}/cancel", id.as_str()))?;
+        let resp = self
+            .http
+            .client
+            .post(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(ProviderError::from)?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let h = resp.headers().clone();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(self.adapter.classify_error(status, &h, &text));
+        }
+        Ok(())
+    }
+}
+
+impl OpenAiProvider {
+    /// Shared GET that pulls the batch object JSON for status / results.
+    async fn fetch_batch_object(&self, id: &BatchJobId) -> Result<Value, ProviderError> {
+        let auth = self
+            .auth_resolver
+            .resolve(&self.auth, &RequestContext::test_default())
+            .await?;
+        let headers = self.adapter.build_headers(&auth)?;
+        let url = self.adapter.batches_url(&format!("/{}", id.as_str()))?;
+        let resp = self
+            .http
+            .client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(ProviderError::from)?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let h = resp.headers().clone();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(self.adapter.classify_error(status, &h, &text));
+        }
+        resp.json::<Value>()
+            .await
+            .map_err(|e| ProviderError::Parse(format!("batch fetch: response not JSON: {e}")))
+    }
+}
+
+/// Authorization header only (no `Content-Type: application/json`) —
+/// reqwest sets the right multipart `Content-Type` automatically; we
+/// must not preset JSON or the boundary string gets clobbered.
+fn openai_auth_only_headers(auth: &ResolvedAuth) -> Result<HeaderMap, ProviderError> {
+    let mut h = HeaderMap::new();
+    match auth {
+        ResolvedAuth::Bearer(t) | ResolvedAuth::ApiKey(t) => {
+            let value = HeaderValue::from_str(&format!("Bearer {t}"))
+                .map_err(|e| ProviderError::Internal(format!("bad auth header: {e}")))?;
+            h.insert(AUTHORIZATION, value);
+        }
+        ResolvedAuth::None => {}
+    }
+    Ok(h)
+}
+
+/// OpenAI's `status` field on the batch object, translated to our
+/// vendor-neutral [`BatchStatus`].
+///
+/// OpenAI vocab:
+///   validating | in_progress | finalizing → InProgress
+///   completed → Completed
+///   failed → Failed
+///   expired → Expired
+///   cancelling → InProgress
+///   cancelled → Cancelled
+fn translate_openai_batch_status(v: &Value) -> Result<BatchStatus, ProviderError> {
+    let status = v
+        .get("status")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| ProviderError::Parse("batch status: missing `status`".into()))?;
+
+    let counts = v.get("request_counts").cloned().unwrap_or_else(|| json!({}));
+    let total = counts.get("total").and_then(|n| n.as_u64()).map(|n| n as u32);
+    let completed = counts
+        .get("completed")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0) as u32;
+    let failed = counts
+        .get("failed")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0) as u32;
+    let processed = completed + failed;
+
+    match status {
+        "validating" | "in_progress" | "finalizing" | "cancelling" => {
+            Ok(BatchStatus::InProgress {
+                processed,
+                total,
+                eta: None,
+            })
+        }
+        "completed" => Ok(BatchStatus::Completed),
+        "expired" => Ok(BatchStatus::Expired),
+        "cancelled" => Ok(BatchStatus::Cancelled),
+        "failed" => {
+            // OpenAI surfaces the top-level reason via the `errors` array.
+            // We collapse to one-message Failed.
+            let message = v
+                .get("errors")
+                .and_then(|e| e.get("data"))
+                .and_then(|d| d.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|first| first.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("batch failed");
+            Ok(BatchStatus::Failed {
+                kind: "batch_failed".into(),
+                message: message.to_string(),
+            })
+        }
+        other => Err(ProviderError::Parse(format!(
+            "batch status: unknown `status` value: {other:?}"
+        ))),
+    }
+}
+
+/// Parse OpenAI's output file JSONL into [`BatchResultItem`]s.
+fn parse_openai_batch_results(text: &str) -> Result<Vec<BatchResultItem>, ProviderError> {
+    let mut items = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let v: Value = serde_json::from_str(line).map_err(|e| {
+            ProviderError::Parse(format!(
+                "batch results line {}: not JSON: {e}",
+                idx + 1
+            ))
+        })?;
+        let custom_id = v
+            .get("custom_id")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| {
+                ProviderError::Parse(format!(
+                    "batch results line {}: missing custom_id",
+                    idx + 1
+                ))
+            })?
+            .to_string();
+
+        // Item-level error takes precedence if present.
+        if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+            let code = err
+                .get("code")
+                .and_then(|c| c.as_str())
+                .unwrap_or("error");
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("(no message)");
+            let pe = match code {
+                "invalid_request" | "invalid_request_error" => {
+                    ProviderError::InvalidRequest(msg.to_string())
+                }
+                "rate_limit_exceeded" => ProviderError::RateLimited { retry_after: None },
+                _ => ProviderError::Internal(format!("openai batch item error ({code}): {msg}")),
+            };
+            items.push(BatchResultItem {
+                item_id: BatchItemId::new(custom_id),
+                result: Err(pe),
+            });
+            continue;
+        }
+
+        let response = v.get("response").ok_or_else(|| {
+            ProviderError::Parse(format!(
+                "batch results line {}: missing response and no error",
+                idx + 1
+            ))
+        })?;
+        let body = response.get("body").ok_or_else(|| {
+            ProviderError::Parse(format!(
+                "batch results line {}: response missing body",
+                idx + 1
+            ))
+        })?;
+        items.push(BatchResultItem {
+            item_id: BatchItemId::new(custom_id),
+            result: openai_chat_completion_to_chat_response(body),
+        });
+    }
+    Ok(items)
+}
+
+/// Convert one OpenAI chat-completion response body into [`ChatResponse`]
+/// by replaying through [`ChatResponseBuilder`]. Same shape as the
+/// streaming end-state, just delivered all-at-once.
+///
+/// **Known gap (Phase 3)**: tool_calls in batch responses are skipped.
+/// Same V1 limitation as the Anthropic backend (`anthropic_message_to_chat_response`).
+fn openai_chat_completion_to_chat_response(body: &Value) -> Result<ChatResponse, ProviderError> {
+    let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("openai");
+    let mut acc = ChatResponseBuilder::new();
+    acc.apply(ChatEvent::started(model));
+
+    let choice = body
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first())
+        .ok_or_else(|| ProviderError::Parse("openai batch response: choices empty".into()))?;
+    let message = choice.get("message").ok_or_else(|| {
+        ProviderError::Parse("openai batch response: choice missing message".into())
+    })?;
+
+    if let Some(text) = message.get("content").and_then(|c| c.as_str()) {
+        if !text.is_empty() {
+            acc.apply(ChatEvent::Delta {
+                text: text.to_string(),
+            });
+        }
+    }
+
+    let stop_reason = match choice.get("finish_reason").and_then(|f| f.as_str()) {
+        Some("stop") => StopReason::EndTurn,
+        Some("length") => StopReason::MaxTokens,
+        Some("content_filter") => StopReason::ContentFilter,
+        Some("tool_calls") => StopReason::ToolUse,
+        _ => StopReason::EndTurn,
+    };
+
+    let u = body.get("usage").cloned().unwrap_or_else(|| json!({}));
+    let usage_u64 = |k: &str| u.get(k).and_then(|n| n.as_u64()).unwrap_or(0);
+    // OpenAI nested cached count: usage.prompt_tokens_details.cached_tokens
+    let cached = u
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0);
+    let usage = Usage {
+        input_tokens: usage_u64("prompt_tokens"),
+        output_tokens: usage_u64("completion_tokens"),
+        cached_input_tokens: cached,
+        cache_creation_tokens: 0,
+        thinking_tokens: 0,
+    };
+    acc.apply(ChatEvent::Finished { stop_reason, usage });
+    Ok(acc.finish())
 }
 
 /// The wire-format adapter — pure functions, no state.
@@ -286,6 +724,24 @@ impl OpenAiAdapter {
             })
             .collect();
         Value::Array(arr)
+    }
+}
+
+impl OpenAiAdapter {
+    /// Build a URL under `{base_url}/files{suffix}` (file upload + download).
+    pub(crate) fn files_url(&self, suffix: &str) -> Result<Url, ProviderError> {
+        let trimmed = self.base_url.trim_end_matches('/');
+        Url::parse(&format!("{trimmed}/files{suffix}"))
+            .map_err(|e| ProviderError::Internal(format!("bad openai files url: {e}")))
+    }
+
+    /// Build a URL under `{base_url}/batches{suffix}`. `""` is the
+    /// collection (POST create), `/{id}` is one job, `/{id}/cancel`
+    /// is the cancel sub-resource.
+    pub(crate) fn batches_url(&self, suffix: &str) -> Result<Url, ProviderError> {
+        let trimmed = self.base_url.trim_end_matches('/');
+        Url::parse(&format!("{trimmed}/batches{suffix}"))
+            .map_err(|e| ProviderError::Internal(format!("bad openai batches url: {e}")))
     }
 }
 
