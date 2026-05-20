@@ -33,6 +33,35 @@ What you get without writing it yourself:
 - **Per-call observability** — `cache_hit`, `retry_count`,
   `validation_summary`, layer trace, latency, all on every response
 
+## Hello, tars (5-minute path)
+
+If you just want to confirm tars works on your machine, these three
+commands are the shortest route to a successful LLM call. No Python,
+no Rust code — just shell.
+
+```bash
+# 1. Build + write a starter config to ~/.tars/config.toml.
+cargo run -p tars-cli -- init
+
+# 2. Set the credential the starter config references.
+export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
+
+# 3. Send one prompt.
+cargo run -p tars-cli -- run -p anthropic "Say hi in 5 words."
+```
+
+Expected: the model's reply on stdout, a one-line `usage:` summary on
+stderr. If you see `error in tars run:` instead, double-check the env
+var name matches what `~/.tars/config.toml` declares for that provider.
+
+Want a different provider? Replace `-p anthropic` with one of the ids
+in `~/.tars/config.toml` (`-p openai_main`, `-p claude_cli`, etc.).
+For the long-lived subscription path, see
+[`providers/claude-cli.md`](./providers/claude-cli.md).
+
+Once that works, the rest of this guide covers calling tars from
+**Python** and **Rust**.
+
 ## Install
 
 ### Python
@@ -76,6 +105,8 @@ See [`.env.example`](../.env.example) for the full env-var list.
 
 ### 1. Single completion
 
+**Python**
+
 ```python
 import tars
 
@@ -101,7 +132,55 @@ those concerns yourself:
 p = tars.Provider.from_default("anthropic")  # no middleware
 ```
 
+**Rust**
+
+The shortest path loads the same `~/.tars/config.toml` and goes through
+`ProviderRegistry::from_config`. No `Pipeline.from_default` analogue
+exists in Rust today — you stack middleware explicitly.
+
+```rust
+use std::sync::Arc;
+use tars_config::Config;
+use tars_pipeline::{Pipeline, TelemetryMiddleware, RetryMiddleware, LlmService};
+use tars_provider::ProviderRegistry;
+use tars_types::{ChatRequest, ModelHint, ProviderId, RequestContext};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Load ~/.tars/config.toml and build providers from it.
+    let cfg = Config::load_default()?;
+    let registry = ProviderRegistry::from_config(&cfg.providers, /* … */)?;
+
+    let provider = registry.get(&ProviderId::new("anthropic")).unwrap();
+
+    // Wrap in the default middleware stack. Outermost layer is added first.
+    let pipeline = Arc::new(
+        Pipeline::builder(provider)
+            .layer(TelemetryMiddleware::new())
+            .layer(RetryMiddleware::default())
+            .build()
+    );
+
+    let req = ChatRequest::user(
+        ModelHint::Explicit("claude-sonnet-4-5".into()),
+        "Find race conditions in this Rust function: ...",
+    );
+    let resp = pipeline.complete(req, RequestContext::test_default()).await?;
+
+    println!("{}", resp.text);
+    println!("{:?}", resp.usage);
+    println!("{:?}", resp.telemetry);
+    Ok(())
+}
+```
+
+`RequestContext::test_default()` is a dev convenience — production code
+constructs one carrying the real `tenant_id` / `principal_id` /
+`trace_id` so the IAM and audit middleware have something to work with.
+
 ### 2. Multi-turn conversation
+
+**Python**
 
 ```python
 import tars
@@ -122,7 +201,31 @@ print(session.history_version)  # bumps on each successful send
 messages, no orphan tool calls), trims history when it exceeds the
 budget, and rolls back atomically if any send fails mid-turn.
 
+**Rust**
+
+```rust
+use tars_runtime::Session;
+use tars_types::{ModelHint, RequestContext};
+
+let mut session = Session::new(
+    pipeline.clone(),                          // from §1
+    ModelHint::Explicit("claude-sonnet-4-5".into()),
+    Some("You are a code reviewer.".into()),
+);
+
+let r1 = session.send("Look at foo.py", RequestContext::test_default()).await?;
+let r2 = session.send("What's the worst issue?", RequestContext::test_default()).await?;
+let r3 = session.send("How would you fix it?", RequestContext::test_default()).await?;
+
+println!("history_version = {}", session.history_version());
+```
+
+Same invariants as the Python `Session` — alternating roles, no orphan
+tool calls, atomic rollback on mid-turn failure.
+
 ### 3. Tool dispatch (auto-loop)
+
+**Python**
 
 ```python
 import tars
@@ -148,6 +251,30 @@ resp = session.send("Review main.py")
 Tool registration is by `(name, callable, schema)`. Parallel tool
 calls are batched into one `tool_result` message per protocol
 requirements.
+
+**Rust**
+
+Rust tools implement the `Tool` trait from `tars-tools`. The built-in
+`ReadFileTool` is a good template; for a custom tool you implement
+`fn name() / fn spec() / async fn invoke()`.
+
+```rust
+use std::sync::Arc;
+use tars_tools::builtins::ReadFileTool;
+
+let mut session = Session::new(pipeline.clone(), model_hint, Some(system.into()));
+session.register_tool(Arc::new(ReadFileTool::new(tempdir.path())));
+
+let resp = session.send("Review main.py", RequestContext::test_default()).await?;
+```
+
+For a complete worked example covering Worker / Critic / Orchestrator
+with real filesystem tools, see
+[`crates/tars-runtime/examples/multi_step_with_tools.rs`](../crates/tars-runtime/examples/multi_step_with_tools.rs):
+
+```bash
+cargo run -p tars-runtime --example multi_step_with_tools
+```
 
 ## Output validators
 
