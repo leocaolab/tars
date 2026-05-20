@@ -42,7 +42,7 @@ use async_trait::async_trait;
 
 use tars_provider::LlmEventStream;
 use tars_types::{
-    Capabilities, ChatRequest, ContentBlock, Message, Pricing, ProviderError, RequestContext,
+    Capabilities, ChatRequest, ContentBlock, Pricing, ProviderError, RequestContext,
 };
 
 use crate::middleware::Middleware;
