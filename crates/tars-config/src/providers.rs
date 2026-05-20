@@ -1259,7 +1259,10 @@ mod tests {
                 assert!(bare);
                 assert_eq!(effort, &Some(ClaudeCliEffortConfig::High));
                 assert!(!exclude_dynamic_sections);
-                assert_eq!(extra_args, &vec!["--betas".to_string(), "experimental-x".into()]);
+                assert_eq!(
+                    extra_args,
+                    &vec!["--betas".to_string(), "experimental-x".into()]
+                );
             }
             other => panic!("wrong variant: {other:?}"),
         }

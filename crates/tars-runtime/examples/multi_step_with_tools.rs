@@ -190,12 +190,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 2. Tool registry — jailed to the tempdir.
     let mut reg = ToolRegistry::new();
-    reg.register_owned(
-        ListDirTool::with_root(dir.path()).expect("list_dir root accepted"),
-    )?;
-    reg.register_owned(
-        ReadFileTool::with_root(dir.path()).expect("read_file root accepted"),
-    )?;
+    reg.register_owned(ListDirTool::with_root(dir.path()).expect("list_dir root accepted"))?;
+    reg.register_owned(ReadFileTool::with_root(dir.path()).expect("read_file root accepted"))?;
     let registry = Arc::new(reg);
 
     // 3. Scripted LLM responses, in call order.
@@ -215,10 +211,7 @@ async fn main() -> anyhow::Result<()> {
     //  13. s3 Critic: approve
     let provider = ScriptedProvider::new(vec![
         // 1. Orchestrator
-        text_stream(plan_json(
-            f1.to_str().unwrap(),
-            f2.to_str().unwrap(),
-        )),
+        text_stream(plan_json(f1.to_str().unwrap(), f2.to_str().unwrap())),
         // 2-4. s1 Worker (3 internal LLM calls; one trajectory step)
         tool_stream(
             "c1",
@@ -230,10 +223,7 @@ async fn main() -> anyhow::Result<()> {
             "fs.read_file",
             serde_json::json!({ "path": f1.to_str().unwrap() }),
         ),
-        text_stream(worker_final(
-            "alpha.txt: greeting payload, 30 bytes",
-            0.85,
-        )),
+        text_stream(worker_final("alpha.txt: greeting payload, 30 bytes", 0.85)),
         // 5. s1 Critic
         text_stream(approve()),
         // 6-7. s2 Worker attempt 1
@@ -244,7 +234,9 @@ async fn main() -> anyhow::Result<()> {
         ),
         text_stream(worker_final("beta.txt has some data", 0.5)),
         // 8. s2 Critic refine
-        text_stream(refine("cite byte length and topic, like the s1 summary did")),
+        text_stream(refine(
+            "cite byte length and topic, like the s1 summary did",
+        )),
         // 9-10. s2 Worker attempt 2
         tool_stream(
             "c4",
@@ -268,8 +260,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 4. Pipeline + Runtime (SQLite event store on tempdir).
     let provider_svc: Arc<dyn LlmService> = ProviderService::new(provider);
-    let llm: Arc<dyn LlmService> =
-        Arc::new(Pipeline::builder_with_inner(provider_svc).build());
+    let llm: Arc<dyn LlmService> = Arc::new(Pipeline::builder_with_inner(provider_svc).build());
     let events_path = dir.path().join("events.sqlite");
     let store: Arc<dyn EventStore> =
         SqliteEventStore::open(SqliteEventStoreConfig::new(&events_path))?;
@@ -322,7 +313,10 @@ async fn main() -> anyhow::Result<()> {
 
     // 8. Replay the trajectory event log.
     let events = runtime.replay(&outcome.trajectory_id).await?;
-    println!("╭─ Trajectory event log ({} events) ──────────────", events.len());
+    println!(
+        "╭─ Trajectory event log ({} events) ──────────────",
+        events.len()
+    );
     for (i, ev) in events.iter().enumerate() {
         let line = match ev {
             AgentEvent::TrajectoryStarted { reason, .. } => {
@@ -361,9 +355,7 @@ async fn main() -> anyhow::Result<()> {
                 error,
                 classification,
                 ..
-            } => format!(
-                "StepFailed   #{step_seq} cls={classification:?} err={error}",
-            ),
+            } => format!("StepFailed   #{step_seq} cls={classification:?} err={error}",),
             AgentEvent::TrajectorySuspended { reason, .. } => {
                 format!("TrajectorySuspended reason={reason}")
             }

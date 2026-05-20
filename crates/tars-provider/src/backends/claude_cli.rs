@@ -52,20 +52,15 @@ const STRIPPED_ENV_KEYS_UPPER: &[&str] = &[
 /// is a pure inference channel and is **auth-neutral**. See
 /// [docs/architecture/01-llm-provider.md §17](../../../../docs/architecture/01-llm-provider.md)
 /// for the design rationale and the token-inflation data that motivated it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ClaudeCliTools {
     /// `--tools ""` — disable every tool. No agent loop possible.
+    #[default]
     Disabled,
     /// Omit `--tools` entirely — inherit the CLI's default (full tool access).
     Default,
     /// `--tools "<csv>"` — allow only the named tools (e.g. `["Read","Bash"]`).
     Allow(Vec<String>),
-}
-
-impl Default for ClaudeCliTools {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 /// What to pass via `--effort` on the CLI argv. `None` means omit the flag
@@ -362,8 +357,8 @@ pub(crate) fn streaming_enabled() -> bool {
 /// Output format is `json` by default. When `TARS_CLAUDE_CLI_STREAM` is
 /// set, the CLI is invoked with `stream-json` + `--include-partial-messages`
 /// + `--verbose`, which produces a real-time NDJSON event stream
-/// ([`RealSubprocessRunner`] tees each event to stderr for observability,
-/// reconstructs the final `result` event as the return Value).
+///   ([`RealSubprocessRunner`] tees each event to stderr for observability,
+///   reconstructs the final `result` event as the return Value).
 pub(crate) fn build_argv(inv: &SubprocessInvocation) -> Vec<String> {
     build_argv_with(inv, streaming_enabled())
 }
@@ -380,7 +375,11 @@ pub(crate) fn build_argv_with(inv: &SubprocessInvocation, streaming: bool) -> Ve
         "--model".into(),
         inv.model.clone(),
         "--output-format".into(),
-        if streaming { "stream-json".into() } else { "json".into() },
+        if streaming {
+            "stream-json".into()
+        } else {
+            "json".into()
+        },
         "--disable-slash-commands".into(),
     ];
     if streaming {
@@ -652,14 +651,20 @@ async fn run_streaming(
 ) -> Result<Value, ProviderError> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-    let stdout = child.stdout.take().ok_or_else(|| ProviderError::CliSubprocessDied {
-        exit_code: None,
-        stderr: "stream-json: stdout pipe missing on spawned child".into(),
-    })?;
-    let stderr_pipe = child.stderr.take().ok_or_else(|| ProviderError::CliSubprocessDied {
-        exit_code: None,
-        stderr: "stream-json: stderr pipe missing on spawned child".into(),
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ProviderError::CliSubprocessDied {
+            exit_code: None,
+            stderr: "stream-json: stdout pipe missing on spawned child".into(),
+        })?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| ProviderError::CliSubprocessDied {
+            exit_code: None,
+            stderr: "stream-json: stderr pipe missing on spawned child".into(),
+        })?;
 
     // Drain stderr in a separate task so the child can't block on a full
     // pipe (claude prints rate limit / debug to stderr).
@@ -820,7 +825,11 @@ fn emit_event_summary(ev: &Value, sid: &str) {
             eprintln!("[claude_cli {sid}] rate_limit {status}");
         }
         "stream_event" => {
-            let inner = ev.get("event").and_then(|v| v.get("type")).and_then(|v| v.as_str()).unwrap_or("?");
+            let inner = ev
+                .get("event")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
             match inner {
                 "message_start" => {
                     let ttft = ev.get("ttft_ms").and_then(|v| v.as_i64()).unwrap_or(-1);
@@ -851,10 +860,7 @@ fn emit_event_summary(ev: &Value, sid: &str) {
                         })
                         .unwrap_or("");
                     if !chunk.is_empty() {
-                        eprintln!(
-                            "[claude_cli {sid}] {dtype}: {}",
-                            truncate(chunk, 200)
-                        );
+                        eprintln!("[claude_cli {sid}] {dtype}: {}", truncate(chunk, 200));
                     }
                 }
                 "content_block_stop" => { /* low-signal, skip */ }
@@ -871,10 +877,22 @@ fn emit_event_summary(ev: &Value, sid: &str) {
         "result" => {
             let dur = ev.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(-1);
             let usage = ev.get("usage");
-            let tin = usage.and_then(|v| v.get("input_tokens")).and_then(|v| v.as_i64()).unwrap_or(0);
-            let tout = usage.and_then(|v| v.get("output_tokens")).and_then(|v| v.as_i64()).unwrap_or(0);
-            let tcached = usage.and_then(|v| v.get("cache_read_input_tokens")).and_then(|v| v.as_i64()).unwrap_or(0);
-            let cost = ev.get("total_cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let tin = usage
+                .and_then(|v| v.get("input_tokens"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let tout = usage
+                .and_then(|v| v.get("output_tokens"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let tcached = usage
+                .and_then(|v| v.get("cache_read_input_tokens"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let cost = ev
+                .get("total_cost_usd")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
             let subtype = ev.get("subtype").and_then(|v| v.as_str()).unwrap_or("?");
             eprintln!(
                 "[claude_cli {sid}] result {subtype} dur={dur}ms in={tin} out={tout} cached={tcached} cost=${cost:.4}"
@@ -1079,8 +1097,8 @@ mod tests {
             }
         }
         let runner = Arc::new(RecRunner(std::sync::Mutex::new(None)));
-        let provider = configure(ClaudeCliProviderBuilder::new("test"))
-            .build_with_runner(runner.clone());
+        let provider =
+            configure(ClaudeCliProviderBuilder::new("test")).build_with_runner(runner.clone());
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1141,7 +1159,10 @@ mod tests {
         );
 
         // No stray extra_args.
-        assert_eq!(argv.last().map(|s| s.as_str()), Some("--exclude-dynamic-system-prompt-sections"));
+        assert_eq!(
+            argv.last().map(|s| s.as_str()),
+            Some("--exclude-dynamic-system-prompt-sections")
+        );
     }
 
     #[test]
@@ -1185,7 +1206,10 @@ mod tests {
     #[test]
     fn argv_tools_allow_serializes_as_csv() {
         let inv = make_invocation(|b| {
-            b.tools(ClaudeCliTools::Allow(vec!["Read".into(), "Bash(git *)".into()]))
+            b.tools(ClaudeCliTools::Allow(vec![
+                "Read".into(),
+                "Bash(git *)".into(),
+            ]))
         });
         let argv = build_argv(&inv);
         let t = idx(&argv, "--tools");
@@ -1220,7 +1244,8 @@ mod tests {
         let inv = make_invocation(|b| b.exclude_dynamic_sections(false));
         let argv = build_argv(&inv);
         assert!(
-            !argv.iter()
+            !argv
+                .iter()
                 .any(|a| a == "--exclude-dynamic-system-prompt-sections"),
             "exclude_dynamic_sections=false must drop the flag"
         );

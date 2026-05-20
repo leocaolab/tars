@@ -217,22 +217,12 @@ mod tests {
     #[test]
     fn cli_parses_log_format_flag() {
         // Sanity: clap accepts the documented values without ambiguity.
-        let cli = Cli::try_parse_from([
-            "tars",
-            "--log-format",
-            "json",
-            "events",
-            "list",
-        ]).expect("parse");
+        let cli =
+            Cli::try_parse_from(["tars", "--log-format", "json", "events", "list"]).expect("parse");
         assert!(matches!(cli.log_format, Some(LogFormat::Json)));
 
-        let cli = Cli::try_parse_from([
-            "tars",
-            "--log-format",
-            "pretty",
-            "events",
-            "list",
-        ]).expect("parse");
+        let cli = Cli::try_parse_from(["tars", "--log-format", "pretty", "events", "list"])
+            .expect("parse");
         assert!(matches!(cli.log_format, Some(LogFormat::Pretty)));
 
         // Omitted → None → fall through to TARS_LOG_FORMAT / Pretty.
@@ -240,13 +230,7 @@ mod tests {
         assert!(cli.log_format.is_none());
 
         // Unknown value → clap rejects (we never silently default).
-        let err = Cli::try_parse_from([
-            "tars",
-            "--log-format",
-            "yaml",
-            "events",
-            "list",
-        ]);
+        let err = Cli::try_parse_from(["tars", "--log-format", "yaml", "events", "list"]);
         assert!(err.is_err(), "clap must reject unsupported values");
     }
 }
