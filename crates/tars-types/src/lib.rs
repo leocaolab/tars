@@ -35,6 +35,7 @@ pub mod error;
 pub mod events;
 pub mod http_extras;
 pub mod ids;
+pub mod judge;
 pub mod model;
 pub mod pipeline_events;
 pub mod principal;
@@ -63,6 +64,7 @@ pub use ids::{
     AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId,
     TenantId, TraceId, TrajectoryId,
 };
+pub use judge::{JudgeItem, JudgeReport, JudgeVerdict, JudgedItem};
 pub use model::{ModelHint, ModelTier, ThinkingMode};
 pub use pipeline_events::{
     CallResult, EvaluationScored, LlmCallFinished, PersistenceMode, PipelineEvent,

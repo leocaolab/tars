@@ -37,6 +37,7 @@ mod agent;
 mod critic;
 mod error;
 mod event;
+pub mod judge;
 mod message;
 mod orchestrator;
 mod prompt;
@@ -53,6 +54,9 @@ pub use agent::{
 pub use critic::{CriticAgent, CriticError, PartialResultRef};
 pub use error::RuntimeError;
 pub use event::{AgentEvent, StepIdempotencyKey};
+pub use judge::{
+    DEFAULT_JUDGE_PROMPT, Judge, JudgeError, LlmJudge, ensure_anti_incest, run_judge_pass,
+};
 pub use message::{AgentMessage, VerdictKind};
 pub use orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep};
 pub use prompt::PromptBuilder;
