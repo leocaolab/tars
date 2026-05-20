@@ -311,7 +311,11 @@ mod tests {
             }
         }
         assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(hop1_calls.load(Ordering::SeqCst), 0, "hop must not run on success");
+        assert_eq!(
+            hop1_calls.load(Ordering::SeqCst),
+            0,
+            "hop must not run on success"
+        );
     }
 
     #[tokio::test]
@@ -386,7 +390,11 @@ mod tests {
             .await
             .expect("hop2 should succeed");
         assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(hop1_calls.load(Ordering::SeqCst), 0, "non-matching trigger must skip");
+        assert_eq!(
+            hop1_calls.load(Ordering::SeqCst),
+            0,
+            "non-matching trigger must skip"
+        );
         assert_eq!(hop2_calls.load(Ordering::SeqCst), 1);
     }
 
@@ -432,7 +440,10 @@ mod tests {
         cancel.cancel(); // pre-cancel — primary runs, then cancel is observed before hop
 
         let err = wrapped
-            .call(ChatRequest::user(ModelHint::Explicit("m".into()), "hi"), ctx)
+            .call(
+                ChatRequest::user(ModelHint::Explicit("m".into()), "hi"),
+                ctx,
+            )
             .await
             .err()
             .expect("must abort");
@@ -448,7 +459,10 @@ mod tests {
         // Pin the kind-string sets so a rename in tars-types ProviderError::kind()
         // breaks this test immediately — that's intentional, it's the canary.
         let e_budget = ProviderError::BudgetExceeded;
-        let e_ctx = ProviderError::ContextTooLong { limit: 1, requested: 2 };
+        let e_ctx = ProviderError::ContextTooLong {
+            limit: 1,
+            requested: 2,
+        };
         let e_rate = ProviderError::RateLimited { retry_after: None };
         let e_load = ProviderError::ModelOverloaded;
         let e_auth = ProviderError::Auth("x".into());

@@ -58,14 +58,14 @@ pub use cache::{CacheLookupMiddleware, set_cache_policy};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use event_emitter::EventEmitterMiddleware;
 pub use fallback::{FallbackBuilder, FallbackMiddleware, FallbackTrigger};
-pub use middleware::{Middleware, Pipeline, PipelineBuilder};
+pub use middleware::{EventStores, Middleware, Pipeline, PipelineBuilder, PipelineOpts};
 pub use retry::{RetryConfig, RetryMiddleware};
-pub use tenant_budget::{
-    BudgetStore, BudgetStoreError, InMemoryBudgetStore, TenantBudgetMiddleware,
-};
 pub use routing::{RoutingPolicy, RoutingService, StaticPolicy, TierPolicy};
 pub use service::{LlmService, ProviderService};
 pub use telemetry::TelemetryMiddleware;
+pub use tenant_budget::{
+    BudgetStore, BudgetStoreError, InMemoryBudgetStore, TenantBudgetMiddleware,
+};
 pub use validation::{
     OutputValidator, ValidationMiddleware,
     builtin::{JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, OnExceed, ResponseField},

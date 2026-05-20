@@ -109,13 +109,18 @@ pub trait OutputValidator: Send + Sync {
 /// Middleware that runs a chain of [`OutputValidator`]s after the
 /// provider's stream finishes. See module docs.
 pub struct ValidationMiddleware {
-    validators: Arc<Vec<Box<dyn OutputValidator>>>,
+    validators: Arc<[Arc<dyn OutputValidator>]>,
 }
 
 impl ValidationMiddleware {
-    pub fn new(validators: Vec<Box<dyn OutputValidator>>) -> Self {
+    /// Build from a `Vec<Arc<dyn OutputValidator>>`. Callers porting
+    /// from the previous `Vec<Box<...>>` shape rewrite `Box::new(X)`
+    /// to `Arc::new(X)`; single-validator vec literals need an
+    /// explicit `as Arc<dyn OutputValidator>` cast on one element
+    /// (subsequent elements coerce automatically).
+    pub fn new(validators: Vec<Arc<dyn OutputValidator>>) -> Self {
         Self {
-            validators: Arc::new(validators),
+            validators: validators.into(),
         }
     }
 }
@@ -135,7 +140,7 @@ impl Middleware for ValidationMiddleware {
 
 struct ValidationService {
     inner: Arc<dyn LlmService>,
-    validators: Arc<Vec<Box<dyn OutputValidator>>>,
+    validators: Arc<[Arc<dyn OutputValidator>]>,
 }
 
 #[async_trait]

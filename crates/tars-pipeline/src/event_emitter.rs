@@ -484,7 +484,9 @@ mod tests {
 
     #[tokio::test]
     async fn validation_summary_propagates_into_event() {
-        use crate::validation::{ValidationMiddleware, builtin::MaxLengthValidator};
+        use crate::validation::{
+            OutputValidator, ValidationMiddleware, builtin::MaxLengthValidator,
+        };
 
         let events: Arc<dyn PipelineEventStore> = SqlitePipelineEventStore::in_memory().unwrap();
         let bodies: Arc<dyn BodyStore> = SqliteBodyStore::in_memory().unwrap();
@@ -492,9 +494,10 @@ mod tests {
         let provider = MockProvider::new("p1", CannedResponse::text("hello world"));
         let inner: Arc<dyn LlmService> = ProviderService::new(provider);
         // Onion: EventEmitter (outer) → Validation (inner) → Provider.
-        let validated =
-            ValidationMiddleware::new(vec![Box::new(MaxLengthValidator::truncate_above(5))])
-                .wrap(inner);
+        let validated = ValidationMiddleware::new(vec![
+            Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>,
+        ])
+        .wrap(inner);
         let svc = EventEmitterMiddleware::new(events.clone(), bodies.clone()).wrap(validated);
 
         let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");

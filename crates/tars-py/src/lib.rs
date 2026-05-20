@@ -42,14 +42,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 
-use tars_cache::CacheKeyFactory;
 use tars_config::{Config, ConfigManager, default_config_path};
 
 use crate::errors::{config_to_py, provider_to_py, runtime_to_py};
-use tars_pipeline::{
-    CacheLookupMiddleware, LlmService, Pipeline as RsPipeline, ProviderService, RetryMiddleware,
-    TelemetryMiddleware,
-};
+use tars_pipeline::{LlmService, Pipeline as RsPipeline, ProviderService};
 use tars_provider::{
     LlmProvider, auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry,
 };
@@ -481,45 +477,22 @@ impl Pipeline {
     fn from_provider(
         id: String,
         provider: Arc<dyn LlmProvider>,
-        validators: Vec<Box<dyn tars_pipeline::OutputValidator>>,
+        validators: Vec<Arc<dyn tars_pipeline::OutputValidator>>,
         event_stores: Option<EventStorePair>,
     ) -> Self {
         let capabilities_full = provider.capabilities().clone();
         let capabilities_summary = CapabilitiesSummary::from(&capabilities_full);
-        let cache_origin = ProviderId::new(id.clone());
 
-        let cache_registry = tars_cache::MemoryCacheRegistry::default_arc();
-        let cache_factory = CacheKeyFactory::new(1);
-
-        // Onion (W4 — see Doc 15 §2 + Doc 17 §8):
-        //   EventEmitter? → Telemetry → Validation → Cache → Retry → Provider
-        //
-        // Builder records outer→inner; Validation must sit OUTSIDE Cache
-        // so that (1) Cache stores raw Provider events, not post-Filter
-        // events, and (2) cache hits still flow through Validation
-        // (validators are pure, rerun is cheap). ValidationFailed is
-        // always Permanent — RetryMiddleware does NOT retry on it.
-        // EventEmitter is the outermost layer when configured so it
-        // sees the complete telemetry / validation_summary picture.
-        let mut builder = RsPipeline::builder(provider);
-        if let Some(EventStorePair { events, bodies }) = event_stores.as_ref() {
-            builder = builder.layer(tars_pipeline::EventEmitterMiddleware::new(
-                events.clone(),
-                bodies.clone(),
-            ));
-        }
-        builder = builder.layer(TelemetryMiddleware::new());
-        if !validators.is_empty() {
-            builder = builder.layer(tars_pipeline::ValidationMiddleware::new(validators));
-        }
-        let pipeline = builder
-            .layer(CacheLookupMiddleware::new(
-                cache_registry,
-                cache_factory,
-                cache_origin,
-            ))
-            .layer(RetryMiddleware::default())
-            .build();
+        // Delegate the onion composition to `Pipeline::default_chain`
+        // — same shape as before (EventEmitter? → Telemetry →
+        // Validation? → Cache → Retry → Provider), now expressed once
+        // in tars-pipeline so non-Python callers (arc, tars-cli, etc.)
+        // pick up the same canonical stack.
+        let mut opts = tars_pipeline::PipelineOpts::new(ProviderId::new(id.clone()));
+        opts.validators = validators;
+        opts.events = event_stores
+            .map(|EventStorePair { events, bodies }| tars_pipeline::EventStores { events, bodies });
+        let pipeline = RsPipeline::default_chain(provider, opts);
 
         let layer_names: Vec<String> = pipeline
             .layer_names()

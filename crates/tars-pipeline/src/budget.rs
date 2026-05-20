@@ -41,9 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 
 use tars_provider::LlmEventStream;
-use tars_types::{
-    Capabilities, ChatRequest, ContentBlock, Pricing, ProviderError, RequestContext,
-};
+use tars_types::{Capabilities, ChatRequest, ContentBlock, Pricing, ProviderError, RequestContext};
 
 use crate::middleware::Middleware;
 use crate::service::LlmService;
@@ -73,11 +71,7 @@ impl PerCallBudgetMiddleware {
     /// Construct from explicit pricing + worst-case output bound. Use
     /// when you don't have a `Capabilities` handy (tests, hand-rolled
     /// services).
-    pub fn from_parts(
-        cap_usd: f64,
-        pricing: Pricing,
-        default_max_output_tokens: u32,
-    ) -> Self {
+    pub fn from_parts(cap_usd: f64, pricing: Pricing, default_max_output_tokens: u32) -> Self {
         Self {
             cap_usd,
             pricing,
@@ -114,8 +108,7 @@ struct PerCallBudgetService {
 
 impl PerCallBudgetService {
     fn is_zero_pricing(&self) -> bool {
-        self.pricing.input_per_million == 0.0
-            && self.pricing.output_per_million == 0.0
+        self.pricing.input_per_million == 0.0 && self.pricing.output_per_million == 0.0
     }
 
     /// Strict upper-bound USD estimate for `req`. See module docs for
@@ -347,10 +340,7 @@ mod tests {
         let svc = mw.wrap(inner);
 
         let err = svc
-            .call(
-                req_with_text("hi", None),
-                RequestContext::test_default(),
-            )
+            .call(req_with_text("hi", None), RequestContext::test_default())
             .await
             .err()
             .expect("over cap due to default_max_output_tokens");

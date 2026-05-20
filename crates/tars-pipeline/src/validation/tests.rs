@@ -169,7 +169,9 @@ async fn drain(s: tars_provider::LlmEventStream) -> Vec<tars_types::ChatEvent> {
 async fn validation_passes_through_when_validators_pass() {
     let mock = MockProvider::new("mock", CannedResponse::text("hello world"));
     let inner: Arc<dyn LlmService> = ProviderService::new(mock);
-    let mw = ValidationMiddleware::new(vec![Box::new(NotEmptyValidator::new())]);
+    let mw = ValidationMiddleware::new(vec![
+        Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
+    ]);
     let svc = mw.wrap(inner);
     let ctx = RequestContext::test_default();
     let outcome_handle = ctx.validation_outcome.clone();
@@ -192,7 +194,9 @@ async fn validation_reject_surfaces_validation_failed_error() {
     // Mock with empty text — NotEmpty will reject.
     let mock = MockProvider::new("mock", CannedResponse::text(""));
     let inner: Arc<dyn LlmService> = ProviderService::new(mock);
-    let mw = ValidationMiddleware::new(vec![Box::new(NotEmptyValidator::new())]);
+    let mw = ValidationMiddleware::new(vec![
+        Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
+    ]);
     let svc = mw.wrap(inner);
     let result = svc.call(fake_req(), RequestContext::test_default()).await;
     match result {
@@ -227,7 +231,10 @@ async fn validation_chain_runs_in_order_and_short_circuits_on_reject() {
     }
     let mock = MockProvider::new("mock", CannedResponse::text("definitely not JSON"));
     let inner: Arc<dyn LlmService> = ProviderService::new(mock);
-    let mw = ValidationMiddleware::new(vec![Box::new(JsonShapeValidator::new()), Box::new(Trap)]);
+    let mw = ValidationMiddleware::new(vec![
+        Arc::new(JsonShapeValidator::new()) as Arc<dyn OutputValidator>,
+        Arc::new(Trap),
+    ]);
     let svc = mw.wrap(inner);
     let result = svc.call(fake_req(), RequestContext::test_default()).await;
     match result {
@@ -246,8 +253,8 @@ async fn validation_filter_modifies_response_subsequent_validators_see_filtered(
     let mock = MockProvider::new("mock", CannedResponse::text("hello world"));
     let inner: Arc<dyn LlmService> = ProviderService::new(mock);
     let mw = ValidationMiddleware::new(vec![
-        Box::new(MaxLengthValidator::truncate_above(5)),
-        Box::new(NotEmptyValidator::new()),
+        Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>,
+        Arc::new(NotEmptyValidator::new()),
     ]);
     let svc = mw.wrap(inner);
     let ctx = RequestContext::test_default();
@@ -280,10 +287,10 @@ async fn validation_filter_modifies_response_subsequent_validators_see_filtered(
 async fn validation_annotate_stores_metrics_in_summary() {
     let mock = MockProvider::new("mock", CannedResponse::text("anything"));
     let inner: Arc<dyn LlmService> = ProviderService::new(mock);
-    let mw = ValidationMiddleware::new(vec![Box::new(AnnotatingValidator {
+    let mw = ValidationMiddleware::new(vec![Arc::new(AnnotatingValidator {
         name_: "annot".into(),
         metric_value: 42,
-    })]);
+    }) as Arc<dyn OutputValidator>]);
     let svc = mw.wrap(inner);
     let ctx = RequestContext::test_default();
     let outcome_handle = ctx.validation_outcome.clone();
@@ -305,7 +312,7 @@ async fn validation_annotate_stores_metrics_in_summary() {
 async fn validation_empty_chain_passes_through_without_drain() {
     let mock = MockProvider::new("mock", CannedResponse::text("hi"));
     let inner: Arc<dyn LlmService> = ProviderService::new(mock);
-    let mw = ValidationMiddleware::new(vec![]); // no validators
+    let mw = ValidationMiddleware::new(Vec::<Arc<dyn OutputValidator>>::new()); // no validators
     let svc = mw.wrap(inner);
     let ctx = RequestContext::test_default();
     let outcome_handle = ctx.validation_outcome.clone();
@@ -364,9 +371,10 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
     )
     .wrap(provider_service);
 
-    let pipeline_svc =
-        ValidationMiddleware::new(vec![Box::new(MaxLengthValidator::truncate_above(5))])
-            .wrap(cache_wrapped);
+    let pipeline_svc = ValidationMiddleware::new(vec![
+        Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>,
+    ])
+    .wrap(cache_wrapped);
 
     // Cacheable request: explicit model + temperature=0.
     let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "say hi");
@@ -433,8 +441,10 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
         CacheLookupMiddleware::new(registry, factory, ProviderId::new("mock_origin"))
             .wrap(provider_service);
 
-    let svc =
-        ValidationMiddleware::new(vec![Box::new(NotEmptyValidator::new())]).wrap(cache_wrapped);
+    let svc = ValidationMiddleware::new(vec![
+        Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
+    ])
+    .wrap(cache_wrapped);
 
     let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "p");
     req.temperature = Some(0.0);
@@ -480,7 +490,9 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
 async fn validation_appends_to_layer_trace() {
     let mock = MockProvider::new("mock", CannedResponse::text("hi"));
     let inner: Arc<dyn LlmService> = ProviderService::new(mock);
-    let mw = ValidationMiddleware::new(vec![Box::new(NotEmptyValidator::new())]);
+    let mw = ValidationMiddleware::new(vec![
+        Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
+    ]);
     let svc = mw.wrap(inner);
     let ctx = RequestContext::test_default();
     let telemetry_handle = ctx.telemetry.clone();

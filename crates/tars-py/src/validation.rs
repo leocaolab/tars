@@ -46,6 +46,7 @@
 //! non-determinism are first-class.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -367,15 +368,15 @@ fn parse_outcome(
 
 /// Public entry point used by tars-py's Pipeline constructors:
 /// translate a Python `validators` kwarg (a list of `(name: str,
-/// callable)` tuples) into a `Vec<Box<dyn OutputValidator>>`
+/// callable)` tuples) into a `Vec<Arc<dyn OutputValidator>>`
 /// suitable for `ValidationMiddleware::new`.
 pub(crate) fn build_validator_list(
     list: Option<Bound<'_, PyList>>,
-) -> PyResult<Vec<Box<dyn OutputValidator>>> {
+) -> PyResult<Vec<Arc<dyn OutputValidator>>> {
     let Some(list) = list else {
         return Ok(Vec::new());
     };
-    let mut out: Vec<Box<dyn OutputValidator>> = Vec::with_capacity(list.len());
+    let mut out: Vec<Arc<dyn OutputValidator>> = Vec::with_capacity(list.len());
     for (i, item) in list.iter().enumerate() {
         // Expect (name: str, callable). Reject anything else with a
         // pinpointed error.
@@ -392,7 +393,7 @@ pub(crate) fn build_validator_list(
         }
         let name: String = tuple.get_item(0)?.extract()?;
         let callback = tuple.get_item(1)?.unbind();
-        out.push(Box::new(PyValidatorAdapter::new(name, callback)));
+        out.push(Arc::new(PyValidatorAdapter::new(name, callback)));
     }
     Ok(out)
 }

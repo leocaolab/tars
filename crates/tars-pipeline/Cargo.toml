@@ -40,3 +40,4 @@ serde_json.workspace = true
 wiremock.workspace = true
 tars-config = { path = "../tars-config" }
 tracing-subscriber.workspace = true
+tempfile = "3"

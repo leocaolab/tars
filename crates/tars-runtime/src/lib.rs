@@ -42,6 +42,7 @@ mod orchestrator;
 mod prompt;
 mod runtime;
 mod session;
+pub mod sync;
 mod task;
 mod worker;
 
@@ -58,5 +59,6 @@ pub use runtime::{AgentExecutionError, LocalRuntime, Runtime, execute_agent_step
 pub use session::{
     Budget, Session, SessionError, SessionOptions, Tokenizer, Tool, ToolRegistry, Turn,
 };
+pub use sync::{complete_sync, shared_runtime};
 pub use task::{RunTaskConfig, RunTaskError, StepOutcome, TaskOutcome, run_task};
 pub use worker::{WorkerAgent, WorkerError};

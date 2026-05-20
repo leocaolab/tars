@@ -74,6 +74,118 @@ impl Pipeline {
     ) -> Result<LlmEventStream, ProviderError> {
         self.inner.clone().call(req, ctx).await
     }
+
+    /// Assemble the canonical TARS pipeline around `provider`. Onion
+    /// (outer → inner):
+    ///
+    /// ```text
+    /// EventEmitter? → Telemetry → Validation? → Cache → Retry → Provider
+    /// ```
+    ///
+    /// `Validation` sits OUTSIDE `Cache` so cache stores raw provider
+    /// events and validators run on every call (W4 — see Doc 15 §2 /
+    /// Doc 17 §8). `EventEmitter` is outermost when configured so it
+    /// sees the complete telemetry + validation_summary picture for
+    /// every call.
+    ///
+    /// This is the Rust-native counterpart of `tars.Pipeline.from_default`
+    /// in tars-py — same composition, no Python dependency.
+    pub fn default_chain(provider: Arc<dyn LlmProvider>, opts: PipelineOpts) -> Self {
+        let PipelineOpts {
+            cache_origin,
+            validators,
+            events,
+            cache_registry,
+            cache_factory,
+            retry,
+        } = opts;
+
+        let mut builder = Self::builder(provider);
+
+        if let Some(EventStores { events: ev, bodies }) = events {
+            builder = builder.layer(crate::event_emitter::EventEmitterMiddleware::new(
+                ev, bodies,
+            ));
+        }
+        builder = builder.layer(crate::telemetry::TelemetryMiddleware::new());
+
+        if !validators.is_empty() {
+            builder = builder.layer(crate::validation::ValidationMiddleware::new(validators));
+        }
+
+        let cache_registry =
+            cache_registry.unwrap_or_else(|| tars_cache::MemoryCacheRegistry::default_arc() as _);
+        let cache_factory = cache_factory.unwrap_or_else(|| tars_cache::CacheKeyFactory::new(1));
+        builder = builder.layer(crate::cache::CacheLookupMiddleware::new(
+            cache_registry,
+            cache_factory,
+            cache_origin,
+        ));
+
+        let retry_cfg = retry.unwrap_or_default();
+        builder = builder.layer(crate::retry::RetryMiddleware::new(retry_cfg));
+
+        builder.build()
+    }
+}
+
+/// Event store pair for [`PipelineOpts::events`].
+pub struct EventStores {
+    pub events: Arc<dyn tars_storage::PipelineEventStore>,
+    pub bodies: Arc<dyn tars_storage::BodyStore>,
+}
+
+/// Options for [`Pipeline::default_chain`]. Constructed with
+/// [`PipelineOpts::new`] (just a cache origin); each field overridable
+/// before passing to `default_chain`.
+///
+/// Marked `non_exhaustive` so adding fields is a non-breaking change.
+#[non_exhaustive]
+pub struct PipelineOpts {
+    /// Cache namespace id. Distinguishes cache buckets across providers
+    /// / tenants / config versions. Required: `dyn LlmProvider` doesn't
+    /// expose its id, and the cache layer needs one.
+    pub cache_origin: tars_types::ProviderId,
+
+    /// Output validators (Filter / Reject / Annotate). Run outside
+    /// Cache, on every call. Empty Vec = no ValidationMiddleware layer
+    /// at all (saves the stream-drain cost on cache hits).
+    pub validators: Vec<Arc<dyn crate::validation::OutputValidator>>,
+
+    /// EventEmitter stores. `None` = no event emission — pipeline still
+    /// works, but `tars events list` / trajectory tooling won't see
+    /// these calls. Set this in production paths.
+    pub events: Option<EventStores>,
+
+    /// Cache registry override. `None` = `MemoryCacheRegistry`
+    /// (process-local L1 only). Set a shared registry for service
+    /// deployments that need cross-process cache.
+    pub cache_registry: Option<Arc<dyn tars_cache::CacheRegistry>>,
+
+    /// Cache key factory override. `None` = `CacheKeyFactory::new(1)`.
+    /// Bump the version when prompt-affecting config changes shape so
+    /// cached entries from the old shape miss instead of misfiring.
+    pub cache_factory: Option<tars_cache::CacheKeyFactory>,
+
+    /// Retry policy override. `None` = `RetryConfig::default()`
+    /// (3 attempts, exp backoff, 30s cap).
+    pub retry: Option<crate::retry::RetryConfig>,
+}
+
+impl PipelineOpts {
+    /// Minimal opts: only the cache origin specified, everything else
+    /// at defaults (no validators, no event store, in-mem cache,
+    /// default retry).
+    pub fn new(cache_origin: tars_types::ProviderId) -> Self {
+        Self {
+            cache_origin,
+            validators: Vec::new(),
+            events: None,
+            cache_registry: None,
+            cache_factory: None,
+            retry: None,
+        }
+    }
 }
 
 #[async_trait]
@@ -213,6 +325,55 @@ mod tests {
             .unwrap();
         // Inbound order = outermost-first = "outer|middle|inner".
         assert_eq!(trace, serde_json::json!("outer|middle|inner"));
+    }
+
+    #[tokio::test]
+    async fn default_chain_layers_match_documented_onion() {
+        // Validators present, events present → full onion.
+        use crate::validation::{OutputValidator, builtin::NotEmptyValidator};
+        use tars_storage::{
+            SqliteBodyStore, SqliteBodyStoreConfig, SqlitePipelineEventStore,
+            SqlitePipelineEventStoreConfig,
+        };
+        use tars_types::ProviderId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let events = SqlitePipelineEventStore::open(SqlitePipelineEventStoreConfig::new(
+            dir.path().join("ev.db"),
+        ))
+        .unwrap();
+        let bodies =
+            SqliteBodyStore::open(SqliteBodyStoreConfig::new(dir.path().join("bd.db"))).unwrap();
+
+        let mock = MockProvider::new("p", CannedResponse::text("hi"));
+        let mut opts = PipelineOpts::new(ProviderId::new("p"));
+        opts.validators = vec![Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>];
+        opts.events = Some(EventStores { events, bodies });
+        let pipeline = Pipeline::default_chain(mock, opts);
+
+        // Outermost → innermost.
+        assert_eq!(
+            pipeline.layer_names(),
+            &[
+                "event_emitter",
+                "telemetry",
+                "validation",
+                "cache_lookup",
+                "retry",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn default_chain_skips_validation_and_event_emitter_when_unset() {
+        use tars_types::ProviderId;
+        let mock = MockProvider::new("p", CannedResponse::text("hi"));
+        let opts = PipelineOpts::new(ProviderId::new("p"));
+        let pipeline = Pipeline::default_chain(mock, opts);
+        assert_eq!(
+            pipeline.layer_names(),
+            &["telemetry", "cache_lookup", "retry"]
+        );
     }
 
     #[tokio::test]

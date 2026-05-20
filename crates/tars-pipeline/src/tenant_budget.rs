@@ -205,8 +205,7 @@ struct TenantBudgetService {
 
 impl TenantBudgetService {
     fn is_zero_pricing(&self) -> bool {
-        self.pricing.input_per_million == 0.0
-            && self.pricing.output_per_million == 0.0
+        self.pricing.input_per_million == 0.0 && self.pricing.output_per_million == 0.0
     }
 
     /// Strict upper-bound USD estimate (chars/4 input + max_output × output).
@@ -375,9 +374,7 @@ mod tests {
         }
     }
 
-    fn ok_service(
-        usage: Usage,
-    ) -> (Arc<dyn LlmService>, Arc<AtomicU32>) {
+    fn ok_service(usage: Usage) -> (Arc<dyn LlmService>, Arc<AtomicU32>) {
         let observed = Arc::new(AtomicU32::new(0));
         struct Count {
             inner: Arc<dyn LlmService>,
@@ -450,13 +447,19 @@ mod tests {
 
         // Massive request that would blow any reasonable budget.
         let stream = svc
-            .call(req(&"x".repeat(10_000_000), Some(100_000)), ctx_for("ghost"))
+            .call(
+                req(&"x".repeat(10_000_000), Some(100_000)),
+                ctx_for("ghost"),
+            )
             .await
             .unwrap();
         drain(stream).await;
         assert_eq!(observed.load(Ordering::SeqCst), 1);
         // Ghost tenant still unconfigured.
-        assert_eq!(store.remaining(&TenantId::new("ghost")).await.unwrap(), None);
+        assert_eq!(
+            store.remaining(&TenantId::new("ghost")).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -505,7 +508,10 @@ mod tests {
         drain(stream).await;
         assert_eq!(observed.load(Ordering::SeqCst), 1);
         let remaining = store.remaining(&tenant).await.unwrap().unwrap();
-        assert!((remaining - (1.00 - 0.0033)).abs() < 1e-9, "got {remaining}");
+        assert!(
+            (remaining - (1.00 - 0.0033)).abs() < 1e-9,
+            "got {remaining}"
+        );
     }
 
     #[tokio::test]
@@ -570,10 +576,7 @@ mod tests {
         struct BrokenStore;
         #[async_trait]
         impl BudgetStore for BrokenStore {
-            async fn remaining(
-                &self,
-                _tenant: &TenantId,
-            ) -> Result<Option<f64>, BudgetStoreError> {
+            async fn remaining(&self, _tenant: &TenantId) -> Result<Option<f64>, BudgetStoreError> {
                 Err(BudgetStoreError::Backend("redis down".into()))
             }
             async fn debit(
