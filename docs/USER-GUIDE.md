@@ -403,6 +403,10 @@ For trajectory inspection, live stderr streaming, JSON-mode logging,
 and the layered "I want to debug X → look at Y" mapping, see
 [`observability.md`](./observability.md).
 
+For per-call cost caps, per-tenant budgets, provider fallback, and
+rate-limit handling, see
+[`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md).
+
 ## When NOT to use tars
 
 - **You only call one provider, one model, one prompt shape.** A

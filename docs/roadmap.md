@@ -25,6 +25,10 @@ Features 1+2 are paired — `max_wait` without fallback creates dead
 paths, and fallback without `max_wait` makes "wait 30 minutes" a
 plausible default. Ship them in the same release.
 
+> **Using these in practice**: copy-paste recipes for composing the
+> full stack live in [`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md).
+> This file is the **design** doc; that one is the **usage** doc.
+
 ---
 
 ## Scope discipline (applies to everything below)
