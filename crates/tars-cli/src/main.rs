@@ -25,6 +25,7 @@ mod init;
 mod plan;
 mod probe;
 mod run;
+mod run_report;
 mod run_task;
 mod trajectory;
 
@@ -92,6 +93,11 @@ enum Command {
     Bench(bench::BenchArgs),
     /// Inspect the trajectory event log written by `tars run` / `tars plan` / `tars run-task`.
     Trajectory(trajectory::TrajectoryArgs),
+    /// Aggregate one trajectory's events into a per-run summary
+    /// (status, wall clock, llm calls, token totals, per-agent /
+    /// per-provider breakdown, errors). See
+    /// `docs/eval-and-arc-llm-roadmap.md §1.1`.
+    RunReport(run_report::RunReportArgs),
     /// Bootstrap a starter user-level config at `~/.tars/config.toml`.
     /// Idempotent (`--force` to overwrite). New users run this first.
     Init(init::InitArgs),
@@ -139,6 +145,7 @@ async fn main() -> ExitCode {
         Command::Probe(_) => "probe",
         Command::Bench(_) => "bench",
         Command::Trajectory(_) => "trajectory",
+        Command::RunReport(_) => "run-report",
         Command::Init(_) => "init",
         Command::Events(_) => "events",
     };
@@ -161,6 +168,15 @@ async fn main() -> ExitCode {
                 );
             }
             trajectory::execute(args).await
+        }
+        Command::RunReport(args) => {
+            if cli.config.is_some() {
+                tracing::warn!(
+                    "--config is ignored by `tars run-report` \
+                     (use --events-path / TARS_EVENTS_PATH instead)"
+                );
+            }
+            run_report::execute(args).await
         }
         Command::Init(args) => {
             // `--config` is a global flag for ergonomics on other

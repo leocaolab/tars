@@ -40,6 +40,7 @@ mod event;
 mod message;
 mod orchestrator;
 mod prompt;
+pub mod run_report;
 mod runtime;
 mod session;
 pub mod sync;
@@ -55,6 +56,7 @@ pub use event::{AgentEvent, StepIdempotencyKey};
 pub use message::{AgentMessage, VerdictKind};
 pub use orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep};
 pub use prompt::PromptBuilder;
+pub use run_report::build_run_report;
 pub use runtime::{AgentExecutionError, LocalRuntime, Runtime, execute_agent_step};
 pub use session::{
     Budget, Session, SessionError, SessionOptions, Tokenizer, Tool, ToolRegistry, Turn,
