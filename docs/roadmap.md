@@ -15,9 +15,9 @@ that uses it, then the bigger access-pattern shift (batch).
 
 | # | Feature | Effort | Status | Tracks |
 |---|---|---|---|---|
-| 1 | [Rate-limit max_wait + cancel propagation](#1-rate-limit-max-wait--cancel-propagation) | 1-2 days | next up | small |
-| 2 | [Fallback / degrade middleware](#2-fallback--degrade-middleware) | 1-2 weeks | designed | small |
-| 3 | [Per-call budget middleware](#3-per-call-budget-middleware) | 1 week | designed | small |
+| 1 | [Rate-limit max_wait + cancel propagation](#1-rate-limit-max-wait--cancel-propagation) | 1-2 days | ✅ shipped (commit 2b10167) | small |
+| 2 | [Fallback / degrade middleware](#2-fallback--degrade-middleware) | 1-2 weeks | ✅ shipped (commit 2b10167) | small |
+| 3 | [Per-call budget middleware](#3-per-call-budget-middleware) | 1 week | ✅ shipped | small |
 | 4 | [Tenant budget middleware (stateful)](#4-tenant-budget-middleware-stateful) | 2-3 weeks | sketched | medium |
 | 5 | [Batch mode (BatchSubmitter trait)](#5-batch-mode-batchsubmitter-trait) | 3-4 weeks | sketched | medium |
 

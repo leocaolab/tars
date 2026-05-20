@@ -40,6 +40,7 @@
 //! Layer order matches the call order: the first `.layer(...)` wraps
 //! everything else and runs first on the inbound, last on the outbound.
 
+mod budget;
 mod cache;
 mod circuit_breaker;
 mod event_emitter;
@@ -51,6 +52,7 @@ mod service;
 mod telemetry;
 mod validation;
 
+pub use budget::PerCallBudgetMiddleware;
 pub use cache::{CacheLookupMiddleware, set_cache_policy};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use event_emitter::EventEmitterMiddleware;
