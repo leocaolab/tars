@@ -81,11 +81,27 @@ pub fn default_gemini() -> ProviderConfig {
 }
 
 /// Default Claude Code CLI: `claude` binary, 5-min timeout, opus model.
+///
+/// Default flag posture is **subscription-friendly**:
+/// - `tools = disabled` — kills the CLI's internal agent loop (the
+///   real fix for the 270 s / 14k-token-output behavior we saw before
+///   tuning), without affecting auth.
+/// - `bare = false` — preserves OAuth + keychain auth for users who
+///   logged in via `claude login`. `--bare` would force
+///   `ANTHROPIC_API_KEY`-only auth and break subscription users.
+/// - `exclude_dynamic_sections = true` — strips per-machine sections
+///   from the system prompt so the prompt cache can be reused across
+///   tenants. See `docs/providers/claude-cli.md §3` for the rationale.
 pub fn default_claude_cli() -> ProviderConfig {
     ProviderConfig::ClaudeCli {
         executable: "claude".into(),
         timeout_secs: 300,
         default_model: "claude-opus-4-7".into(),
+        tools: crate::providers::ClaudeCliToolsConfig::default(),
+        bare: false,
+        effort: None,
+        exclude_dynamic_sections: true,
+        extra_args: Vec::new(),
     }
 }
 

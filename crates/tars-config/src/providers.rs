@@ -164,6 +164,30 @@ pub enum ProviderConfig {
         #[serde(default = "default_cli_timeout_secs")]
         timeout_secs: u64,
         default_model: String,
+        /// `--tools` knob. `"disabled"` (default) kills the CLI's
+        /// internal agent loop while staying auth-neutral; `"default"`
+        /// preserves full agent behavior; an array names specific
+        /// allowed tools. See `docs/providers/claude-cli.md §3`.
+        #[serde(default)]
+        tools: ClaudeCliToolsConfig,
+        /// `--bare`. **Default `false`** — setting `true` skips
+        /// auto-memory / CLAUDE.md auto-discovery **and disables
+        /// OAuth/keychain auth**, requiring `ANTHROPIC_API_KEY`.
+        /// Most `claude_cli` users log in via `claude login` and would
+        /// break with `bare=true`. See `docs/providers/claude-cli.md §3`.
+        #[serde(default)]
+        bare: bool,
+        /// `--effort` level. `None` (default) omits the flag.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<ClaudeCliEffortConfig>,
+        /// `--exclude-dynamic-system-prompt-sections`. Default `true`
+        /// (improves prompt-cache reuse).
+        #[serde(default = "default_true")]
+        exclude_dynamic_sections: bool,
+        /// Escape hatch — raw argv tokens appended to every call.
+        /// Use sparingly; the Builder methods cover the common cases.
+        #[serde(default)]
+        extra_args: Vec<String>,
     },
 
     /// Gemini CLI subscription path.
@@ -241,6 +265,50 @@ pub enum CodexSandboxConfig {
     ReadOnly,
     WorkspaceWrite,
     DangerFullAccess,
+}
+
+/// TOML-friendly mirror of [`tars_provider::ClaudeCliTools`].
+///
+/// The two string variants (`"disabled"` / `"default"`) cover the
+/// common cases; the list form lets users hand-pick a tool whitelist.
+/// `#[serde(untagged)]` so users can write either shape:
+///
+/// ```toml
+/// tools = "disabled"
+/// tools = "default"
+/// tools = ["Read", "Bash"]
+/// ```
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ClaudeCliToolsConfig {
+    /// `"disabled"` or `"default"`.
+    Named(ClaudeCliToolsKeyword),
+    /// Explicit allow-list, e.g. `["Read", "Bash"]`.
+    Allow(Vec<String>),
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaudeCliToolsKeyword {
+    Disabled,
+    Default,
+}
+
+impl Default for ClaudeCliToolsConfig {
+    fn default() -> Self {
+        Self::Named(ClaudeCliToolsKeyword::Disabled)
+    }
+}
+
+/// TOML-friendly mirror of [`tars_provider::ClaudeCliEffort`].
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaudeCliEffortConfig {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
 }
 
 fn default_mock_response() -> String {
@@ -463,6 +531,7 @@ impl ProviderConfig {
                 executable,
                 timeout_secs,
                 default_model,
+                ..
             }
             | ProviderConfig::GeminiCli {
                 executable,
@@ -630,6 +699,7 @@ mod tests {
                 executable,
                 timeout_secs,
                 default_model,
+                ..
             } => {
                 assert_eq!(executable, "claude");
                 assert_eq!(timeout_secs, 300);
@@ -870,6 +940,11 @@ mod tests {
             executable: "claude".into(),
             timeout_secs: 86_401,
             default_model: "claude-opus-4-7".into(),
+            tools: ClaudeCliToolsConfig::default(),
+            bare: false,
+            effort: None,
+            exclude_dynamic_sections: true,
+            extra_args: Vec::new(),
         };
         let id = ProviderId::new("c");
         let mut errs = Vec::new();
@@ -916,6 +991,11 @@ mod tests {
             executable: "claude".into(),
             timeout_secs: 300,
             default_model: "claude-opus-4-7".into(),
+            tools: ClaudeCliToolsConfig::default(),
+            bare: false,
+            effort: None,
+            exclude_dynamic_sections: true,
+            extra_args: Vec::new(),
         }
         .validate_self(&id, &mut errs);
 
@@ -1007,6 +1087,7 @@ mod tests {
                 default_model,
                 executable,
                 timeout_secs,
+                ..
             } => {
                 assert_eq!(default_model, "claude-opus-4-7");
                 assert_eq!(executable, "claude"); // default
@@ -1033,5 +1114,154 @@ mod tests {
             cfg2.get(&ProviderId::new("claude_cli")),
             Some(ProviderConfig::ClaudeCli { .. })
         ));
+    }
+
+    #[test]
+    fn claude_cli_omitted_fields_use_safe_defaults() {
+        // The only thing the user MUST provide is `default_model`. Every
+        // other knob should fall back to the subscription-friendly
+        // defaults the architecture doc and Builder agreed on.
+        let toml_str = r#"
+            [claude_cli]
+            type = "claude_cli"
+            default_model = "claude-sonnet-4-5"
+        "#;
+        let cfg: ProvidersConfig = toml::from_str(toml_str).expect("parse");
+        let p = cfg.get(&ProviderId::new("claude_cli")).expect("entry");
+        match p {
+            ProviderConfig::ClaudeCli {
+                tools,
+                bare,
+                effort,
+                exclude_dynamic_sections,
+                extra_args,
+                ..
+            } => {
+                assert_eq!(
+                    tools,
+                    &ClaudeCliToolsConfig::Named(ClaudeCliToolsKeyword::Disabled),
+                    "tools default must be Disabled — kills agent loop, auth-neutral"
+                );
+                assert!(
+                    !bare,
+                    "bare default must be false — preserves OAuth/keychain auth"
+                );
+                assert!(effort.is_none(), "effort default must be unset");
+                assert!(
+                    exclude_dynamic_sections,
+                    "exclude_dynamic_sections default must be true (cache reuse)"
+                );
+                assert!(extra_args.is_empty());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_cli_tools_accepts_all_three_shapes() {
+        // Keyword "disabled".
+        let cfg: ProvidersConfig = toml::from_str(
+            r#"
+            [c]
+            type = "claude_cli"
+            default_model = "m"
+            tools = "disabled"
+            "#,
+        )
+        .unwrap();
+        match cfg.get(&ProviderId::new("c")).unwrap() {
+            ProviderConfig::ClaudeCli { tools, .. } => {
+                assert_eq!(
+                    tools,
+                    &ClaudeCliToolsConfig::Named(ClaudeCliToolsKeyword::Disabled)
+                );
+            }
+            _ => panic!(),
+        }
+
+        // Keyword "default".
+        let cfg: ProvidersConfig = toml::from_str(
+            r#"
+            [c]
+            type = "claude_cli"
+            default_model = "m"
+            tools = "default"
+            "#,
+        )
+        .unwrap();
+        match cfg.get(&ProviderId::new("c")).unwrap() {
+            ProviderConfig::ClaudeCli { tools, .. } => {
+                assert_eq!(
+                    tools,
+                    &ClaudeCliToolsConfig::Named(ClaudeCliToolsKeyword::Default)
+                );
+            }
+            _ => panic!(),
+        }
+
+        // List of tool names.
+        let cfg: ProvidersConfig = toml::from_str(
+            r#"
+            [c]
+            type = "claude_cli"
+            default_model = "m"
+            tools = ["Read", "Bash"]
+            "#,
+        )
+        .unwrap();
+        match cfg.get(&ProviderId::new("c")).unwrap() {
+            ProviderConfig::ClaudeCli { tools, .. } => {
+                assert_eq!(
+                    tools,
+                    &ClaudeCliToolsConfig::Allow(vec!["Read".into(), "Bash".into()])
+                );
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn claude_cli_full_config_round_trips() {
+        let toml_in = r#"
+            [c]
+            type = "claude_cli"
+            default_model = "claude-sonnet-4-5"
+            executable = "claude"
+            timeout_secs = 180
+            tools = ["Read", "Bash(git *)"]
+            bare = true
+            effort = "high"
+            exclude_dynamic_sections = false
+            extra_args = ["--betas", "experimental-x"]
+        "#;
+        let cfg: ProvidersConfig = toml::from_str(toml_in).expect("parse");
+        let reserialized = toml::to_string(&cfg).expect("serialize");
+        let cfg2: ProvidersConfig =
+            toml::from_str(&reserialized).expect("re-parse after serialize");
+        match cfg2.get(&ProviderId::new("c")).unwrap() {
+            ProviderConfig::ClaudeCli {
+                executable,
+                timeout_secs,
+                default_model,
+                tools,
+                bare,
+                effort,
+                exclude_dynamic_sections,
+                extra_args,
+            } => {
+                assert_eq!(executable, "claude");
+                assert_eq!(*timeout_secs, 180);
+                assert_eq!(default_model, "claude-sonnet-4-5");
+                assert_eq!(
+                    tools,
+                    &ClaudeCliToolsConfig::Allow(vec!["Read".into(), "Bash(git *)".into()])
+                );
+                assert!(bare);
+                assert_eq!(effort, &Some(ClaudeCliEffortConfig::High));
+                assert!(!exclude_dynamic_sections);
+                assert_eq!(extra_args, &vec!["--betas".to_string(), "experimental-x".into()]);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 }

@@ -36,8 +36,8 @@ pub use tool_buffer::ToolCallBuffer;
 // Re-export concrete backends at the crate root for ergonomic use.
 pub use backends::anthropic::{AnthropicAdapter, AnthropicProvider, AnthropicProviderBuilder};
 pub use backends::claude_cli::{
-    ClaudeCliProvider, ClaudeCliProviderBuilder, SubprocessRunner as ClaudeCliSubprocessRunner,
-    claude_cli,
+    ClaudeCliEffort, ClaudeCliProvider, ClaudeCliProviderBuilder, ClaudeCliTools,
+    SubprocessRunner as ClaudeCliSubprocessRunner, claude_cli,
 };
 pub use backends::gemini::{GeminiAdapter, GeminiProvider, GeminiProviderBuilder};
 pub use backends::gemini_cli::{

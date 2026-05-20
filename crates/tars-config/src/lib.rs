@@ -35,5 +35,8 @@ pub use builtin::{
 pub use error::ConfigError;
 pub use manager::{Config, ConfigManager};
 pub use paths::default_config_path;
-pub use providers::{CapabilitiesOverrides, CodexSandboxConfig, ProviderConfig, ProvidersConfig};
+pub use providers::{
+    CapabilitiesOverrides, ClaudeCliEffortConfig, ClaudeCliToolsConfig, ClaudeCliToolsKeyword,
+    CodexSandboxConfig, ProviderConfig, ProvidersConfig,
+};
 pub use routing::RoutingConfig;

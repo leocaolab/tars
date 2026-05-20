@@ -906,10 +906,135 @@ Once this boundary is clean, adding a new provider (e.g. xAI Grok ships an API) 
 
 ---
 
-## 17. TODOs and Open Questions
+## 17. CLI Subprocess Tuning — Avoiding the Hidden Agent Loop
+
+### 17.1. The problem
+
+When a `*_cli` provider invokes the user-installed binary (e.g. `claude -p`) with default flags, the CLI is **not** a pure inference channel. It runs its own agent runtime around our request: auto-loads `CLAUDE.md` hierarchies, splices in auto-memory, runs hooks, may take additional internal turns with tool access (Read / Bash / Grep / etc.) before emitting a final response. From the caller's perspective this looks like one LLM call; in reality it is an opaque mini-agent session.
+
+Concrete signal (from `~/.tars/events/pipeline_events.db`, sampled May 2026, 16 real `llm_call_finished` records):
+
+| `usage.output_tokens` reported | response body bytes | response `text` chars | latency |
+|---:|---:|---:|---:|
+| 14,547 | 5,217 | 4,587 (≈1.1k tok) | 270 s |
+| 14,531 | 509 | 175 (≈40 tok) | 277 s |
+| 6,733 | 10,284 | 9,490 (≈2.4k tok) | 131 s |
+
+The token counts diverge from response size by 3–360×, and `input_tokens` is typically reported as a single-digit number even for 99 KB requests. These numbers are the CLI's internal agent-loop accumulator, not a measurement of the inference we asked for. Wall-time, however, is real — the model genuinely burns those tokens, just doing things we didn't ask for.
+
+**Implication for the Provider trait contract**: a `*_cli` backend that ships default flags is not interchangeable with an HTTP-API backend. Same `ChatRequest` in, vastly different work performed. We reconcile this by configuring the subprocess to behave as a pure inference channel by default — see §17.3.
+
+### 17.2. Flag mapping (Claude Code CLI)
+
+`--max-turns` is **not** a Claude Code CLI flag (it exists in some SDKs and was previously assumed by name; the CLI uses different mechanics). The actual knobs:
+
+| Goal | Flag |
+|---|---|
+| Disable all tools → no agent loop possible | `--tools ""` (literal empty string) |
+| Skip auto-memory, `CLAUDE.md` auto-discovery, hooks, plugin sync, keychain reads | `--bare` |
+| Lower reasoning effort | `--effort low\|medium\|high\|xhigh\|max` |
+| Improve cross-tenant prompt-cache reuse | `--exclude-dynamic-system-prompt-sections` |
+| Allow a specific tool whitelist (advanced) | `--allowedTools "Bash(git *) Read"` |
+
+Other CLIs (Gemini, Codex) have analogous flags but different names; the same default-safe principle applies (§17.3).
+
+### 17.3. Default-safe Builder API
+
+`tars-provider` is a library; consumers expect `provider.call(req)` to mean "one inference," not "start a mini-agent inheriting my shell environment." So the default Builder config for CLI backends locks down the surprise behaviors and exposes opt-ins.
+
+**Default-value rationale — `tools` vs `bare` are not symmetric.** `--tools ""` is the actual kill switch for the agent loop (no tools ⇒ no internal turns possible) and is auth-neutral, so it defaults to disabled. `--bare`, however, additionally **suppresses keychain reads and forces auth via `ANTHROPIC_API_KEY` or `apiKeyHelper` only** — OAuth tokens from `claude login` are ignored. Since the entire reason most users pick `claude_cli` over `anthropic` is subscription auth, `bare` defaults to `false`; flipping it on without an API key in the env breaks every call. Treat the two flags as orthogonal axes: tools controls behavior, bare controls auth surface.
+
+```rust
+pub enum ClaudeCliTools {
+    Disabled,                   // → --tools ""
+    Default,                    // → omit --tools (CLI default, full access)
+    Allow(Vec<String>),         // → --tools "Read,Bash"
+}
+
+pub enum ClaudeCliEffort { Low, Medium, High, Xhigh, Max }
+
+impl ClaudeCliProviderBuilder {
+    pub fn tools(self, t: ClaudeCliTools) -> Self;          // default: Disabled  — kills agent loop, auth-neutral
+    pub fn bare(self, b: bool) -> Self;                     // default: false     — `true` disables keychain/OAuth auth
+    pub fn effort(self, e: Option<ClaudeCliEffort>) -> Self;// default: None
+    pub fn exclude_dynamic_sections(self, b: bool) -> Self; // default: true
+    pub fn extra_args(self, a: Vec<String>) -> Self;        // escape hatch
+}
+```
+
+Config-driven users (TOML / `tars-py` / `arc`) get the same surface through `ProviderConfig::ClaudeCli` and `default_claude_cli()`:
+
+```toml
+[providers.claude_cli]
+type = "claude_cli"
+default_model = "claude-sonnet-4-5"
+tools = "disabled"                  # "disabled" | "default" | ["Read","Bash"]
+bare = false                        # `true` requires ANTHROPIC_API_KEY — breaks subscription auth
+effort = "medium"                   # optional
+exclude_dynamic_sections = true
+extra_args = []
+```
+
+**Invariant**: every config-side field must be threaded through `registry.rs` into a Builder method. A field deserialized into `ProviderConfig::ClaudeCli` but not passed to the Builder is worse than no field at all — silent no-op. Enforced by a config-roundtrip test.
+
+### 17.4. Composing a Builder-built provider with the Pipeline
+
+The Pipeline does not care where the provider came from; it operates on `Arc<dyn LlmProvider>`. Three idiomatic patterns:
+
+**(A) Direct — Builder → Pipeline, no Registry:**
+
+```rust
+let provider = ClaudeCliProviderBuilder::new("claude")
+    .tools(ClaudeCliTools::Disabled)
+    .bare(true)
+    .build();
+let pipeline = Pipeline::builder(provider)
+    .layer(TelemetryMiddleware::new())          // outermost
+    .layer(RetryMiddleware::default())          // innermost
+    .build();
+```
+
+**(B) Registry — name a hand-built provider:**
+
+```rust
+let custom: Arc<dyn LlmProvider> =
+    ClaudeCliProviderBuilder::new("my-claude").bare(true).build();
+let mut m = HashMap::new();
+m.insert(ProviderId::new("my-claude"), custom);
+let registry = ProviderRegistry::from_map(m);
+```
+
+**(C) `map_providers` — override one entry of a config-loaded Registry:**
+
+```rust
+let registry = ProviderRegistry::from_config(&cfg, ...)?
+    .map_providers(|id, default_p| {
+        if id.as_str() == "claude_cli" {
+            ClaudeCliProviderBuilder::new(id.clone()).bare(true).build()
+                as Arc<dyn LlmProvider>
+        } else {
+            default_p
+        }
+    });
+```
+
+`ProviderRegistry::from_map` does **not** auto-wrap middleware. The convention is `registry.get() → Pipeline::builder(p).layer(...).build() → service.call()`; the Registry is the naming namespace, the Pipeline is the middleware stack, and the two compose orthogonally.
+
+### 17.5. Test obligations
+
+Because we hard-code CLI flag spellings, an upstream rename can break us silently. Required tests:
+
+- **argv-shape test** — a `MockSubprocessRunner` captures the constructed `SubprocessInvocation` and asserts argv includes / excludes the expected flag tokens for each Builder config permutation. Caught by CI the moment Anthropic ships a flag rename.
+- **Config roundtrip** — TOML → `ProviderConfig::ClaudeCli` → Builder → argv, asserting every config field reaches argv.
+- **Default-safety smoke** — `ClaudeCliProviderBuilder::new(id).build()` must produce an invocation that contains `--tools ""` and `--bare` with no further configuration.
+
+---
+
+## 18. TODOs and Open Questions
 
 - [ ] Validate mistral.rs embedded backend on macOS Apple Silicon Metal backend
 - [ ] Confirm spec of Claude Code CLI's `interrupt` JSONL control message (may need adapters for multiple CLI versions)
 - [ ] Evaluate maturity of Gemini CLI's stream protocol — worth promoting from one-shot to long-lived?
 - [ ] OAuth token auto-refresh mechanism (Anthropic and Google have different flows)
 - [ ] Multi-threaded inference scheduling for embedded ONNX classifier (avoid request contention on a single model instance)
+- [ ] Apply §17 default-safe pattern to `gemini_cli` and `codex_cli` backends (same agent-loop risk exists there)

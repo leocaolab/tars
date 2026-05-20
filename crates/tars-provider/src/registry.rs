@@ -249,10 +249,43 @@ fn build_one(
             executable,
             timeout_secs,
             default_model: _,
-        } => ClaudeCliProviderBuilder::new(id)
-            .executable(executable.clone())
-            .timeout(Duration::from_secs(*timeout_secs))
-            .build(),
+            tools,
+            bare,
+            effort,
+            exclude_dynamic_sections,
+            extra_args,
+        } => {
+            use crate::backends::claude_cli::{ClaudeCliEffort, ClaudeCliTools};
+            use tars_config::{ClaudeCliEffortConfig, ClaudeCliToolsConfig, ClaudeCliToolsKeyword};
+
+            let tools_runtime = match tools {
+                ClaudeCliToolsConfig::Named(ClaudeCliToolsKeyword::Disabled) => {
+                    ClaudeCliTools::Disabled
+                }
+                ClaudeCliToolsConfig::Named(ClaudeCliToolsKeyword::Default) => {
+                    ClaudeCliTools::Default
+                }
+                ClaudeCliToolsConfig::Allow(list) => ClaudeCliTools::Allow(list.clone()),
+            };
+
+            let effort_runtime = effort.as_ref().map(|e| match e {
+                ClaudeCliEffortConfig::Low => ClaudeCliEffort::Low,
+                ClaudeCliEffortConfig::Medium => ClaudeCliEffort::Medium,
+                ClaudeCliEffortConfig::High => ClaudeCliEffort::High,
+                ClaudeCliEffortConfig::Xhigh => ClaudeCliEffort::Xhigh,
+                ClaudeCliEffortConfig::Max => ClaudeCliEffort::Max,
+            });
+
+            ClaudeCliProviderBuilder::new(id)
+                .executable(executable.clone())
+                .timeout(Duration::from_secs(*timeout_secs))
+                .tools(tools_runtime)
+                .bare(*bare)
+                .effort(effort_runtime)
+                .exclude_dynamic_sections(*exclude_dynamic_sections)
+                .extra_args(extra_args.clone())
+                .build()
+        }
 
         ProviderConfig::GeminiCli {
             executable,
