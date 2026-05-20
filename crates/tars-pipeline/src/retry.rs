@@ -21,6 +21,11 @@
 //! carries a `retry_after` (Anthropic / OpenAI Retry-After header)
 //! we honour that instead of computing our own — the provider knows
 //! its own load shape better than we do.
+//!
+//! `max_wait` caps how long we'll honour a `Retry-After`. Past the
+//! cap, we bubble the error unchanged so an outer FallbackMiddleware
+//! (or the caller) can decide — agents should never sleep 30 minutes
+//! inside a single call. See `docs/roadmap.md §1`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +53,13 @@ pub struct RetryConfig {
     /// attempt is often the right call, but more is throwing good
     /// effort after bad.
     pub max_attempts_maybe_retriable: u32,
+    /// Upper bound on how long we'll wait between attempts — applies to
+    /// both `Retry-After` headers and computed backoff. If the wait we'd
+    /// pick exceeds this, the error bubbles up unchanged so an outer
+    /// `FallbackMiddleware` (or the caller) can switch providers
+    /// instead of sleeping. Default: 30 s. Set to `Duration::MAX` to
+    /// disable (don't — agents shouldn't sleep for minutes).
+    pub max_wait: Duration,
 }
 
 impl Default for RetryConfig {
@@ -59,6 +71,7 @@ impl Default for RetryConfig {
             multiplier: 2.0,
             respect_retry_after: true,
             max_attempts_maybe_retriable: 2,
+            max_wait: Duration::from_secs(30),
         }
     }
 }
@@ -87,6 +100,9 @@ impl RetryMiddleware {
                 multiplier: 1.0,
                 respect_retry_after: false,
                 max_attempts_maybe_retriable: max_attempts,
+                // Tests don't exercise long Retry-After bubbling; the
+                // dedicated test for that uses an explicit config.
+                max_wait: Duration::MAX,
             },
         }
     }
@@ -160,6 +176,22 @@ impl LlmService for RetryService {
             } else {
                 backoff
             };
+
+            // Don't sleep past the cap — bubble the error so an outer
+            // FallbackMiddleware (or the caller) can switch providers
+            // instead. Agents are not meant to sleep for minutes
+            // inside a single call.
+            if wait > cfg.max_wait {
+                tracing::debug!(
+                    attempt,
+                    wait_ms = wait.as_millis() as u64,
+                    max_wait_ms = cfg.max_wait.as_millis() as u64,
+                    error = %err,
+                    "retry: wait exceeds max_wait — bubbling error for fallback / caller",
+                );
+                return Err(err);
+            }
+
             tracing::debug!(
                 attempt,
                 next_attempt = attempt + 1,
@@ -314,6 +346,7 @@ mod tests {
             multiplier: 1.0,
             respect_retry_after: false,
             max_attempts_maybe_retriable: 2,
+            max_wait: Duration::MAX,
         };
         let (svc, observed) = build(
             10,
@@ -339,6 +372,9 @@ mod tests {
             multiplier: 1.0,
             respect_retry_after: false,
             max_attempts_maybe_retriable: 5,
+            // Test asserts cancel during sleep — needs the sleep to
+            // actually happen, so allow long waits.
+            max_wait: Duration::MAX,
         };
         let (svc, observed) = build(
             10,
@@ -365,6 +401,84 @@ mod tests {
         assert!(matches!(err, ProviderError::Internal(ref m) if m.contains("cancel")));
         // First attempt observed; cancel kicked in before any retry.
         assert_eq!(observed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn bubbles_when_retry_after_exceeds_max_wait() {
+        // Provider says "wait 5 minutes", but we cap at 10 s — bubble
+        // the original error so an outer FallbackMiddleware can
+        // switch providers instead of sleeping.
+        let cfg = RetryConfig {
+            max_attempts: 5,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+            multiplier: 1.0,
+            respect_retry_after: true,
+            max_attempts_maybe_retriable: 5,
+            max_wait: Duration::from_secs(10),
+        };
+        let (svc, observed) = build(
+            10,
+            || ProviderError::RateLimited {
+                retry_after: Some(Duration::from_secs(300)),
+            },
+            RetryMiddleware::new(cfg),
+        );
+        let err = svc
+            .call(
+                ChatRequest::user(ModelHint::Explicit("m".into()), "x"),
+                RequestContext::test_default(),
+            )
+            .await
+            .err()
+            .expect("bubble RateLimited");
+        // Must surface the *original* RateLimited so FallbackMiddleware
+        // (or the caller) can pattern-match on `retry_after`.
+        match err {
+            ProviderError::RateLimited { retry_after } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(300)));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        // First attempt ran; max_wait check fired before any sleep.
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn honors_retry_after_within_max_wait() {
+        // Symmetric case: Retry-After fits under max_wait → normal retry.
+        // (Sibling test to the bubble case so the boundary behavior is
+        // pinned from both sides.)
+        let cfg = RetryConfig {
+            max_attempts: 5,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+            multiplier: 1.0,
+            respect_retry_after: true,
+            max_attempts_maybe_retriable: 5,
+            max_wait: Duration::from_secs(10),
+        };
+        let (svc, observed) = build(
+            1,
+            || ProviderError::RateLimited {
+                retry_after: Some(Duration::from_secs(2)),
+            },
+            RetryMiddleware::new(cfg),
+        );
+        let ctx = RequestContext::test_default();
+        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "x");
+        let task = tokio::spawn(svc.call(req, ctx));
+
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let mut stream = task.await.unwrap().unwrap();
+        while let Some(ev) = stream.next().await {
+            if matches!(ev.unwrap(), ChatEvent::Finished { .. }) {
+                break;
+            }
+        }
+        assert_eq!(observed.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

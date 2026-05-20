@@ -43,6 +43,7 @@
 mod cache;
 mod circuit_breaker;
 mod event_emitter;
+mod fallback;
 mod middleware;
 mod retry;
 mod routing;
@@ -53,6 +54,7 @@ mod validation;
 pub use cache::{CacheLookupMiddleware, set_cache_policy};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use event_emitter::EventEmitterMiddleware;
+pub use fallback::{FallbackBuilder, FallbackMiddleware, FallbackTrigger};
 pub use middleware::{Middleware, Pipeline, PipelineBuilder};
 pub use retry::{RetryConfig, RetryMiddleware};
 pub use routing::{RoutingPolicy, RoutingService, StaticPolicy, TierPolicy};
