@@ -1,0 +1,304 @@
+# Eval methodology — what tars produces and how to compare runs
+
+This doc answers two questions about tars's eval framework:
+
+1. **What metrics can you actually get** out of a corpus replay + judge pass?
+2. **How do you compare two runs** correctly — and what's the
+   statistical research behind the comparison?
+
+It's the methodology companion to the tooling described in
+[`eval-and-arc-llm-roadmap.md`](./eval-and-arc-llm-roadmap.md) (§1.1
+RunReport, §1.2 Judge, §1.3 corpus replay) and the usage recipes in
+[`recipes/`](./recipes/).
+
+> **Scope note**: this is *paired offline evaluation*, **not**
+> production A/B testing. We run the **same fixed corpus** through two
+> configurations and compare. A real A/B test splits live traffic by
+> user with random assignment and measures business outcomes — that
+> needs traffic-routing + identity infrastructure tars doesn't have
+> (it'd come after the M6/M7 multi-tenant + dashboard milestones). The
+> two share vocabulary (two variants, significance testing) but are
+> different tools for different jobs.
+
+---
+
+## 1. Two tiers of metrics
+
+### Tier 1 — operational (free, no judge needed)
+
+Produced directly by `tars eval run` (corpus replay), in
+`manifest.json` per case + aggregate:
+
+| Metric | Source | Answers |
+|---|---|---|
+| **error rate** | `error_count / case_count` | Does B fail more cases? |
+| **token cost** | `total_usage.{input,output}` | Does B burn more tokens → $? |
+| **latency** | per-case `wall_clock_ms` (→ p50/p99) | Is B slower? |
+| **output length** | `output_chars` | Is B more verbose / terser? |
+
+These need no ground truth and no second LLM. They answer "is B
+cheaper / faster / more reliable" — but **not** "is B more correct".
+
+### Tier 2 — quality (needs a judge pass)
+
+Produced by `tars eval judge` over a run's outputs, in `JudgeReport`:
+
+| Metric | Answers |
+|---|---|
+| **precision** = TP / (TP + FP), with Wilson CI | Are B's outputs more correct? |
+| **unsure rate** = Unsure / n | Is the judge less confident on B (calibration signal)? |
+| **per-item verdicts** | *Which specific cases* flipped right↔wrong |
+
+---
+
+## 2. How to compare — and the one thing most people get wrong
+
+### Operational: plain deltas + ratios
+
+```
+tokens in:   12.3k → 16.1k   (+31%)
+latency p50:  1.20s → 0.95s  (−21%)
+errors:        2/50 → 1/50   (−1)
+```
+
+No statistical subtlety. Report the delta and move on.
+
+### Quality: the data is PAIRED — don't compare independent CIs
+
+⚠️ The single most common mistake: computing a Wilson CI for run A's
+precision and run B's precision separately, then eyeballing whether
+they overlap.
+
+That's **wrong for this design**, because `eval diff` runs the **same
+corpus** through both configs — the per-item outcomes are *paired*.
+Comparing two independent 1-sample CIs:
+
+- throws away the pairing (loses statistical power), and
+- gives a conservative, sometimes misleading answer (non-overlapping
+  CIs imply significance, but *overlapping* CIs do **not** imply
+  non-significance — a widely-documented fallacy).
+
+### The right test: McNemar (for binary correctness)
+
+Build the 2×2 paired contingency table over the shared cases:
+
+```
+                 B correct   B wrong
+   A correct  │  concordant │   b      │   ← b: A right, B wrong  (REGRESSION)
+   A wrong    │     c       │ concordant│   ← c: A wrong, B right  (IMPROVEMENT)
+
+   McNemar χ² = (b − c)² / (b + c)        (1 d.o.f.)
+   H0: b = c   (the change has no systematic effect)
+```
+
+Only the **discordant** cells (b, c) carry information — the cases
+both configs agree on tell you nothing about the *difference*. This is
+exactly why pairing matters: McNemar is more sensitive than an
+unpaired two-proportion test at the same sample size, because it
+conditions on the agreements.
+
+For small discordant counts (b + c < ~25), use the **exact binomial**
+version instead of the χ² approximation.
+
+### Alternative: paired bootstrap (for non-binary metrics)
+
+If the per-item metric isn't binary (e.g. a 1–5 quality score, or a
+continuous severity), McNemar doesn't apply. The NLP-standard
+alternative is **paired bootstrap resampling**: resample the corpus
+with replacement N times, recompute the metric delta on each
+resample, and read the significance off the bootstrap distribution.
+This is the de-facto method in machine-translation evaluation and
+works down to a few hundred items.
+
+tars's V1 judge is binary (TP/FP/Unsure), so McNemar is the natural
+fit. A paired-bootstrap path is a clean extension if/when scored
+(non-binary) verdicts land.
+
+---
+
+## 3. What `tars eval diff` produces (target shape)
+
+```
+$ tars eval diff eval-runs/baseline/ eval-runs/candidate/
+
+operational:
+  cases:        50 → 50
+  errors:        2 → 1          (−1)
+  tokens in:  12.3k → 16.1k     (+31%)
+  tokens out:  8.1k → 7.4k      (−9%)
+  latency p50:  1.20s → 0.95s   (−21%)
+
+quality (judge: anthropic:claude-opus-4-7):
+  precision:  0.72 [0.58, 0.83] → 0.81 [0.68, 0.90]   (+0.09)
+  unsure:        3 → 2
+
+  paired changes (same 50 cases):
+    improved (FP→TP):   7   [case_003, case_011, …]
+    regressed (TP→FP):  2   [case_022, case_041]
+    unchanged:         41
+
+  McNemar: b=2, c=7  →  χ²=2.78, p=0.095
+  → improvement NOT significant at α=0.05 (need more cases or a bigger effect)
+```
+
+The `p=0.095` line is the decision-driver: precision rose 0.09, but at
+n=50 that's not yet distinguishable from luck. The named regression
+cases (`case_022`, `case_041`) are the actionable output — go read
+what got worse.
+
+---
+
+## 3.5 But how do you actually know which is *better*?
+
+The machinery above computes "B has higher precision than A, and the
+gap is/isn't significant." But precision against **what**? This is the
+question everything hinges on, and it has no free answer: **someone has
+to define what "correct" means.** There are three regimes, in
+descending order of trustworthiness.
+
+### Regime 1 — gold standard exists (most trustworthy)
+
+The corpus has `expected.txt` per case — human-written reference
+answers. "Correct" = the output matches the gold standard, and the
+judge's job is the narrow, reliable task of *comparing output to
+reference* (not deciding correctness in a vacuum).
+
+This is what makes the **Cando-Peter** setup work: their LLM-as-judge
+compared new risk-assessment drafts against **historic gold-standard
+assessments**. The judge wasn't inventing "correct" — it was checking
+against human-authored truth. "B is better" = B matches gold more
+often, McNemar-significant. **Unambiguous.**
+
+### Regime 2 — no gold, judge decides absolute correctness (weaker)
+
+No `expected.txt`. The judge rules TP/FP on its own opinion of whether
+the output is right. Now "B is better" means **"the judge prefers B's
+outputs"** — which is only as reliable as the judge. Per Zheng 2023
+that's ~80% human agreement: good, not ground truth.
+
+**This regime is only valid if you've validated the judge** (next).
+
+### Regime 3 — both often correct (binary saturates)
+
+When A and B are both ~95% correct, binary precision can't separate
+them — you've hit the ceiling. To rank "both acceptable, but which is
+*better*" you need either:
+
+- **pairwise preference** (judge sees A and B, picks the better) — but
+  this reintroduces position bias (Zheng 2023), so you must randomize
+  + average both orderings; or
+- **scored judging** (1–5 quality) — noisier, needs paired bootstrap
+  instead of McNemar.
+
+Both are heavier and noisier than binary. tars V1 is binary on purpose;
+these are documented extensions, not V1.
+
+### The non-negotiable: validate the judge itself
+
+In Regime 2 and 3 you are trusting the judge, so you must **spot-check
+the judge against humans**. Label ~20–30 items yourself, run the judge
+on the same items, compute judge-vs-human agreement. If the judge
+agrees with you 85%+, the judge's verdicts are worth acting on. If it
+agrees 60%, the eval is measuring the judge's confusion, not the
+configs' quality.
+
+This is **meta-evaluation** — evaluating the evaluator — and it's the
+step that's easiest to skip and most expensive to skip. The
+`anti-incest` rule and Wilson CIs make the judge's *output* honest;
+only a human-labeled calibration sample makes the judge itself
+*trustworthy*.
+
+### Decision rule, in one line
+
+> **"B is better"** = B is more correct against a *defined* notion of
+> correct (gold standard, or a judge you've validated against humans),
+> the delta is **McNemar-significant** on the shared corpus, and the
+> **operational cost** (tokens / latency) is acceptable for that
+> quality gain.
+
+If you can't fill in "a *defined* notion of correct," you don't yet
+have an eval — you have two outputs and an opinion.
+
+---
+
+## 4. Research basis
+
+These aren't novel choices — they're the established methods for the
+problems we have. Verified references (2026-05-21):
+
+### Paired comparison of two systems on one test set
+
+- **McNemar's test** for paired binary outcomes:
+  McNemar, Q. (1947), *"Note on the sampling error of the difference
+  between correlated proportions or percentages"*, Psychometrika.
+- **Recommended specifically for comparing two classifiers you can
+  only run once**:
+  Dietterich, T. G. (1998), *["Approximate Statistical Tests for
+  Comparing Supervised Classification Learning
+  Algorithms"](https://sebastianraschka.com/blog/2018/model-evaluation-selection-part4.html)*,
+  Neural Computation. Dietterich finds McNemar on the misclassification
+  matrix as powerful as the 5×2cv t-test when repeated runs aren't
+  feasible — exactly our "one corpus, two configs" situation.
+
+### Significance testing for NLP-style metrics
+
+- **Bootstrap resampling** as the field-standard for system comparison:
+  Koehn, P. (2004), *["Statistical Significance Tests for Machine
+  Translation Evaluation"](https://aclanthology.org/W04-3250.pdf)*,
+  EMNLP. Validated down to ~300-sentence test sets.
+- **Comprehensive practitioner guide**:
+  Dror, R. et al. (2018), *"The Hitchhiker's Guide to Testing
+  Statistical Significance in Natural Language Processing"*, ACL.
+
+### Binomial proportion confidence intervals
+
+- **Wilson score interval** (what `precision_with_ci` implements):
+  Wilson, E. B. (1927), *"Probable Inference, the Law of Succession,
+  and Statistical Inference"*, JASA. Chosen over the normal
+  approximation because it stays in [0, 1] and behaves at the edges
+  (precision = 0 or 1) — common when n is small, as eval corpora
+  usually are.
+
+### LLM-as-judge validity and biases
+
+- **The methodology + its limits**:
+  Zheng, L. et al. (2023), *["Judging LLM-as-a-Judge with MT-Bench and
+  Chatbot Arena"](https://arxiv.org/abs/2306.05685)*, NeurIPS.
+  Strong judges (GPT-4) reach **>80% agreement with humans** — the
+  same level humans agree with each other — but the paper documents
+  **position bias**, **verbosity bias**, and **self-enhancement bias**.
+- **Self-preference, the basis for our anti-incest rule**:
+  Panickssery, A. et al. (2024), *["LLM Evaluators Recognize and Favor
+  Their Own Generations"](https://arxiv.org/abs/2404.13076)*, NeurIPS.
+  Shows a causal link between an LLM's self-recognition ability and a
+  bias toward its own outputs. This is precisely why
+  `ensure_anti_incest` refuses to let a judge grade a critic that
+  shares its provider.
+
+---
+
+## 5. Honest limitations
+
+The framework addresses some biases and not others:
+
+| Bias / risk | Addressed? |
+|---|---|
+| **Self-preference** (judge favors own provider) | ✅ `ensure_anti_incest` hard-refuses same-provider judge |
+| **Position bias** (judge favors first/last) | ❌ not addressed — single-output judging avoids the A-vs-B ordering question, but a paired-comparison judge would need randomized order |
+| **Verbosity bias** (judge favors longer answers) | ❌ not addressed — caller's prompt-engineering problem for now |
+| **Single-judge variance** | ⚠️ partially — ensemble judging (priority #4) is the planned mitigation; majority vote across 2-3 judges reduces single-judge noise |
+| **Small-n overconfidence** | ✅ Wilson CI + McNemar surface the uncertainty rather than hiding it behind a point estimate |
+
+The honest summary: tars gives you the **right statistical machinery**
+for paired offline eval, and encodes the one judge-bias finding
+(self-preference) that's a clean runtime rule. The remaining judge
+biases are real (per Zheng 2023) and stay the caller's responsibility
+— mitigated by good judge prompts and, eventually, ensemble judging.
+
+---
+
+## See also
+
+- [`eval-and-arc-llm-roadmap.md`](./eval-and-arc-llm-roadmap.md) — the eval framework plan + arc_llm collapse
+- [`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md) — the middleware stack eval runs against
+- [`observability.md`](./observability.md) — the event stores eval reads from

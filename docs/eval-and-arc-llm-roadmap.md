@@ -9,6 +9,11 @@ audience: future self / next session
 **arc 的实证经验** 推翻了 Doc 16 现在的形状，
 **arc_llm 该死** 又依赖 tars 暴露三个便利 API。
 
+> **方法学**（怎么比较两次 eval run、用什么统计、"哪个更好"怎么定义、
+> 背后有什么研究）单独写在
+> [`eval-methodology.md`](./eval-methodology.md)。本文是 *计划*，
+> 那篇是 *方法*。
+
 ---
 
 ## 0. 已决定**不做**的事
