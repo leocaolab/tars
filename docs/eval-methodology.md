@@ -388,6 +388,97 @@ class (systematic wrongness) that precision catches.
 
 ---
 
+## 4.6 Two robustness axes with their own research
+
+Two specific oracle-light eval techniques worth calling out, both
+asked about directly and both well-studied.
+
+### Axis A — semantic stability under AI-generated paraphrase
+
+The idea: have an LLM **generate semantically-equivalent rewrites** of
+each input, run all of them, and measure how much the *outputs* drift.
+Low drift = stable; high drift = the model is sensitive to surface form
+(a known failure mode). The paraphrase generator and the equivalence
+checker can both be LLMs — so this is fully automatable, no gold
+standard.
+
+The clean part: you're measuring **consistency**, which needs no oracle
+— you never need the right answer, only "did N paraphrases of the same
+question produce the same answer?"
+
+Established work:
+
+- **METAL** — *["METAL: Metamorphic Testing Framework for Analyzing
+  Large-Language Model Qualities"](https://arxiv.org/abs/2312.06056)*
+  (2023). Exactly this: the metamorphic relation is "same-meaning
+  prompts → same-semantics outputs," generated via NLP paraphrasing,
+  auto-producing hundreds of MRs from templates. Detects flaws by
+  detecting *inconsistency* across paraphrases.
+- **Metamorphic prompt testing for code** — *["Validating
+  LLM-Generated Programs with Metamorphic Prompt
+  Testing"](https://arxiv.org/abs/2406.06864)* (2024). Paraphrase the
+  spec, generate code from each, cross-check the programs agree —
+  catches LLM coding errors without a reference solution.
+- **Semantic entropy** — Farquhar, Kossen, Kuhn, Gal (2024),
+  *["Detecting hallucinations in large language models using semantic
+  entropy"](https://www.nature.com/articles/s41586-024-07421-0)*,
+  **Nature**. The measurement technique: sample many generations,
+  **cluster them by semantic equivalence** (an NLI model / LLM judges
+  meaning, not tokens), then compute entropy *over the semantic
+  clusters*. High semantic entropy = the model is unstable / making it
+  up. This is the principled "use AI to judge same-semantics, then
+  measure stability" answer — published in Nature, so about as
+  validated as it gets.
+
+The arc connection: a critic that finds different bugs each run on the
+*same code* (or on a paraphrased rubric) has high semantic entropy —
+measurable, no gold standard needed.
+
+### Axis B — accuracy / hallucination vs context size and position
+
+The idea: hold the task fixed, **vary how much context you stuff in**
+(and *where* the relevant bit sits), measure accuracy. This is exactly
+the "does giving arc's critic a bigger file make it miss more bugs?"
+question.
+
+The research is unambiguous that **more context is not free**:
+
+- **Lost in the Middle** — Liu et al. (2024),
+  *["Lost in the Middle: How Language Models Use Long
+  Contexts"](https://arxiv.org/abs/2307.03172)*, TACL. **U-shaped
+  performance**: models use info at the *beginning* (primacy) and
+  *end* (recency) well, but accuracy degrades sharply when the
+  relevant bit is in the **middle** of a long context — even for
+  models explicitly built for long context.
+- **RULER** — NVIDIA (2024). Only ~half of models claiming 32K+
+  context hold up at that length; **effective context windows fall
+  far short of advertised**, sometimes by ~99%. Degradation appears
+  across 18 LLMs even with clean retrieval, tied to attention
+  dilution.
+- **Needle-in-a-Haystack (NIAH)** — the now-standard probe: plant a
+  known fact at varying depth × context length, measure retrieval.
+  The "needle" *is* the oracle, so this gives a clean accuracy curve
+  vs. (length, position).
+
+**Direct implication for arc**: arc feeds the critic a whole file. If
+the file is large and a real bug sits in the middle, "lost in the
+middle" predicts the critic misses it — not because the rubric is
+wrong but because of context position. The metamorphic test writes
+itself:
+
+> Plant the **same** known bug. Vary (file size, bug position).
+> Measure detection rate. A detection curve that sags in the middle /
+> collapses past some length is the lost-in-the-middle effect biting
+> your critic — and tells you to chunk the file rather than feed it
+> whole.
+
+This is the highest-value oracle-free test for arc specifically,
+because the needle (planted bug) gives you ground truth for free, and
+the failure mode it surfaces (context-position blindness) is one
+precision-on-natural-corpus would never isolate.
+
+---
+
 ## 5. Honest limitations
 
 The framework addresses some biases and not others:
