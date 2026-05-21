@@ -477,6 +477,106 @@ because the needle (planted bug) gives you ground truth for free, and
 the failure mode it surfaces (context-position blindness) is one
 precision-on-natural-corpus would never isolate.
 
+## 4.7 Worked example — testing a reasoning trap without an oracle
+
+A concrete illustration of "test the goal-state invariant, not the
+answer string," because the abstract framing in §4.5/§4.6 is easy to
+nod along to and hard to actually apply.
+
+**The question**: *"To go to a car wash 50 m away to wash your car, do
+you drive or walk?"*
+
+The trap: 50 m is trivially walkable, so the surface-pattern answer is
+"walk." But the car is the thing being washed — it has to physically
+be at the wash. A correct answer must conclude "drive" (or otherwise
+move the car there). The distance is a distractor.
+
+### Step 1 — don't test the answer, test the postcondition
+
+The surface answer varies ("drive", "you'd have to drive the car
+over", "walk if you're just checking it out"). What's invariant across
+every *correct* answer is the **goal state**:
+
+```
+postcondition:  car_is_at_wash  ∧  car_gets_clean
+```
+
+Check whether the proposed plan, executed, satisfies it:
+
+- "drive" → car at wash → ✅ postcondition holds
+- "walk"  → car at home → ❌ postcondition violated
+
+### Step 2 — how to check the postcondition (3 rigor levels)
+
+| Level | Mechanism | Trade-off |
+|---|---|---|
+| **a. symbolic** | parse answer for "drive / move car" vs "walk / leave car" | cheap, brittle |
+| **b. judge on postcondition** | ask a judge "given this answer, does the car end up at the wash and get clean? yes/no" | robust; judge checks **goal attainment**, not abstract correctness — so the goal you supply IS the oracle |
+| **c. forward simulation** | have a model role-play executing the plan, report the end state | heaviest, strongest |
+
+Level **b** is the key move: the judge isn't asked "is this right?"
+(needs an oracle) but "does this plan reach the goal I gave?" (the
+goal is the oracle, supplied for free).
+
+### Step 3 — the metamorphic pair that actually catches the bug
+
+One question can be guessed. The real test is a pair of metamorphic
+relations that **separate "reasons about the goal" from "pattern-matches
+short-distance → walk":**
+
+```
+INV (invariance): vary distance → answer must NOT change
+  "50 m car wash" → "50 km car wash" → "a nearby car wash"
+  correct model:  always "drive"  (the car must be present)
+  broken model:   near→walk, far→drive   ← keys on distance → CAUGHT
+
+DIR (directional): swap the object → answer MUST change
+  "...wash your car"        → "drive"  (object must be transported)
+  "...buy a coffee"         → "walk"   (no transport constraint)
+  correct model:  the two answers differ
+  broken model:   both "short distance → walk"   ← CAUGHT
+```
+
+Neither single answer proves anything. The **pair** does: it isolates
+whether the model encodes the constraint "the thing being acted on
+must be physically present" rather than "short distance ⇒ walk."
+
+### Step 4 — as a tars metamorphic case
+
+```rust
+// reuses the §4.5 MetamorphicCase sketch
+MetamorphicCase {
+    base: "To wash your car at a wash 50 m away, drive or walk?",
+    transform: replace("50 m", "50 km"),          // distance varies
+    relation: same_decision,                       // INV: still "drive"
+}
+MetamorphicCase {
+    base: "To wash your car at a wash 50 m away, drive or walk?",
+    transform: replace("wash your car at a wash", "buy a coffee at a shop"),
+    relation: decision_flips,                      // DIR: drive → walk
+}
+```
+
+`same_decision` / `decision_flips` are evaluated by a Level-b judge
+checking the postcondition — no gold answer string anywhere.
+
+### Why this generalizes
+
+This is the template for testing *any* reasoning task where the right
+answer is hard to enumerate but the **goal state is specifiable**:
+
+1. Write the postcondition (the invariant any correct answer satisfies).
+2. Check attainment, not string match (judge / simulation).
+3. Build INV/DIR metamorphic pairs that vary the *distractor* (should
+   not change the answer) and the *load-bearing constraint* (must
+   change the answer). The pair, not the point, is the test.
+
+It connects three established lines: property-based testing's
+**postcondition assertion**, functional-correctness eval (HumanEval
+runs unit tests, not source diff), and agent **task-success** eval
+(WebArena / τ-bench score goal attainment, not transcripts) — all of
+which gave up on exact-answer oracles for exactly this reason.
+
 ---
 
 ## 5. Honest limitations
