@@ -277,6 +277,117 @@ problems we have. Verified references (2026-05-21):
 
 ---
 
+## 4.5 Oracle-free testing: property-based + metamorphic
+
+Everything in §1–§4 needs an **oracle** — a definition of "correct"
+(gold standard, or a validated judge). But §3.5 Regime 2/3 is exactly
+the case where the oracle is expensive or absent. Software testing hit
+this wall decades ago and built two paradigms specifically for it.
+They apply directly to LLM/agent eval and are a **third axis**,
+orthogonal to operational metrics and judge-precision.
+
+### The key shift: test *relations*, not *answers*
+
+Instead of "is output X correct?" (needs an oracle), ask "do two
+**related** runs satisfy a relation we know must hold?" (needs no
+oracle). You never need to know the right answer — only how the right
+answer must *behave* under a transformation.
+
+### Invariance (property-based) — output must NOT change
+
+Perturb the input in a way that shouldn't matter; the output must stay
+equivalent. Borrowed straight from property-based testing (QuickCheck:
+"for all inputs, this invariant holds").
+
+| Relation | For an LLM agent |
+|---|---|
+| paraphrase invariance | reword the prompt → semantically same answer |
+| order invariance | reorder independent list items → same findings |
+| rename invariance | rename a variable in code → arc's critic flags the *same* bug |
+| typo robustness | inject typos → answer unchanged |
+| determinism | same input twice at temp 0 → byte-identical output |
+
+A failure here means the agent is **flaky / non-robust** — e.g. "the
+critic finds 5 bugs on one run and 3 on a re-run of the same code."
+Precision can't catch that; an invariance check catches it with **no
+gold standard**.
+
+### Directional (metamorphic) — output must change a KNOWN way
+
+Transform the input so the output *must* move in a predictable
+direction, even though you don't know the exact answer.
+
+| Relation | For an LLM agent |
+|---|---|
+| add a constraint | "...and keep it under 50 words" → output must shrink |
+| inject a known bug | plant a real defect → critic must flag *at least* that |
+| negate the question | flip a yes/no question → answer should flip |
+| strengthen severity | make a vuln clearly worse → severity rating must not drop |
+
+A failure means the agent ignored a change it should have respected —
+again caught **without an oracle**.
+
+### Research basis
+
+This isn't ad-hoc. The established work:
+
+- **CheckList** — Ribeiro et al. (2020), *["Beyond Accuracy:
+  Behavioral Testing of NLP Models with
+  CheckList"](https://aclanthology.org/2020.acl-main.442/)*, ACL best
+  paper. Brings software-testing structure to NLP with three test
+  types that map exactly onto the above: **MFT** (minimum
+  functionality = unit test), **INV** (invariance = property test),
+  **DIR** (directional expectation = metamorphic relation).
+- **Metamorphic testing for MT (oracle-free)** — He, Meister, Su
+  (2020), *["Structure-Invariant Testing for Machine
+  Translation"](https://arxiv.org/abs/1907.08710)*, ICSE. Detects
+  translation defects *without reference translations* by checking
+  that similar source sentences yield structurally similar outputs —
+  a pure metamorphic relation. Same group has follow-ups (referential
+  transparency, terminology) and the idea generalizes:
+  e.g. *MTTM: Metamorphic Testing for Textual Content Moderation*
+  (ICSE 2023).
+- **Metamorphic testing, origin** — Chen, Cheung, Yiu (1998),
+  introduced the technique for the general oracle problem; "new
+  visions after a quarter century" (FSE 2021) surveys the field.
+
+### Where this fits tars (proposed)
+
+A metamorphic case is a triple: `(transform, relation, base_input)`.
+
+```rust
+// sketch — not yet implemented
+struct MetamorphicCase {
+    base: ChatRequest,
+    transform: fn(&ChatRequest) -> ChatRequest,   // paraphrase / add-constraint / …
+    relation: fn(&ChatResponse, &ChatResponse) -> bool, // invariance / directional check
+}
+```
+
+Run `base` and `transform(base)` through the **same** pipeline, apply
+`relation` to the two outputs. No gold standard, no judge required for
+the structural relations (an invariance like "same set of finding ids"
+is a pure string/set check); a judge is only needed for *semantic*
+relations ("are these two answers equivalent?").
+
+This would be a fourth eval mode — `tars eval metamorphic` — sitting
+beside corpus replay (§1.3), judge (§1.2), and diff (#2). **Not yet
+scoped**; flagged here because it's the principled answer to "how do
+you test when you have no ground truth," which §3.5 Regime 2/3 leaves
+open.
+
+### The honest caveat
+
+Metamorphic / invariance testing proves the agent is **consistent and
+robust** — it does **not** prove the agent is **correct**. A model can
+be perfectly invariant under paraphrase and consistently, robustly
+*wrong*. So this axis is **complementary** to gold/judge eval, not a
+replacement: it catches a bug class (flakiness, ignored constraints,
+non-determinism) that precision is blind to, and is blind to a bug
+class (systematic wrongness) that precision catches.
+
+---
+
 ## 5. Honest limitations
 
 The framework addresses some biases and not others:
