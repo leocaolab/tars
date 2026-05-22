@@ -34,6 +34,7 @@
 //!   is a derived projection we'll add when something consumes it).
 
 mod agent;
+pub mod check;
 mod critic;
 mod error;
 mod event;
@@ -51,6 +52,7 @@ mod worker;
 pub use agent::{
     Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult, SingleShotAgent,
 };
+pub use check::{CheckResult, Invariant, MembershipInvariant, ValidatorInvariant};
 pub use critic::{CriticAgent, CriticError, PartialResultRef};
 pub use error::RuntimeError;
 pub use event::{AgentEvent, StepIdempotencyKey};
