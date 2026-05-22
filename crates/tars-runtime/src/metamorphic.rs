@@ -6,7 +6,6 @@
 //! are follow-on wiring; the traits + their pure logic live here and
 //! are unit-tested without a provider.
 
-use std::sync::Arc;
 
 use tars_types::{ChatRequest, ChatResponse};
 
@@ -31,10 +30,15 @@ pub trait MetamorphicRelation: Send + Sync {
 /// predicate: after transforming the input, the output must stay
 /// "equivalent" by the caller's definition. Covers paraphrase /
 /// reorder / rename / vary-distance (Doc 18 §4.2 INV).
+/// Rewrites the input text before re-running the request.
+type TransformFn = Box<dyn Fn(&str) -> String + Send + Sync>;
+/// Compares base vs. transformed output text (equivalence or direction).
+type RelationFn = Box<dyn Fn(&str, &str) -> bool + Send + Sync>;
+
 pub struct InvarianceRelation {
     name: String,
-    transform_text: Box<dyn Fn(&str) -> String + Send + Sync>,
-    equivalent: Box<dyn Fn(&str, &str) -> bool + Send + Sync>,
+    transform_text: TransformFn,
+    equivalent: RelationFn,
 }
 
 impl InvarianceRelation {
@@ -106,8 +110,8 @@ impl MetamorphicRelation for InvarianceRelation {
 /// (Doc 18 §4.2 DIR).
 pub struct DirectionalRelation {
     name: String,
-    transform_text: Box<dyn Fn(&str) -> String + Send + Sync>,
-    direction_holds: Box<dyn Fn(&str, &str) -> bool + Send + Sync>,
+    transform_text: TransformFn,
+    direction_holds: RelationFn,
 }
 
 impl DirectionalRelation {

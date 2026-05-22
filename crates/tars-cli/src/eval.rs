@@ -1033,7 +1033,7 @@ mod tests {
         assert_eq!(back.success_count, 2);
         assert_eq!(back.cases[0].status, EvalCaseStatus::Ok);
         assert_eq!(back.checks[0].name, "non-empty");
-        assert_eq!(back.cases[0].checks[0].passed, true);
+        assert!(back.cases[0].checks[0].passed);
     }
 
     #[test]

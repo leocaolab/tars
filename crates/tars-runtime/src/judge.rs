@@ -342,8 +342,7 @@ mod tests {
     #[test]
     fn anti_incest_blocks_same_provider() {
         let err = ensure_anti_incest("anthropic:claude-opus-4-7", &["anthropic"])
-            .err()
-            .expect("must reject");
+            .expect_err("must reject");
         assert!(matches!(err, JudgeError::AntiIncest { .. }));
     }
 
@@ -410,8 +409,7 @@ mod tests {
     #[test]
     fn parse_verdict_unknown_errors() {
         let err = parse_verdict("I think the agent did a great job!")
-            .err()
-            .expect("must error");
+            .expect_err("must error");
         assert!(matches!(err, JudgeError::Parse(_)));
     }
 

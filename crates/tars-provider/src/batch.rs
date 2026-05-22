@@ -282,8 +282,7 @@ mod tests {
         let err = m
             .status(&BatchJobId::new("does-not-exist"))
             .await
-            .err()
-            .expect("must error");
+            .expect_err("must error");
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
     }
 
@@ -323,8 +322,7 @@ mod tests {
         let err = m
             .results(&id)
             .await
-            .err()
-            .expect("must reject results() on non-terminal");
+            .expect_err("must reject results() on non-terminal");
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
     }
 
@@ -359,7 +357,7 @@ mod tests {
             .submit(vec![(BatchItemId::new("a"), req("x"))])
             .await
             .unwrap();
-        let err = m.cancel(&id).await.err().expect("default unsupported");
+        let err = m.cancel(&id).await.expect_err("default unsupported");
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
     }
 

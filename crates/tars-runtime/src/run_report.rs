@@ -196,7 +196,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use tars_storage::{SqliteEventStore, SqliteEventStoreConfig};
-    use tars_types::{ProviderId, Usage};
+    use tars_types::Usage;
 
     async fn store_with(
         records: Vec<(TrajectoryId, serde_json::Value)>,
@@ -232,8 +232,7 @@ mod tests {
         let store = store_with(vec![]).await;
         let err = build_run_report(&*store, &TrajectoryId::new("nope"))
             .await
-            .err()
-            .expect("must error");
+            .expect_err("must error");
         assert!(matches!(err, RuntimeError::TrajectoryNotFound(_)));
     }
 
@@ -394,8 +393,10 @@ mod tests {
         assert_eq!(report.status, RunStatus::Active);
         assert!(report.summary.is_none());
         assert!(report.ended_at_ms.is_none());
-        // wall_clock_ms uses last-event ts when there's no terminal.
-        assert!(report.wall_clock_ms >= 0);
+        // wall_clock_ms falls back to the last-event ts when there's no
+        // terminal; the two events here land in the same instant, so the
+        // span is effectively zero rather than derived from a terminal event.
+        assert_eq!(report.wall_clock_ms, 0);
     }
 
     #[test]

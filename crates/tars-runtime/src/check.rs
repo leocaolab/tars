@@ -76,10 +76,13 @@ pub trait Invariant: Send + Sync {
 /// page (Zapier). The caller supplies the extractor because *what* to
 /// pull out of the response (a field, a list, the whole text) is
 /// domain-specific; the membership check is generic.
+/// Pulls the candidate value(s) to membership-check out of a response.
+type ExtractFn = Box<dyn Fn(&ChatResponse) -> Vec<String> + Send + Sync>;
+
 pub struct MembershipInvariant {
     name: String,
     allowed: HashSet<String>,
-    extract: Box<dyn Fn(&ChatResponse) -> Vec<String> + Send + Sync>,
+    extract: ExtractFn,
 }
 
 impl MembershipInvariant {

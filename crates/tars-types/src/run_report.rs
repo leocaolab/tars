@@ -119,7 +119,7 @@ mod tests {
             RunStatus::Suspended,
             RunStatus::Abandoned,
         ] {
-            let v = serde_json::to_value(&st).unwrap();
+            let v = serde_json::to_value(st).unwrap();
             let back: RunStatus = serde_json::from_value(v).unwrap();
             assert_eq!(st, back);
         }

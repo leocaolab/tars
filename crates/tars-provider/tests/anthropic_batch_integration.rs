@@ -18,10 +18,10 @@ use tars_types::{
 
 fn build_provider(server: &MockServer) -> Arc<dyn LlmProvider> {
     let http = HttpProviderBase::default_arc().unwrap();
-    let provider = AnthropicProviderBuilder::new("anthropic_test", Auth::inline("test-key"))
+    
+    (AnthropicProviderBuilder::new("anthropic_test", Auth::inline("test-key"))
         .base_url(server.uri())
-        .build(http, basic());
-    provider
+        .build(http, basic())) as _
 }
 
 #[tokio::test]
@@ -80,7 +80,7 @@ async fn submit_empty_items_is_invalid_request() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
 
-    let err = submitter.submit(vec![]).await.err().expect("must reject");
+    let err = submitter.submit(vec![]).await.expect_err("must reject");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));
 }
 
@@ -255,8 +255,7 @@ async fn results_on_non_terminal_returns_invalid_request_without_fetching() {
     let err = submitter
         .results(&BatchJobId::new("msgbatch_pending"))
         .await
-        .err()
-        .expect("must refuse on non-terminal");
+        .expect_err("must refuse on non-terminal");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));
 }
 
@@ -303,8 +302,7 @@ async fn submit_propagates_http_error_via_classifier() {
             ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "hi"),
         )])
         .await
-        .err()
-        .expect("401 should error");
+        .expect_err("401 should error");
     // Adapter's classify_error maps 401 → Auth. We don't pin the kind to
     // avoid coupling to the adapter's classifier; just confirm it's a
     // typed error and not a Network/Parse fallthrough.

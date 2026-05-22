@@ -80,7 +80,7 @@ async fn submit_empty_items_is_invalid_request_before_http() {
     let server = MockServer::start().await;
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
-    let err = submitter.submit(vec![]).await.err().expect("reject");
+    let err = submitter.submit(vec![]).await.expect_err("reject");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));
 }
 
@@ -243,8 +243,7 @@ async fn results_on_non_terminal_refuses_without_fetching_output_file() {
     let err = submitter
         .results(&BatchJobId::new("batch_running"))
         .await
-        .err()
-        .expect("must refuse");
+        .expect_err("must refuse");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));
 }
 

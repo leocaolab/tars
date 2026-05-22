@@ -54,8 +54,7 @@ async fn submit_returns_not_implemented_invalid_request() {
             ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "hi"),
         )])
         .await
-        .err()
-        .expect("must reject");
+        .expect_err("must reject");
     assert_not_implemented(err);
 }
 
@@ -66,8 +65,7 @@ async fn status_returns_not_implemented_invalid_request() {
     let err = submitter
         .status(&BatchJobId::new("ignored"))
         .await
-        .err()
-        .expect("must reject");
+        .expect_err("must reject");
     assert_not_implemented(err);
 }
 
@@ -78,8 +76,7 @@ async fn results_returns_not_implemented_invalid_request() {
     let err = submitter
         .results(&BatchJobId::new("ignored"))
         .await
-        .err()
-        .expect("must reject");
+        .expect_err("must reject");
     assert_not_implemented(err);
 }
 
@@ -90,7 +87,6 @@ async fn cancel_returns_not_implemented_invalid_request() {
     let err = submitter
         .cancel(&BatchJobId::new("ignored"))
         .await
-        .err()
-        .expect("must reject");
+        .expect_err("must reject");
     assert_not_implemented(err);
 }
