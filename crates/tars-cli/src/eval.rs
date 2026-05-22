@@ -48,8 +48,11 @@ use clap::{Args, Subcommand};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use tars_pipeline::{Pipeline, PipelineOpts};
-use tars_types::{ChatRequest, ChatResponseBuilder, ModelHint, RequestContext, Usage};
+use tars_pipeline::{
+    JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, Pipeline, PipelineOpts,
+};
+use tars_runtime::{CheckRunner, Invariant, ValidatorInvariant};
+use tars_types::{ChatRequest, ChatResponse, ChatResponseBuilder, ModelHint, RequestContext, Usage};
 
 use crate::config_loader;
 use crate::dispatch::{build_registry_with_breaker, pick_provider};
@@ -65,6 +68,22 @@ pub enum EvalCommand {
     /// Replay a corpus of cases through a pipeline, writing per-case
     /// outputs + a manifest two runs can be diffed against.
     Run(EvalRunArgs),
+    /// Behavioral diff of two eval runs (baseline vs candidate).
+    /// Compares operational metrics (errors / tokens / latency) and
+    /// per-check violation rates — NOT raw output text. See
+    /// `docs/architecture/18-agent-testing.md` §2.
+    Diff(EvalDiffArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct EvalDiffArgs {
+    /// Baseline eval-run directory (contains manifest.json).
+    pub baseline: PathBuf,
+    /// Candidate eval-run directory (contains manifest.json).
+    pub candidate: PathBuf,
+    /// Emit the diff as a single JSON object on stdout.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -90,6 +109,39 @@ pub struct EvalRunArgs {
     /// Per-case max output token bound.
     #[arg(long)]
     pub max_output_tokens: Option<u32>,
+
+    /// Built-in invariant checks to run against each output (repeatable).
+    /// Recognized: `non-empty`, `valid-json`, `max-length:<N>`.
+    /// Custom invariants are a Rust-API feature (see Doc 18 §4.1).
+    #[arg(long = "check")]
+    pub checks: Vec<String>,
+}
+
+/// Map a `--check` spec to a built-in invariant. Returns an error for
+/// unrecognized specs so a typo fails loudly instead of silently
+/// running no check.
+fn build_invariant(spec: &str) -> Result<Arc<dyn Invariant>> {
+    let inv: Arc<dyn Invariant> = match spec {
+        "non-empty" => {
+            Arc::new(ValidatorInvariant::new(Arc::new(NotEmptyValidator::new())))
+        }
+        "valid-json" => {
+            Arc::new(ValidatorInvariant::new(Arc::new(JsonShapeValidator::new())))
+        }
+        other if other.starts_with("max-length:") => {
+            let n: usize = other
+                .trim_start_matches("max-length:")
+                .parse()
+                .with_context(|| format!("bad max-length spec: {other}"))?;
+            Arc::new(ValidatorInvariant::new(Arc::new(
+                MaxLengthValidator::truncate_above(n),
+            )))
+        }
+        other => anyhow::bail!(
+            "unknown --check `{other}`. Recognized: non-empty, valid-json, max-length:<N>"
+        ),
+    };
+    Ok(inv)
 }
 
 /// Manifest written to `<output>/manifest.json`. Stable schema so
@@ -112,9 +164,26 @@ pub struct EvalRunManifest {
     /// Sum of `Usage` across successful cases. Failed cases contribute
     /// nothing (no usage reported on a failed call).
     pub total_usage: Usage,
+    /// Invariant check rollups, one per `--check`. Empty if no checks
+    /// were requested. This is the "behavioral" part of the report —
+    /// `tars eval diff` reads these to show violation-rate deltas.
+    #[serde(default)]
+    pub checks: Vec<CheckSummary>,
     /// Per-case summary, in run order. Each entry mirrors the
     /// `report.json` written inside that case's directory.
     pub cases: Vec<EvalCaseReport>,
+}
+
+/// Aggregate of one invariant across all cases in a run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckSummary {
+    pub name: String,
+    /// Cases the check ran on (= successful cases; we don't check
+    /// errored cases since there's no real output).
+    pub evaluated: u32,
+    pub violations: u32,
+    /// `violations / evaluated`, 0.0 when `evaluated == 0`.
+    pub violation_rate: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -129,6 +198,17 @@ pub struct EvalCaseReport {
     pub output_chars: u64,
     /// Truncated error message when `status == "error"`. Empty when OK.
     pub error: Option<String>,
+    /// Per-invariant results for this case. Empty if no checks ran.
+    #[serde(default)]
+    pub checks: Vec<CaseCheckResult>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CaseCheckResult {
+    pub name: String,
+    pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,6 +221,142 @@ pub enum EvalCaseStatus {
 pub async fn execute(args: EvalArgs, config_path: Option<PathBuf>) -> Result<()> {
     match args.command {
         EvalCommand::Run(a) => run_eval(a, config_path).await,
+        EvalCommand::Diff(a) => run_diff(a),
+    }
+}
+
+// ─── eval diff ────────────────────────────────────────────────────────
+
+fn load_manifest(dir: &Path) -> Result<EvalRunManifest> {
+    let path = dir.join("manifest.json");
+    let body = fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn p50(mut v: Vec<u64>) -> u64 {
+    if v.is_empty() {
+        return 0;
+    }
+    v.sort_unstable();
+    v[v.len() / 2]
+}
+
+fn run_diff(args: EvalDiffArgs) -> Result<()> {
+    let a = load_manifest(&args.baseline)?;
+    let b = load_manifest(&args.candidate)?;
+
+    // Operational metrics.
+    let a_lat = p50(a.cases.iter().map(|c| c.wall_clock_ms).collect());
+    let b_lat = p50(b.cases.iter().map(|c| c.wall_clock_ms).collect());
+
+    if args.json {
+        // Machine-readable: emit aligned check deltas + operational deltas.
+        let check_deltas: Vec<serde_json::Value> = b
+            .checks
+            .iter()
+            .map(|bc| {
+                let base = a.checks.iter().find(|ac| ac.name == bc.name);
+                serde_json::json!({
+                    "name": bc.name,
+                    "baseline_violation_rate": base.map(|x| x.violation_rate),
+                    "candidate_violation_rate": bc.violation_rate,
+                    "delta": base.map(|x| bc.violation_rate - x.violation_rate),
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "baseline": args.baseline.display().to_string(),
+            "candidate": args.candidate.display().to_string(),
+            "operational": {
+                "case_count": [a.case_count, b.case_count],
+                "error_count": [a.error_count, b.error_count],
+                "tokens_in": [a.total_usage.input_tokens, b.total_usage.input_tokens],
+                "tokens_out": [a.total_usage.output_tokens, b.total_usage.output_tokens],
+                "latency_p50_ms": [a_lat, b_lat],
+            },
+            "checks": check_deltas,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    // Human table.
+    println!("eval diff");
+    println!("  baseline:  {}", args.baseline.display());
+    println!("  candidate: {}", args.candidate.display());
+    println!();
+    println!("operational:");
+    println!("  {:<14} {:>10} → {:>10}   {}", "cases", a.case_count, b.case_count, delta_i(a.case_count as i64, b.case_count as i64));
+    println!("  {:<14} {:>10} → {:>10}   {}", "errors", a.error_count, b.error_count, delta_i(a.error_count as i64, b.error_count as i64));
+    println!("  {:<14} {:>10} → {:>10}   {}", "tokens in", a.total_usage.input_tokens, b.total_usage.input_tokens, delta_pct(a.total_usage.input_tokens as f64, b.total_usage.input_tokens as f64));
+    println!("  {:<14} {:>10} → {:>10}   {}", "tokens out", a.total_usage.output_tokens, b.total_usage.output_tokens, delta_pct(a.total_usage.output_tokens as f64, b.total_usage.output_tokens as f64));
+    println!("  {:<14} {:>9}ms → {:>9}ms   {}", "latency p50", a_lat, b_lat, delta_pct(a_lat as f64, b_lat as f64));
+
+    if !a.checks.is_empty() || !b.checks.is_empty() {
+        println!();
+        println!("checks (violation rate):");
+        // Union of check names, candidate order first.
+        let mut names: Vec<String> = b.checks.iter().map(|c| c.name.clone()).collect();
+        for ac in &a.checks {
+            if !names.contains(&ac.name) {
+                names.push(ac.name.clone());
+            }
+        }
+        for name in &names {
+            let av = a.checks.iter().find(|c| &c.name == name).map(|c| c.violation_rate);
+            let bv = b.checks.iter().find(|c| &c.name == name).map(|c| c.violation_rate);
+            let arrow = match (av, bv) {
+                (Some(x), Some(y)) => format!(
+                    "{:>6.1}% → {:>6.1}%   {}",
+                    x * 100.0,
+                    y * 100.0,
+                    delta_pp(x, y)
+                ),
+                (None, Some(y)) => format!("    —   → {:>6.1}%   (new)", y * 100.0),
+                (Some(x), None) => format!("{:>6.1}% →     —     (dropped)", x * 100.0),
+                (None, None) => "—".into(),
+            };
+            println!("  {name:<24} {arrow}");
+        }
+    }
+    Ok(())
+}
+
+/// Integer delta with sign + direction marker.
+fn delta_i(a: i64, b: i64) -> String {
+    let d = b - a;
+    match d.cmp(&0) {
+        std::cmp::Ordering::Equal => "(=)".into(),
+        std::cmp::Ordering::Greater => format!("(+{d})"),
+        std::cmp::Ordering::Less => format!("({d})"),
+    }
+}
+
+/// Percent change a→b.
+fn delta_pct(a: f64, b: f64) -> String {
+    if a == 0.0 {
+        return if b == 0.0 { "(=)".into() } else { "(new)".into() };
+    }
+    let pct = (b - a) / a * 100.0;
+    if pct.abs() < 0.05 {
+        "(=)".into()
+    } else if pct > 0.0 {
+        format!("(+{pct:.0}%)")
+    } else {
+        format!("({pct:.0}%)")
+    }
+}
+
+/// Percentage-point delta for rates (already in [0,1]).
+fn delta_pp(a: f64, b: f64) -> String {
+    let pp = (b - a) * 100.0;
+    if pp.abs() < 0.05 {
+        "(=)".into()
+    } else if pp > 0.0 {
+        format!("(+{pp:.1}pp ⚠)") // violation rate UP = worse
+    } else {
+        format!("({pp:.1}pp ✓)") // violation rate DOWN = better
     }
 }
 
@@ -159,6 +375,14 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
     //    benefits if cases share prompts — rare but free).
     let pipeline = Pipeline::default_chain(provider, PipelineOpts::new(provider_id.clone()));
     let pipeline = Arc::new(pipeline);
+
+    // 2b. Build the invariant check runner from --check specs.
+    let mut invariants: Vec<Arc<dyn Invariant>> = Vec::with_capacity(args.checks.len());
+    for spec in &args.checks {
+        invariants.push(build_invariant(spec)?);
+    }
+    let check_runner = CheckRunner::new(invariants);
+    let check_names: Vec<String> = check_runner.names().iter().map(|s| s.to_string()).collect();
 
     // 3. Discover cases.
     let cases = load_corpus(&args.corpus)
@@ -199,9 +423,14 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         let case_out_dir = output_dir.join(&case.id);
         fs::create_dir_all(&case_out_dir)
             .with_context(|| format!("creating case dir {}", case_out_dir.display()))?;
-        let report =
-            run_one_case(pipeline.clone(), case, args.model.as_deref(), args.max_output_tokens)
-                .await;
+        let report = run_one_case(
+            pipeline.clone(),
+            case,
+            args.model.as_deref(),
+            args.max_output_tokens,
+            &check_runner,
+        )
+        .await;
         // Persist response text + per-case report regardless of outcome.
         let output_path = case_out_dir.join("output.txt");
         let output_text = report.output_text.clone();
@@ -232,7 +461,34 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         reports.push(report.summary);
     }
 
-    // 6. Manifest.
+    // 6. Aggregate per-check violation rates across all cases.
+    let check_summaries: Vec<CheckSummary> = check_names
+        .iter()
+        .map(|name| {
+            let mut evaluated = 0u32;
+            let mut violations = 0u32;
+            for case in &reports {
+                if let Some(c) = case.checks.iter().find(|c| &c.name == name) {
+                    evaluated += 1;
+                    if !c.passed {
+                        violations += 1;
+                    }
+                }
+            }
+            CheckSummary {
+                name: name.clone(),
+                evaluated,
+                violations,
+                violation_rate: if evaluated == 0 {
+                    0.0
+                } else {
+                    violations as f64 / evaluated as f64
+                },
+            }
+        })
+        .collect();
+
+    // 7. Manifest.
     let ended_at_ms = utc_now_millis();
     let manifest = EvalRunManifest {
         corpus_path: args
@@ -255,6 +511,7 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
             .filter(|r| r.status == EvalCaseStatus::Error)
             .count() as u32,
         total_usage,
+        checks: check_summaries,
         cases: reports,
     };
     let manifest_path = output_dir.join("manifest.json");
@@ -262,13 +519,22 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         .with_context(|| format!("writing {}", manifest_path.display()))?;
 
     eprintln!(
-        "── done. {} ok, {} error, total {} in / {} out tokens. manifest: {}",
+        "── done. {} ok, {} error, total {} in / {} out tokens.",
         manifest.success_count,
         manifest.error_count,
         manifest.total_usage.input_tokens,
         manifest.total_usage.output_tokens,
-        manifest_path.display(),
     );
+    for c in &manifest.checks {
+        eprintln!(
+            "── check {}: {:.0}% violation ({}/{} cases)",
+            c.name,
+            c.violation_rate * 100.0,
+            c.violations,
+            c.evaluated,
+        );
+    }
+    eprintln!("── manifest: {}", manifest_path.display());
     Ok(())
 }
 
@@ -294,6 +560,7 @@ async fn run_one_case(
     case: &Case,
     model: Option<&str>,
     max_output_tokens: Option<u32>,
+    checks: &CheckRunner,
 ) -> CaseOutcome {
     let started = Instant::now();
     let mut req = ChatRequest::user(
@@ -313,6 +580,9 @@ async fn run_one_case(
         req.max_output_tokens = Some(cap);
     }
 
+    // Keep a copy of the request — invariants need it (and `call`
+    // consumes the original).
+    let req_for_checks = req.clone();
     let ctx = RequestContext::test_default();
     let stream_result = pipeline.clone().call(req, ctx).await;
     let mut acc = ChatResponseBuilder::new();
@@ -333,13 +603,30 @@ async fn run_one_case(
         Err(e) => error = Some(truncate(&format!("{e}"), 500)),
     }
 
-    let response = acc.finish();
+    let response: ChatResponse = acc.finish();
     let output_text = response.text.clone();
     let status = if error.is_some() {
         EvalCaseStatus::Error
     } else {
         EvalCaseStatus::Ok
     };
+
+    // Run invariants only on successful cases — an errored call has no
+    // real output to check.
+    let case_checks: Vec<CaseCheckResult> = if status == EvalCaseStatus::Ok && !checks.is_empty() {
+        checks
+            .run(&req_for_checks, &response)
+            .into_iter()
+            .map(|(name, r)| CaseCheckResult {
+                name,
+                passed: r.passed,
+                detail: r.detail,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     CaseOutcome {
         summary: EvalCaseReport {
             case_id: case.id.clone(),
@@ -348,6 +635,7 @@ async fn run_one_case(
             usage: response.usage,
             output_chars: output_text.chars().count() as u64,
             error,
+            checks: case_checks,
         },
         output_text,
     }
@@ -543,6 +831,12 @@ mod tests {
                 output_tokens: 200,
                 ..Usage::default()
             },
+            checks: vec![CheckSummary {
+                name: "non-empty".into(),
+                evaluated: 2,
+                violations: 0,
+                violation_rate: 0.0,
+            }],
             cases: vec![EvalCaseReport {
                 case_id: "case_001".into(),
                 status: EvalCaseStatus::Ok,
@@ -550,6 +844,11 @@ mod tests {
                 usage: Usage::default(),
                 output_chars: 80,
                 error: None,
+                checks: vec![CaseCheckResult {
+                    name: "non-empty".into(),
+                    passed: true,
+                    detail: None,
+                }],
             }],
         };
         let v = serde_json::to_value(&m).unwrap();
@@ -557,6 +856,8 @@ mod tests {
         assert_eq!(back.case_count, 2);
         assert_eq!(back.success_count, 2);
         assert_eq!(back.cases[0].status, EvalCaseStatus::Ok);
+        assert_eq!(back.checks[0].name, "non-empty");
+        assert_eq!(back.cases[0].checks[0].passed, true);
     }
 
     #[test]

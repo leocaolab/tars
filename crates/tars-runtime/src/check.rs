@@ -136,6 +136,45 @@ impl Invariant for MembershipInvariant {
     }
 }
 
+// ─── CheckRunner — run a set of invariants over one output ────────────
+
+/// Holds a set of [`Invariant`]s and runs them all against one
+/// `(request, response)` pair. Thin by design — aggregation across a
+/// corpus (violation rates) is the caller's job, because the caller
+/// owns the corpus loop.
+#[derive(Clone, Default)]
+pub struct CheckRunner {
+    invariants: Vec<Arc<dyn Invariant>>,
+}
+
+impl CheckRunner {
+    pub fn new(invariants: Vec<Arc<dyn Invariant>>) -> Self {
+        Self { invariants }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.invariants.is_empty()
+    }
+
+    /// Run every invariant; return `(name, result)` in declared order.
+    pub fn run(
+        &self,
+        input: &ChatRequest,
+        output: &ChatResponse,
+    ) -> Vec<(String, CheckResult)> {
+        self.invariants
+            .iter()
+            .map(|inv| (inv.name().to_string(), inv.check(input, output)))
+            .collect()
+    }
+
+    /// The invariant names, in order — useful for pre-allocating
+    /// aggregation buckets before the corpus loop.
+    pub fn names(&self) -> Vec<&str> {
+        self.invariants.iter().map(|i| i.name()).collect()
+    }
+}
+
 // ─── ValidatorInvariant — reuse existing OutputValidators ─────────────
 
 /// Adapts any [`OutputValidator`] into an [`Invariant`] so the existing
