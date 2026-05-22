@@ -40,6 +40,7 @@ mod error;
 mod event;
 pub mod judge;
 mod message;
+pub mod metamorphic;
 mod orchestrator;
 mod prompt;
 pub mod run_report;
@@ -60,6 +61,10 @@ pub use judge::{
     DEFAULT_JUDGE_PROMPT, Judge, JudgeError, LlmJudge, ensure_anti_incest, run_judge_pass,
 };
 pub use message::{AgentMessage, VerdictKind};
+pub use metamorphic::{
+    DeleteSubstringMutation, DirectionalRelation, GoldenMatch, InvarianceRelation,
+    MetamorphicRelation, Mutation, MutationVerdict, mutation_caught,
+};
 pub use orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep};
 pub use prompt::PromptBuilder;
 pub use run_report::build_run_report;

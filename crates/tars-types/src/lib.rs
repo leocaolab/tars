@@ -64,7 +64,7 @@ pub use ids::{
     AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId,
     TenantId, TraceId, TrajectoryId,
 };
-pub use judge::{JudgeItem, JudgeReport, JudgeVerdict, JudgedItem};
+pub use judge::{JudgeItem, JudgeReport, JudgeVerdict, JudgedItem, McNemarResult, mcnemar};
 pub use model::{ModelHint, ModelTier, ThinkingMode};
 pub use pipeline_events::{
     CallResult, EvaluationScored, LlmCallFinished, PersistenceMode, PipelineEvent,

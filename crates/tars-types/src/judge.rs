@@ -154,6 +154,64 @@ fn z_for_confidence(level: f64) -> Option<f64> {
     }
 }
 
+/// Result of a McNemar paired-significance test comparing two judge
+/// runs over the **same** items. See `docs/eval-methodology.md §2`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct McNemarResult {
+    /// Items baseline got right but candidate got wrong (regressions).
+    pub b: u32,
+    /// Items baseline got wrong but candidate got right (improvements).
+    pub c: u32,
+    /// χ² = (b−c)² / (b+c). `None` when b+c == 0 (no discordant pairs —
+    /// the two runs agree on every item, nothing to test).
+    pub chi_squared: Option<f64>,
+    /// True iff χ² exceeds the 1-dof critical value at α=0.05 (3.841).
+    pub significant_at_05: bool,
+    /// ... at α=0.01 (6.635).
+    pub significant_at_01: bool,
+}
+
+/// McNemar's test on two sets of per-item correctness, paired by item
+/// id. `correct` maps item_id → was-correct (TruePositive). Only items
+/// present in **both** maps are paired; the rest are ignored (you
+/// can't compare an item one run didn't judge).
+///
+/// This is the statistically correct test for "did config B change
+/// behavior vs A on the same corpus" — the data is paired, so an
+/// unpaired two-proportion test would be wrong (see methodology doc).
+/// Significance via 1-dof critical-value lookup (no erfc needed):
+/// 3.841 @ 0.05, 6.635 @ 0.01.
+pub fn mcnemar(
+    baseline: &std::collections::BTreeMap<String, bool>,
+    candidate: &std::collections::BTreeMap<String, bool>,
+) -> McNemarResult {
+    let mut b = 0u32; // base right, cand wrong
+    let mut c = 0u32; // base wrong, cand right
+    for (id, &base_correct) in baseline {
+        if let Some(&cand_correct) = candidate.get(id) {
+            match (base_correct, cand_correct) {
+                (true, false) => b += 1,
+                (false, true) => c += 1,
+                _ => {} // concordant — carries no information
+            }
+        }
+    }
+    let n = b + c;
+    let chi_squared = if n == 0 {
+        None
+    } else {
+        let diff = b as f64 - c as f64;
+        Some(diff * diff / n as f64)
+    };
+    McNemarResult {
+        b,
+        c,
+        chi_squared,
+        significant_at_05: chi_squared.is_some_and(|x| x > 3.841),
+        significant_at_01: chi_squared.is_some_and(|x| x > 6.635),
+    }
+}
+
 /// Wilson score interval — closed-form binomial confidence interval.
 /// `p` is the observed proportion (TP / n); `n` is the trial count;
 /// `z` is the standard normal quantile for the desired level.
@@ -320,6 +378,63 @@ mod tests {
         // returns None so callers don't get a silently wrong z.
         assert!(report_with(10, 5).precision_with_ci(0.80).is_none());
         assert!(report_with(10, 5).precision_with_ci(0.50).is_none());
+    }
+
+    fn correctness(pairs: &[(&str, bool)]) -> std::collections::BTreeMap<String, bool> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn mcnemar_counts_discordant_pairs() {
+        // baseline: a✓ b✓ c✗ d✗ ; candidate: a✓ b✗ c✓ d✓
+        // b (base right, cand wrong): {b} → 1
+        // c (base wrong, cand right): {c, d} → 2
+        let base = correctness(&[("a", true), ("b", true), ("c", false), ("d", false)]);
+        let cand = correctness(&[("a", true), ("b", false), ("c", true), ("d", true)]);
+        let r = mcnemar(&base, &cand);
+        assert_eq!(r.b, 1);
+        assert_eq!(r.c, 2);
+        // χ² = (1−2)²/(1+2) = 1/3 ≈ 0.333
+        assert!((r.chi_squared.unwrap() - 1.0 / 3.0).abs() < 1e-9);
+        assert!(!r.significant_at_05); // tiny n, not significant
+    }
+
+    #[test]
+    fn mcnemar_significant_when_lopsided() {
+        // 12 improvements, 1 regression → χ² = (1−12)²/13 = 121/13 ≈ 9.3 > 6.635
+        let mut base = std::collections::BTreeMap::new();
+        let mut cand = std::collections::BTreeMap::new();
+        for i in 0..12 {
+            base.insert(format!("imp{i}"), false);
+            cand.insert(format!("imp{i}"), true);
+        }
+        base.insert("reg".into(), true);
+        cand.insert("reg".into(), false);
+        let r = mcnemar(&base, &cand);
+        assert_eq!(r.c, 12);
+        assert_eq!(r.b, 1);
+        assert!(r.significant_at_05);
+        assert!(r.significant_at_01);
+    }
+
+    #[test]
+    fn mcnemar_no_discordant_pairs_is_none() {
+        let base = correctness(&[("a", true), ("b", false)]);
+        let cand = correctness(&[("a", true), ("b", false)]);
+        let r = mcnemar(&base, &cand);
+        assert_eq!((r.b, r.c), (0, 0));
+        assert!(r.chi_squared.is_none());
+        assert!(!r.significant_at_05);
+    }
+
+    #[test]
+    fn mcnemar_ignores_unpaired_items() {
+        // "only_base" / "only_cand" are dropped — can't pair them.
+        let base = correctness(&[("shared", true), ("only_base", false)]);
+        let cand = correctness(&[("shared", false), ("only_cand", true)]);
+        let r = mcnemar(&base, &cand);
+        // only "shared": base right, cand wrong → b=1
+        assert_eq!((r.b, r.c), (1, 0));
     }
 
     #[test]

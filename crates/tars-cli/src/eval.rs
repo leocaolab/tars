@@ -73,6 +73,24 @@ pub enum EvalCommand {
     /// per-check violation rates — NOT raw output text. See
     /// `docs/architecture/18-agent-testing.md` §2.
     Diff(EvalDiffArgs),
+    /// Run an LLM judge over an eval run's outputs (TP/FP/Unsure per
+    /// case), writing `judge_report.json` into the run directory. The
+    /// judge is a normal tars provider (default `claude_cli`); anti-
+    /// incest refuses a judge whose provider matches the run's. See
+    /// Doc 18 §7.
+    Judge(EvalJudgeArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct EvalJudgeArgs {
+    /// Eval-run directory (contains manifest.json + per-case output.txt).
+    pub run: PathBuf,
+    /// Provider id to use as the judge. Default `claude_cli`.
+    #[arg(long, default_value = "claude_cli")]
+    pub judge: String,
+    /// Judge model hint. If unset, the provider's default model.
+    #[arg(long)]
+    pub judge_model: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -222,7 +240,99 @@ pub async fn execute(args: EvalArgs, config_path: Option<PathBuf>) -> Result<()>
     match args.command {
         EvalCommand::Run(a) => run_eval(a, config_path).await,
         EvalCommand::Diff(a) => run_diff(a),
+        EvalCommand::Judge(a) => run_judge(a, config_path).await,
     }
+}
+
+// ─── eval judge ───────────────────────────────────────────────────────
+
+async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<()> {
+    use tars_runtime::{LlmJudge, ensure_anti_incest, run_judge_pass};
+    use tars_types::{JudgeItem, ModelHint, ProviderId};
+
+    let manifest = load_manifest(&args.run)?;
+
+    // Anti-incest: the judge's provider must differ from the provider
+    // that produced the run (Doc 18 §7 / Panickssery 2024).
+    ensure_anti_incest(&args.judge, &[manifest.provider_id.as_str()]).map_err(|e| {
+        anyhow::anyhow!(
+            "{e}\nthe run was produced by `{}`; pick a different --judge provider",
+            manifest.provider_id
+        )
+    })?;
+
+    // Build the judge pipeline from config.
+    let cfg = config_loader::load(config_path)?;
+    let registry = build_registry_with_breaker(&cfg, true)?;
+    let judge_pid = ProviderId::new(&args.judge);
+    let judge_provider = registry.get(&judge_pid).ok_or_else(|| {
+        anyhow::anyhow!("judge provider `{}` not in config", args.judge)
+    })?;
+    let judge_pipeline = Pipeline::default_chain(judge_provider, PipelineOpts::new(judge_pid.clone()));
+    let judge_model = args
+        .judge_model
+        .clone()
+        .map(ModelHint::Explicit)
+        .unwrap_or_else(|| ModelHint::Explicit("".into()));
+    let judge = LlmJudge::new(
+        Arc::new(judge_pipeline),
+        format!("{}:{}", args.judge, args.judge_model.as_deref().unwrap_or("default")),
+        judge_model,
+    );
+
+    // Build JudgeItems from each successful case: input (from corpus),
+    // output (output.txt), expected (expected.txt if present).
+    let mut items: Vec<JudgeItem> = Vec::new();
+    for case in &manifest.cases {
+        if case.status != EvalCaseStatus::Ok {
+            continue;
+        }
+        let case_dir = args.run.join(&case.case_id);
+        let output = read_optional(&case_dir.join("output.txt"))?.unwrap_or_default();
+        // input/expected: the corpus isn't copied into the run dir, so
+        // we read what we can. output.txt always present; expected may
+        // be carried alongside if the run recorded it (future). For now
+        // input is the case id as a stand-in label; the judge prompt
+        // leans on output + expected.
+        items.push(JudgeItem {
+            item_id: case.case_id.clone(),
+            input: case.case_id.clone(),
+            output,
+            expected: read_optional(&case_dir.join("expected.txt"))?,
+            context: None,
+        });
+    }
+    if items.is_empty() {
+        anyhow::bail!("no successful cases in {} to judge", args.run.display());
+    }
+
+    eprintln!(
+        "── judging {} cases with {} (anti-incest vs `{}` OK)",
+        items.len(),
+        args.judge,
+        manifest.provider_id,
+    );
+    let report = run_judge_pass(items, &judge)
+        .await
+        .map_err(|e| anyhow::anyhow!("judge pass failed: {e}"))?;
+
+    let report_path = args.run.join("judge_report.json");
+    fs::write(&report_path, serde_json::to_string_pretty(&report)?)
+        .with_context(|| format!("writing {}", report_path.display()))?;
+
+    let prec = report
+        .precision()
+        .map(|p| format!("{:.1}%", p * 100.0))
+        .unwrap_or_else(|| "n/a".into());
+    eprintln!(
+        "── done. TP={} FP={} Unsure={}  precision={}  → {}",
+        report.true_positives,
+        report.false_positives,
+        report.unsure,
+        prec,
+        report_path.display(),
+    );
+    Ok(())
 }
 
 // ─── eval diff ────────────────────────────────────────────────────────
@@ -320,7 +430,61 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
             println!("  {name:<24} {arrow}");
         }
     }
+
+    // Quality tier — only when both runs have a judge_report.json.
+    if let (Some(ja), Some(jb)) = (
+        load_judge_report(&args.baseline),
+        load_judge_report(&args.candidate),
+    ) {
+        use tars_types::{JudgeVerdict, mcnemar};
+        println!();
+        println!("quality (judge: {} → {}):", ja.judge_id, jb.judge_id);
+        let pa = ja.precision().map(|p| p * 100.0);
+        let pb = jb.precision().map(|p| p * 100.0);
+        match (pa, pb) {
+            (Some(x), Some(y)) => println!(
+                "  precision   {:>6.1}% → {:>6.1}%   {}",
+                x,
+                y,
+                delta_pp_higher_better(x / 100.0, y / 100.0)
+            ),
+            _ => println!("  precision   (no decisive verdicts)"),
+        }
+
+        // Paired McNemar over shared item ids.
+        let to_map = |r: &tars_types::JudgeReport| {
+            r.verdicts
+                .iter()
+                .map(|v| (v.item_id.clone(), matches!(v.verdict, JudgeVerdict::TruePositive)))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let m = mcnemar(&to_map(&ja), &to_map(&jb));
+        let improved = m.c;
+        let regressed = m.b;
+        println!(
+            "  paired changes: improved (FP→TP)={improved}, regressed (TP→FP)={regressed}"
+        );
+        match m.chi_squared {
+            None => println!("  McNemar: no discordant pairs (runs agree on every item)"),
+            Some(chi2) => {
+                let verdict = if m.significant_at_01 {
+                    "significant at α=0.01"
+                } else if m.significant_at_05 {
+                    "significant at α=0.05"
+                } else {
+                    "NOT significant at α=0.05 (need more cases or bigger effect)"
+                };
+                println!("  McNemar: b={regressed} c={improved} χ²={chi2:.2} → {verdict}");
+            }
+        }
+    }
     Ok(())
+}
+
+fn load_judge_report(dir: &Path) -> Option<tars_types::JudgeReport> {
+    let path = dir.join("judge_report.json");
+    let body = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&body).ok()
 }
 
 /// Integer delta with sign + direction marker.
@@ -348,7 +512,7 @@ fn delta_pct(a: f64, b: f64) -> String {
     }
 }
 
-/// Percentage-point delta for rates (already in [0,1]).
+/// Percentage-point delta for a rate where UP is WORSE (violation rate).
 fn delta_pp(a: f64, b: f64) -> String {
     let pp = (b - a) * 100.0;
     if pp.abs() < 0.05 {
@@ -357,6 +521,18 @@ fn delta_pp(a: f64, b: f64) -> String {
         format!("(+{pp:.1}pp ⚠)") // violation rate UP = worse
     } else {
         format!("({pp:.1}pp ✓)") // violation rate DOWN = better
+    }
+}
+
+/// Percentage-point delta for a rate where UP is BETTER (precision).
+fn delta_pp_higher_better(a: f64, b: f64) -> String {
+    let pp = (b - a) * 100.0;
+    if pp.abs() < 0.05 {
+        "(=)".into()
+    } else if pp > 0.0 {
+        format!("(+{pp:.1}pp ✓)") // precision UP = better
+    } else {
+        format!("({pp:.1}pp ⚠)") // precision DOWN = worse
     }
 }
 
