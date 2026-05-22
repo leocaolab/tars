@@ -135,6 +135,11 @@ The Rust trait is the source of truth; HTTP API / gRPC / Python / TypeScript and
 | [11](./11-performance-capacity.md) | Performance and Capacity | SLO definitions; bottleneck analysis; cache ROI; load-testing methodology | Performance engineers + SRE |
 | [12](./12-api-specification.md) | API Specification | Rust / HTTP / gRPC / Python(PyO3) / TS(napi-rs) / WASM | SDK developers |
 | [13](./13-operational-runbook.md) | Operational Runbook | On-call playbook; 12 failure scenarios; backup and restore; incident communication | SRE / On-call |
+| [14](./14-implementation-path.md) | Implementation Path | M0–M9 milestones; crate workspace; dependency choices | Maintainers / planners |
+| [15](./15-output-validation.md) | Output Validation | Validator chain; Pass/Reject/Filter/Annotate outcomes | Pipeline developers |
+| [16](./16-evaluation-framework.md) | Evaluation Framework | Event-channel + metrics-sink plumbing. **§7.1 per-call deterministic scoring superseded by Doc 18** | Eval developers |
+| [17](./17-pipeline-event-store.md) | Pipeline Event Store | Per-call observability DB; CAS bodies; `tars events` | Observability / eval |
+| [18](./18-agent-testing.md) | **Agent & LLM Testing** | Behavioral diff (not text); 5 test modes (invariant / metamorphic / mutation / golden / quality); paired stats (McNemar); native LLM judge via `claude_cli`; framework-vs-domain discipline | Anyone testing/migrating prompts, data, or models |
 
 ---
 

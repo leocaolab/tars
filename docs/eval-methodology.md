@@ -601,6 +601,7 @@ biases are real (per Zheng 2023) and stay the caller's responsibility
 
 ## See also
 
+- [`architecture/18-agent-testing.md`](./architecture/18-agent-testing.md) — the **architecture** chapter this methodology underpins (5 test modes, Check trait family, native judge, framework-vs-domain discipline). This doc is the *stats + research*; that one is the *design*.
 - [`eval-and-arc-llm-roadmap.md`](./eval-and-arc-llm-roadmap.md) — the eval framework plan + arc_llm collapse
 - [`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md) — the middleware stack eval runs against
 - [`observability.md`](./observability.md) — the event stores eval reads from
