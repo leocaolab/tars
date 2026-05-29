@@ -88,23 +88,60 @@ pub async fn execute(args: InitArgs) -> Result<()> {
         None => default_config_path().ok_or_else(|| anyhow!("could not resolve home directory"))?,
     };
 
-    if target.exists() && !args.force {
-        return Err(anyhow!(
-            "{} already exists; pass --force to overwrite",
-            target.display()
-        ));
-    }
-
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating parent directory {}", parent.display()))?;
-    }
-
-    std::fs::write(&target, STARTER_TEMPLATE)
-        .with_context(|| format!("writing starter config to {}", target.display()))?;
+    // Filesystem work is blocking; run it on the blocking pool so it
+    // can't stall other tasks sharing this runtime. Hand the path back
+    // out so we can print next-steps with it.
+    let force = args.force;
+    let target = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+        write_starter_config(&target, force)?;
+        Ok(target)
+    })
+    .await
+    .context("init filesystem task panicked")??;
 
     print_next_steps(&target);
     Ok(())
+}
+
+/// Write the starter template to `target`. When `force` is false this
+/// uses `create_new` so the existence check and the write are a single
+/// atomic syscall — closing the TOCTOU window a separate `exists()` +
+/// `write()` would open, and refusing to follow/overwrite a symlink
+/// planted at the target path (a plain `fs::write` would clobber the
+/// symlink's destination instead).
+fn write_starter_config(target: &Path, force: bool) -> Result<()> {
+    if let Some(parent) = target.parent() {
+        // `parent()` of a bare filename is `Some("")`; skip the empty
+        // path so we don't ask the OS to create the cwd.
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent directory {}", parent.display()))?;
+        }
+    }
+
+    if force {
+        std::fs::write(target, STARTER_TEMPLATE)
+            .with_context(|| format!("writing starter config to {}", target.display()))?;
+        return Ok(());
+    }
+
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+    {
+        Ok(mut f) => f
+            .write_all(STARTER_TEMPLATE.as_bytes())
+            .with_context(|| format!("writing starter config to {}", target.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(anyhow!(
+            "{} already exists; pass --force to overwrite",
+            target.display()
+        )),
+        Err(e) => {
+            Err(e).with_context(|| format!("writing starter config to {}", target.display()))
+        }
+    }
 }
 
 fn print_next_steps(target: &Path) {

@@ -58,12 +58,27 @@ use tars_types::{
 /// thread-pool cost across all `Provider` / `Pipeline` calls.
 /// Multi-threaded so async I/O concurrency works inside one
 /// `complete()` invocation (provider adapters spawn background reads).
-pub(crate) static TOKIO: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+pub(crate) static TOKIO: LazyLock<std::io::Result<tokio::runtime::Runtime>> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("tokio runtime init")
 });
+
+/// Access the process-wide runtime, surfacing a build failure as a
+/// Python `RuntimeError` instead of panicking the interpreter.
+///
+/// Runtime construction only fails under OS resource exhaustion (thread
+/// / fd limits), but that failure used to `expect()`-panic inside a
+/// `LazyLock` accessed by every call — tearing down the work rather
+/// than handing Python a catchable error. The `LazyLock` caches the
+/// outcome, so a doomed build isn't retried per call.
+pub(crate) fn tokio_runtime() -> PyResult<&'static tokio::runtime::Runtime> {
+    TOKIO.as_ref().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "failed to initialize tars async runtime: {e}"
+        ))
+    })
+}
 
 // ── Result + Usage ────────────────────────────────────────────────────
 
@@ -171,7 +186,14 @@ impl ValidationSummary {
     #[getter]
     fn outcomes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let json_mod = py.import("json")?;
-        let s = serde_json::to_string(&self.outcomes_json).unwrap_or_else(|_| "{}".into());
+        // Propagate a serialization failure rather than silently handing
+        // Python an empty `{}` — a `{}` would masquerade as "no outcomes"
+        // and hide the real failure from the caller.
+        let s = serde_json::to_string(&self.outcomes_json).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to serialize validation outcomes: {e}"
+            ))
+        })?;
         let obj = json_mod.call_method1("loads", (s,))?;
         obj.downcast_into::<pyo3::types::PyDict>()
             .map_err(PyErr::from)
@@ -199,8 +221,18 @@ pub(crate) fn validation_summary_to_py(s: tars_types::ValidationSummary) -> Vali
                 serde_json::json!({"outcome": "annotate", "metrics": metrics})
             }
             // `#[non_exhaustive]` — surface unknown variant names to
-            // the caller rather than panic.
-            _ => serde_json::json!({"outcome": "unknown"}),
+            // the caller rather than panic. Log it and preserve the
+            // Debug rendering so a tars-py older than tars-types doesn't
+            // discard the variant's structured data entirely.
+            ref other => {
+                tracing::warn!(
+                    validator = %name,
+                    outcome = ?other,
+                    "validation_summary: unknown OutcomeSummary variant mapped to \
+                     `unknown` (tars-py is older than tars-types — upgrade to surface it)",
+                );
+                serde_json::json!({"outcome": "unknown", "debug": format!("{other:?}")})
+            }
         };
         outcomes.insert(name, val);
     }
@@ -1123,13 +1155,30 @@ fn compatibility_to_py(c: tars_types::CompatibilityCheck) -> CompatibilityResult
                 reasons: py_reasons,
             }
         }
-        // `#[non_exhaustive]` wildcard. Unknown future variants
-        // (e.g. `MaybeWithCaveat`) treated as compatible-with-warning
-        // until we model the warning channel; for now: pass through.
-        _ => CompatibilityResult {
-            is_compatible: true,
-            reasons: Vec::new(),
-        },
+        // `#[non_exhaustive]` wildcard. Fail *closed*: an unknown future
+        // variant might be a new incompatibility this build can't model
+        // (e.g. a critical-incompat kind). Reporting it as compatible
+        // would let a request proceed that should be blocked, so we
+        // surface it as incompatible with a self-describing reason and
+        // let the caller decide (the fix is to upgrade tars).
+        ref other => {
+            tracing::warn!(
+                check = ?other,
+                "compatibility_to_py: unknown CompatibilityCheck variant treated as \
+                 incompatible (tars-py is older than tars-types — upgrade to resolve)",
+            );
+            CompatibilityResult {
+                is_compatible: false,
+                reasons: vec![CompatibilityReasonPy {
+                    kind: "unknown_compatibility_check".to_string(),
+                    message: format!(
+                        "provider reported a compatibility variant this build does not \
+                         understand ({other:?}); treating as incompatible"
+                    ),
+                    detail_json: None,
+                }],
+            }
+        }
     }
 }
 
@@ -1321,8 +1370,9 @@ fn run_complete_tagged(
     req: ChatRequest,
     tags: Vec<String>,
 ) -> PyResult<Response> {
+    let rt = tokio_runtime()?;
     py.allow_threads(|| {
-        TOKIO.block_on(async move {
+        rt.block_on(async move {
             // Build the context here (rather than inline in `call`) so
             // we keep an Arc clone of the telemetry handle that
             // survives the move into the middleware chain. Middleware
@@ -1344,9 +1394,22 @@ fn run_complete_tagged(
             // post-Filter response + summary on the side-channel; prefer
             // that over the stream-rebuild so `validation_summary` is
             // populated and any Filter outcome is reflected.
-            if let Ok(rec) = validation_handle.lock() {
-                if let Some(filtered) = &rec.filtered_response {
-                    resp = filtered.clone();
+            // A poisoned lock here means a validator panicked while
+            // holding it. Falling through would return the *unfiltered*
+            // `builder.finish()` response — silently bypassing any
+            // FilterText/Reject outcome (PII scrub, content moderation,
+            // …). Refuse to serve potentially-unvalidated content.
+            match validation_handle.lock() {
+                Ok(rec) => {
+                    if let Some(filtered) = &rec.filtered_response {
+                        resp = filtered.clone();
+                    }
+                }
+                Err(_) => {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "validation state lock poisoned — refusing to return a \
+                         possibly-unvalidated response (a validator likely panicked)",
+                    ));
                 }
             }
 
@@ -1384,8 +1447,17 @@ pub(crate) fn read_telemetry(handle: &tars_types::SharedTelemetry) -> Telemetry 
         // Surface a default so the call still returns a usable
         // Response rather than tearing down on a metadata-only lock
         // error. The text + usage above are the contract; telemetry
-        // is the bonus.
-        Err(_) => tars_types::TelemetryAccumulator::default(),
+        // is the bonus. Log it, though: a poisoned lock means a panic
+        // in the middleware stack, and the returned telemetry is then
+        // fabricated defaults rather than real data.
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "read_telemetry: telemetry mutex poisoned (a middleware layer likely \
+                 panicked); returning default/empty telemetry",
+            );
+            tars_types::TelemetryAccumulator::default()
+        }
     };
     Telemetry {
         cache_hit: acc.cache_hit,

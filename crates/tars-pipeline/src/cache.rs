@@ -100,9 +100,17 @@ impl LlmService for CacheLookupService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        // Telemetry: layer trace.
-        if let Ok(mut t) = ctx.telemetry.lock() {
-            t.layers.push("cache_lookup".into());
+        // Telemetry: layer trace. A poisoned lock means a prior task
+        // panicked while holding it — telemetry is best-effort so we
+        // don't fail the call, but log it loud (consistent with the
+        // policy-RwLock handling below) rather than dropping silently.
+        match ctx.telemetry.lock() {
+            Ok(mut t) => t.layers.push("cache_lookup".into()),
+            Err(e) => tracing::error!(
+                error = %e,
+                "cache: telemetry mutex poisoned recording layer trace; \
+                 the underlying panic should be investigated",
+            ),
         }
         let policy = read_policy(&ctx);
         if !policy.any_enabled() {
@@ -139,8 +147,13 @@ impl LlmService for CacheLookupService {
                 // from `Usage.cached_input_tokens` which is the
                 // *provider's* prompt cache. Both can be true; this
                 // field is "we avoided the provider call entirely".)
-                if let Ok(mut t) = ctx.telemetry.lock() {
-                    t.cache_hit = true;
+                match ctx.telemetry.lock() {
+                    Ok(mut t) => t.cache_hit = true,
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        "cache: telemetry mutex poisoned recording cache hit; \
+                         the underlying panic should be investigated",
+                    ),
                 }
                 let cache_hit = CacheHitInfo {
                     // Surface the original input-token count as the

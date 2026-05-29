@@ -133,7 +133,11 @@ impl LlmService for RetryService {
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let cfg = &self.config;
-        let mut backoff = cfg.initial_backoff;
+        // Clamp initial backoff to max so a misconfigured
+        // `initial_backoff > max_backoff` can't make the *first* retry
+        // wait longer than every subsequent one (which `next_backoff`
+        // caps at `max_backoff`) — backoff should never decrease.
+        let mut backoff = cfg.initial_backoff.min(cfg.max_backoff);
         let mut attempt: u32 = 0;
         // Record this layer in the telemetry trace.
         if let Ok(mut t) = ctx.telemetry.lock() {
@@ -161,8 +165,11 @@ impl LlmService for RetryService {
                     );
                     return Err(err);
                 }
-                ErrorClass::Retriable => cfg.max_attempts,
-                ErrorClass::MaybeRetriable => cfg.max_attempts_maybe_retriable,
+                // `.max(1)` so a misconfigured `max_attempts = 0` still
+                // allows the single attempt we already made, rather than
+                // behaving as a hard "never even try once" cap.
+                ErrorClass::Retriable => cfg.max_attempts.max(1),
+                ErrorClass::MaybeRetriable => cfg.max_attempts_maybe_retriable.max(1),
             };
             if attempt >= cap {
                 tracing::debug!(
@@ -184,8 +191,8 @@ impl LlmService for RetryService {
             if wait > cfg.max_wait {
                 tracing::debug!(
                     attempt,
-                    wait_ms = wait.as_millis() as u64,
-                    max_wait_ms = cfg.max_wait.as_millis() as u64,
+                    wait_ms = millis_u64(wait),
+                    max_wait_ms = millis_u64(cfg.max_wait),
                     error = %err,
                     "retry: wait exceeds max_wait — bubbling error for fallback / caller",
                 );
@@ -195,7 +202,7 @@ impl LlmService for RetryService {
             tracing::debug!(
                 attempt,
                 next_attempt = attempt + 1,
-                wait_ms = wait.as_millis() as u64,
+                wait_ms = millis_u64(wait),
                 error = %err,
                 "retry: backing off",
             );
@@ -210,7 +217,7 @@ impl LlmService for RetryService {
                 t.retry_count = t.retry_count.saturating_add(1);
                 t.retry_attempts.push(tars_types::RetryAttempt {
                     error_kind: provider_error_kind(&err).into(),
-                    retry_after_ms: Some(wait.as_millis() as u64),
+                    retry_after_ms: Some(millis_u64(wait)),
                 });
             }
 
@@ -225,8 +232,9 @@ impl LlmService for RetryService {
                 _ = tokio::time::sleep(wait) => {}
             }
 
-            // Exponential backoff for the next attempt — never above max.
-            backoff = (backoff.mul_f64(cfg.multiplier)).min(cfg.max_backoff);
+            // Exponential backoff for the next attempt — never above max,
+            // and panic-safe against a bad `multiplier` (see next_backoff).
+            backoff = next_backoff(backoff, cfg.multiplier, cfg.max_backoff);
         }
     }
 }
@@ -238,6 +246,31 @@ impl LlmService for RetryService {
 /// every callsite.
 fn provider_error_kind(err: &ProviderError) -> &'static str {
     err.kind()
+}
+
+/// `Duration::as_millis()` is `u128`; telemetry / log fields want `u64`.
+/// Saturate instead of the silent wrap an `as u64` truncation would do
+/// for pathological durations (e.g. a `Duration::MAX` `max_wait`).
+fn millis_u64(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Next exponential backoff, capped at `max`. `Duration::mul_f64`
+/// panics on a negative, NaN, or overflowing product, and `RetryConfig`
+/// doesn't validate `multiplier`, so guard the arithmetic here: a
+/// non-finite/negative multiplier or an overflowing product collapses
+/// to `max` rather than panicking inside the retry loop.
+fn next_backoff(current: Duration, multiplier: f64, max: Duration) -> Duration {
+    if !multiplier.is_finite() || multiplier < 0.0 {
+        return max;
+    }
+    let scaled = current.as_secs_f64() * multiplier;
+    if !scaled.is_finite() {
+        return max;
+    }
+    Duration::try_from_secs_f64(scaled)
+        .unwrap_or(max)
+        .min(max)
 }
 
 #[cfg(test)]

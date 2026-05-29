@@ -154,12 +154,15 @@ pub async fn execute(args: RunTaskArgs, config_path: Option<PathBuf>) -> Result<
 
     match outcome {
         Ok(o) => {
+            // Print the trajectory id *before* rendering output so the
+            // user can always run `tars trajectory show <ID>` — even if
+            // JSON serialization below fails and propagates via `?`.
+            eprintln!("── trajectory: {}", o.trajectory_id);
             if args.json {
                 print_outcome_json(&o)?;
             } else {
                 print_outcome_human(&o);
             }
-            eprintln!("── trajectory: {}", o.trajectory_id);
             Ok(())
         }
         Err(e) => {
@@ -196,10 +199,16 @@ fn build_worker(args: &RunTaskArgs, model: String) -> Result<Arc<WorkerAgent>> {
         )
     })?;
     // list_dir paired with read_file so prompts can discover before
-    // reading. with_root is infallible here (we just canonicalized
-    // the same path above for read_file).
-    let list_dir = ListDirTool::with_root(&root)
-        .expect("tools root canonicalized for read_file; list_dir must succeed too");
+    // reading. `read_file` canonicalized the same root just above, so
+    // this normally succeeds — but the two tools are independent APIs
+    // and the dir could vanish between the calls, so handle failure as
+    // an error rather than asserting a cross-API invariant with expect.
+    let list_dir = ListDirTool::with_root(&root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "tools root `{}` cannot be used for list_dir",
+            root.display(),
+        )
+    })?;
 
     let mut registry = ToolRegistry::new();
     registry

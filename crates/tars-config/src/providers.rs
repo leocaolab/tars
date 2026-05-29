@@ -420,7 +420,10 @@ impl ProviderConfig {
         // Helpers — every provider needs these checks, so factor them out
         // rather than open-code each variant arm.
         let check_default_model = |dm: &str, sink: &mut Vec<ValidationError>| {
-            if dm.is_empty() {
+            // `trim()` so a whitespace-only value (`"   "`) is rejected too —
+            // it would pass a bare `is_empty()` check but fail at runtime
+            // when the provider tries to use it. Matches the base_url checks.
+            if dm.trim().is_empty() {
                 sink.push(ValidationError::new(
                     key("default_model"),
                     "must not be empty",
@@ -432,6 +435,24 @@ impl ProviderConfig {
                 sink.push(ValidationError::new(
                     key("base_url"),
                     "must not be empty when set (omit the field to use the default)",
+                ));
+            }
+        };
+        // Reject explicitly-set zero token caps: a model can't have a
+        // zero context window or zero output budget, and a `Some(0)`
+        // would silently corrupt the runtime `Capabilities` via
+        // `apply_to`. `None` (no override) stays valid.
+        let check_capabilities = |caps: &CapabilitiesOverrides, sink: &mut Vec<ValidationError>| {
+            if matches!(caps.max_context_tokens, Some(0)) {
+                sink.push(ValidationError::new(
+                    key("max_context_tokens"),
+                    "must be > 0 when set",
+                ));
+            }
+            if matches!(caps.max_output_tokens, Some(0)) {
+                sink.push(ValidationError::new(
+                    key("max_output_tokens"),
+                    "must be > 0 when set",
                 ));
             }
         };
@@ -469,6 +490,7 @@ impl ProviderConfig {
             ProviderConfig::OpenaiCompat {
                 base_url,
                 default_model,
+                capabilities,
                 ..
             } => {
                 if base_url.trim().is_empty() {
@@ -478,14 +500,25 @@ impl ProviderConfig {
                     ));
                 }
                 check_default_model(default_model, sink);
+                check_capabilities(capabilities, sink);
             }
             ProviderConfig::Anthropic {
                 base_url,
+                api_version,
                 auth,
                 default_model,
                 ..
             } => {
                 check_opt_base_url(base_url, sink);
+                // Same empty-when-set contract as base_url: a `Some("")`
+                // or `Some("   ")` would pass an unchecked `..` and then
+                // surface as a confusing wire error against the backend.
+                if matches!(api_version, Some(s) if s.trim().is_empty()) {
+                    sink.push(ValidationError::new(
+                        key("api_version"),
+                        "must not be empty when set (omit the field to use the default)",
+                    ));
+                }
                 if matches!(auth, Auth::None) {
                     sink.push(ValidationError::new(
                         key("auth"),
@@ -512,20 +545,24 @@ impl ProviderConfig {
             ProviderConfig::Vllm {
                 base_url,
                 default_model,
+                capabilities,
                 ..
             }
             | ProviderConfig::Mlx {
                 base_url,
                 default_model,
+                capabilities,
                 ..
             }
             | ProviderConfig::Llamacpp {
                 base_url,
                 default_model,
+                capabilities,
                 ..
             } => {
                 check_opt_base_url(base_url, sink);
                 check_default_model(default_model, sink);
+                check_capabilities(capabilities, sink);
             }
             ProviderConfig::ClaudeCli {
                 executable,
@@ -538,7 +575,7 @@ impl ProviderConfig {
                 timeout_secs,
                 default_model,
             } => {
-                if executable.is_empty() {
+                if executable.trim().is_empty() {
                     sink.push(ValidationError::new(key("executable"), "must not be empty"));
                 }
                 check_timeout(*timeout_secs, sink);
@@ -550,7 +587,7 @@ impl ProviderConfig {
                 default_model,
                 ..
             } => {
-                if executable.is_empty() {
+                if executable.trim().is_empty() {
                     sink.push(ValidationError::new(key("executable"), "must not be empty"));
                 }
                 check_timeout(*timeout_secs, sink);

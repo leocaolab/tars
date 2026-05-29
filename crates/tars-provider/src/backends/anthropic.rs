@@ -222,7 +222,15 @@ impl BatchSubmitter for AnthropicProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
+            let text = resp.text().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    %status,
+                    "anthropic batch: failed to read error response body; \
+                     classifying by HTTP status only",
+                );
+                String::new()
+            });
             return Err(self.adapter.classify_error(status, &h, &text));
         }
 
@@ -257,7 +265,15 @@ impl BatchSubmitter for AnthropicProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
+            let text = resp.text().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    %status,
+                    "anthropic batch: failed to read error response body; \
+                     classifying by HTTP status only",
+                );
+                String::new()
+            });
             return Err(self.adapter.classify_error(status, &h, &text));
         }
 
@@ -304,7 +320,15 @@ impl BatchSubmitter for AnthropicProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
+            let text = resp.text().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    %status,
+                    "anthropic batch: failed to read error response body; \
+                     classifying by HTTP status only",
+                );
+                String::new()
+            });
             return Err(self.adapter.classify_error(status, &h, &text));
         }
 
@@ -337,7 +361,15 @@ impl BatchSubmitter for AnthropicProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
+            let text = resp.text().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    %status,
+                    "anthropic batch: failed to read error response body; \
+                     classifying by HTTP status only",
+                );
+                String::new()
+            });
             return Err(self.adapter.classify_error(status, &h, &text));
         }
         Ok(())

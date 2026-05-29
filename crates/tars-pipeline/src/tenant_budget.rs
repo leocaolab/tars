@@ -106,11 +106,24 @@ impl InMemoryBudgetStore {
 
     /// Set the tenant's remaining balance to `amount_usd`. Calling with
     /// a brand-new tenant configures it for the first time.
+    ///
+    /// A non-finite (`NaN`/`±inf`) or negative balance is clamped to a
+    /// fail-closed `0.0`: a `NaN` balance would make every `estimate >
+    /// remaining` pre-check `false` and silently uncap the tenant, so we
+    /// refuse to store it.
     pub async fn set(&self, tenant: &TenantId, amount_usd: f64) {
-        self.balances
-            .lock()
-            .await
-            .insert(tenant.clone(), amount_usd);
+        let safe = if amount_usd.is_finite() && amount_usd >= 0.0 {
+            amount_usd
+        } else {
+            tracing::warn!(
+                event = "tenant_budget.invalid_balance",
+                tenant_id = %tenant,
+                requested_usd = amount_usd,
+                "rejected non-finite/negative tenant balance; clamping to 0.0 (fail-closed)",
+            );
+            0.0
+        };
+        self.balances.lock().await.insert(tenant.clone(), safe);
     }
 
     /// Forget a tenant's balance (reverts to unconfigured / unlimited).
@@ -208,7 +221,15 @@ impl TenantBudgetService {
         self.pricing.input_per_million == 0.0 && self.pricing.output_per_million == 0.0
     }
 
-    /// Strict upper-bound USD estimate (chars/4 input + max_output × output).
+    /// Best-effort pre-call USD estimate (chars/4 input + max_output ×
+    /// output). **Not** a strict upper bound: the `chars/4` heuristic is
+    /// tuned for English and *underestimates* token count for CJK and
+    /// other multi-byte scripts (a Chinese character is ~1 token but
+    /// only ~0.75 here). That's acceptable given the module-level
+    /// soft-cap contract — the real cost is reconciled post-call via the
+    /// `Finished` event's actual `Usage` — but callers needing a hard
+    /// cap must enforce it in their own `BudgetStore`.
+    ///
     /// Mirrors [`crate::PerCallBudgetMiddleware`] — kept duplicated rather
     /// than pulled into a shared util because the two middlewares are
     /// likely to diverge (V2 may add cache-discount estimates here).
@@ -239,8 +260,15 @@ impl LlmService for TenantBudgetService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        if let Ok(mut t) = ctx.telemetry.lock() {
-            t.layers.push("tenant_budget".into());
+        match ctx.telemetry.lock() {
+            Ok(mut t) => t.layers.push("tenant_budget".into()),
+            // Telemetry is best-effort, but a poisoned lock means a prior
+            // task panicked while holding it — surface it for debugging
+            // rather than dropping the trace entry silently.
+            Err(e) => tracing::debug!(
+                error = %e,
+                "tenant_budget: telemetry mutex poisoned recording layer trace",
+            ),
         }
 
         if self.is_zero_pricing() {
@@ -260,6 +288,22 @@ impl LlmService for TenantBudgetService {
         let estimate = self.estimate_cost_usd(&req);
         match self.store.remaining(&ctx.tenant_id).await {
             Ok(Some(remaining)) => {
+                // The trait can't statically forbid a buggy/malicious
+                // store from returning NaN/inf/negative. Such a value
+                // would make `estimate > remaining` always `false` and
+                // silently uncap the tenant, so fail-closed instead.
+                if !remaining.is_finite() || remaining < 0.0 {
+                    tracing::error!(
+                        event = "tenant_budget.invalid_remaining",
+                        tenant_id = %ctx.tenant_id,
+                        remaining_usd = remaining,
+                        trace_id = %ctx.trace_id,
+                    );
+                    return Err(ProviderError::Internal(
+                        "tenant budget store returned an invalid (non-finite/negative) balance"
+                            .into(),
+                    ));
+                }
                 if estimate > remaining {
                     tracing::warn!(
                         event = "tenant_budget.exceeded",
@@ -314,6 +358,21 @@ impl LlmService for TenantBudgetService {
             while let Some(ev) = s.next().await {
                 if let Ok(ChatEvent::Finished { usage, .. }) = &ev {
                     let real_cost = pricing.cost_for(usage);
+                    // Guard against a bad `Pricing`/`Usage` yielding a
+                    // NaN/inf/negative cost: debiting it would poison the
+                    // balance (`x -= NaN` → NaN; `x -= -y` → balance grows).
+                    // Skip the debit and log loudly instead of corrupting state.
+                    if !real_cost.0.is_finite() || real_cost.0 < 0.0 {
+                        tracing::error!(
+                            event = "tenant_budget.invalid_cost",
+                            tenant_id = %tenant,
+                            cost_usd = real_cost.0,
+                            trace_id = %trace_id,
+                            "computed cost is non-finite/negative; skipping debit",
+                        );
+                        yield ev;
+                        continue;
+                    }
                     match store.debit(&tenant, real_cost.0).await {
                         Ok(Some(remaining)) => {
                             tracing::debug!(

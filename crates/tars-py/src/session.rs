@@ -32,7 +32,7 @@ use tars_runtime::{
 use tars_types::{JsonSchema, ModelHint, ToolSpec};
 
 use crate::errors::{provider_to_py, runtime_to_py};
-use crate::{Pipeline as PyPipeline, Response, TOKIO, Usage};
+use crate::{Pipeline as PyPipeline, Response, Usage, tokio_runtime};
 
 /// `Session` wraps `tars_runtime::Session`. Mutable internally — every
 /// method takes `&mut self`. PyO3's per-instance lock serializes
@@ -232,7 +232,8 @@ impl Session {
         // self; instead, we run the future on the tokio runtime under
         // `allow_threads`, with a tiny block_in_place to satisfy the
         // borrow checker — `inner` is only touched on this thread.
-        let result = py.allow_threads(|| TOKIO.block_on(self.inner.send(user, max_output_tokens)));
+        let rt = tokio_runtime()?;
+        let result = py.allow_threads(|| rt.block_on(self.inner.send(user, max_output_tokens)));
         let (resp, telemetry) = result.map_err(session_err_to_py)?;
         Ok(chat_response_to_py(resp, telemetry))
     }
@@ -245,8 +246,9 @@ impl Session {
         user: &str,
         max_output_tokens: Option<u32>,
     ) -> PyResult<String> {
+        let rt = tokio_runtime()?;
         let result: Result<String, SessionError> =
-            py.allow_threads(|| TOKIO.block_on(self.inner.send_text(user, max_output_tokens)));
+            py.allow_threads(|| rt.block_on(self.inner.send_text(user, max_output_tokens)));
         result.map_err(session_err_to_py)
     }
 

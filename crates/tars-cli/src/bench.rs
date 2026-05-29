@@ -318,8 +318,15 @@ fn print_summary(provider_id: &str, model: &str, samples: &[Sample]) {
 
     let mean_f = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
     let mean_u = |v: &[u64]| v.iter().sum::<u64>() as f64 / v.len() as f64;
-    let p50_f = |v: &[f64]| v[v.len() / 2];
+    // Both percentile closures are called only after the `valid.is_empty()`
+    // guard above, but they defend against empty input anyway so a future
+    // refactor/reuse can't turn an out-of-bounds index (p50) or a
+    // `v.len() - 1` underflow (p99) into a panic.
+    let p50_f = |v: &[f64]| v.get(v.len() / 2).copied().unwrap_or(0.0);
     let p99_f = |v: &[f64]| {
+        if v.is_empty() {
+            return 0.0;
+        }
         // For n < 100 this isn't a true p99 — clamp to the worst sample.
         let idx = ((v.len() as f64 * 0.99).ceil() as usize)
             .saturating_sub(1)

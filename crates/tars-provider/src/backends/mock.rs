@@ -74,17 +74,32 @@ impl MockProvider {
 
     /// Replace the canned response — useful for multi-step tests that
     /// want to vary behavior between invocations.
+    ///
+    /// Recovers from a poisoned mutex (`into_inner`) rather than
+    /// `unwrap()`-panicking — same rationale as [`Self::stream`]: a
+    /// prior panic while holding the lock shouldn't cascade-panic this
+    /// helper and mask the original test failure.
     pub fn set_response(&self, r: CannedResponse) {
-        self.state.lock().unwrap().response = r;
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).response = r;
     }
 
     /// Snapshot of the requests recorded so far.
     pub fn history_snapshot(&self) -> Vec<ChatRequest> {
-        self.state.lock().unwrap().history.requests.clone()
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .history
+            .requests
+            .clone()
     }
 
     pub fn call_count(&self) -> usize {
-        self.state.lock().unwrap().history.requests.len()
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .history
+            .requests
+            .len()
     }
 }
 
