@@ -229,7 +229,8 @@ CLAUDE.md
 
 # Gemini CLI local data
 .consumer-state/
-.arc/
+.arc/*
+!.arc/config.toml.example
 
 # === Secrets / live config (extra belt-and-suspenders) ===
 # .env is already covered above via the Python "Environments" block.

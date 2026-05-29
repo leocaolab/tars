@@ -1,0 +1,8 @@
+# A.R.C. runtime data — local to this clone, never commit.
+# bodies.db / pipeline_events.db under tars/ hold raw request +
+# response bodies (your source + model output); arc.db, reviews/ and
+# progress/ are regenerable. Only the config template is shared —
+# config.toml itself is your local environment routing.
+*
+!.gitignore
+!config.toml.example

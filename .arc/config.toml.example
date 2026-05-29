@@ -1,0 +1,76 @@
+# A.R.C. provider registry — tars-py edition.
+#
+# arc routes every production LLM call through tars-py. The actual
+# provider configuration (api keys, endpoints, model defaults) lives
+# in the user's tars TOML at the OS-conventional location:
+#   macOS:  ~/Library/Application Support/tars/config.toml
+#   Linux:  $XDG_CONFIG_HOME/tars/config.toml  (or ~/.config/tars/...)
+# Override with the ARC_TARS_CONFIG env var.
+#
+# This file maps role → tars provider_id + model. Rules:
+#   - `type` is a tars provider_id from the user's tars TOML
+#     (built-in: openai | anthropic | gemini | claude_cli | gemini_cli
+#      | mlx | llamacpp; user-defined ids resolve to whatever the user
+#      configured under that name).
+#   - `model` selects which model the provider serves. Optional —
+#     if omitted, tars's per-provider default applies.
+#   - Every name under [roles] must reference a declared [providers.*]
+
+# ── Providers ─────────────────────────────────────────────────────
+
+[providers.gemini_pro]
+type = "gemini"
+model = "gemini-3.1-pro-preview"
+# Thinking-only model: rejects a 0 thinking budget. "auto" lets the
+# provider auto-decide depth (preserves prior hardcoded behavior, now
+# config-driven). Accepted: "off" | "auto" | "budget:<N>".
+thinking = "auto"
+
+[providers.gemini_flash]
+type = "gemini"
+model = "gemini-3.5-flash"
+
+[providers.claude_sonnet]
+type = "anthropic"
+model = "claude-sonnet-4-5"
+
+[providers.claude_cli]
+type = "claude_cli"
+model = "claude-sonnet-4-5"
+# Default tars timeout is 300s. `claude -p` generates paginated L4
+# findings serially; the biggest source files (>10k prompt chars)
+# blow past 300s and the subprocess gets killed mid-scan (observed on
+# arc-vscode tree.ts + webviews.ts). 900s gives big files headroom.
+timeout_secs = 900
+
+[providers.gpt_4o]
+type = "openai"
+model = "gpt-4o"
+
+# Local LM Studio via tars's openai_compat type. The endpoint + auth
+# (none) live in the user's tars TOML under [providers.qwen_coder_local].
+[providers.qwen_local]
+type = "qwen_coder_local"
+model = "qwen/qwen3-coder-30b"
+
+# Gemini via the `gemini` CLI binary (uses your `gemini login` session,
+# no API key needed). Cloud, fast, much stronger than local 30B 4bit.
+[providers.gemini_flash_cli]
+type = "gemini_cli"
+model = "gemini-3-flash-preview"
+
+# ── Role mappings ─────────────────────────────────────────────────
+# Each role may be filled by any declared provider.
+#
+# ANTI-INCEST RULE: the critic / audit / agent provider families MUST
+# NOT collide. See docs/review-philosophy.md. Claude Code CLI is the
+# primary Agent; therefore non-Anthropic families fill the review roles.
+
+[roles]
+default    = "gemini_pro"           # gemini-3.1-pro-preview via API (.env key)
+critic     = "gemini_pro"           # FIND bugs: gemini-3.1-pro-preview (flash missed deep/platform bugs)
+critic_l5  = "gemini_pro"           # FIND bugs: gemini-3.1-pro-preview (depth matters for L5 arch)
+critic_l4  = "gemini_pro"           # FIND bugs: same
+fixer      = "claude_cli"           # FIX bugs: claude (code resolves role "fixer", not "agent")
+audit      = "gpt_4o"               # third family for tri-party anti-incest
+cleanup    = "claude_cli"           # FIX/rewrite: claude
