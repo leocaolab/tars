@@ -133,10 +133,12 @@ fn render_human(r: &RunReport, out: &mut dyn Write) -> std::io::Result<()> {
         writeln!(out)?;
         writeln!(out, "errors ({}):", r.errors.len())?;
         for e in &r.errors {
-            let truncated = if e.error.len() > 80 {
-                format!("{}…", &e.error[..80])
-            } else {
-                e.error.clone()
+            // Truncate by character, not byte: error strings may carry
+            // arbitrary Unicode from external systems, and slicing at a
+            // byte index that lands mid-codepoint panics.
+            let truncated = match e.error.char_indices().nth(80) {
+                Some((byte_idx, _)) => format!("{}…", &e.error[..byte_idx]),
+                None => e.error.clone(),
             };
             writeln!(
                 out,

@@ -130,6 +130,9 @@ mod tests {
     fn tempfile_with_contents(contents: &str) -> tempfile::NamedTempFile {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         write!(f, "{contents}").unwrap();
+        // `load_from_file` opens a fresh handle on `f.path()`; flush so the
+        // bytes are guaranteed visible through that second handle.
+        f.flush().unwrap();
         f
     }
 

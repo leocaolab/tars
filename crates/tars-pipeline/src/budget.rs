@@ -61,6 +61,8 @@ impl PerCallBudgetMiddleware {
     /// `cap_usd` is the per-call upper bound. Estimates at or above
     /// this value are rejected with [`ProviderError::BudgetExceeded`].
     pub fn new(cap_usd: f64, capabilities: &Capabilities) -> Self {
+        validate_cap(cap_usd);
+        validate_pricing(&capabilities.pricing);
         Self {
             cap_usd,
             pricing: capabilities.pricing,
@@ -72,12 +74,42 @@ impl PerCallBudgetMiddleware {
     /// when you don't have a `Capabilities` handy (tests, hand-rolled
     /// services).
     pub fn from_parts(cap_usd: f64, pricing: Pricing, default_max_output_tokens: u32) -> Self {
+        validate_cap(cap_usd);
+        validate_pricing(&pricing);
         Self {
             cap_usd,
             pricing,
             default_max_output_tokens,
         }
     }
+}
+
+/// Reject a non-finite or negative cap at construction. A NaN cap would
+/// make `estimate >= cap_usd` always false (NaN compares false), silently
+/// disabling the budget; a negative cap would reject every call. Both are
+/// configuration bugs, so fail loudly where they're introduced.
+fn validate_cap(cap_usd: f64) {
+    assert!(
+        cap_usd.is_finite() && cap_usd >= 0.0,
+        "PerCallBudgetMiddleware cap_usd must be finite and non-negative, got {cap_usd}"
+    );
+}
+
+/// Reject non-finite or negative pricing rates. A NaN/inf rate would
+/// propagate into the cost estimate and bypass (NaN) or always-trip (inf)
+/// the budget. `Capabilities`-sourced pricing should already be valid;
+/// this guards the hand-rolled `from_parts` path too.
+fn validate_pricing(pricing: &Pricing) {
+    assert!(
+        pricing.input_per_million.is_finite() && pricing.input_per_million >= 0.0,
+        "Pricing.input_per_million must be finite and non-negative, got {}",
+        pricing.input_per_million
+    );
+    assert!(
+        pricing.output_per_million.is_finite() && pricing.output_per_million >= 0.0,
+        "Pricing.output_per_million must be finite and non-negative, got {}",
+        pricing.output_per_million
+    );
 }
 
 impl Middleware for PerCallBudgetMiddleware {
@@ -144,8 +176,16 @@ impl LlmService for PerCallBudgetService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        if let Ok(mut t) = ctx.telemetry.lock() {
-            t.layers.push("per_call_budget".into());
+        match ctx.telemetry.lock() {
+            Ok(mut t) => t.layers.push("per_call_budget".into()),
+            // Telemetry is best-effort, so a failed layer trace must not
+            // fail the call — but a poisoned lock means another thread
+            // panicked holding it, so leave a breadcrumb rather than
+            // swallowing silently. [arc:intentional-handle]
+            Err(_) => tracing::debug!(
+                event = "per_call_budget.telemetry_poisoned",
+                "telemetry mutex poisoned; skipping layer trace"
+            ),
         }
 
         if self.is_zero_pricing() {

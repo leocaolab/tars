@@ -68,8 +68,15 @@ impl LlmService for TelemetryService {
         // completes (not just when call() returns, which is when the
         // stream OPENS).
         let telemetry = ctx.telemetry.clone();
-        if let Ok(mut t) = telemetry.lock() {
-            t.layers.push("telemetry".into());
+        // Best-effort: never fail the call on a telemetry lock, but a
+        // poisoned lock means another thread panicked holding it — leave a
+        // breadcrumb instead of swallowing silently. [arc:intentional-handle]
+        match telemetry.lock() {
+            Ok(mut t) => t.layers.push("telemetry".into()),
+            Err(_) => tracing::debug!(
+                event = "telemetry.mutex_poisoned",
+                "telemetry mutex poisoned; skipping layer trace"
+            ),
         }
 
         tracing::info!(
@@ -142,8 +149,12 @@ fn wrap_stream(
                         cached_input_tokens = usage.cached_input_tokens,
                         thinking_tokens = usage.thinking_tokens,
                     );
-                    if let Ok(mut t) = telemetry.lock() {
-                        t.pipeline_total_ms = Some(total_ms);
+                    match telemetry.lock() {
+                        Ok(mut t) => t.pipeline_total_ms = Some(total_ms),
+                        Err(_) => tracing::debug!(
+                            event = "telemetry.mutex_poisoned",
+                            "telemetry mutex poisoned; skipping pipeline_total_ms"
+                        ),
                     }
                 }
                 Err(e) => {
@@ -157,8 +168,12 @@ fn wrap_stream(
                         error_class = ?e.class(),
                         error = %e,
                     );
-                    if let Ok(mut t) = telemetry.lock() {
-                        t.pipeline_total_ms = Some(total_ms);
+                    match telemetry.lock() {
+                        Ok(mut t) => t.pipeline_total_ms = Some(total_ms),
+                        Err(_) => tracing::debug!(
+                            event = "telemetry.mutex_poisoned",
+                            "telemetry mutex poisoned; skipping pipeline_total_ms"
+                        ),
                     }
                 }
                 _ => {}

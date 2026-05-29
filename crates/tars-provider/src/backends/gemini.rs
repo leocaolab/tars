@@ -402,9 +402,19 @@ impl GeminiAdapter {
                     }]
                 }))
             }
-            Message::System { content } => {
-                let parts: Vec<Value> = content.iter().map(Self::translate_part).collect();
-                Ok(json!({"role": "user", "parts": parts}))
+            Message::System { content: _ } => {
+                // Gemini has no "system" message role — system text belongs
+                // in `systemInstruction`, which `translate_request` builds
+                // from `ChatRequest.system` (see lines below). Silently
+                // relabelling a system message as "user" would change how
+                // the model weights the instruction, so reject with an
+                // actionable error (mirrors the Tool-message handling above)
+                // and steer callers to the dedicated `system` field.
+                Err(ProviderError::InvalidRequest(
+                    "Gemini does not support a `system` message role; \
+                     put system text in `ChatRequest.system` instead"
+                        .into(),
+                ))
             }
         }
     }
@@ -738,6 +748,12 @@ impl HttpAdapter for GeminiAdapter {
             StatusCode::BAD_REQUEST => {
                 let lower = message.to_lowercase();
                 if lower.contains("token") && lower.contains("limit") {
+                    // Gemini's 400 body does not reliably carry machine-
+                    // readable token counts (the message is free-form
+                    // prose), so we cannot populate these fields. `0`/`0`
+                    // is a documented sentinel meaning "unknown for this
+                    // provider"; callers must rely on `message`/the error
+                    // kind, not these numbers, for Gemini context errors.
                     ProviderError::ContextTooLong {
                         limit: 0,
                         requested: 0,

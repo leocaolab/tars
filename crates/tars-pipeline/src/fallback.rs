@@ -175,9 +175,16 @@ impl LlmService for FallbackService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        // Layer trace.
-        if let Ok(mut t) = ctx.telemetry.lock() {
-            t.layers.push("fallback".into());
+        // Layer trace. Best-effort: a poisoned lock (another thread
+        // panicked while holding it) must not fail the call, but we leave
+        // a breadcrumb rather than swallowing it silently.
+        // [arc:intentional-handle]
+        match ctx.telemetry.lock() {
+            Ok(mut t) => t.layers.push("fallback".into()),
+            Err(_) => tracing::debug!(
+                event = "fallback.telemetry_poisoned",
+                "telemetry mutex poisoned; skipping layer trace"
+            ),
         }
 
         // Try the primary first.

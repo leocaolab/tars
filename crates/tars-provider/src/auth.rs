@@ -115,6 +115,16 @@ impl AuthResolver for BasicAuthResolver {
                         }
                     }
                     let raw = value.expose();
+                    // Enforce the same size cap as Env/File sources: an
+                    // oversized inline secret (paste accident, wrong field)
+                    // would otherwise be cloned around inside ResolvedAuth
+                    // unchecked.
+                    if raw.len() > MAX_CREDENTIAL_BYTES {
+                        return Err(AuthError::Internal(format!(
+                            "inline credential exceeds size cap ({} bytes > {MAX_CREDENTIAL_BYTES})",
+                            raw.len()
+                        )));
+                    }
                     let trimmed = raw.trim();
                     if trimmed.is_empty() {
                         return Err(AuthError::Missing("inline credential is empty".into()));

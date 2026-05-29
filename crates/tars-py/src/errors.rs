@@ -24,7 +24,7 @@
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::PyList;
 
 use tars_config::ConfigError;
 use tars_types::error::{ErrorClass, ProviderError};
@@ -64,73 +64,88 @@ pub fn provider_to_py(err: ProviderError) -> PyErr {
     let message = err.to_string();
 
     Python::with_gil(|py| {
-        // Pick the right exception class. Subclassing for specific
-        // variants gives callers idiomatic `except SubclassError as e`
-        // branching with typed attributes; generic variants stay on
-        // the base `TarsProviderError`.
-        let exc = match &err {
-            ProviderError::NoCompatibleCandidate { .. } => {
-                TarsRoutingExhaustedError::new_err(message)
-            }
-            _ => TarsProviderError::new_err(message),
-        };
-
-        // Common attributes — set on every TarsProviderError (and
-        // therefore on subclasses too via Python attribute lookup).
-        let value = exc.value(py);
-        let _ = value.setattr("kind", kind);
-        let _ = value.setattr("retry_after", retry_after);
-        let _ = value.setattr("is_retriable", is_retriable);
-
-        // Variant-specific structured attributes.
-        match &err {
-            ProviderError::UnknownTool { name } => {
-                let _ = value.setattr("tool_name", name);
-            }
-            ProviderError::NoCompatibleCandidate { skipped } => {
-                // `skipped_candidates: list[(provider_id: str,
-                // reasons: list[CompatibilityReason])]`. Each reason
-                // re-uses the existing `CompatibilityReasonPy` class
-                // so callers get the same kind/message/detail surface
-                // they get from `Pipeline.check_compatibility`.
-                let py_skipped = PyList::empty(py);
-                for (id, reasons) in skipped {
-                    let id_str = id.to_string();
-                    let py_reasons = PyList::empty(py);
-                    for r in reasons {
-                        let kind = r.kind().to_string();
-                        let message = r.to_string();
-                        let detail_json = compat_reason_detail(r);
-                        let item = pyo3::Py::new(
-                            py,
-                            crate::CompatibilityReasonPy {
-                                kind,
-                                message,
-                                detail_json,
-                            },
-                        )
-                        .ok();
-                        if let Some(item) = item {
-                            let _ = py_reasons.append(item);
-                        }
-                    }
-                    let tuple = PyTuple::new(
-                        py,
-                        &[
-                            id_str.into_pyobject(py).unwrap().into_any(),
-                            py_reasons.into_any(),
-                        ],
-                    );
-                    if let Ok(t) = tuple {
-                        let _ = py_skipped.append(t);
-                    }
-                }
-                let _ = value.setattr("skipped_candidates", py_skipped);
-            }
-            _ => {}
+        // The doc contract promises `kind` / `retry_after` /
+        // `is_retriable` (and variant-specific attributes) on the
+        // returned exception. Decorating it can in principle fail on the
+        // Python side (setattr, list/tuple construction), so we build it
+        // in a fallible helper and propagate any failure as the returned
+        // exception instead of silently handing back a half-populated
+        // object that violates the contract.
+        match build_provider_exc(py, &err, kind, retry_after, is_retriable, message) {
+            Ok(exc) => exc,
+            Err(decorate_err) => decorate_err,
         }
-        exc
     })
+}
+
+/// Build a fully-decorated `TarsProviderError` (or subclass). Returns the
+/// exception on success, or the `PyErr` that occurred while decorating it.
+/// Keeping every Python operation behind `?` is what makes the documented
+/// attribute contract enforceable rather than best-effort.
+fn build_provider_exc(
+    py: Python<'_>,
+    err: &ProviderError,
+    kind: &'static str,
+    retry_after: Option<f64>,
+    is_retriable: bool,
+    message: String,
+) -> PyResult<PyErr> {
+    // Pick the right exception class. Subclassing for specific variants
+    // gives callers idiomatic `except SubclassError as e` branching with
+    // typed attributes; generic variants stay on the base
+    // `TarsProviderError`.
+    let exc = match err {
+        ProviderError::NoCompatibleCandidate { .. } => TarsRoutingExhaustedError::new_err(message),
+        _ => TarsProviderError::new_err(message),
+    };
+
+    // Common attributes — set on every TarsProviderError (and therefore
+    // on subclasses too via Python attribute lookup).
+    let value = exc.value(py);
+    value.setattr("kind", kind)?;
+    value.setattr("retry_after", retry_after)?;
+    value.setattr("is_retriable", is_retriable)?;
+
+    // Variant-specific structured attributes.
+    match err {
+        ProviderError::UnknownTool { name } => {
+            value.setattr("tool_name", name)?;
+        }
+        ProviderError::NoCompatibleCandidate { skipped } => {
+            // `skipped_candidates: list[(provider_id: str,
+            // reasons: list[CompatibilityReason])]`. Each reason re-uses
+            // the existing `CompatibilityReasonPy` class so callers get
+            // the same kind/message/detail surface they get from
+            // `Pipeline.check_compatibility`.
+            let py_skipped = PyList::empty(py);
+            for (id, reasons) in skipped {
+                let id_str = id.to_string();
+                let py_reasons = PyList::empty(py);
+                for r in reasons {
+                    let kind = r.kind().to_string();
+                    let message = r.to_string();
+                    let detail_json = compat_reason_detail(r);
+                    let item = pyo3::Py::new(
+                        py,
+                        crate::CompatibilityReasonPy {
+                            kind,
+                            message,
+                            detail_json,
+                        },
+                    )?;
+                    py_reasons.append(item)?;
+                }
+                // `(str, list)` → `Bound<PyTuple>`; the tuple's
+                // `IntoPyObject` is fallible, so `?` covers element
+                // conversion without an `unwrap` panic path.
+                let tuple = (id_str, py_reasons).into_pyobject(py)?;
+                py_skipped.append(tuple)?;
+            }
+            value.setattr("skipped_candidates", py_skipped)?;
+        }
+        _ => {}
+    }
+    Ok(exc)
 }
 
 /// Mirror of the detail-extraction logic in `compatibility_to_py` so

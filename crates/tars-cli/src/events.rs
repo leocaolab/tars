@@ -18,7 +18,7 @@
 //! files directly or use `tars_storage::SqlitePipelineEventStore`.
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -88,6 +88,13 @@ pub async fn execute(args: EventsArgs) -> Result<()> {
             dir.display()
         );
     }
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "event store path is not a directory: {}\n\
+             Expected a directory containing `pipeline_events.db` + `bodies.db`.",
+            dir.display()
+        );
+    }
     let events = open_events(&dir)?;
     let bodies = open_bodies(&dir)?;
 
@@ -130,20 +137,32 @@ fn open_bodies(dir: &std::path::Path) -> Result<std::sync::Arc<dyn BodyStore>> {
 
 async fn list(store: &dyn PipelineEventStore, args: ListArgs) -> Result<()> {
     let since = parse_since(&args.since)?;
+    // Tag filter is applied in-process (no SQL pushdown yet; that's v2).
+    // When a tag is set we must NOT push `--limit` down to the query —
+    // doing so would cap the *scan window* to N rows and then filter,
+    // so `--limit 50` could yield far fewer than 50 matches. Instead we
+    // scan the store's default window (capped at 10_000 by the store),
+    // filter by tag, then truncate to `--limit`, giving the expected
+    // "up to N matching events" semantics. Without a tag the limit is a
+    // direct SQL bound, which is exact.
     let q = PipelineEventQuery {
         tenant_id: args.tenant.map(TenantId::new),
         since,
         until: None,
-        limit: Some(args.limit),
+        limit: if args.tag.is_some() {
+            None
+        } else {
+            Some(args.limit)
+        },
     };
     let mut events = store.query(&q).await?;
-    // Tag filter: post-query filter (small N; full pushdown to SQL is v2).
     if let Some(tag) = &args.tag {
         events.retain(|ev| match ev {
             PipelineEvent::LlmCallFinished(e) => e.tags.iter().any(|t| t == tag),
             PipelineEvent::EvaluationScored(e) => e.tags.iter().any(|t| t == tag),
             _ => false,
         });
+        events.truncate(args.limit as usize);
     }
 
     if args.json {
@@ -206,12 +225,20 @@ async fn show(
     bodies: &dyn BodyStore,
     args: ShowArgs,
 ) -> Result<()> {
+    // The store exposes no by-id lookup, so we scan. The store caps any
+    // single query at 10_000 rows, so an event older than the most recent
+    // 10_000 is unreachable here — a documented v1 limitation (a real
+    // by-id index is the v2 fix). Make `limit` explicit and surface the
+    // cap in the not-found message so the failure isn't mistaken for a
+    // genuinely missing event.
+    const SCAN_LIMIT: u32 = 10_000;
     let all = store
         .query(&PipelineEventQuery {
-            limit: Some(10_000),
+            limit: Some(SCAN_LIMIT),
             ..Default::default()
         })
         .await?;
+    let scanned = all.len();
     let target = all
         .into_iter()
         .find(|ev| match ev {
@@ -219,7 +246,17 @@ async fn show(
             PipelineEvent::EvaluationScored(e) => e.event_id.to_string() == args.event_id,
             _ => false,
         })
-        .with_context(|| format!("event_id {} not found", args.event_id))?;
+        .with_context(|| {
+            if scanned >= SCAN_LIMIT as usize {
+                format!(
+                    "event_id {} not found in the most recent {SCAN_LIMIT} events \
+                     (older events are not scannable in v1; narrow with `tars events list --since`)",
+                    args.event_id
+                )
+            } else {
+                format!("event_id {} not found", args.event_id)
+            }
+        })?;
 
     let pretty = serde_json::to_string_pretty(&target)?;
     println!("{pretty}");
@@ -260,18 +297,25 @@ fn parse_since(s: &str) -> Result<Option<SystemTime>> {
     let n: u64 = num.parse().with_context(|| {
         format!("invalid --since value: {s} (expected like `1d`, `2h`, `30m`, `45s`, or `all`)")
     })?;
+    // Saturate rather than wrap: an absurdly large value like
+    // `1000000000000000000d` should clamp to "very far back", not silently
+    // overflow to a tiny window in release builds.
     let secs = match unit {
         "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86400,
+        "m" => n.saturating_mul(60),
+        "h" => n.saturating_mul(3600),
+        "d" => n.saturating_mul(86400),
         other => anyhow::bail!("unknown duration unit `{other}`; use s/m/h/d"),
     };
-    Ok(Some(SystemTime::now() - Duration::from_secs(secs)))
+    // `checked_sub` so a huge `secs` clamps to the epoch instead of
+    // panicking on SystemTime underflow.
+    let lower_bound = SystemTime::now()
+        .checked_sub(Duration::from_secs(secs))
+        .unwrap_or(UNIX_EPOCH);
+    Ok(Some(lower_bound))
 }
 
 fn format_ts(t: SystemTime) -> String {
-    use std::time::UNIX_EPOCH;
     let secs = t
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
