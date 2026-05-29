@@ -41,10 +41,17 @@ impl ConfigError {
     /// Construct a `ValidationFailed` variant, asserting the error list
     /// is non-empty. Callers building this enum from validation results
     /// already short-circuit on an empty list (see `Config::validate`),
-    /// so an empty vec here indicates an upstream bug. Enforced in all
-    /// builds because this is a `pub` constructor — a release-only escape
-    /// would render the confusing "config validation failed (0)".
-    pub fn validation_failed(errors: Vec<ValidationError>) -> Self {
+    /// so an empty vec here indicates an upstream bug.
+    ///
+    /// `pub(crate)`: this asserting helper is only ever called from
+    /// `ConfigManager` inside this crate (both call sites feed it the
+    /// output of `Config::validate`, which returns `Ok(())` rather than
+    /// an empty error list). Keeping it crate-private means no external
+    /// caller can trip the assertion — the panic stays a guard against
+    /// our own upstream bugs, not a fragile public API. The `assert!`
+    /// is retained so an in-crate regression fails loudly rather than
+    /// emitting the confusing "config validation failed (0)".
+    pub(crate) fn validation_failed(errors: Vec<ValidationError>) -> Self {
         assert!(
             !errors.is_empty(),
             "ConfigError::validation_failed called with no errors — \

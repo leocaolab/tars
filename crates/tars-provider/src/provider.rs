@@ -71,7 +71,10 @@ pub trait LlmProvider: Send + Sync + 'static {
         for m in &req.messages {
             for block in m.content() {
                 if let Some(t) = block.as_text() {
-                    chars += t.len();
+                    // saturating_add: this count gates budget/cost
+                    // checks, so on pathological inputs cap at usize::MAX
+                    // rather than wrap silently to a tiny value in release.
+                    chars = chars.saturating_add(t.len());
                 }
             }
         }

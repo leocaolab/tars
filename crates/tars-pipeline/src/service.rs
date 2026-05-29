@@ -57,7 +57,21 @@ impl LlmService for ProviderService {
         // outer call may invoke us multiple times — `provider_latency_ms`
         // accumulates across attempts so it reflects total provider
         // wall time across the whole call.
-        if let Ok(mut t) = ctx.telemetry.lock() {
+        // Recover from a poisoned lock rather than silently skipping:
+        // the provider id stamped here is what the outer event-emitter
+        // reads back to attribute the call, so dropping it on poison
+        // would corrupt routing diagnostics. A poison only flags that
+        // some other holder panicked; the data is still sound.
+        {
+            let mut t = match ctx.telemetry.lock() {
+                Ok(t) => t,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "provider_service: telemetry mutex poisoned; recovering to record provider metadata",
+                    );
+                    poisoned.into_inner()
+                }
+            };
             t.layers.push("provider".into());
             // Stamp the provider id so outer middleware (event emitter)
             // can record which provider actually ran post-routing.
@@ -77,12 +91,21 @@ impl LlmService for ProviderService {
             while let Some(ev) = s.next().await {
                 yield ev;
             }
-            // Stream end — accumulate provider latency.
+            // Stream end — accumulate provider latency. Recover from a
+            // poisoned lock (warn, don't silently drop) so retry-loop
+            // latency totals aren't lost when an unrelated holder panicked.
             let elapsed = started.elapsed().as_millis() as u64;
-            if let Ok(mut t) = telemetry.lock() {
-                let prev = t.provider_latency_ms.unwrap_or(0);
-                t.provider_latency_ms = Some(prev.saturating_add(elapsed));
-            }
+            let mut t = match telemetry.lock() {
+                Ok(t) => t,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "provider_service: telemetry mutex poisoned; recovering to record provider latency",
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            let prev = t.provider_latency_ms.unwrap_or(0);
+            t.provider_latency_ms = Some(prev.saturating_add(elapsed));
         };
         Ok(Box::pin(observed))
     }

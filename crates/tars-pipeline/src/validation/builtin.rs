@@ -8,8 +8,6 @@
 //! `RegexBannedValidator`) are NOT here — consumers compose them via
 //! the trait. See Doc 15 §5 for full philosophy.
 
-use std::collections::HashMap;
-
 use tars_types::{ChatRequest, ChatResponse, ValidationOutcome};
 
 use super::OutputValidator;
@@ -232,11 +230,6 @@ impl OutputValidator for MaxLengthValidator {
                     ResponseField::Text => new_resp.text = truncated,
                     ResponseField::Thinking => new_resp.thinking = truncated,
                 }
-                let mut metrics = HashMap::new();
-                metrics.insert(
-                    "dropped_chars".to_string(),
-                    serde_json::Value::from(dropped_chars),
-                );
                 ValidationOutcome::Filter {
                     response: new_resp,
                     dropped: vec![format!(

@@ -71,7 +71,10 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     let registry = build_registry_with_breaker(&cfg, args.dispatch.breaker)?;
     let dispatch = build_dispatch(&cfg, &registry, &args.dispatch)?;
 
-    let req = build_request(&args, &dispatch.model_label);
+    // Resolve the prompt once: `-` means read stdin. Reused below for
+    // both the request body and the trajectory `input_summary` length.
+    let prompt = resolve_prompt(&args)?;
+    let req = build_request(&args, &dispatch.model_label, &prompt);
 
     let cache_registry = build_cache(args.dispatch.cache_path.as_deref())?;
     let cache_factory = CacheKeyFactory::new(1);
@@ -96,7 +99,8 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     // tracing::warn so the LLM call itself isn't blocked by a
     // local-state hiccup (same Doc 03 §4.3 "best-effort, never fatal"
     // discipline the cache uses).
-    let trajectory_logger = build_trajectory_logger(&args, &dispatch).await;
+    let trajectory_logger =
+        build_trajectory_logger(&args, &dispatch, prompt.chars().count()).await;
 
     let dispatch_label = dispatch.label.clone();
 
@@ -155,7 +159,7 @@ impl TrajectoryLogger {
 
     async fn record_open_failure(&self, err: &tars_types::ProviderError) {
         let class = format!("{:?}", err.class()).to_lowercase();
-        let _ = self
+        if let Err(e) = self
             .runtime
             .append(
                 &self.traj,
@@ -167,8 +171,10 @@ impl TrajectoryLogger {
                 },
             )
             .await
-            .map_err(|e| tracing::warn!(error = %e, "trajectory: failed to record StepFailed"));
-        let _ = self
+        {
+            tracing::warn!(error = %e, "trajectory: failed to record StepFailed");
+        }
+        if let Err(e) = self
             .runtime
             .append(
                 &self.traj,
@@ -178,15 +184,15 @@ impl TrajectoryLogger {
                 },
             )
             .await
-            .map_err(
-                |e| tracing::warn!(error = %e, "trajectory: failed to record TrajectoryAbandoned"),
-            );
+        {
+            tracing::warn!(error = %e, "trajectory: failed to record TrajectoryAbandoned");
+        }
     }
 
     async fn record_outcome(&self, outcome: &Result<StreamOutcome>, dispatch: &Dispatch) {
         match outcome {
             Ok(o) => {
-                let _ = self
+                if let Err(e) = self
                     .runtime
                     .append(
                         &self.traj,
@@ -211,10 +217,10 @@ impl TrajectoryLogger {
                         },
                     )
                     .await
-                    .map_err(|e| {
-                        tracing::warn!(error = %e, "trajectory: failed to record LlmCallCaptured")
-                    });
-                let _ = self
+                {
+                    tracing::warn!(error = %e, "trajectory: failed to record LlmCallCaptured");
+                }
+                if let Err(e) = self
                     .runtime
                     .append(
                         &self.traj,
@@ -226,14 +232,14 @@ impl TrajectoryLogger {
                         },
                     )
                     .await
-                    .map_err(|e| {
-                        tracing::warn!(error = %e, "trajectory: failed to record StepCompleted")
-                    });
+                {
+                    tracing::warn!(error = %e, "trajectory: failed to record StepCompleted");
+                }
                 let stop = o
                     .stop_reason
                     .map(|s| format!("{s:?}"))
                     .unwrap_or_else(|| "no-finished".into());
-                let _ = self
+                if let Err(e) = self
                     .runtime
                     .append(
                         &self.traj,
@@ -246,12 +252,12 @@ impl TrajectoryLogger {
                         },
                     )
                     .await
-                    .map_err(|e| {
-                        tracing::warn!(error = %e, "trajectory: failed to record TrajectoryCompleted")
-                    });
+                {
+                    tracing::warn!(error = %e, "trajectory: failed to record TrajectoryCompleted");
+                }
             }
             Err(e) => {
-                let _ = self
+                if let Err(append_err) = self
                     .runtime
                     .append(
                         &self.traj,
@@ -262,8 +268,11 @@ impl TrajectoryLogger {
                             classification: "stream_error".into(),
                         },
                     )
-                    .await;
-                let _ = self
+                    .await
+                {
+                    tracing::warn!(error = %append_err, "trajectory: failed to record StepFailed");
+                }
+                if let Err(append_err) = self
                     .runtime
                     .append(
                         &self.traj,
@@ -272,7 +281,10 @@ impl TrajectoryLogger {
                             cause: format!("mid-stream error: {e:#}"),
                         },
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(error = %append_err, "trajectory: failed to record TrajectoryAbandoned");
+                }
             }
         }
     }
@@ -290,7 +302,11 @@ fn response_summary(o: &StreamOutcome) -> String {
     }
 }
 
-async fn build_trajectory_logger(args: &RunArgs, dispatch: &Dispatch) -> Option<TrajectoryLogger> {
+async fn build_trajectory_logger(
+    args: &RunArgs,
+    dispatch: &Dispatch,
+    prompt_chars: usize,
+) -> Option<TrajectoryLogger> {
     if args.dispatch.no_trajectory {
         return None;
     }
@@ -319,12 +335,12 @@ async fn build_trajectory_logger(args: &RunArgs, dispatch: &Dispatch) -> Option<
     };
 
     let input_summary = format!(
-        "prompt({} chars), model={}",
-        // We don't have the prompt here without threading it; the
+        // `prompt_chars` is the resolved prompt's char count (threaded
+        // from execute, which also handles the `-` => stdin case); the
         // length signal is enough for log-grep + future replay.
         // build_request stamped req.model = Explicit(model_label),
         // so model_label is the right thing to record.
-        dispatch.model_label.len(),
+        "prompt({prompt_chars} chars), model={}",
         dispatch.model_label,
     );
     let key = StepIdempotencyKey::compute(&traj, 1, &input_summary);
@@ -353,8 +369,24 @@ async fn build_trajectory_logger(args: &RunArgs, dispatch: &Dispatch) -> Option<
     Some(TrajectoryLogger { runtime, traj })
 }
 
-fn build_request(args: &RunArgs, model: &str) -> ChatRequest {
-    let mut req = ChatRequest::user(ModelHint::Explicit(model.to_string()), &args.prompt);
+/// Resolve the prompt source. The documented `-` sentinel reads the
+/// whole prompt from stdin (so callers can pipe large prompts without
+/// blowing the arg length limit); any other value is used verbatim.
+fn resolve_prompt(args: &RunArgs) -> Result<String> {
+    if args.prompt == "-" {
+        use std::io::Read as _;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("reading prompt from stdin (`--prompt -`)")?;
+        Ok(buf)
+    } else {
+        Ok(args.prompt.clone())
+    }
+}
+
+fn build_request(args: &RunArgs, model: &str, prompt: &str) -> ChatRequest {
+    let mut req = ChatRequest::user(ModelHint::Explicit(model.to_string()), prompt);
     if let Some(s) = &args.system {
         req = req.with_system(s);
     }
@@ -481,7 +513,7 @@ mod tests {
             temperature: Some(0.3),
             no_summary: false,
         };
-        let req = build_request(&args, "gpt-4o");
+        let req = build_request(&args, "gpt-4o", "hi");
         assert_eq!(req.max_output_tokens, Some(64));
         assert_eq!(req.temperature, Some(0.3));
         assert_eq!(req.system.as_deref(), Some("be brief"));

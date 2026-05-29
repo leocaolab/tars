@@ -157,9 +157,14 @@ impl LlmService for EventEmitterService {
                 Ok(Box::pin(observed))
             }
             Err(e) => {
-                // Failure before the stream opened. Emit synchronously
-                // (no stream to wrap). Still fire-and-forget.
-                let stores = (self.events.clone(), self.bodies.clone());
+                // Failure before the stream opened. No stream wrapper
+                // runs here, so — unlike the success path — nothing else
+                // writes the request body. Write it in the spawned task
+                // before the event row so the event's `request_ref`
+                // isn't a dangling ContentRef. Still fire-and-forget.
+                let events = self.events.clone();
+                let bodies = self.bodies.clone();
+                let req_body_for_write = req_body_bytes.clone();
                 let event = build_event(EventInputs {
                     result: result_for_error.expect("error path"),
                     response_body: None,
@@ -182,8 +187,23 @@ impl LlmService for EventEmitterService {
                     validation_handle,
                     tags,
                 });
+                let body_ref = request_ref.clone();
                 tokio::spawn(async move {
-                    fire_and_forget(stores.0, stores.1, event, tenant_id, request_ref).await;
+                    // Body first so the event's request_ref resolves; if
+                    // the body write fails the ref would dangle, so skip
+                    // emitting the event entirely (best-effort, but never
+                    // a broken reference).
+                    if let Err(err) =
+                        bodies.put(&body_ref, Bytes::from(req_body_for_write)).await
+                    {
+                        tracing::warn!(
+                            error = %err,
+                            "event_emitter: request body write failed on error path; \
+                             skipping event to avoid a dangling request_ref",
+                        );
+                        return;
+                    }
+                    fire_and_forget(events, bodies, event, tenant_id, request_ref).await;
                 });
                 Err(e)
             }
@@ -243,16 +263,31 @@ struct EventInputs {
 fn build_event(i: EventInputs) -> LlmCallFinished {
     let _ = i.req_body_bytes; // body content already hashed into request_ref + stored
 
-    let telemetry = i
-        .telemetry_handle
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
-    let validation_summary = i
-        .validation_handle
-        .lock()
-        .map(|g| g.summary.clone())
-        .unwrap_or_default();
+    // A poisoned lock means a prior holder panicked — but the data
+    // behind it is still intact and is exactly the diagnostic payload
+    // we don't want to lose. Recover the inner value (rather than
+    // silently substituting defaults) and warn so the panic isn't
+    // hidden.
+    let telemetry = match i.telemetry_handle.lock() {
+        Ok(g) => g.clone(),
+        Err(poisoned) => {
+            tracing::warn!(
+                "event_emitter: telemetry mutex poisoned (a prior holder panicked); \
+                 recovering its contents for the event",
+            );
+            poisoned.into_inner().clone()
+        }
+    };
+    let validation_summary = match i.validation_handle.lock() {
+        Ok(g) => g.summary.clone(),
+        Err(poisoned) => {
+            tracing::warn!(
+                "event_emitter: validation mutex poisoned (a prior holder panicked); \
+                 recovering its contents for the event",
+            );
+            poisoned.into_inner().summary.clone()
+        }
+    };
 
     // Provider id is stamped onto telemetry by `ProviderService` once
     // routing has resolved which provider runs. If telemetry never
@@ -407,22 +442,31 @@ fn wrap_stream_for_emit(
         });
 
         tokio::spawn(async move {
-            // Bodies — request always; response only if we have it.
+            let mut event = event;
+            // Bodies — request always; response only if we have it. The
+            // event row's ContentRefs must resolve, so a failed body
+            // write can't leave its ref hanging on the event:
+            //  - request body is required on the event → if its write
+            //    fails, skip the event entirely.
+            //  - response_ref is optional → if its write fails, null it
+            //    out and still emit (the rest of the event is useful).
             if let Err(e) = bodies_for_spawn
                 .put(&request_ref_for_spawn, Bytes::from(req_body_bytes_for_spawn))
                 .await
             {
                 tracing::warn!(
                     error = %e,
-                    "event_emitter: request body write failed (degraded silently)",
+                    "event_emitter: request body write failed; skipping event to avoid a dangling request_ref",
                 );
+                return;
             }
             if let (Some(rref), Some(rbytes)) = (response_ref_for_spawn, response_body_bytes_opt) {
                 if let Err(e) = bodies_for_spawn.put(&rref, Bytes::from(rbytes)).await {
                     tracing::warn!(
                         error = %e,
-                        "event_emitter: response body write failed (degraded silently)",
+                        "event_emitter: response body write failed; emitting event without response_ref",
                     );
+                    event.response_ref = None;
                 }
             }
             // Event row — depends on bodies, write last.

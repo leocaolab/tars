@@ -150,10 +150,23 @@ pub fn init(config: TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
     // shouldn't kill the process).
     let filter = match EnvFilter::try_from_default_env() {
         Ok(f) => f,
-        Err(_) => EnvFilter::try_new(&config.level).map_err(|e| TelemetryError::InvalidFilter {
-            directive: config.level.clone(),
-            reason: e.to_string(),
-        })?,
+        Err(env_err) => {
+            // `try_from_default_env` only errors when RUST_LOG is *set
+            // but malformed* (an absent var parses as the empty
+            // directive, i.e. Ok). Surface the bad input so the
+            // operator knows their RUST_LOG was ignored — same
+            // eprintln discipline as the TARS_LOG_FORMAT path. No
+            // `tracing` yet (we ARE init), so stderr is the channel.
+            eprintln!(
+                "tars-melt: RUST_LOG is set but invalid ({env_err}) — \
+                 falling back to derived level {:?}",
+                config.level,
+            );
+            EnvFilter::try_new(&config.level).map_err(|e| TelemetryError::InvalidFilter {
+                directive: config.level.clone(),
+                reason: e.to_string(),
+            })?
+        }
     };
 
     let span_events = if config.include_span_events {

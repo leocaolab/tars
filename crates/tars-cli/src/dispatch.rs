@@ -136,6 +136,12 @@ fn build_single_provider_dispatch(
                 "no model: pass --model, or set `default_model` on provider `{provider_id}`"
             )
         })?;
+    if model_label.trim().is_empty() {
+        anyhow::bail!(
+            "model name is empty (from --model or provider `{provider_id}`'s `default_model`); \
+             pass a non-empty --model"
+        );
+    }
     let label = format!("provider `{provider_id}`");
     let inner: Arc<dyn LlmService> = tars_pipeline::ProviderService::new(provider.clone());
     Ok(Dispatch {
@@ -179,6 +185,12 @@ fn build_tier_dispatch(
                 "no model: pass --model, or set `default_model` on provider `{first}` (tier `{tier:?}` first candidate)"
             )
         })?;
+    if model_label.trim().is_empty() {
+        anyhow::bail!(
+            "model name is empty (from --model or provider `{first}`'s `default_model`); \
+             pass a non-empty --model"
+        );
+    }
     // Tier→candidates resolution happens at startup; the runtime
     // policy is StaticPolicy. See run.rs's previous comment for the
     // rationale (CLI's req.model is always Explicit, so TierPolicy's

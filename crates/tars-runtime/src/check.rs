@@ -210,12 +210,31 @@ impl Invariant for ValidatorInvariant {
             ValidationOutcome::Pass | ValidationOutcome::Annotate { .. } => CheckResult::pass(),
             ValidationOutcome::Reject { reason } => CheckResult::fail(reason),
             ValidationOutcome::Filter { dropped, .. } => {
-                CheckResult::fail(format!("filtered {} item(s)", dropped.len()))
+                // A Filter only violates the invariant if it actually
+                // dropped something. An empty `dropped` list means the
+                // validator filtered nothing — "filtered 0 item(s)" is a
+                // contradiction (this file documents Filter as "found
+                // content to drop"), so treat it as a pass.
+                if dropped.is_empty() {
+                    CheckResult::pass()
+                } else {
+                    CheckResult::fail(format!("filtered {} item(s)", dropped.len()))
+                }
             }
             // ValidationOutcome is #[non_exhaustive]; a future variant
             // defaults to "holds" rather than guessing it's a violation
-            // (conservative — a new outcome shouldn't silently fail tests).
-            _ => CheckResult::pass(),
+            // (conservative — a new outcome shouldn't silently fail
+            // tests). But don't do it silently: warn so an unmodeled
+            // variant that *should* fail is visible to operators and
+            // prompts an explicit arm here instead of masking forever.
+            _ => {
+                tracing::warn!(
+                    invariant = self.inner.name(),
+                    "ValidatorInvariant: unhandled ValidationOutcome variant treated as pass \
+                     (conservative); add an explicit arm when new variants land",
+                );
+                CheckResult::pass()
+            }
         }
     }
 }

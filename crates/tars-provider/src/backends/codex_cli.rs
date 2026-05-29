@@ -323,15 +323,21 @@ impl SubprocessLineRunner for RealSubprocessLineRunner {
         })?;
 
         // Write the prompt on stdin and close it so codex sees EOF.
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(inv.prompt.as_bytes()).await.map_err(|e| {
-                ProviderError::CliSubprocessDied {
-                    exit_code: None,
-                    stderr: format!("stdin write failed: {e}"),
-                }
+        // stdin must be present (Stdio::piped above); if it isn't,
+        // error immediately rather than letting codex block on an EOF
+        // that never comes and hang until the timeout (mirrors the
+        // stdout `ok_or_else` check below).
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            ProviderError::Internal("codex child has no stdin pipe (Stdio::piped above)".into())
+        })?;
+        stdin
+            .write_all(inv.prompt.as_bytes())
+            .await
+            .map_err(|e| ProviderError::CliSubprocessDied {
+                exit_code: None,
+                stderr: format!("stdin write failed: {e}"),
             })?;
-            drop(stdin);
-        }
+        drop(stdin);
 
         let stdout = child.stdout.take().ok_or_else(|| {
             ProviderError::Internal("codex child has no stdout pipe (Stdio::piped above)".into())
@@ -381,7 +387,20 @@ impl SubprocessLineRunner for RealSubprocessLineRunner {
                 Ok(Ok(status)) if !status.success() => {
                     let stderr_text = if let Some(mut se) = stderr {
                         let mut buf = String::new();
-                        let _ = tokio::io::AsyncReadExt::read_to_string(&mut se, &mut buf).await;
+                        if let Err(e) =
+                            tokio::io::AsyncReadExt::read_to_string(&mut se, &mut buf).await
+                        {
+                            // Don't swallow: a failed/partial read means
+                            // the diagnostic the user needs may be
+                            // missing, so log it and mark the gap inline
+                            // rather than emitting a bare "exited non-zero".
+                            tracing::warn!(error = %e, "codex_cli: failed to read child stderr");
+                            if buf.is_empty() {
+                                buf.push_str("(stderr unavailable: read failed)");
+                            } else {
+                                buf.push_str(" (stderr truncated: read failed)");
+                            }
+                        }
                         buf
                     } else {
                         String::new()
@@ -560,15 +579,39 @@ fn translate_codex_to_chat(
             let event: ThreadEvent = match serde_json::from_str(&line) {
                 Ok(e) => e,
                 Err(e) => {
-                    // Be lenient — codex may add new event variants
-                    // we don't recognise; logging + skipping beats
-                    // failing the whole stream.
-                    tracing::debug!(
-                        line = %truncate(&line, 200),
-                        error = %e,
-                        "codex_cli: skipping unparseable line",
-                    );
-                    continue;
+                    // Leniency is for *unknown* event types (codex may
+                    // add variants we don't model) — those we skip. But
+                    // a malformed *critical* event (turn.completed
+                    // carries usage; turn.failed/error carry the failure
+                    // cause) must not be silently dropped: skipping
+                    // turn.completed would yield a stream with no
+                    // Finished event and zero usage — data loss masked
+                    // as success. Peek the `type` tag to tell them apart.
+                    let kind = serde_json::from_str::<serde_json::Value>(&line)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("type").and_then(|t| t.as_str()).map(str::to_string)
+                        });
+                    match kind.as_deref() {
+                        Some("turn.completed") | Some("turn.failed") | Some("error") => {
+                            yield Err(ProviderError::CliSubprocessDied {
+                                exit_code: None,
+                                stderr: format!(
+                                    "codex: failed to parse critical `{}` event: {e}",
+                                    kind.as_deref().unwrap_or("?"),
+                                ),
+                            });
+                            return;
+                        }
+                        _ => {
+                            tracing::debug!(
+                                line = %truncate(&line, 200),
+                                error = %e,
+                                "codex_cli: skipping unparseable line",
+                            );
+                            continue;
+                        }
+                    }
                 }
             };
             for ev in map_thread_event(event) {
