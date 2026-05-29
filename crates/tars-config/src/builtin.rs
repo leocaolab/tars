@@ -194,6 +194,7 @@ mod tests {
             "gemini_cli",
             "mlx",
             "llamacpp",
+            "vllm",
         ] {
             assert!(
                 defs.contains_key(&ProviderId::new(id)),

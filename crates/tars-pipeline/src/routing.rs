@@ -47,7 +47,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use tars_provider::registry::ProviderRegistry;
-use tars_provider::{LlmEventStream, LlmProvider};
+use tars_provider::LlmEventStream;
 use tars_types::{
     ChatRequest, CompatibilityCheck, CompatibilityReason, ErrorClass, ModelHint, ModelTier,
     ProviderError, ProviderId, RequestContext,
@@ -234,7 +234,7 @@ impl LlmService for RoutingService {
             // the next candidate may have stronger capabilities. Only
             // when *all* candidates are skipped do we surface an
             // InvalidRequest error with the collected reasons.
-            let resolved = resolve_model_for_provider(req.clone(), &provider);
+            let resolved = resolve_model_for_provider(req.clone(), self.registry.default_model(id));
             match resolved.compatibility_check(provider.capabilities()) {
                 CompatibilityCheck::Compatible => {}
                 CompatibilityCheck::Incompatible { reasons } => {
@@ -312,6 +312,27 @@ impl LlmService for RoutingService {
             });
         }
 
+        // Mixed failure: we're about to return the last wire-level
+        // error, but some candidates were ALSO eliminated for capability
+        // reasons. `NoCompatibleCandidate` can't carry both, so without
+        // this the structured skip context would be invisible at the
+        // final-failure point (only in the per-candidate warns earlier).
+        // Emit a consolidated record so debugging the terminal error
+        // still sees which candidates were skipped and why.
+        if !skipped_with_reasons.is_empty() {
+            let skipped_summary: Vec<(String, Vec<&'static str>)> = skipped_with_reasons
+                .iter()
+                .map(|(id, reasons)| {
+                    (id.as_ref().to_string(), reasons.iter().map(|r| r.kind()).collect())
+                })
+                .collect();
+            tracing::warn!(
+                trace_id = %ctx.trace_id,
+                skipped = ?skipped_summary,
+                "routing: returning wire error; some candidates were also skipped for capability reasons",
+            );
+        }
+
         Err(last_err.unwrap_or_else(|| {
             ProviderError::Internal(format!(
                 "routing: all {} candidates skipped (none registered)",
@@ -321,32 +342,25 @@ impl LlmService for RoutingService {
     }
 }
 
-/// If `req.model` is `Tier(...)`, rewrite to `Explicit(provider.default_model)`.
-/// Cache + adapter layers below this point require Explicit.
+/// If `req.model` is `Tier(...)`, rewrite to `Explicit(default_model)`
+/// using the chosen provider's configured default model. Cache +
+/// adapter layers below this point require Explicit.
 ///
-/// `LlmProvider` doesn't expose `default_model` (that's on
-/// `ProviderConfig`, not the trait), so we use `capabilities()` as a
-/// proxy: in practice every adapter sets a sensible default during
-/// construction. M2.1 will add a `LlmProvider::default_model()` method
-/// when it becomes a real pain point; for M2 the workaround is "use
-/// `ProviderId` itself as a model hint when no better signal exists".
-fn resolve_model_for_provider(
-    mut req: ChatRequest,
-    provider: &Arc<dyn LlmProvider>,
-) -> ChatRequest {
+/// `default_model` comes from [`ProviderRegistry::default_model`], which
+/// captures it from `ProviderConfig` at build time (the `LlmProvider`
+/// trait itself doesn't expose it). When it's `None` — only possible
+/// for registries built without config, e.g. some test fixtures — we
+/// leave the `Tier` hint untouched rather than fabricating a bogus model
+/// name; the adapter then falls back to its own default. We never
+/// synthesize a placeholder like `"tier-resolution-deferred:..."`: that
+/// produced inconsistent behavior (some adapters 400'd on the bogus
+/// name, others silently used a default), violating the contract that
+/// tier→explicit resolution is deterministic before dispatch.
+fn resolve_model_for_provider(mut req: ChatRequest, default_model: Option<&str>) -> ChatRequest {
     if matches!(req.model, ModelHint::Tier(_)) {
-        // No tier→model resolution at the trait level yet — adapters
-        // ignore the tier and use their own default_model when given a
-        // model name they don't recognise. The honest fix is to add
-        // `LlmProvider::default_model()`; for now we forward the tier
-        // as a label so logs stay useful, and the adapter falls back.
-        // Most adapters' `translate_request` rejects non-Explicit, so
-        // this works out as: providers that need an explicit model
-        // surface a clear error pointing at this exact line.
-        req.model = ModelHint::Explicit(format!(
-            "tier-resolution-deferred:{}",
-            provider.id().as_ref(),
-        ));
+        if let Some(model) = default_model {
+            req.model = ModelHint::Explicit(model.to_string());
+        }
     }
     req
 }
@@ -357,6 +371,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use futures::StreamExt;
+    use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
     use tars_provider::registry::ProviderRegistry;
 
@@ -466,13 +481,30 @@ mod tests {
     /// Lives in this test module only.
     struct FakeRegistry {
         map: HashMap<ProviderId, Arc<dyn LlmProvider>>,
+        /// Mirror of the real registry's default-model table so the
+        /// harness can exercise `resolve_model_for_provider` exactly as
+        /// production does.
+        default_models: HashMap<ProviderId, String>,
     }
 
     impl FakeRegistry {
         fn new(entries: Vec<(ProviderId, Arc<dyn LlmProvider>)>) -> Self {
             Self {
                 map: entries.into_iter().collect(),
+                default_models: HashMap::new(),
             }
+        }
+
+        /// Register a default model for `id` so a `Tier` request routed
+        /// to it resolves to `Explicit(model)` (mirrors prod).
+        #[allow(dead_code)]
+        fn with_default_model(mut self, id: ProviderId, model: &str) -> Self {
+            self.default_models.insert(id, model.to_string());
+            self
+        }
+
+        fn default_model(&self, id: &ProviderId) -> Option<&str> {
+            self.default_models.get(id).map(String::as_str)
         }
     }
 
@@ -500,8 +532,11 @@ mod tests {
                 Some(p) => p,
                 None => continue,
             };
-            // Capability pre-flight (mirror RoutingService::call).
-            match req.compatibility_check(provider.capabilities()) {
+            // Resolve the model + capability pre-flight EXACTLY as
+            // RoutingService::call does, so this harness exercises the
+            // same code path as production (incl. resolve_model_for_provider).
+            let resolved = resolve_model_for_provider(req.clone(), fake.default_model(id));
+            match resolved.compatibility_check(provider.capabilities()) {
                 CompatibilityCheck::Compatible => {}
                 CompatibilityCheck::Incompatible { reasons } => {
                     skipped.push((id.clone(), reasons));
@@ -509,7 +544,7 @@ mod tests {
                 }
                 _ => {}
             }
-            match provider.stream(req.clone(), ctx.clone()).await {
+            match provider.stream(resolved, ctx.clone()).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) if e.class() == ErrorClass::Permanent => return Err(e),
                 Err(e) => {

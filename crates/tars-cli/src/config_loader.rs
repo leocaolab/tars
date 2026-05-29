@@ -22,12 +22,28 @@ pub fn load(path: Option<PathBuf>) -> Result<Config> {
              pass --config <PATH> to specify explicitly"
         )
     })?;
-    if !resolved.is_file() {
-        anyhow::bail!(
+    // Distinguish "missing" from "inaccessible" / "not a regular file".
+    // `Path::is_file()` collapses NotFound, PermissionDenied, and
+    // every other metadata error into a single `false`, which would
+    // mislead a user whose file exists but is unreadable into thinking
+    // it's absent. Inspect the actual `ErrorKind` instead.
+    match std::fs::metadata(&resolved) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => anyhow::bail!(
+            "config path {} exists but is not a regular file\n\
+             pass --config <PATH> pointing at a TOML file",
+            resolved.display(),
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
             "config file not found at {}\n\
              create one or pass --config <PATH>",
             resolved.display(),
-        );
+        ),
+        Err(e) => {
+            return Err(anyhow::Error::new(e)).with_context(|| {
+                format!("cannot access config file at {}", resolved.display())
+            });
+        }
     }
     ConfigManager::load_from_file(&resolved)
         .with_context(|| format!("loading config from {}", resolved.display()))
@@ -55,13 +71,16 @@ default_model = "Qwen/Qwen2.5-Coder-32B-Instruct"
     }
 
     #[test]
-    fn explicit_path_to_directory_errors_as_not_found() {
+    fn explicit_path_to_directory_errors_as_not_a_regular_file() {
         let dir = tempfile::tempdir().unwrap();
         let err = load(Some(dir.path().to_path_buf())).unwrap_err();
         let msg = format!("{err}");
+        // A directory exists but isn't a config file — we must NOT
+        // report it as "not found" (that would send the user looking
+        // for a missing file that's actually right there).
         assert!(
-            msg.contains("not found"),
-            "directory path should error like a missing file, got: {msg}"
+            msg.contains("not a regular file"),
+            "directory path should be rejected as not-a-regular-file, got: {msg}"
         );
     }
 

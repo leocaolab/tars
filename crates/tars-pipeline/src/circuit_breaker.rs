@@ -39,7 +39,7 @@
 //! failure mode for HTTP backends.
 
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -112,8 +112,52 @@ impl BreakerState {
 }
 
 enum Decision {
-    Allow,
+    /// Let the call through. `is_probe` is true when this caller is the
+    /// single HalfOpen probe (it flipped `probe_in_flight` to true), so
+    /// the dispatch path knows it must arm a [`ProbeGuard`] to clear
+    /// that flag if the probing future is cancelled.
+    Allow { is_probe: bool },
     Reject { until: Instant },
+}
+
+/// RAII guard that clears a HalfOpen `probe_in_flight` flag if the
+/// probing future is dropped (cancelled via timeout / client
+/// disconnect / task abort) before recording an outcome.
+///
+/// Without this, a cancelled probe leaves `probe_in_flight` stuck at
+/// `true`: every subsequent caller hits the HalfOpen "another caller is
+/// already probing" branch and is rejected with a 100ms backoff
+/// *forever*. The breaker would be permanently bricked for that
+/// provider. The guard is disarmed by [`ProbeGuard::disarm`] once
+/// `record_success`/`record_failure` has run (which transitions out of
+/// HalfOpen anyway), so on the happy path the Drop is a no-op.
+struct ProbeGuard<'a> {
+    state: &'a Mutex<BreakerState>,
+    armed: bool,
+}
+
+impl ProbeGuard<'_> {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProbeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        // Only clear if we're still the in-flight probe. A normal
+        // completion would have transitioned away from HalfOpen via
+        // record_*; if we're still HalfOpen with the flag set, the
+        // probe was cancelled and we must release the slot so the next
+        // caller can probe instead of being rejected indefinitely.
+        if state.kind == BreakerStateKind::HalfOpen && state.probe_in_flight {
+            state.probe_in_flight = false;
+            tracing::warn!("circuit_breaker: probe future cancelled; released probe slot");
+        }
+    }
 }
 
 /// Wrap a single provider with circuit-breaker semantics.
@@ -149,9 +193,9 @@ impl CircuitBreaker {
     }
 
     fn check(&self, now: Instant) -> Decision {
-        let mut state = self.state.lock().expect("breaker state poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         match state.kind {
-            BreakerStateKind::Closed => Decision::Allow,
+            BreakerStateKind::Closed => Decision::Allow { is_probe: false },
             BreakerStateKind::Open => {
                 let until = state.open_until.expect("open without expiry");
                 if now >= until {
@@ -161,7 +205,7 @@ impl CircuitBreaker {
                     state.probe_in_flight = true;
                     state.consecutive_failures = 0;
                     state.open_until = None;
-                    Decision::Allow
+                    Decision::Allow { is_probe: true }
                 } else {
                     Decision::Reject { until }
                 }
@@ -175,14 +219,14 @@ impl CircuitBreaker {
                     Decision::Reject { until: next_check }
                 } else {
                     state.probe_in_flight = true;
-                    Decision::Allow
+                    Decision::Allow { is_probe: true }
                 }
             }
         }
     }
 
     fn record_success(&self) {
-        let mut state = self.state.lock().expect("breaker state poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         match state.kind {
             BreakerStateKind::Closed => {
                 state.consecutive_failures = 0;
@@ -208,7 +252,7 @@ impl CircuitBreaker {
     }
 
     fn record_failure(&self, now: Instant) {
-        let mut state = self.state.lock().expect("breaker state poisoned");
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         match state.kind {
             BreakerStateKind::Closed => {
                 state.consecutive_failures = state.consecutive_failures.saturating_add(1);
@@ -263,7 +307,7 @@ impl LlmProvider for CircuitBreaker {
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let now = Instant::now();
-        match self.check(now) {
+        let is_probe = match self.check(now) {
             Decision::Reject { until } => {
                 tracing::debug!(
                     provider_id = %self.id,
@@ -272,14 +316,25 @@ impl LlmProvider for CircuitBreaker {
                 );
                 return Err(ProviderError::CircuitOpen { until });
             }
-            Decision::Allow => {}
-        }
+            Decision::Allow { is_probe } => is_probe,
+        };
+
+        // If this call is the HalfOpen probe, guard the in-flight flag
+        // so a cancelled future can't leave the breaker stuck rejecting.
+        let probe_guard = is_probe.then(|| ProbeGuard {
+            state: &self.state,
+            armed: true,
+        });
 
         let inner = self.inner.clone();
         let result = inner.stream(req, ctx).await;
         match &result {
             Ok(_) => self.record_success(),
             Err(_) => self.record_failure(Instant::now()),
+        }
+        // Outcome recorded → the probe completed; disarm so Drop is a no-op.
+        if let Some(g) = probe_guard {
+            g.disarm();
         }
         result
     }
@@ -294,18 +349,26 @@ impl LlmProvider for CircuitBreaker {
         // optimization the inner provider has (no extra round-trip
         // through the breaker check, since stream() already handled it).
         let now = Instant::now();
-        match self.check(now) {
+        let is_probe = match self.check(now) {
             Decision::Reject { until } => {
                 return Err(ProviderError::CircuitOpen { until });
             }
-            Decision::Allow => {}
-        }
+            Decision::Allow { is_probe } => is_probe,
+        };
+
+        let probe_guard = is_probe.then(|| ProbeGuard {
+            state: &self.state,
+            armed: true,
+        });
 
         let inner = self.inner.clone();
         let result = inner.complete(req, ctx).await;
         match &result {
             Ok(_) => self.record_success(),
             Err(_) => self.record_failure(Instant::now()),
+        }
+        if let Some(g) = probe_guard {
+            g.disarm();
         }
         result
     }
@@ -655,6 +718,54 @@ mod tests {
         // Subsequent calls flow normally.
         let r = cb.clone().stream(req(), ctx()).await;
         assert!(r.is_ok());
+    }
+
+    // ── Cancelled probe must not brick the breaker ───────────────────
+    //
+    // Regression: if the probing future is dropped (cancelled) between
+    // `check()` setting probe_in_flight=true and record_*() running, the
+    // flag must be cleared so the next caller can probe — otherwise the
+    // breaker rejects every call with a 100ms backoff forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_probe_releases_probe_slot() {
+        let (inner, _calls) =
+            scripted("p", ScriptedOutcome::Err(|| ProviderError::ModelOverloaded));
+        let id = inner.id().clone();
+        let cb = Arc::new(CircuitBreaker {
+            inner,
+            id,
+            config: CircuitBreakerConfig {
+                failure_threshold: 1,
+                cooldown: Duration::from_millis(40),
+            },
+            state: Mutex::new(BreakerState::closed()),
+        });
+
+        // Trip → Open.
+        let _ = cb.clone().stream(req(), ctx()).await;
+        assert_eq!(cb.current_kind(), BreakerStateKind::Open);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // Simulate a probe whose future is cancelled before it records
+        // an outcome: become the probe via check(), then drop an armed
+        // ProbeGuard without disarming it.
+        {
+            let d = cb.check(Instant::now());
+            assert!(matches!(d, Decision::Allow { is_probe: true }));
+            let _guard = ProbeGuard {
+                state: &cb.state,
+                armed: true,
+            };
+            // `_guard` drops here (no disarm) → models cancellation.
+        }
+
+        // The probe slot must be free again: still HalfOpen, but the
+        // next caller is allowed to probe rather than rejected.
+        assert_eq!(cb.current_kind(), BreakerStateKind::HalfOpen);
+        assert!(
+            matches!(cb.check(Instant::now()), Decision::Allow { is_probe: true }),
+            "after a cancelled probe the next caller must be allowed to probe",
+        );
     }
 
     // ── Reject error class is Retriable so RoutingService falls through

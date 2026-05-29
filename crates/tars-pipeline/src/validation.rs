@@ -65,8 +65,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use tars_provider::LlmEventStream;
 use tars_types::{
-    CacheHitInfo, ChatRequest, ChatResponse, ChatResponseBuilder, OutcomeSummary, ProviderError,
-    RequestContext, ValidationOutcome, ValidationSummary,
+    ChatRequest, ChatResponse, ChatResponseBuilder, OutcomeSummary, ProviderError, RequestContext,
+    ValidationOutcome, ValidationSummary,
 };
 
 use crate::middleware::Middleware;
@@ -150,9 +150,20 @@ impl LlmService for ValidationService {
         req: ChatRequest,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        // Telemetry: layer trace.
-        if let Ok(mut t) = ctx.telemetry.lock() {
-            t.layers.push("validation".into());
+        // Telemetry: layer trace. Best-effort, but don't silently drop
+        // it on a poisoned mutex — recover the guard (the poisoned data
+        // is still readable/appendable) and log so the poisoning is
+        // visible. [arc:intentional-handle] reason: telemetry is
+        // observability-only; a poisoned lock must never abort a user's
+        // LLM request, and recovering preserves the layer trace.
+        match ctx.telemetry.lock() {
+            Ok(mut t) => t.layers.push("validation".into()),
+            Err(poisoned) => {
+                tracing::warn!(
+                    "validation: telemetry mutex poisoned; recording layer trace on recovered guard"
+                );
+                poisoned.into_inner().layers.push("validation".into());
+            }
         }
 
         // Empty validator chain — pass through, no drain. Avoids the
@@ -237,7 +248,20 @@ impl LlmService for ValidationService {
         // it drains the stream. Caller substitutes the filtered
         // response over the streamed one.
         response.validation_summary = summary;
-        if let Ok(mut rec) = outcome_handle.lock() {
+        // Publish the summary + blessed response on the side-channel.
+        // A poisoned mutex must not silently strip this metadata — the
+        // outer caller (tars-py's `run_complete`) relies on it — so
+        // recover the guard and log rather than dropping the write.
+        {
+            let mut rec = match outcome_handle.lock() {
+                Ok(rec) => rec,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "validation: outcome side-channel mutex poisoned; publishing summary on recovered guard"
+                    );
+                    poisoned.into_inner()
+                }
+            };
             rec.summary = response.validation_summary.clone();
             // Always publish the response so the caller can pick it
             // up — even when no Filter ran, the outer caller may
@@ -252,11 +276,16 @@ impl LlmService for ValidationService {
         // captured events verbatim (preserves token-by-token timing
         // semantics for any further wrapping middleware).
         if filtered_any {
+            // Preserve the ORIGINAL cache-hit metadata when re-emitting
+            // the filtered response. The builder captured it from the
+            // inner stream's `Started` event into `response.cache_hit`;
+            // using `CacheHitInfo::default()` here would erase whether
+            // this response came from cache, diverging from the
+            // verbatim-replay (non-filtered) path below and corrupting
+            // downstream cache accounting / observability.
+            let cache_hit = response.cache_hit.clone();
             let stream = futures::stream::iter(
-                response
-                    .into_events(CacheHitInfo::default())
-                    .into_iter()
-                    .map(Ok),
+                response.into_events(cache_hit).into_iter().map(Ok),
             );
             Ok(Box::pin(stream))
         } else {

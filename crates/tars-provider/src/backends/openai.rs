@@ -420,16 +420,19 @@ fn translate_openai_batch_status(v: &Value) -> Result<BatchStatus, ProviderError
         .ok_or_else(|| ProviderError::Parse("batch status: missing `status`".into()))?;
 
     let counts = v.get("request_counts").cloned().unwrap_or_else(|| json!({}));
-    let total = counts.get("total").and_then(|n| n.as_u64()).map(|n| n as u32);
-    let completed = counts
-        .get("completed")
+    // Counts arrive as u64 on the wire but `BatchStatus` carries u32.
+    // Clamp instead of using a silent `as u32` truncation (which would
+    // wrap a >u32::MAX count into a small bogus value).
+    let clamp_u32 = |n: u64| n.min(u32::MAX as u64) as u32;
+    let total = counts
+        .get("total")
         .and_then(|n| n.as_u64())
-        .unwrap_or(0) as u32;
-    let failed = counts
-        .get("failed")
-        .and_then(|n| n.as_u64())
-        .unwrap_or(0) as u32;
-    let processed = completed + failed;
+        .map(clamp_u32);
+    let completed = clamp_u32(counts.get("completed").and_then(|n| n.as_u64()).unwrap_or(0));
+    let failed = clamp_u32(counts.get("failed").and_then(|n| n.as_u64()).unwrap_or(0));
+    // Saturating add: the sum of two clamped u32s can exceed u32::MAX,
+    // which would panic (debug) or wrap (release) with plain `+`.
+    let processed = completed.saturating_add(failed);
 
     match status {
         "validating" | "in_progress" | "finalizing" | "cancelling" => {
@@ -997,7 +1000,11 @@ impl HttpAdapter for OpenAiAdapter {
                     let index = tc
                         .get("index")
                         .and_then(|i| i.as_u64())
-                        .map(|i| i as usize)
+                        // Fall back to the array position if `index` is
+                        // missing OR doesn't fit `usize` (32-bit targets):
+                        // a silent `as usize` truncation could collapse
+                        // two distinct parallel tool calls into one slot.
+                        .and_then(|i| usize::try_from(i).ok())
                         .unwrap_or(iter_pos);
                     let id = tc
                         .get("id")

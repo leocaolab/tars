@@ -35,9 +35,25 @@ use crate::errors::{provider_to_py, runtime_to_py};
 use crate::{Pipeline as PyPipeline, Response, Usage, tokio_runtime};
 
 /// `Session` wraps `tars_runtime::Session`. Mutable internally — every
-/// method takes `&mut self`. PyO3's per-instance lock serializes
-/// concurrent calls from Python threads (we deliberately do NOT mark
-/// the class `frozen` for this reason).
+/// method takes `&mut self`, so PyO3 holds an exclusive `PyRefMut`
+/// borrow for the whole call.
+///
+/// ## Concurrency contract (important)
+///
+/// PyO3 does **not** serialize concurrent calls — it enforces
+/// RefCell-style runtime borrow checking. `send`/`send_text` release
+/// the GIL via `py.allow_threads` for the duration of the network call
+/// (so *other* Python threads, and *other* `Session` instances, run
+/// concurrently — that's the point), but the exclusive borrow on *this*
+/// instance is still held across that release. A second Python thread
+/// that calls any method on the *same* `Session` while a call is
+/// in flight does not block-and-wait; it hits the borrow check and
+/// raises `RuntimeError: Already borrowed`.
+///
+/// So: a single `Session` is single-threaded. To parallelize, give each
+/// thread its own `Session` (see [`Session::fork`]). The class is
+/// intentionally NOT `frozen` — interior `&mut` is the whole design —
+/// but that does not make it shareable across threads.
 #[pyclass]
 pub struct Session {
     inner: RsSession,
@@ -127,9 +143,14 @@ impl Session {
                         let td = PyDict::new(py);
                         td.set_item("id", &tc.id)?;
                         td.set_item("name", &tc.name)?;
+                        // Surface a serialization failure instead of
+                        // silently substituting "" — a caller reading
+                        // history() must not get a tool call whose
+                        // arguments vanished without a trace.
                         td.set_item(
                             "arguments",
-                            serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                            serde_json::to_string(&tc.arguments)
+                                .map_err(|e| runtime_to_py("serialize tool-call arguments", e))?,
                         )?;
                         tcs.append(td)?;
                     }
@@ -190,6 +211,16 @@ impl Session {
         parameters_schema: Bound<'_, PyDict>,
         callback: Py<PyAny>,
     ) -> PyResult<()> {
+        // Fail fast on a non-callable: otherwise the TypeError surfaces
+        // only when the model first invokes the tool (potentially many
+        // turns later), making the misconfiguration hard to trace back
+        // to this registration call.
+        if !callback.bind(py).is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "register_tool: `callback` for tool `{name}` is not callable"
+            )));
+        }
+
         // Convert the schema dict to serde_json::Value via JSON round
         // trip; pyo3 doesn't have a direct `PyDict -> serde_json::Value`
         // path that handles every nested case.

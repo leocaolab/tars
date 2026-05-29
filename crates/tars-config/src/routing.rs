@@ -62,6 +62,13 @@ impl RoutingConfig {
                             "references unknown provider `{id}` — add a [providers.{id}] section or remove this entry"
                         ),
                     ));
+                    // Skip the duplicate check for an unknown provider:
+                    // it would (a) pollute `seen` and (b) emit a
+                    // non-actionable "duplicate" error on top of the
+                    // unknown-provider one (`["typo","typo"]` would
+                    // produce 3 errors instead of 2). The user must fix
+                    // the unknown reference first.
+                    continue;
                 }
                 if !seen.insert(id) {
                     sink.push(crate::error::ValidationError::new(

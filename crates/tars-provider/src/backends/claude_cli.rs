@@ -286,7 +286,13 @@ impl LlmProvider for ClaudeCliProvider {
 
         let max_chars = req.max_output_tokens.map(|t| (t as usize) * 4);
         let truncated = match max_chars {
-            Some(cap) if response_text.len() > cap => response_text[..cap].to_string(),
+            // Truncate on a UTF-8 char boundary — `cap` (max_output_tokens
+            // * 4) can land mid-codepoint, and byte-indexing `[..cap]`
+            // would panic. `truncate_utf8` rounds down to the previous
+            // boundary (no ellipsis, so the byte cap is still honored).
+            Some(cap) if response_text.len() > cap => {
+                crate::http_base::truncate_utf8(&response_text, cap).to_string()
+            }
             _ => response_text,
         };
 
@@ -359,6 +365,10 @@ pub(crate) fn streaming_enabled() -> bool {
 /// + `--verbose`, which produces a real-time NDJSON event stream
 ///   ([`RealSubprocessRunner`] tees each event to stderr for observability,
 ///   reconstructs the final `result` event as the return Value).
+// Production now calls `build_argv_with` directly (reading
+// `streaming_enabled()` exactly once — see `RealSubprocessRunner::run`).
+// This convenience wrapper remains for the argv unit tests.
+#[allow(dead_code)]
 pub(crate) fn build_argv(inv: &SubprocessInvocation) -> Vec<String> {
     build_argv_with(inv, streaming_enabled())
 }
@@ -431,8 +441,16 @@ pub struct RealSubprocessRunner;
 #[async_trait]
 impl SubprocessRunner for RealSubprocessRunner {
     async fn run(&self, inv: SubprocessInvocation) -> Result<Value, ProviderError> {
+        // Read the streaming flag ONCE and thread it consistently into
+        // both argv construction and the execution-path branch below.
+        // Reading `streaming_enabled()` twice is a TOCTOU race: if
+        // `TARS_CLAUDE_CLI_STREAM` flips between the two reads the child
+        // is spawned with `--output-format json` but parsed as
+        // `stream-json` (or vice-versa), corrupting the result.
+        let streaming = streaming_enabled();
+
         let mut cmd = Command::new(&inv.executable);
-        for tok in build_argv(&inv) {
+        for tok in build_argv_with(&inv, streaming) {
             cmd.arg(tok);
         }
 
@@ -481,7 +499,7 @@ impl SubprocessRunner for RealSubprocessRunner {
         // by line as NDJSON events, tee a pretty per-event summary to
         // stderr, return the reconstructed `result` event so callers see
         // the same shape as buffered mode.
-        if streaming_enabled() {
+        if streaming {
             return run_streaming(&mut child, &inv).await;
         }
 
@@ -509,11 +527,10 @@ impl SubprocessRunner for RealSubprocessRunner {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let truncated = if stderr.len() > 500 {
-                stderr[..500].to_string()
-            } else {
-                stderr
-            };
+            // UTF-8-safe truncation — byte-indexing `[..500]` panics if
+            // byte 500 lands mid-codepoint (stderr can carry arbitrary
+            // Unicode: paths, user messages).
+            let truncated = truncate(&stderr, 500);
             return Err(ProviderError::CliSubprocessDied {
                 exit_code: output.status.code(),
                 stderr: truncated,
@@ -751,11 +768,9 @@ async fn run_streaming(
 
     if !status.success() {
         let stderr_s = String::from_utf8_lossy(&stderr_buf).to_string();
-        let truncated = if stderr_s.len() > 500 {
-            stderr_s[..500].to_string()
-        } else {
-            stderr_s
-        };
+        // UTF-8-safe truncation — see the buffered path; `[..500]` can
+        // panic on a multi-byte boundary.
+        let truncated = truncate(&stderr_s, 500);
         return Err(ProviderError::CliSubprocessDied {
             exit_code: status.code(),
             stderr: truncated,

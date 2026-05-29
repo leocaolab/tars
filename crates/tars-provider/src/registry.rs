@@ -47,6 +47,13 @@ pub enum RegistryError {
 #[derive(Clone)]
 pub struct ProviderRegistry {
     providers: Arc<HashMap<ProviderId, Arc<dyn LlmProvider>>>,
+    /// Per-provider configured default model, captured from
+    /// `ProviderConfig` at build time. The `LlmProvider` trait doesn't
+    /// expose `default_model`, so routing consults this map to resolve
+    /// `ModelHint::Tier(...)` into a concrete `Explicit(...)` before
+    /// dispatch. Preserved across [`Self::map_providers`] (e.g. when
+    /// wrapping providers in a `CircuitBreaker`).
+    default_models: Arc<HashMap<ProviderId, String>>,
 }
 
 impl ProviderRegistry {
@@ -54,6 +61,7 @@ impl ProviderRegistry {
     pub fn empty() -> Self {
         Self {
             providers: Arc::new(HashMap::new()),
+            default_models: Arc::new(HashMap::new()),
         }
     }
 
@@ -65,14 +73,17 @@ impl ProviderRegistry {
         auth_resolver: Arc<dyn AuthResolver>,
     ) -> Result<Self, RegistryError> {
         let mut map: HashMap<ProviderId, Arc<dyn LlmProvider>> = HashMap::new();
+        let mut default_models: HashMap<ProviderId, String> = HashMap::new();
         for (id, entry) in cfg.iter() {
             let provider = build_one(id.clone(), entry, http.clone(), auth_resolver.clone())?;
             if map.insert(id.clone(), provider).is_some() {
                 return Err(RegistryError::Duplicate(id.clone()));
             }
+            default_models.insert(id.clone(), entry.default_model().to_string());
         }
         Ok(Self {
             providers: Arc::new(map),
+            default_models: Arc::new(default_models),
         })
     }
 
@@ -85,6 +96,12 @@ impl ProviderRegistry {
     pub fn from_map(map: HashMap<ProviderId, Arc<dyn LlmProvider>>) -> Self {
         Self {
             providers: Arc::new(map),
+            // No config available here, so no default-model table. Tier
+            // resolution falls back to forwarding the hint unchanged
+            // (adapters use their own default). Callers that need tier
+            // resolution should build via `from_config` (and use
+            // `map_providers`, which preserves the table).
+            default_models: Arc::new(HashMap::new()),
         }
     }
 
@@ -103,11 +120,22 @@ impl ProviderRegistry {
             .iter()
             .map(|(id, p)| (id.clone(), f(id, p.clone())))
             .collect();
-        Self::from_map(mapped)
+        // Preserve the default-model table — wrapping a provider (e.g.
+        // in a CircuitBreaker) must not lose tier-resolution data.
+        Self {
+            providers: Arc::new(mapped),
+            default_models: self.default_models.clone(),
+        }
     }
 
     pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn LlmProvider>> {
         self.providers.get(id).cloned()
+    }
+
+    /// The configured default model for `id`, if this registry was
+    /// built from config. Used by routing to resolve tier requests.
+    pub fn default_model(&self, id: &ProviderId) -> Option<&str> {
+        self.default_models.get(id).map(String::as_str)
     }
 
     pub fn ids(&self) -> impl Iterator<Item = &ProviderId> {

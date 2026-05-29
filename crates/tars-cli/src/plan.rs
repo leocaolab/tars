@@ -64,6 +64,12 @@ pub struct PlanArgs {
 }
 
 pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()> {
+    // Reject a blank goal at the CLI boundary — a clearer error than
+    // letting an empty prompt fan out into the orchestrator/provider.
+    if args.goal.trim().is_empty() {
+        anyhow::bail!("goal must not be empty — pass --goal <DESCRIPTION>");
+    }
+
     let cfg = config_loader::load(config_path)?;
     let registry = build_registry_with_breaker(&cfg, args.dispatch.breaker)?;
     let dispatch = build_dispatch(&cfg, &registry, &args.dispatch)?;
@@ -147,20 +153,29 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
             .context("orchestrator.plan() failed")
     };
 
-    // Close the trajectory before returning.
+    // Fold JSON encoding into the outcome BEFORE closing the
+    // trajectory: a serialization failure is just as much a failure of
+    // this operation as a planning failure, and closing on
+    // `plan_result.is_ok()` alone would mark the trajectory Completed
+    // while the CLI exits non-zero (StepStarted with no honest
+    // terminal). Compute the full success/failure once, then close.
+    let json_result = plan_result.and_then(|plan| {
+        // Output: pretty by default, compact via flag.
+        if args.compact {
+            serde_json::to_string(&plan)
+        } else {
+            serde_json::to_string_pretty(&plan)
+        }
+        .context("encode plan as JSON")
+    });
+
+    // Close the trajectory before returning, reflecting the *complete*
+    // outcome (plan produced AND serialized).
     if let Some(logger) = &trajectory_logger {
-        logger.close_with(plan_result.is_ok()).await;
+        logger.close_with(json_result.is_ok()).await;
     }
 
-    let plan = plan_result?;
-
-    // Output: pretty by default, compact via flag.
-    let json = if args.compact {
-        serde_json::to_string(&plan)
-    } else {
-        serde_json::to_string_pretty(&plan)
-    }
-    .context("encode plan as JSON")?;
+    let json = json_result?;
     println!("{json}");
 
     if let Some(logger) = &trajectory_logger {
@@ -228,6 +243,16 @@ struct TrajectoryLogger {
 }
 
 impl TrajectoryLogger {
+    /// Write the terminal `TrajectoryCompleted` / `TrajectoryAbandoned`
+    /// event. Best-effort by design.
+    ///
+    /// [arc:intentional-handle] reason: trajectory logging is an
+    /// observability side-channel; a SQLite/event-store hiccup while
+    /// closing must NOT fail the user's CLI operation (the plan has
+    /// already been computed and printed). Every caller wants the same
+    /// behavior — log the append error with the error object so the
+    /// cause-chain is captured, then continue. A stuck-open trajectory
+    /// is surfaced via the warn log, not by aborting the command.
     async fn close_with(&self, succeeded: bool) {
         let event = if succeeded {
             AgentEvent::TrajectoryCompleted {
