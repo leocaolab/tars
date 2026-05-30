@@ -1,13 +1,9 @@
-//! OpenAI HTTP backend.
+//! Wire-format translation for OpenAI / OpenAI-compatible endpoints.
 //!
-//! Also serves OpenAI-compatible endpoints (vLLM, llama.cpp server,
-//! Groq, Together, DeepSeek) by overriding `base_url`.
-//!
-//! Mirrors the Python `OpenAIClient` (the equivalent Python OpenAI client)
-//! semantics for `max_tokens` vs `max_completion_tokens` routing and
-//! usage tracking, but is async + streaming.
-
-use std::sync::Arc;
+//! Pure I/O-free struct: takes a `base_url` + `HttpProviderExtras`,
+//! translates [`ChatRequest`] ↔ OpenAI JSON, parses SSE deltas into
+//! [`ChatEvent`]s, classifies HTTP errors. Reusable in tests without
+//! an `HttpProviderBase`.
 
 use async_trait::async_trait;
 use reqwest::StatusCode;
@@ -16,577 +12,18 @@ use serde_json::{Value, json};
 use url::Url;
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatEvent, ChatRequest,
-    ChatResponse, ChatResponseBuilder, ContentBlock, Message, Modality, ProviderError,
-    ProviderId, RequestContext, StopReason, StructuredOutputMode, Usage,
+    ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason, Usage,
 };
 
-use crate::auth::{Auth, AuthResolver, ResolvedAuth};
-use crate::batch::BatchSubmitter;
-use crate::http_base::{
-    HttpAdapter, HttpProviderBase, HttpProviderExtras, SseEvent, stream_via_adapter,
-};
-use crate::provider::{LlmEventStream, LlmProvider};
+use crate::auth::ResolvedAuth;
+use crate::http_base::{HttpAdapter, HttpProviderExtras, SseEvent, truncate};
 use crate::tool_buffer::ToolCallBuffer;
 
-/// Default OpenAI base URL.
-const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+use super::mapping::{drain_buffer_into, parse_openai_usage};
 
 /// Models that require `max_completion_tokens` instead of `max_tokens`.
 /// Mirrors the Python `_max_tokens_kwarg` heuristic — gpt-5 / o1 / o3 / o4.
 const NEW_TOKENS_PARAM_PREFIXES: &[&str] = &["gpt-5", "o1", "o3", "o4"];
-
-#[derive(Clone, Debug)]
-pub struct OpenAiProviderBuilder {
-    id: ProviderId,
-    base_url: String,
-    auth: Auth,
-    capabilities: Option<Capabilities>,
-    extras: HttpProviderExtras,
-}
-
-impl OpenAiProviderBuilder {
-    pub fn new(id: impl Into<ProviderId>, auth: Auth) -> Self {
-        Self {
-            id: id.into(),
-            base_url: DEFAULT_BASE_URL.to_string(),
-            auth,
-            capabilities: None,
-            extras: HttpProviderExtras::default(),
-        }
-    }
-
-    builder_setter! {
-        /// Override base URL — for vLLM / llama.cpp / Groq / etc.
-        base_url: into String
-    }
-
-    builder_setter! {
-        /// Override capability descriptor. Default is a vanilla
-        /// GPT-4o-style profile; OpenAI-compatible local backends
-        /// should set their own.
-        capabilities: opt Capabilities
-    }
-
-    builder_setter! {
-        /// Attach user-config-supplied http_headers / env_http_headers /
-        /// query_params (Doc 01 §6.1).
-        extras: HttpProviderExtras
-    }
-
-    pub fn build(
-        self,
-        http: Arc<HttpProviderBase>,
-        auth_resolver: Arc<dyn AuthResolver>,
-    ) -> Arc<OpenAiProvider> {
-        let caps = self
-            .capabilities
-            .unwrap_or_else(default_openai_capabilities);
-        let adapter = Arc::new(OpenAiAdapter {
-            base_url: self.base_url,
-            extras: self.extras,
-        });
-        Arc::new(OpenAiProvider {
-            id: self.id,
-            http,
-            auth_resolver,
-            auth: self.auth,
-            adapter,
-            capabilities: caps,
-        })
-    }
-}
-
-pub fn default_openai_capabilities() -> Capabilities {
-    use std::collections::HashSet;
-    let mut modalities = HashSet::new();
-    modalities.insert(Modality::Text);
-    Capabilities {
-        max_context_tokens: 128_000,
-        max_output_tokens: 16_384,
-        supports_tool_use: true,
-        supports_parallel_tool_calls: true,
-        supports_structured_output: StructuredOutputMode::StrictSchema,
-        supports_vision: false, // gpt-4o supports vision; per-model override expected
-        supports_thinking: false,
-        supports_cancel: true, // close stream → reqwest cancels HTTP body
-        prompt_cache: tars_types::PromptCacheKind::ImplicitPrefix { min_tokens: 1024 },
-        streaming: true,
-        modalities_in: modalities.clone(),
-        modalities_out: modalities,
-        pricing: tars_types::Pricing::default(),
-    }
-}
-
-/// The provider itself. Cheap to clone (`Arc` everywhere), so the
-/// `Arc<Self>` requirement of [`LlmProvider`] is trivial.
-pub struct OpenAiProvider {
-    id: ProviderId,
-    http: Arc<HttpProviderBase>,
-    auth_resolver: Arc<dyn AuthResolver>,
-    auth: Auth,
-    adapter: Arc<OpenAiAdapter>,
-    capabilities: Capabilities,
-}
-
-#[async_trait]
-impl LlmProvider for OpenAiProvider {
-    fn id(&self) -> &ProviderId {
-        &self.id
-    }
-
-    fn capabilities(&self) -> &Capabilities {
-        &self.capabilities
-    }
-
-    async fn stream(
-        self: Arc<Self>,
-        req: ChatRequest,
-        ctx: RequestContext,
-    ) -> Result<LlmEventStream, ProviderError> {
-        let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
-        stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, ctx).await
-    }
-
-    fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn BatchSubmitter>> {
-        Some(self)
-    }
-}
-
-// ─── BatchSubmitter — OpenAI Batch API ──────────────────────────────
-//
-// Reference: <https://platform.openai.com/docs/api-reference/batch>
-//
-// Two-step submission (different from Anthropic's one-step):
-//   1) POST /files  (multipart, purpose=batch) → file_id
-//   2) POST /batches { input_file_id, endpoint, completion_window } → job
-//
-// Results come back as a separate output file (output_file_id on the
-// batch object); fetch via GET /files/{id}/content. Errors during the
-// batch surface in an error_file_id similarly.
-//
-// Per-line JSONL shape (input):
-//   {"custom_id": "...", "method":"POST", "url":"/v1/chat/completions",
-//    "body": <chat completion request body>}
-//
-// Per-line JSONL shape (output):
-//   {"custom_id": "...", "response": {"status_code":200,"body":{...}}, "error": null}
-//   or {"custom_id": "...", "response": null, "error":{...}}
-
-#[async_trait]
-impl BatchSubmitter for OpenAiProvider {
-    async fn submit(
-        &self,
-        items: Vec<(BatchItemId, ChatRequest)>,
-    ) -> Result<BatchJobId, ProviderError> {
-        if items.is_empty() {
-            return Err(ProviderError::InvalidRequest(
-                "batch submit: items list must not be empty".into(),
-            ));
-        }
-
-        // 1) Build the JSONL input file content.
-        let mut jsonl = String::with_capacity(items.len() * 256);
-        for (item_id, req) in &items {
-            let body = self.adapter.translate_request(req)?;
-            let line = serde_json::to_string(&json!({
-                "custom_id": item_id.as_str(),
-                "method": "POST",
-                "url": "/v1/chat/completions",
-                "body": body,
-            }))
-            .map_err(|e| ProviderError::Internal(format!("batch input serialize: {e}")))?;
-            jsonl.push_str(&line);
-            jsonl.push('\n');
-        }
-
-        // 2) Upload the JSONL as a "batch" purpose file via multipart.
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
-        let auth_only = openai_auth_only_headers(&auth)?;
-
-        let file_part = reqwest::multipart::Part::bytes(jsonl.into_bytes())
-            .file_name("batch.jsonl")
-            .mime_str("application/jsonl")
-            .map_err(|e| ProviderError::Internal(format!("multipart part: {e}")))?;
-        let form = reqwest::multipart::Form::new()
-            .text("purpose", "batch")
-            .part("file", file_part);
-
-        let upload_url = self.adapter.files_url("")?;
-        let upload_resp = self
-            .http
-            .client
-            .post(upload_url)
-            .headers(auth_only.clone())
-            .multipart(form)
-            .send()
-            .await
-            .map_err(ProviderError::from)?;
-        if !upload_resp.status().is_success() {
-            let status = upload_resp.status();
-            let h = upload_resp.headers().clone();
-            let text = upload_resp.text().await.unwrap_or_default();
-            return Err(self.adapter.classify_error(status, &h, &text));
-        }
-        let file_v: Value = upload_resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::Parse(format!("file upload: response not JSON: {e}")))?;
-        let input_file_id = file_v
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ProviderError::Parse("file upload: response missing `id`".into())
-            })?
-            .to_string();
-
-        // 3) Create the batch referencing that file.
-        let create_url = self.adapter.batches_url("")?;
-        let headers = self.adapter.build_headers(&auth)?; // JSON content-type
-        let body = json!({
-            "input_file_id": input_file_id,
-            "endpoint": "/v1/chat/completions",
-            "completion_window": "24h",
-        });
-        let resp = self
-            .http
-            .client
-            .post(create_url)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await
-            .map_err(ProviderError::from)?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(self.adapter.classify_error(status, &h, &text));
-        }
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::Parse(format!("batch create: response not JSON: {e}")))?;
-        let id = v
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ProviderError::Parse("batch create: response missing `id`".into()))?;
-        Ok(BatchJobId::new(id))
-    }
-
-    async fn status(&self, id: &BatchJobId) -> Result<BatchStatus, ProviderError> {
-        let v = self.fetch_batch_object(id).await?;
-        translate_openai_batch_status(&v)
-    }
-
-    async fn results(
-        &self,
-        id: &BatchJobId,
-    ) -> Result<Vec<BatchResultItem>, ProviderError> {
-        let v = self.fetch_batch_object(id).await?;
-        let status = translate_openai_batch_status(&v)?;
-        if !status.is_terminal() {
-            return Err(ProviderError::InvalidRequest(format!(
-                "batch results: job {id} is not yet terminal (status: {status:?})"
-            )));
-        }
-        // For Completed: read output_file_id and download it. For
-        // Failed/Expired/Cancelled there's typically no output file
-        // (errors live in error_file_id which we currently surface as
-        // an Err on each item-less response). Return empty for now;
-        // callers should branch on status() before results().
-        let output_file_id = v.get("output_file_id").and_then(|s| s.as_str());
-        let Some(output_file_id) = output_file_id else {
-            return Ok(Vec::new());
-        };
-
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
-        let headers = openai_auth_only_headers(&auth)?;
-        let url = self
-            .adapter
-            .files_url(&format!("/{output_file_id}/content"))?;
-        let resp = self
-            .http
-            .client
-            .get(url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(ProviderError::from)?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(self.adapter.classify_error(status, &h, &text));
-        }
-        let text = resp.text().await.map_err(ProviderError::from)?;
-        parse_openai_batch_results(&text)
-    }
-
-    async fn cancel(&self, id: &BatchJobId) -> Result<(), ProviderError> {
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
-        let headers = self.adapter.build_headers(&auth)?;
-        let url = self
-            .adapter
-            .batches_url(&format!("/{}/cancel", id.as_str()))?;
-        let resp = self
-            .http
-            .client
-            .post(url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(ProviderError::from)?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(self.adapter.classify_error(status, &h, &text));
-        }
-        Ok(())
-    }
-}
-
-impl OpenAiProvider {
-    /// Shared GET that pulls the batch object JSON for status / results.
-    async fn fetch_batch_object(&self, id: &BatchJobId) -> Result<Value, ProviderError> {
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
-        let headers = self.adapter.build_headers(&auth)?;
-        let url = self.adapter.batches_url(&format!("/{}", id.as_str()))?;
-        let resp = self
-            .http
-            .client
-            .get(url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(ProviderError::from)?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(self.adapter.classify_error(status, &h, &text));
-        }
-        resp.json::<Value>()
-            .await
-            .map_err(|e| ProviderError::Parse(format!("batch fetch: response not JSON: {e}")))
-    }
-}
-
-/// Authorization header only (no `Content-Type: application/json`) —
-/// reqwest sets the right multipart `Content-Type` automatically; we
-/// must not preset JSON or the boundary string gets clobbered.
-fn openai_auth_only_headers(auth: &ResolvedAuth) -> Result<HeaderMap, ProviderError> {
-    let mut h = HeaderMap::new();
-    match auth {
-        ResolvedAuth::Bearer(t) | ResolvedAuth::ApiKey(t) => {
-            let value = HeaderValue::from_str(&format!("Bearer {t}"))
-                .map_err(|e| ProviderError::Internal(format!("bad auth header: {e}")))?;
-            h.insert(AUTHORIZATION, value);
-        }
-        ResolvedAuth::None => {}
-    }
-    Ok(h)
-}
-
-/// OpenAI's `status` field on the batch object, translated to our
-/// vendor-neutral [`BatchStatus`].
-///
-/// OpenAI vocab:
-///   validating | in_progress | finalizing → InProgress
-///   completed → Completed
-///   failed → Failed
-///   expired → Expired
-///   cancelling → InProgress
-///   cancelled → Cancelled
-fn translate_openai_batch_status(v: &Value) -> Result<BatchStatus, ProviderError> {
-    let status = v
-        .get("status")
-        .and_then(|s| s.as_str())
-        .ok_or_else(|| ProviderError::Parse("batch status: missing `status`".into()))?;
-
-    let counts = v.get("request_counts").cloned().unwrap_or_else(|| json!({}));
-    // Counts arrive as u64 on the wire but `BatchStatus` carries u32.
-    // Clamp instead of using a silent `as u32` truncation (which would
-    // wrap a >u32::MAX count into a small bogus value).
-    let clamp_u32 = |n: u64| n.min(u32::MAX as u64) as u32;
-    let total = counts
-        .get("total")
-        .and_then(|n| n.as_u64())
-        .map(clamp_u32);
-    let completed = clamp_u32(counts.get("completed").and_then(|n| n.as_u64()).unwrap_or(0));
-    let failed = clamp_u32(counts.get("failed").and_then(|n| n.as_u64()).unwrap_or(0));
-    // Saturating add: the sum of two clamped u32s can exceed u32::MAX,
-    // which would panic (debug) or wrap (release) with plain `+`.
-    let processed = completed.saturating_add(failed);
-
-    match status {
-        "validating" | "in_progress" | "finalizing" | "cancelling" => {
-            Ok(BatchStatus::InProgress {
-                processed,
-                total,
-                eta: None,
-            })
-        }
-        "completed" => Ok(BatchStatus::Completed),
-        "expired" => Ok(BatchStatus::Expired),
-        "cancelled" => Ok(BatchStatus::Cancelled),
-        "failed" => {
-            // OpenAI surfaces the top-level reason via the `errors` array.
-            // We collapse to one-message Failed.
-            let message = v
-                .get("errors")
-                .and_then(|e| e.get("data"))
-                .and_then(|d| d.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|first| first.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("batch failed");
-            Ok(BatchStatus::Failed {
-                kind: "batch_failed".into(),
-                message: message.to_string(),
-            })
-        }
-        other => Err(ProviderError::Parse(format!(
-            "batch status: unknown `status` value: {other:?}"
-        ))),
-    }
-}
-
-/// Parse OpenAI's output file JSONL into [`BatchResultItem`]s.
-fn parse_openai_batch_results(text: &str) -> Result<Vec<BatchResultItem>, ProviderError> {
-    let mut items = Vec::new();
-    for (idx, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let v: Value = serde_json::from_str(line).map_err(|e| {
-            ProviderError::Parse(format!(
-                "batch results line {}: not JSON: {e}",
-                idx + 1
-            ))
-        })?;
-        let custom_id = v
-            .get("custom_id")
-            .and_then(|s| s.as_str())
-            .ok_or_else(|| {
-                ProviderError::Parse(format!(
-                    "batch results line {}: missing custom_id",
-                    idx + 1
-                ))
-            })?
-            .to_string();
-
-        // Item-level error takes precedence if present.
-        if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
-            let code = err
-                .get("code")
-                .and_then(|c| c.as_str())
-                .unwrap_or("error");
-            let msg = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("(no message)");
-            let pe = match code {
-                "invalid_request" | "invalid_request_error" => {
-                    ProviderError::InvalidRequest(msg.to_string())
-                }
-                "rate_limit_exceeded" => ProviderError::RateLimited { retry_after: None },
-                _ => ProviderError::Internal(format!("openai batch item error ({code}): {msg}")),
-            };
-            items.push(BatchResultItem {
-                item_id: BatchItemId::new(custom_id),
-                result: Err(pe),
-            });
-            continue;
-        }
-
-        let response = v.get("response").ok_or_else(|| {
-            ProviderError::Parse(format!(
-                "batch results line {}: missing response and no error",
-                idx + 1
-            ))
-        })?;
-        let body = response.get("body").ok_or_else(|| {
-            ProviderError::Parse(format!(
-                "batch results line {}: response missing body",
-                idx + 1
-            ))
-        })?;
-        items.push(BatchResultItem {
-            item_id: BatchItemId::new(custom_id),
-            result: openai_chat_completion_to_chat_response(body),
-        });
-    }
-    Ok(items)
-}
-
-/// Convert one OpenAI chat-completion response body into [`ChatResponse`]
-/// by replaying through [`ChatResponseBuilder`]. Same shape as the
-/// streaming end-state, just delivered all-at-once.
-///
-/// **Known gap (Phase 3)**: tool_calls in batch responses are skipped.
-/// Same V1 limitation as the Anthropic backend (`anthropic_message_to_chat_response`).
-fn openai_chat_completion_to_chat_response(body: &Value) -> Result<ChatResponse, ProviderError> {
-    let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("openai");
-    let mut acc = ChatResponseBuilder::new();
-    acc.apply(ChatEvent::started(model));
-
-    let choice = body
-        .get("choices")
-        .and_then(|c| c.as_array())
-        .and_then(|a| a.first())
-        .ok_or_else(|| ProviderError::Parse("openai batch response: choices empty".into()))?;
-    let message = choice.get("message").ok_or_else(|| {
-        ProviderError::Parse("openai batch response: choice missing message".into())
-    })?;
-
-    if let Some(text) = message.get("content").and_then(|c| c.as_str()) {
-        if !text.is_empty() {
-            acc.apply(ChatEvent::Delta {
-                text: text.to_string(),
-            });
-        }
-    }
-
-    let stop_reason = match choice.get("finish_reason").and_then(|f| f.as_str()) {
-        Some("stop") => StopReason::EndTurn,
-        Some("length") => StopReason::MaxTokens,
-        Some("content_filter") => StopReason::ContentFilter,
-        Some("tool_calls") => StopReason::ToolUse,
-        _ => StopReason::EndTurn,
-    };
-
-    let u = body.get("usage").cloned().unwrap_or_else(|| json!({}));
-    let usage_u64 = |k: &str| u.get(k).and_then(|n| n.as_u64()).unwrap_or(0);
-    // OpenAI nested cached count: usage.prompt_tokens_details.cached_tokens
-    let cached = u
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|n| n.as_u64())
-        .unwrap_or(0);
-    let usage = Usage {
-        input_tokens: usage_u64("prompt_tokens"),
-        output_tokens: usage_u64("completion_tokens"),
-        cached_input_tokens: cached,
-        cache_creation_tokens: 0,
-        thinking_tokens: 0,
-    };
-    acc.apply(ChatEvent::Finished { stop_reason, usage });
-    Ok(acc.finish())
-}
 
 /// The wire-format adapter — pure functions, no state.
 pub struct OpenAiAdapter {
@@ -595,6 +32,10 @@ pub struct OpenAiAdapter {
 }
 
 impl OpenAiAdapter {
+    pub(super) fn new(base_url: String, extras: HttpProviderExtras) -> Self {
+        Self { base_url, extras }
+    }
+
     /// Decide which "max tokens" parameter the model accepts.
     fn max_tokens_field(model: &str) -> &'static str {
         if NEW_TOKENS_PARAM_PREFIXES
@@ -658,7 +99,7 @@ impl OpenAiAdapter {
             } => {
                 // OpenAI's tool-role message has no literal `is_error`
                 // field. The convention is to prefix the content with
-                // a marker so the model sees the error semantically.
+                // a marker so the model sees it as an error semantically.
                 // Audit finding `tars-provider-src-backends-openai-7`:
                 // failed tool execution was being presented as success.
                 let mut content_blocks = Self::translate_content(content);
@@ -726,9 +167,7 @@ impl OpenAiAdapter {
             .collect();
         Value::Array(arr)
     }
-}
 
-impl OpenAiAdapter {
     /// Build a URL under `{base_url}/files{suffix}` (file upload + download).
     pub(crate) fn files_url(&self, suffix: &str) -> Result<Url, ProviderError> {
         let trimmed = self.base_url.trim_end_matches('/');
@@ -1142,73 +581,10 @@ impl HttpAdapter for OpenAiAdapter {
     }
 }
 
-fn parse_openai_usage(usage: &serde_json::Map<String, Value>) -> Usage {
-    let prompt = usage
-        .get("prompt_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let completion = usage
-        .get("completion_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let cached = usage
-        .get("prompt_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    Usage {
-        input_tokens: prompt,
-        output_tokens: completion,
-        cached_input_tokens: cached,
-        cache_creation_tokens: 0,
-        thinking_tokens: 0,
-    }
-}
-
-/// Drain whatever indices the buffer has into ToolCallEnd events.
-/// Replaces the broken finalization loop in `parse_event`.
-///
-/// Audit `tars-provider-src-backends-openai-29`: previously swallowed
-/// finalize errors with `if let Ok(...)`, leaving consumers in an
-/// inconsistent state when args were malformed. Now propagates.
-/// Indices that were never started simply don't show up in the
-/// inflight map and yield a benign `not started` error we filter out.
-fn drain_buffer_into(
-    buf: &mut ToolCallBuffer,
-    out: &mut Vec<ChatEvent>,
-) -> Result<(), ProviderError> {
-    // We don't have a public iter on ToolCallBuffer; finalize indices
-    // 0..32 (parallel call ceiling we treat as practical max).
-    for i in 0..32 {
-        match buf.finalize(i) {
-            Ok((id, _name, parsed)) => {
-                out.push(ChatEvent::ToolCallEnd {
-                    index: i,
-                    id,
-                    parsed_args: parsed,
-                });
-            }
-            Err(ProviderError::Parse(msg)) if msg.contains("not started") => {
-                // Index was never used in this stream — fine.
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let trimmed = crate::http_base::truncate_utf8(s, max);
-    if trimmed.len() == s.len() {
-        s.to_string()
-    } else {
-        format!("{trimmed}…")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::provider::DEFAULT_BASE_URL;
 
     #[test]
     fn picks_max_completion_tokens_for_o1() {
@@ -1266,10 +642,7 @@ mod tests {
         // Audit `tars-provider-src-backends-openai-9`: caller set
         // both req.system AND an inline System message → 2 system
         // blocks were emitted. Now the inline System is skipped.
-        let a = OpenAiAdapter {
-            base_url: DEFAULT_BASE_URL.into(),
-            extras: HttpProviderExtras::default(),
-        };
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default());
         let req = ChatRequest {
             model: tars_types::ModelHint::Explicit("gpt-4o".into()),
             system: Some("explicit system".into()),
@@ -1303,10 +676,7 @@ mod tests {
 
     #[test]
     fn classify_401_is_auth() {
-        let a = OpenAiAdapter {
-            base_url: DEFAULT_BASE_URL.into(),
-            extras: HttpProviderExtras::default(),
-        };
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default());
         let err = a.classify_error(
             StatusCode::UNAUTHORIZED,
             &empty_headers(),
@@ -1317,10 +687,7 @@ mod tests {
 
     #[test]
     fn classify_429_is_rate_limited() {
-        let a = OpenAiAdapter {
-            base_url: DEFAULT_BASE_URL.into(),
-            extras: HttpProviderExtras::default(),
-        };
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default());
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &empty_headers(), "");
         assert!(matches!(
             err,
@@ -1330,10 +697,7 @@ mod tests {
 
     #[test]
     fn classify_429_with_retry_after_seconds_populates_field() {
-        let a = OpenAiAdapter {
-            base_url: DEFAULT_BASE_URL.into(),
-            extras: HttpProviderExtras::default(),
-        };
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default());
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::RETRY_AFTER, "42".parse().unwrap());
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &headers, "");
@@ -1347,10 +711,7 @@ mod tests {
 
     #[test]
     fn classify_400_context_length_is_typed() {
-        let a = OpenAiAdapter {
-            base_url: DEFAULT_BASE_URL.into(),
-            extras: HttpProviderExtras::default(),
-        };
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default());
         let body = r#"{"error":{"message":"context_length_exceeded: too many tokens"}}"#;
         let err = a.classify_error(StatusCode::BAD_REQUEST, &empty_headers(), body);
         assert!(matches!(err, ProviderError::ContextTooLong { .. }));
