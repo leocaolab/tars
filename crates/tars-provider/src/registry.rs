@@ -88,24 +88,6 @@ impl ProviderRegistry {
         })
     }
 
-    /// Build from a pre-existing map of (id, provider). Useful when a
-    /// caller wants to **transform** an existing registry — e.g. wrap
-    /// every provider in a `CircuitBreaker` (Doc 02 §4.7) — without
-    /// rebuilding from `ProvidersConfig`. Same duplicate-id rule as
-    /// `from_config` (relies on the input being a `HashMap` to
-    /// pre-deduplicate).
-    pub fn from_map(map: HashMap<ProviderId, Arc<dyn LlmProvider>>) -> Self {
-        Self {
-            providers: Arc::new(map),
-            // No config available here, so no default-model table. Tier
-            // resolution falls back to forwarding the hint unchanged
-            // (adapters use their own default). Callers that need tier
-            // resolution should build via `from_config` (and use
-            // `map_providers`, which preserves the table).
-            default_models: Arc::new(HashMap::new()),
-        }
-    }
-
     /// Map every provider through `f` and return a new registry. The
     /// closure runs once per provider at registry-build time, so any
     /// state held by the wrapped provider (e.g. CircuitBreaker counters)

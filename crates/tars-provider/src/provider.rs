@@ -117,16 +117,5 @@ where
     Box::pin(s)
 }
 
-/// Erase the concrete stream type (used in tests / mocks).
-pub fn boxed_iter_stream(
-    events: impl IntoIterator<Item = Result<ChatEvent, ProviderError>> + Send + 'static,
-) -> LlmEventStream
-where
-    <Vec<Result<ChatEvent, ProviderError>> as IntoIterator>::IntoIter: Send,
-{
-    let v: Vec<_> = events.into_iter().collect();
-    boxed_stream(futures::stream::iter(v))
-}
-
 // Type alias for downstream consumers that don't want to write `BoxStream` themselves.
 pub type EventBoxStream = BoxStream<'static, Result<ChatEvent, ProviderError>>;
