@@ -129,6 +129,13 @@ pub enum EvalCommand {
     /// per-check violation rates — NOT raw output text. See
     /// `docs/architecture/18-agent-testing.md` §2.
     Diff(EvalDiffArgs),
+    /// One-shot migration for eval runs written before `ARC-L5-B-6`.
+    /// Walks the given run directory and rewrites any `CaseCheckResult`
+    /// blocks in `manifest.json` / `<case>/report.json` from the legacy
+    /// `{"name", "passed", "detail"}` shape to the new internally-tagged
+    /// `{"outcome": "passed"|"failed", "name", "note"|"reason"}` shape.
+    /// Idempotent — files already in the new shape are left untouched.
+    MigrateChecks(EvalMigrateChecksArgs),
     /// Run an LLM judge over an eval run's outputs (TP/FP/Unsure per
     /// case), writing `judge_report.json` into the run directory. The
     /// judge is a normal tars provider (default `claude_cli`); anti-
@@ -147,6 +154,14 @@ pub struct EvalJudgeArgs {
     /// Judge model hint. If unset, the provider's default model.
     #[arg(long)]
     pub judge_model: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct EvalMigrateChecksArgs {
+    /// Eval-run directory containing `manifest.json` and per-case
+    /// subdirectories with `report.json`.
+    #[arg(value_name = "DIR")]
+    pub dir: PathBuf,
 }
 
 #[derive(Args, Debug)]
@@ -280,26 +295,41 @@ pub struct EvalCaseReport {
 /// One invariant check's outcome for one eval case.
 ///
 /// Sum-as-product fix for the original `(name, passed: bool, detail:
-/// Option<String>)` shape (`arc scan --judge` finding `ARC-L5-B-8`).
-/// The typed enum makes "fail without reason" unrepresentable while
-/// keeping the documented "pass with note" path available
-/// (validator-skipped notes, etc).
+/// Option<String>)` shape (`arc scan --judge` findings `ARC-L5-B-8` /
+/// `ARC-L5-B-6`). The typed enum makes "fail without reason"
+/// unrepresentable while keeping the documented "pass with note" path
+/// available (validator-skipped notes, etc).
 ///
 /// ### Wire format
 ///
-/// Serialised to / from the **legacy flat shape**
-/// `{"name", "passed", "detail"}` via a custom `Serialize` /
-/// `Deserialize` below. Existing report.json artifacts and manifest
-/// payloads round-trip byte-for-byte unchanged; the typing only
-/// affects how Rust callers construct and pattern-match values.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Internally-tagged serde — `outcome: "passed" | "failed"` is the
+/// discriminator, the remaining fields are flattened alongside it:
+///
+/// ```text
+///   {"outcome": "passed", "name": "x", "note": null}
+///   {"outcome": "failed", "name": "y", "reason": "bad"}
+/// ```
+///
+/// `ARC-L5-B-6` killed the bespoke `CaseCheckResultWire` adapter that
+/// preserved the legacy flat `{"name", "passed", "detail"}` shape:
+/// the wire DTO + custom `Serialize`/`Deserialize` were permanent
+/// tech debt for a back-compat surface that doesn't apply to new
+/// runs. Old `report.json` / `manifest.json` artifacts can be
+/// migrated in place via [`migrate_legacy_check_results_in_dir`] (CLI:
+/// `tars eval migrate-checks <dir>`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum CaseCheckResult {
     /// Invariant held. `note` is an optional diagnostic (e.g.
     /// "validator skipped because no oracle was supplied").
-    Passed { name: String, note: Option<String> },
+    Passed {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     /// Invariant failed. `reason` is required — a failure without a
     /// reason was a constructible-but-meaningless legacy state and is
-    /// now rejected at the wire boundary.
+    /// now structurally unrepresentable at every layer.
     Failed { name: String, reason: String },
 }
 
@@ -326,54 +356,144 @@ impl CaseCheckResult {
     }
 }
 
-// ─── Wire-format adapter ─────────────────────────────────────────────
+// ─── Legacy-shape migration ────────────────────────────────────────
 //
-// Project / lift to the legacy
+// `CaseCheckResultWire` is gone, but report.json / manifest.json
+// files written before ARC-L5-B-6 carry the old flat shape:
+//
 //   {"name": "x", "passed": true, "detail": null}
-// flat shape so any existing report.json / manifest.json artifact
-// keeps round-tripping.
+//   {"name": "y", "passed": false, "detail": "bad"}
+//
+// These helpers walk a JSON `Value` and rewrite any such block to
+// the new internally-tagged form. Idempotent: blocks already in the
+// new shape pass through untouched. Failed-without-detail (the
+// previously-rejected illegal state) becomes an explicit error so
+// the operator sees what they have rather than silently inventing a
+// reason.
 
-#[derive(Serialize, Deserialize)]
-struct CaseCheckResultWire {
-    name: String,
-    passed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-}
-
-impl Serialize for CaseCheckResult {
-    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        let wire = match self {
-            Self::Passed { name, note } => CaseCheckResultWire {
-                name: name.clone(),
-                passed: true,
-                detail: note.clone(),
-            },
-            Self::Failed { name, reason } => CaseCheckResultWire {
-                name: name.clone(),
-                passed: false,
-                detail: Some(reason.clone()),
-            },
-        };
-        wire.serialize(ser)
+/// Migrate one check JSON block in place. Returns `Ok(true)` if the
+/// block was rewritten, `Ok(false)` if it was already in the new
+/// shape or wasn't recognisably a check object at all.
+fn migrate_legacy_check(check: &mut serde_json::Value) -> std::io::Result<bool> {
+    let Some(obj) = check.as_object() else {
+        return Ok(false);
+    };
+    if obj.contains_key("outcome") {
+        // Already new shape.
+        return Ok(false);
     }
+    let Some(name) = obj.get("name").and_then(|v| v.as_str()).map(String::from)
+    else {
+        // Not a check object — leave alone.
+        return Ok(false);
+    };
+    let Some(passed) = obj.get("passed").and_then(|v| v.as_bool()) else {
+        return Ok(false);
+    };
+    let detail = obj.get("detail").and_then(|v| v.as_str()).map(String::from);
+    let new = match (passed, detail) {
+        (true, note) => {
+            let mut m = serde_json::Map::new();
+            m.insert("outcome".into(), serde_json::Value::String("passed".into()));
+            m.insert("name".into(), serde_json::Value::String(name));
+            if let Some(n) = note {
+                m.insert("note".into(), serde_json::Value::String(n));
+            }
+            serde_json::Value::Object(m)
+        }
+        (false, Some(reason)) => serde_json::json!({
+            "outcome": "failed",
+            "name": name,
+            "reason": reason,
+        }),
+        (false, None) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "legacy check `{name}` has passed=false with no detail; \
+                     the original code rejected this on read, refusing to \
+                     invent a reason on migrate"
+                ),
+            ));
+        }
+    };
+    *check = new;
+    Ok(true)
 }
 
-impl<'de> Deserialize<'de> for CaseCheckResult {
-    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        let w = CaseCheckResultWire::deserialize(de)?;
-        match (w.passed, w.detail) {
-            (true, note) => Ok(Self::Passed { name: w.name, note }),
-            (false, Some(reason)) => Ok(Self::Failed {
-                name: w.name,
-                reason,
-            }),
-            (false, None) => Err(serde::de::Error::custom(format!(
-                "case check `{}`: failed=true but no detail/reason; refusing to materialize a Failed without a reason",
-                w.name
-            ))),
+/// Walk a manifest/report JSON value and migrate every check block.
+/// Recognises both `manifest.json` (top-level `cases[*].checks[*]`)
+/// and per-case `report.json` (top-level `checks[*]`).
+fn migrate_legacy_checks_in_value(v: &mut serde_json::Value) -> std::io::Result<usize> {
+    let mut rewrites = 0;
+    if let Some(checks) = v.get_mut("checks").and_then(|c| c.as_array_mut()) {
+        for c in checks {
+            if migrate_legacy_check(c)? {
+                rewrites += 1;
+            }
         }
     }
+    if let Some(cases) = v.get_mut("cases").and_then(|c| c.as_array_mut()) {
+        for case in cases {
+            if let Some(checks) = case
+                .get_mut("checks")
+                .and_then(|c| c.as_array_mut())
+            {
+                for c in checks {
+                    if migrate_legacy_check(c)? {
+                        rewrites += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(rewrites)
+}
+
+/// Walk an eval-run directory and rewrite every legacy check block
+/// in `manifest.json` and `<case>/report.json`. Returns the per-file
+/// rewrite counts. Files already in the new shape are left untouched.
+pub fn migrate_legacy_check_results_in_dir(dir: &Path) -> Result<Vec<(PathBuf, usize)>> {
+    let mut touched = Vec::new();
+    let manifest = dir.join("manifest.json");
+    if manifest.is_file() {
+        if let Some(n) = migrate_one_file(&manifest)? {
+            touched.push((manifest, n));
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let report = p.join("report.json");
+            if report.is_file()
+                && let Some(n) = migrate_one_file(&report)?
+            {
+                touched.push((report, n));
+            }
+        }
+    }
+    Ok(touched)
+}
+
+/// Read → migrate → write one JSON file. Returns the rewrite count,
+/// or `None` if the file was already entirely in the new shape (in
+/// which case we leave the bytes alone — no spurious mtime bump).
+fn migrate_one_file(path: &Path) -> Result<Option<usize>> {
+    let body = read_text(path)?;
+    let mut v: serde_json::Value = serde_json::from_str(&body)
+        .with_context(|| format!("parsing {} as JSON", path.display()))?;
+    let n = migrate_legacy_checks_in_value(&mut v)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let out = serde_json::to_string_pretty(&v)
+        .with_context(|| format!("re-serializing migrated {}", path.display()))?;
+    std::fs::write(path, out)
+        .with_context(|| format!("writing migrated {}", path.display()))?;
+    Ok(Some(n))
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -387,6 +507,7 @@ pub async fn execute(args: EvalArgs, config_path: Option<PathBuf>) -> Result<()>
     match args.command {
         EvalCommand::Run(a) => run_eval(a, config_path).await,
         EvalCommand::Diff(a) => run_diff(a),
+        EvalCommand::MigrateChecks(a) => run_migrate_checks(a),
         EvalCommand::Judge(a) => run_judge(a, config_path).await,
     }
 }
@@ -482,6 +603,28 @@ async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<
 }
 
 // ─── eval diff ────────────────────────────────────────────────────────
+
+fn run_migrate_checks(args: EvalMigrateChecksArgs) -> Result<()> {
+    let touched = migrate_legacy_check_results_in_dir(&args.dir)?;
+    if touched.is_empty() {
+        println!(
+            "eval migrate-checks: nothing to do ({} already in the new \
+             shape, or no manifest.json / report.json files found)",
+            args.dir.display()
+        );
+        return Ok(());
+    }
+    let total: usize = touched.iter().map(|(_, n)| n).sum();
+    println!(
+        "eval migrate-checks: rewrote {total} legacy check block(s) \
+         across {} file(s):",
+        touched.len()
+    );
+    for (path, n) in &touched {
+        println!("  {n:>4}  {}", path.display());
+    }
+    Ok(())
+}
 
 fn load_manifest(dir: &Path) -> Result<EvalRunManifest> {
     let path = dir.join("manifest.json");
@@ -1195,35 +1338,136 @@ mod tests {
     }
 
     #[test]
-    fn case_check_result_legacy_wire_round_trips() {
-        // Pin the wire-form contract: existing report.json artifacts
-        // continue to round-trip byte-identical.
-        let legacy_pass = serde_json::json!({"name": "x", "passed": true});
-        let parsed: CaseCheckResult = serde_json::from_value(legacy_pass.clone()).unwrap();
-        assert!(matches!(parsed, CaseCheckResult::Passed { ref name, note: None } if name == "x"));
-
-        let legacy_fail = serde_json::json!({"name": "y", "passed": false, "detail": "bad"});
-        let parsed: CaseCheckResult = serde_json::from_value(legacy_fail.clone()).unwrap();
-        assert!(matches!(parsed, CaseCheckResult::Failed { ref name, ref reason } if name == "y" && reason == "bad"));
-
-        // Re-serialise drops the wire form back to its legacy
-        // representation (passed=true with detail omitted because
-        // skip_serializing_if).
-        let re = serde_json::to_value(CaseCheckResult::Passed {
+    fn case_check_result_serialises_as_internally_tagged() {
+        // Pin the new wire shape (B-6 cut). Passed.note is omitted
+        // when None thanks to skip_serializing_if; Failed.reason
+        // is always present.
+        let pass = serde_json::to_value(CaseCheckResult::Passed {
             name: "x".into(),
             note: None,
         })
         .unwrap();
-        assert_eq!(re, legacy_pass);
+        assert_eq!(pass, serde_json::json!({"outcome": "passed", "name": "x"}));
+
+        let pass_with_note = serde_json::to_value(CaseCheckResult::Passed {
+            name: "x".into(),
+            note: Some("validator skipped".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            pass_with_note,
+            serde_json::json!({
+                "outcome": "passed",
+                "name": "x",
+                "note": "validator skipped",
+            })
+        );
+
+        let fail = serde_json::to_value(CaseCheckResult::Failed {
+            name: "y".into(),
+            reason: "bad".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            fail,
+            serde_json::json!({"outcome": "failed", "name": "y", "reason": "bad"})
+        );
+    }
+
+    #[test]
+    fn case_check_result_round_trips_through_serde() {
+        let cases = vec![
+            CaseCheckResult::Passed { name: "p".into(), note: None },
+            CaseCheckResult::Passed {
+                name: "p".into(),
+                note: Some("n".into()),
+            },
+            CaseCheckResult::Failed {
+                name: "f".into(),
+                reason: "because".into(),
+            },
+        ];
+        for c in cases {
+            let json = serde_json::to_value(&c).unwrap();
+            let back: CaseCheckResult = serde_json::from_value(json).unwrap();
+            assert_eq!(c, back);
+        }
+    }
+
+    #[test]
+    fn migrate_legacy_check_rewrites_passed() {
+        let mut v = serde_json::json!({"name": "x", "passed": true});
+        let rewrote = migrate_legacy_check(&mut v).unwrap();
+        assert!(rewrote);
+        assert_eq!(v, serde_json::json!({"outcome": "passed", "name": "x"}));
+    }
+
+    #[test]
+    fn migrate_legacy_check_carries_pass_note() {
+        let mut v = serde_json::json!({
+            "name": "x",
+            "passed": true,
+            "detail": "validator skipped"
+        });
+        let rewrote = migrate_legacy_check(&mut v).unwrap();
+        assert!(rewrote);
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "outcome": "passed",
+                "name": "x",
+                "note": "validator skipped",
+            })
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_check_rewrites_failed_with_reason() {
+        let mut v = serde_json::json!({
+            "name": "y",
+            "passed": false,
+            "detail": "bad"
+        });
+        let rewrote = migrate_legacy_check(&mut v).unwrap();
+        assert!(rewrote);
+        assert_eq!(
+            v,
+            serde_json::json!({"outcome": "failed", "name": "y", "reason": "bad"})
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_check_is_idempotent_on_new_shape() {
+        let mut v = serde_json::json!({
+            "outcome": "passed",
+            "name": "x",
+            "note": null
+        });
+        let before = v.clone();
+        let rewrote = migrate_legacy_check(&mut v).unwrap();
+        assert!(!rewrote);
+        assert_eq!(v, before);
+    }
+
+    #[test]
+    fn migrate_legacy_check_refuses_failed_without_reason() {
+        // The previously-rejected illegal state — surface it loud
+        // rather than invent a reason during the migrate.
+        let mut v = serde_json::json!({"name": "z", "passed": false});
+        let err = migrate_legacy_check(&mut v).unwrap_err();
+        assert!(err.to_string().contains("z"));
+        assert!(err.to_string().contains("no detail"));
     }
 
     #[test]
     fn case_check_result_rejects_failed_without_reason() {
-        // The whole point of the typed shape: "failed but no detail"
-        // is an invalid wire payload, not a default-into-empty-string.
-        let bad = serde_json::json!({"name": "z", "passed": false});
+        // Now enforced by the type system: there is no `reason`
+        // field available to serde when deserializing a `failed`
+        // outcome without one. Picking up an old-shape document
+        // skips this path entirely (it goes through the migrate).
+        let bad = serde_json::json!({"outcome": "failed", "name": "z"});
         let err = serde_json::from_value::<CaseCheckResult>(bad).unwrap_err();
-        assert!(err.to_string().contains("no detail/reason"));
+        assert!(err.to_string().contains("reason"));
     }
 
     #[test]
