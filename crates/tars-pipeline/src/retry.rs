@@ -216,7 +216,7 @@ impl LlmService for RetryService {
             if let Ok(mut t) = ctx.telemetry.lock() {
                 t.retry_count = t.retry_count.saturating_add(1);
                 t.retry_attempts.push(tars_types::RetryAttempt {
-                    error_kind: provider_error_kind(&err).into(),
+                    error_kind: provider_error_kind(&err),
                     retry_after_ms: Some(millis_u64(wait)),
                 });
             }
@@ -239,12 +239,12 @@ impl LlmService for RetryService {
     }
 }
 
-/// Snake-case kind tag matching `tars-py`'s `TarsProviderError.kind`
+/// Typed kind tag matching `tars-py`'s `TarsProviderError.kind`
 /// Wrapper around [`ProviderError::kind`] kept for call-site clarity
 /// and so a future `provider_error_kind` divergence (if it ever needs
-/// to differ from the canonical kind string) doesn't have to update
-/// every callsite.
-fn provider_error_kind(err: &ProviderError) -> &'static str {
+/// to differ from the canonical kind) doesn't have to update every
+/// callsite.
+fn provider_error_kind(err: &ProviderError) -> tars_types::ProviderErrorKind {
     err.kind()
 }
 

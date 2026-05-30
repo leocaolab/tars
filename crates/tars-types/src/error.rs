@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chat::CompatibilityReason;
@@ -156,30 +157,98 @@ impl ProviderError {
         }
     }
 
-    /// Variant name in snake_case. Stable wire format used across
-    /// surfaces: telemetry `RetryAttempt.error_kind`,
-    /// `TarsProviderError.kind` on the Python side, `CallResult::Error
-    /// { kind }` on `LlmCallFinished`. Centralised here so all
-    /// consumers see the same string for the same variant.
-    pub fn kind(&self) -> &'static str {
+    /// Typed discriminator — the variant of this error as a value type
+    /// (no payload), useful for: trigger matching ([`crate`]'s
+    /// `FallbackTrigger`), telemetry (`RetryAttempt.error_kind`),
+    /// Python-side classification (`TarsProviderError.kind`), and the
+    /// `LlmCallFinished` event's `CallResult::Error { kind }`. Round-
+    /// trips to the same snake_case string everywhere via serde and
+    /// [`ProviderErrorKind::as_str`].
+    pub fn kind(&self) -> ProviderErrorKind {
         use ProviderError::*;
+        use ProviderErrorKind as K;
         match self {
-            Auth(_) => "auth",
-            RateLimited { .. } => "rate_limited",
-            BudgetExceeded => "budget_exceeded",
-            InvalidRequest(_) => "invalid_request",
-            ContentFiltered { .. } => "content_filtered",
-            ContextTooLong { .. } => "context_too_long",
-            ModelOverloaded => "model_overloaded",
-            CircuitOpen { .. } => "circuit_open",
-            Network(_) => "network",
-            Parse(_) => "parse",
-            CliSubprocessDied { .. } => "cli_subprocess_died",
-            UnknownTool { .. } => "unknown_tool",
-            NoCompatibleCandidate { .. } => "no_compatible_candidate",
-            ValidationFailed { .. } => "validation_failed",
-            Internal(_) => "internal",
+            Auth(_) => K::Auth,
+            RateLimited { .. } => K::RateLimited,
+            BudgetExceeded => K::BudgetExceeded,
+            InvalidRequest(_) => K::InvalidRequest,
+            ContentFiltered { .. } => K::ContentFiltered,
+            ContextTooLong { .. } => K::ContextTooLong,
+            ModelOverloaded => K::ModelOverloaded,
+            CircuitOpen { .. } => K::CircuitOpen,
+            Network(_) => K::Network,
+            Parse(_) => K::Parse,
+            CliSubprocessDied { .. } => K::CliSubprocessDied,
+            UnknownTool { .. } => K::UnknownTool,
+            NoCompatibleCandidate { .. } => K::NoCompatibleCandidate,
+            ValidationFailed { .. } => K::ValidationFailed,
+            Internal(_) => K::Internal,
         }
+    }
+}
+
+/// Discriminator companion to [`ProviderError`]. One variant per
+/// `ProviderError` variant; serializes as the snake_case wire string
+/// every consumer already used — telemetry / Python / event store —
+/// so making this typed is backward-compatible at the JSON wire and
+/// breaks only direct Rust `.kind()` callers (who were passing
+/// `&'static str` around).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderErrorKind {
+    Auth,
+    RateLimited,
+    BudgetExceeded,
+    InvalidRequest,
+    ContentFiltered,
+    ContextTooLong,
+    ModelOverloaded,
+    CircuitOpen,
+    Network,
+    Parse,
+    CliSubprocessDied,
+    UnknownTool,
+    NoCompatibleCandidate,
+    ValidationFailed,
+    Internal,
+}
+
+impl ProviderErrorKind {
+    /// Snake-case wire form — the string every existing consumer
+    /// (telemetry, Python, `LlmCallFinished`) is keyed on. Kept in
+    /// sync with the serde `rename_all = "snake_case"` annotation
+    /// above: changing one without the other would break round-trips.
+    pub fn as_str(&self) -> &'static str {
+        use ProviderErrorKind::*;
+        match self {
+            Auth => "auth",
+            RateLimited => "rate_limited",
+            BudgetExceeded => "budget_exceeded",
+            InvalidRequest => "invalid_request",
+            ContentFiltered => "content_filtered",
+            ContextTooLong => "context_too_long",
+            ModelOverloaded => "model_overloaded",
+            CircuitOpen => "circuit_open",
+            Network => "network",
+            Parse => "parse",
+            CliSubprocessDied => "cli_subprocess_died",
+            UnknownTool => "unknown_tool",
+            NoCompatibleCandidate => "no_compatible_candidate",
+            ValidationFailed => "validation_failed",
+            Internal => "internal",
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl AsRef<str> for ProviderErrorKind {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 

@@ -57,7 +57,7 @@ pub use chat::{
 };
 pub use content_ref::ContentRef;
 pub use context::{CancellationToken, RequestContext};
-pub use error::{ErrorClass, ProviderError};
+pub use error::{ErrorClass, ProviderError, ProviderErrorKind};
 pub use events::{ChatChunk, ChatEvent, PartialUsage, StopReason};
 pub use http_extras::HttpProviderExtras;
 pub use ids::{

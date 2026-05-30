@@ -81,11 +81,16 @@ pub struct TelemetryAccumulator {
 /// One retry attempt summary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetryAttempt {
-    /// Variant name of the underlying [`crate::error::ProviderError`]
-    /// that caused this retry, in snake_case (`"rate_limited"`,
-    /// `"network"`, `"model_overloaded"`, …). Same string scheme as
-    /// the `kind` attribute on Python-side `TarsProviderError`.
-    pub error_kind: String,
+    /// Discriminator of the underlying [`crate::error::ProviderError`]
+    /// that caused this retry. Serialised in snake_case
+    /// (`"rate_limited"`, `"network"`, `"model_overloaded"`, …) via
+    /// the `serde(rename_all = "snake_case")` annotation on
+    /// [`crate::error::ProviderErrorKind`], so the persisted JSON
+    /// wire format is unchanged from when this was `String`. The
+    /// Rust-side typing now catches `"rate_limmited"` typos at
+    /// compile time instead of producing a silent
+    /// no-fallback-trigger-matches at runtime.
+    pub error_kind: crate::error::ProviderErrorKind,
     /// Backoff this retry actually slept before the next attempt.
     /// Combines policy backoff + any provider-supplied `Retry-After`
     /// (whichever was honored by the retry middleware).

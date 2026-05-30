@@ -195,33 +195,44 @@ impl<'a> PartialResultRef<'a> {
 
 // ── Wire format → typed VerdictKind ────────────────────────────────────
 
+/// The three discriminator values the LLM is allowed to emit.
+/// `serde(rename_all = "lowercase")` makes the wire form match the
+/// JSON schema's `enum: ["approve","reject","refine"]` constraint, so
+/// the deserializer rejects an unknown variant **at parse time** —
+/// the previous `kind: String` shape pushed that check into
+/// `into_verdict_kind`'s catch-all `other =>` arm, which is now
+/// unreachable by construction (anything serde tolerates IS one of
+/// the three variants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum RawVerdictKind {
+    Approve,
+    Reject,
+    Refine,
+}
+
 /// Flat shape we ask the LLM to emit. Mapped to the typed
 /// [`VerdictKind`] enum in `into_verdict_kind`. This split keeps the
 /// JSON schema simple (no oneOf at the root) so OpenAI strict mode
 /// handles it cleanly across providers.
-///
-/// `kind` is `String` deliberately: this is the wire format the LLM
-/// JSON emits, so it must be a string for the JSON schema. The
-/// internal source of truth is the [`VerdictKind`] enum that
-/// `into_verdict_kind` immediately constructs from this struct —
-/// nothing downstream of that boundary sees the string.
 #[derive(Debug, Deserialize, Serialize)]
 struct RawVerdict {
-    /// `"approve"` / `"reject"` / `"refine"`. Validated below.
-    kind: String,
+    /// One of [`RawVerdictKind::Approve`] / `Reject` / `Refine`.
+    /// Type-checked by serde at parse time.
+    kind: RawVerdictKind,
     /// Required by the schema (so all providers accept the shape);
-    /// expected to be empty unless `kind == "reject"`.
+    /// expected to be empty unless `kind == Reject`.
     reason: String,
     /// Required by the schema; expected to be empty unless
-    /// `kind == "refine"`.
+    /// `kind == Refine`.
     suggestions: Vec<String>,
 }
 
 impl RawVerdict {
     fn into_verdict_kind(self) -> Result<VerdictKind, CriticError> {
-        match self.kind.as_str() {
-            "approve" => Ok(VerdictKind::Approve),
-            "reject" => {
+        match self.kind {
+            RawVerdictKind::Approve => Ok(VerdictKind::Approve),
+            RawVerdictKind::Reject => {
                 if self.reason.is_empty() {
                     return Err(CriticError::InvalidVerdict(
                         "kind=reject but reason is empty".into(),
@@ -231,7 +242,7 @@ impl RawVerdict {
                     reason: self.reason,
                 })
             }
-            "refine" => {
+            RawVerdictKind::Refine => {
                 if self.suggestions.is_empty() {
                     return Err(CriticError::InvalidVerdict(
                         "kind=refine but suggestions list is empty".into(),
@@ -241,9 +252,6 @@ impl RawVerdict {
                     suggestions: self.suggestions,
                 })
             }
-            other => Err(CriticError::InvalidVerdict(format!(
-                "unknown verdict kind `{other}` (expected approve / reject / refine)"
-            ))),
         }
     }
 }
@@ -370,7 +378,7 @@ mod tests {
     #[test]
     fn raw_verdict_approve_maps_cleanly() {
         let raw = RawVerdict {
-            kind: "approve".into(),
+            kind: RawVerdictKind::Approve,
             reason: String::new(),
             suggestions: vec![],
         };
@@ -383,7 +391,7 @@ mod tests {
     #[test]
     fn raw_verdict_reject_requires_reason() {
         let raw = RawVerdict {
-            kind: "reject".into(),
+            kind: RawVerdictKind::Reject,
             reason: String::new(),
             suggestions: vec![],
         };
@@ -395,7 +403,7 @@ mod tests {
         }
         // With reason populated, it works.
         let raw = RawVerdict {
-            kind: "reject".into(),
+            kind: RawVerdictKind::Reject,
             reason: "too vague".into(),
             suggestions: vec![],
         };
@@ -408,7 +416,7 @@ mod tests {
     #[test]
     fn raw_verdict_refine_requires_non_empty_suggestions() {
         let raw = RawVerdict {
-            kind: "refine".into(),
+            kind: RawVerdictKind::Refine,
             reason: String::new(),
             suggestions: vec![],
         };
@@ -419,7 +427,7 @@ mod tests {
             other => panic!("expected InvalidVerdict, got {other:?}"),
         }
         let raw = RawVerdict {
-            kind: "refine".into(),
+            kind: RawVerdictKind::Refine,
             reason: String::new(),
             suggestions: vec!["add an example".into()],
         };
@@ -432,18 +440,19 @@ mod tests {
     }
 
     #[test]
-    fn raw_verdict_unknown_kind_errors() {
-        let raw = RawVerdict {
-            kind: "explode".into(),
-            reason: String::new(),
-            suggestions: vec![],
-        };
-        match raw.into_verdict_kind() {
-            Err(CriticError::InvalidVerdict(msg)) => {
-                assert!(msg.contains("explode"));
-            }
-            other => panic!("expected InvalidVerdict, got {other:?}"),
-        }
+    fn raw_verdict_unknown_kind_rejected_by_serde() {
+        // Pre-refactor this was an `into_verdict_kind` runtime check
+        // ("unknown verdict kind `explode`"). With the typed
+        // `RawVerdictKind` enum, serde rejects the unknown variant at
+        // *parse time*, so the same input now fails one layer earlier
+        // and never reaches the matcher.
+        let bad = r#"{"kind":"explode","reason":"","suggestions":[]}"#;
+        let err = serde_json::from_str::<RawVerdict>(bad).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("explode") || msg.contains("unknown variant"),
+            "unexpected serde error: {msg}"
+        );
     }
 
     // ── Critic request shape ────────────────────────────────────────

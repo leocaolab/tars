@@ -285,29 +285,39 @@ impl Telemetry {
     }
 }
 
-/// One retry attempt record — `kind` is the snake-case error kind that
-/// caused the retry (`"rate_limited"`, `"network"`, etc.), matching
-/// `TarsProviderError.kind`. `retry_after_ms` is the actual backoff slept.
-///
-/// `kind` is `String` deliberately: PyO3 marshalls this field straight
-/// to a Python string (Python has no native Rust enum), and the value
-/// is sourced from `ProviderError::kind() -> &'static str` which is the
-/// typed enum's stable name. Switching the field to a Rust enum would
-/// require a custom IntoPy impl that emits the same string back, adding
-/// boilerplate without changing the externally observable contract.
-#[pyclass(frozen, get_all, name = "RetryAttempt")]
+/// One retry attempt record. `kind` is sourced from the typed
+/// [`ProviderErrorKind`] discriminator on the underlying
+/// [`tars_types::ProviderError`]; it crosses into Python as a
+/// snake-case string (`"rate_limited"`, `"network"`, …) matching the
+/// stable wire form of `TarsProviderError.kind`. `retry_after_ms` is
+/// the actual backoff slept.
+#[pyclass(frozen, name = "RetryAttempt")]
 #[derive(Clone, Debug)]
 pub(crate) struct RetryAttemptPy {
-    pub(crate) kind: String,
+    /// Internally typed (`ProviderErrorKind`); not exposed directly to
+    /// Python (`get_all` removed). The `#[getter] kind()` below
+    /// projects to the snake-case `&str` Python consumers already
+    /// see, so the external contract is unchanged.
+    pub(crate) kind: tars_types::ProviderErrorKind,
+    #[pyo3(get)]
     pub(crate) retry_after_ms: Option<u64>,
 }
 
 #[pymethods]
 impl RetryAttemptPy {
+    /// Snake-case kind tag — same string the field exposed when it
+    /// was `String`. Backed by the typed [`ProviderErrorKind`] now,
+    /// so producers can't accidentally write `"rate_limmited"`.
+    #[getter]
+    fn kind(&self) -> &'static str {
+        self.kind.as_str()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "RetryAttempt(kind={:?}, retry_after_ms={:?})",
-            self.kind, self.retry_after_ms
+            self.kind.as_str(),
+            self.retry_after_ms
         )
     }
 }

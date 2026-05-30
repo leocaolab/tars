@@ -361,7 +361,7 @@ fn wrap_stream_for_emit(
         let mut s = inner;
         let mut builder = ChatResponseBuilder::new();
         let mut saw_terminal = false;
-        let mut stream_error_kind: Option<&'static str> = None;
+        let mut stream_error_kind: Option<tars_types::ProviderErrorKind> = None;
 
         while let Some(item) = s.next().await {
             match &item {
@@ -403,8 +403,12 @@ fn wrap_stream_for_emit(
 
         let result = match (saw_terminal, stream_error_kind) {
             (true, None) => CallResult::Ok,
-            (_, Some(kind)) => CallResult::Error { kind: kind.to_string() },
-            (false, None) => CallResult::Error { kind: "internal".to_string() },
+            (_, Some(kind)) => CallResult::Error {
+                kind: kind.as_str().to_string(),
+            },
+            (false, None) => CallResult::Error {
+                kind: tars_types::ProviderErrorKind::Internal.as_str().to_string(),
+            },
         };
 
         // Bodies first: write request + response so the event row's

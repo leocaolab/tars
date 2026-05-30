@@ -51,31 +51,33 @@ use crate::service::LlmService;
 /// the earlier hops didn't.
 #[derive(Clone, Debug, Default)]
 pub struct FallbackTrigger {
-    kinds: HashSet<&'static str>,
+    kinds: HashSet<tars_types::ProviderErrorKind>,
 }
 
 impl FallbackTrigger {
     /// Trigger on the given error kinds.
-    pub fn on(kinds: &[&'static str]) -> Self {
+    pub fn on(kinds: &[tars_types::ProviderErrorKind]) -> Self {
         Self {
             kinds: kinds.iter().copied().collect(),
         }
     }
 
     /// Cost / capability errors: caller wants a cheaper or larger-context model.
-    /// Includes `budget_exceeded` and `context_too_long`.
+    /// Includes `BudgetExceeded` and `ContextTooLong`.
     pub fn cost_related() -> Self {
-        Self::on(&["budget_exceeded", "context_too_long"])
+        use tars_types::ProviderErrorKind as K;
+        Self::on(&[K::BudgetExceeded, K::ContextTooLong])
     }
 
     /// Availability / load errors: caller wants a different provider.
-    /// Includes `rate_limited`, `model_overloaded`, `circuit_open`, `network`.
+    /// Includes `RateLimited`, `ModelOverloaded`, `CircuitOpen`, `Network`.
     pub fn availability() -> Self {
+        use tars_types::ProviderErrorKind as K;
         Self::on(&[
-            "rate_limited",
-            "model_overloaded",
-            "circuit_open",
-            "network",
+            K::RateLimited,
+            K::ModelOverloaded,
+            K::CircuitOpen,
+            K::Network,
         ])
     }
 
@@ -89,7 +91,7 @@ impl FallbackTrigger {
 
     pub fn matches(&self, err: &ProviderError) -> bool {
         // Empty set = match-anything sentinel.
-        self.kinds.is_empty() || self.kinds.contains(err.kind())
+        self.kinds.is_empty() || self.kinds.contains(&err.kind())
     }
 }
 
@@ -194,7 +196,7 @@ impl LlmService for FallbackService {
             tracing::warn!(
                 event = "fallback.triggered",
                 hop = hop_index,
-                from_kind = last_err.kind(),
+                from_kind = last_err.kind().as_str(),
                 trace_id = %ctx.trace_id,
                 tenant_id = %ctx.tenant_id,
                 "fallback: primary failed, switching to next hop",
@@ -472,10 +474,19 @@ mod tests {
         assert!(!FallbackTrigger::availability().matches(&e_budget));
 
         assert!(FallbackTrigger::any().matches(&e_auth));
-        assert!(FallbackTrigger::on(&["auth"]).matches(&e_auth));
+        assert!(
+            FallbackTrigger::on(&[tars_types::ProviderErrorKind::Auth]).matches(&e_auth)
+        );
 
         // sanity: kind strings are stable
-        assert_eq!(ProviderError::BudgetExceeded.kind(), "budget_exceeded");
+        assert_eq!(
+            ProviderError::BudgetExceeded.kind(),
+            tars_types::ProviderErrorKind::BudgetExceeded
+        );
+        assert_eq!(
+            ProviderError::BudgetExceeded.kind().as_str(),
+            "budget_exceeded"
+        );
         let _ = Duration::from_secs(0); // pin import (no-op)
     }
 }

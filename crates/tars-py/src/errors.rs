@@ -178,7 +178,7 @@ fn compat_reason_detail(r: &tars_types::CompatibilityReason) -> Option<serde_jso
 }
 
 fn provider_kind(err: &ProviderError) -> &'static str {
-    err.kind()
+    err.kind().as_str()
 }
 
 /// Register all exception classes in the Python module so callers can
