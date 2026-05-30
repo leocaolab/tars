@@ -1,0 +1,682 @@
+//! Claude SDK child-process backend.
+//!
+//! Why it exists: the `claude_cli` backend spawns a fresh `claude -p`
+//! subprocess per call. Each spawn pays a Node-runtime cold start +
+//! OAuth handshake + ~128k-token internal system-prompt cache load
+//! (the CLI silently runs `num_turns=5` worth of internal routing).
+//! Empirically this costs 60-300s per call on realistic prompts and
+//! trips tars's circuit breaker after a few timeouts.
+//!
+//! How this backend fixes it: spawn one long-lived Node child running
+//! `tools/claude-daemon/server.mjs --stdio`. The child embeds
+//! `@anthropic-ai/claude-agent-sdk`, holds OAuth + the prompt cache
+//! warm for the rest of tars's lifetime, and serves N concurrent
+//! requests over its single stdin (NDJSON requests) / stdout (NDJSON
+//! replies) pipe pair. Each request carries an `id`; a background
+//! reader task demuxes the replies back to per-call `oneshot`
+//! channels.
+//!
+//! Lifecycle: child is spawned **lazily** on the first `stream()` call
+//! (so just constructing a provider doesn't pay the warm-up cost
+//! upfront), reused for all subsequent calls, and killed on `Drop`
+//! (`tokio::process::Command::kill_on_drop(true)`). If the child
+//! exits — clean or crashed — the reader task drains pending requests
+//! with [`ProviderError::Internal`] and the next `stream()` call
+//! transparently respawns.
+//!
+//! Wire shape (per line on each pipe):
+//! ```json
+//! stdin:  { "id": u64, "prompt": str, "system"?: str,
+//!           "model"?: str, "max_turns"?: int }
+//! stdout: { "id": u64,
+//!           // either reply fields…
+//!           "text"?: str, "usage"?: {...}, "model"?: str,
+//!           "result_subtype"?: str, "durations"?: {...},
+//!           "message_count"?: int,
+//!           // …or an error envelope
+//!           "error"?: str, "stack"?: str }
+//! ```
+
+use std::collections::HashMap;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures::stream;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStdin, Command};
+use tokio::sync::{oneshot, Mutex};
+
+use tars_types::{
+    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message, Modality, PromptCacheKind,
+    ProviderError, ProviderId, RequestContext, StopReason, StructuredOutputMode, Usage,
+};
+
+use crate::provider::{LlmEventStream, LlmProvider};
+
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
+/// In-flight requests keyed by their wire `id`. The reader task removes
+/// the entry on the matching reply line; the `call()` path removes it
+/// if it hits the per-call timeout first (so a late reply doesn't try
+/// to send into a dropped sender).
+type PendingMap =
+    Arc<Mutex<HashMap<u64, oneshot::Sender<Result<DaemonChatReply, ProviderError>>>>>;
+
+pub struct ClaudeSdkProviderBuilder {
+    id: ProviderId,
+    executable: String,
+    script_path: Option<String>,
+    default_model: Option<String>,
+    timeout: Duration,
+    capabilities: Option<Capabilities>,
+}
+
+impl ClaudeSdkProviderBuilder {
+    pub fn new(id: impl Into<ProviderId>) -> Self {
+        Self {
+            id: id.into(),
+            executable: "node".into(),
+            script_path: None,
+            default_model: None,
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            capabilities: None,
+        }
+    }
+
+    pub fn executable(mut self, exe: impl Into<String>) -> Self {
+        self.executable = exe.into();
+        self
+    }
+
+    pub fn script_path(mut self, p: impl Into<String>) -> Self {
+        self.script_path = Some(p.into());
+        self
+    }
+
+    pub fn default_model(mut self, m: impl Into<String>) -> Self {
+        self.default_model = Some(m.into());
+        self
+    }
+
+    pub fn timeout(mut self, t: Duration) -> Self {
+        self.timeout = t;
+        self
+    }
+
+    pub fn capabilities(mut self, c: Capabilities) -> Self {
+        self.capabilities = Some(c);
+        self
+    }
+
+    pub fn build(self) -> Arc<ClaudeSdkProvider> {
+        // Builders for the other CLI-shaped backends (ClaudeCli, GeminiCli)
+        // are infallible and accept a missing script_path / executable
+        // by letting validation surface the error at config time. Mirror
+        // that — if script_path is `None` here, fail loudly on the first
+        // call rather than at construction.
+        let caps = self.capabilities.unwrap_or_else(default_capabilities);
+        Arc::new(ClaudeSdkProvider {
+            id: self.id,
+            executable: self.executable,
+            script_path: self.script_path,
+            default_model: self.default_model,
+            timeout: self.timeout,
+            capabilities: caps,
+            session: Mutex::new(None),
+        })
+    }
+}
+
+fn default_capabilities() -> Capabilities {
+    let mut modalities = std::collections::HashSet::new();
+    modalities.insert(Modality::Text);
+    Capabilities {
+        max_context_tokens: 200_000,
+        max_output_tokens: 8_192,
+        // Child strips tools (server.mjs sets disallowedTools: ['*']);
+        // this provider is intentionally pure-LLM.
+        supports_tool_use: false,
+        supports_parallel_tool_calls: false,
+        supports_structured_output: StructuredOutputMode::None,
+        supports_vision: false,
+        supports_thinking: false,
+        supports_cancel: true,
+        // The SDK uses Anthropic prompt caching transparently — same
+        // shape as `claude_cli`.
+        prompt_cache: PromptCacheKind::Delegated,
+        // We aggregate the SDK's events inside the daemon and reply
+        // once. Treat as non-streaming from tars's POV.
+        streaming: false,
+        modalities_in: modalities.clone(),
+        modalities_out: std::collections::HashSet::from([Modality::Text]),
+        pricing: tars_types::Pricing::default(),
+    }
+}
+
+pub struct ClaudeSdkProvider {
+    id: ProviderId,
+    executable: String,
+    script_path: Option<String>,
+    default_model: Option<String>,
+    timeout: Duration,
+    capabilities: Capabilities,
+    /// Lazily-initialized child session. `None` until the first
+    /// `stream()` call (or after a child crash that the reader task
+    /// noticed and cleared).
+    session: Mutex<Option<Arc<Session>>>,
+}
+
+#[async_trait]
+impl LlmProvider for ClaudeSdkProvider {
+    fn id(&self) -> &ProviderId {
+        &self.id
+    }
+
+    fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
+    async fn stream(
+        self: Arc<Self>,
+        req: ChatRequest,
+        _ctx: RequestContext,
+    ) -> Result<LlmEventStream, ProviderError> {
+        let resp = self.call(&req).await?;
+        // Daemon returns a single JSON; project as canonical streaming
+        // triple so callers' aggregation paths work unchanged.
+        let usage = normalize_usage(&resp.usage);
+        let actual_model = resp
+            .model
+            .unwrap_or_else(|| self.default_model.clone().unwrap_or_default());
+        let stop_reason = map_stop_reason(resp.result_subtype.as_deref());
+        let events: Vec<Result<ChatEvent, ProviderError>> = vec![
+            Ok(ChatEvent::started(actual_model)),
+            Ok(ChatEvent::Delta { text: resp.text }),
+            Ok(ChatEvent::Finished { stop_reason, usage }),
+        ];
+        Ok(Box::pin(stream::iter(events)))
+    }
+}
+
+impl ClaudeSdkProvider {
+    /// Issue one chat request. Acquires (or spawns) the session,
+    /// registers a pending oneshot, writes the request line, awaits
+    /// the matching reply with the configured timeout.
+    async fn call(&self, req: &ChatRequest) -> Result<DaemonChatReply, ProviderError> {
+        let prompt = serialize_messages(req);
+        if prompt.is_empty() {
+            return Err(ProviderError::InvalidRequest(
+                "claude_sdk: request has no user-visible content".into(),
+            ));
+        }
+        let model = req
+            .model
+            .explicit()
+            .map(str::to_owned)
+            .or_else(|| self.default_model.clone());
+
+        let session = self.ensure_session().await?;
+        let id = session.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel::<Result<DaemonChatReply, ProviderError>>();
+        session.pending.lock().await.insert(id, tx);
+
+        let body = ChatLine {
+            id,
+            prompt: &prompt,
+            system: req.system.as_deref(),
+            model: model.as_deref(),
+            max_turns: 1,
+        };
+        let mut line = serde_json::to_string(&body)
+            .map_err(|e| ProviderError::Internal(format!("claude_sdk: encode body: {e}")))?;
+        line.push('\n');
+
+        {
+            let mut stdin = session.stdin.lock().await;
+            if let Err(e) = stdin.write_all(line.as_bytes()).await {
+                // Most likely the child died between session lookup and
+                // now; drop our pending entry and surface the cause.
+                session.pending.lock().await.remove(&id);
+                return Err(ProviderError::Internal(format!(
+                    "claude_sdk: write to child stdin failed: {e}"
+                )));
+            }
+            if let Err(e) = stdin.flush().await {
+                session.pending.lock().await.remove(&id);
+                return Err(ProviderError::Internal(format!(
+                    "claude_sdk: flush child stdin failed: {e}"
+                )));
+            }
+        }
+
+        match tokio::time::timeout(self.timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(ProviderError::Internal(
+                "claude_sdk: pending channel dropped (reader task gone)".into(),
+            )),
+            Err(_) => {
+                // Reclaim the pending slot so a late reply doesn't try
+                // to send into a dropped sender.
+                session.pending.lock().await.remove(&id);
+                Err(ProviderError::Internal(format!(
+                    "claude_sdk: timed out waiting for child reply after {:?}",
+                    self.timeout
+                )))
+            }
+        }
+    }
+
+    /// Hand out the warm session, or spawn one if there isn't a live
+    /// child yet. Held under a single async-Mutex so a 4-concurrent
+    /// `arc review` racing to the first call can't double-spawn.
+    async fn ensure_session(&self) -> Result<Arc<Session>, ProviderError> {
+        let mut guard = self.session.lock().await;
+        if let Some(s) = guard.as_ref() {
+            return Ok(s.clone());
+        }
+        let s = Arc::new(self.spawn_session().await?);
+        *guard = Some(s.clone());
+        Ok(s)
+    }
+
+    async fn spawn_session(&self) -> Result<Session, ProviderError> {
+        // If the config pinned a path, honor it verbatim — the user knows
+        // where their daemon lives. Otherwise walk the standard search
+        // chain (env var → CWD ancestors → ~/.tars/). Owned `PathBuf`
+        // because the searched candidates outlive `Self`.
+        let resolved = match self.script_path.as_deref() {
+            Some(p) => std::path::PathBuf::from(p),
+            None => find_default_script_path().ok_or_else(|| {
+                ProviderError::Internal(
+                    "claude_sdk: no `script_path` configured and none of the default \
+                     locations exist (checked $TARS_CLAUDE_SDK_SCRIPT, \
+                     `tools/claude-daemon/server.mjs` walking up from CWD, \
+                     and `~/.tars/claude-daemon/server.mjs`)"
+                        .into(),
+                )
+            })?,
+        };
+        let script: &str = resolved.to_str().ok_or_else(|| {
+            ProviderError::Internal(format!(
+                "claude_sdk: script_path {resolved:?} is not valid UTF-8"
+            ))
+        })?;
+
+        let mut child = Command::new(&self.executable)
+            .args([script, "--stdio"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            // Pass child stderr through so `claude-daemon stdio ready`
+            // and any SDK warnings land in the operator's terminal —
+            // critical for debugging OAuth / SDK init failures.
+            .stderr(Stdio::inherit())
+            // Reap when this provider is dropped; without this, the
+            // child outlives tars on `panic!` / `process::exit`.
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                ProviderError::Internal(format!(
+                    "claude_sdk: spawn {:?} {:?}: {e}",
+                    self.executable, script
+                ))
+            })?;
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            ProviderError::Internal("claude_sdk: child stdin pipe missing".into())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ProviderError::Internal("claude_sdk: child stdout pipe missing".into())
+        })?;
+
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+
+        // Reader task: drain stdout line-by-line, demux each line to
+        // the matching pending oneshot by `id`. On EOF, drain the map
+        // with an error so callers in flight don't hang forever.
+        let pending_for_reader = pending.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if let Err(e) =
+                            dispatch_reply_line(&line, pending_for_reader.clone()).await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                line = %line,
+                                "claude_sdk reader: dropping malformed reply line",
+                            );
+                        }
+                    }
+                    Ok(None) => {
+                        // Clean EOF — child exited.
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "claude_sdk reader: stdout read error");
+                        break;
+                    }
+                }
+            }
+            // Drain any pending requests with a clear error so callers
+            // unblock instead of hanging on the oneshot.
+            let mut p = pending_for_reader.lock().await;
+            for (_, tx) in p.drain() {
+                let _ = tx.send(Err(ProviderError::Internal(
+                    "claude_sdk: child exited before responding".into(),
+                )));
+            }
+        });
+
+        // Keep the `Child` alive on the session so the configured
+        // `kill_on_drop(true)` actually fires when the session is
+        // dropped. (Dropping `Child` is what triggers kill.)
+        Ok(Session {
+            stdin: Mutex::new(stdin),
+            pending,
+            next_id: AtomicU64::new(0),
+            _child: Mutex::new(Some(child)),
+        })
+    }
+}
+
+/// One in-flight reply being routed. Pulled out of `spawn_session` so
+/// the reader loop stays readable.
+async fn dispatch_reply_line(line: &str, pending: PendingMap) -> Result<(), ProviderError> {
+    let raw: ReplyLine = serde_json::from_str(line)
+        .map_err(|e| ProviderError::Parse(format!("decode reply: {e}")))?;
+    let id = raw.id;
+    let result: Result<DaemonChatReply, ProviderError> = if let Some(err) = raw.error {
+        Err(ProviderError::Internal(format!(
+            "claude_sdk daemon: {err}"
+        )))
+    } else {
+        Ok(DaemonChatReply {
+            text: raw.text.unwrap_or_default(),
+            result_subtype: raw.result_subtype,
+            usage: raw.usage,
+            model: raw.model,
+        })
+    };
+    if let Some(tx) = pending.lock().await.remove(&id) {
+        let _ = tx.send(result);
+    } else {
+        tracing::warn!(
+            id = id,
+            "claude_sdk reader: reply with unknown id (caller already gave up?)",
+        );
+    }
+    Ok(())
+}
+
+struct Session {
+    stdin: Mutex<ChildStdin>,
+    pending: PendingMap,
+    next_id: AtomicU64,
+    /// Holds the `Child` handle just so its `Drop` (and the
+    /// `kill_on_drop(true)` flag we set at spawn) actually fire when
+    /// the session is dropped. Never read otherwise — the mutex is
+    /// only there to satisfy `Sync` without a Cell wrapper.
+    _child: Mutex<Option<tokio::process::Child>>,
+}
+
+/// Resolve a default `server.mjs` location when the user omits
+/// `script_path` from config. Returns `Some(path)` for the first
+/// existing candidate, `None` if none of them resolve.
+///
+/// Search order (first hit wins):
+/// 1. `$TARS_CLAUDE_SDK_SCRIPT` — explicit override for unusual layouts.
+/// 2. `tools/claude-daemon/server.mjs` walking up from CWD — catches
+///    "running inside the tars checkout" and "the reviewed repo
+///    happens to vendor a copy". Stops at the filesystem root.
+/// 3. `$HOME/.tars/claude-daemon/server.mjs` — standard per-user
+///    install. (`tars install-claude-daemon` lays it down here.)
+fn find_default_script_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("TARS_CLAUDE_SDK_SCRIPT") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.exists() {
+            return Some(pb);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for ancestor in cwd.ancestors() {
+            let candidate = ancestor.join("tools/claude-daemon/server.mjs");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let candidate = std::path::PathBuf::from(home).join(".tars/claude-daemon/server.mjs");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Flatten the ChatRequest into the single `prompt` string the daemon
+/// expects. Multi-turn dialogues are tagged with `[role]` headers —
+/// same shape as `claude_cli.rs::serialize_messages_for_cli`, so a
+/// finding generated under one backend reads the same way under the
+/// other.
+fn serialize_messages(req: &ChatRequest) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(req.messages.len());
+    for m in &req.messages {
+        let (role, content) = match m {
+            Message::User { content } => ("user", content),
+            Message::Assistant { content, .. } => ("assistant", content),
+            Message::Tool { content, .. } => ("tool", content),
+            Message::System { content } => ("system", content),
+        };
+        let flat = flatten_blocks(content);
+        if !flat.is_empty() {
+            parts.push(format!("[{role}]\n{flat}"));
+        }
+    }
+    parts.join("\n\n")
+}
+
+fn flatten_blocks(blocks: &[ContentBlock]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for b in blocks {
+        match b {
+            ContentBlock::Text { text } => out.push(text.clone()),
+            ContentBlock::Image { mime, .. } => out.push(format!("[image:{mime}]")),
+        }
+    }
+    out.join("\n")
+}
+
+/// Anthropic-shape (disjoint) → tars-shape (OpenAI-shape: input_tokens
+/// is the *total* prompt and includes cached + cache_creation). Same
+/// normalization the [`crate::backends::anthropic`] adapter does.
+fn normalize_usage(raw: &Option<RawUsage>) -> Usage {
+    let Some(u) = raw else {
+        return Usage::default();
+    };
+    let cached = u.cache_read_input_tokens.unwrap_or(0);
+    let created = u.cache_creation_input_tokens.unwrap_or(0);
+    let fresh = u.input_tokens.unwrap_or(0);
+    Usage {
+        input_tokens: fresh + cached + created,
+        output_tokens: u.output_tokens.unwrap_or(0),
+        cached_input_tokens: cached,
+        cache_creation_tokens: created,
+        ..Default::default()
+    }
+}
+
+fn map_stop_reason(subtype: Option<&str>) -> StopReason {
+    match subtype {
+        Some("success") | Some("end_turn") | None => StopReason::EndTurn,
+        Some("max_tokens") => StopReason::MaxTokens,
+        Some("error_during_execution") | Some("error_max_turns") => StopReason::Other,
+        Some(_) => StopReason::Other,
+    }
+}
+
+// ─── Wire types ───────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct ChatLine<'a> {
+    id: u64,
+    prompt: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+    max_turns: u32,
+}
+
+/// Reply lines carry the `id` alongside either reply fields or an
+/// `error` envelope. We accept both shapes in one struct so the
+/// dispatcher doesn't have to peek before parsing — a `None` text +
+/// `Some` error means failure, otherwise success.
+#[derive(Debug, Deserialize)]
+struct ReplyLine {
+    id: u64,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    result_subtype: Option<String>,
+    #[serde(default)]
+    usage: Option<RawUsage>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+struct DaemonChatReply {
+    text: String,
+    result_subtype: Option<String>,
+    usage: Option<RawUsage>,
+    model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUsage {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tars_types::ModelHint;
+
+    #[test]
+    fn serialize_single_user_message() {
+        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "ping");
+        assert_eq!(serialize_messages(&req), "[user]\nping");
+    }
+
+    #[test]
+    fn normalize_usage_sums_into_input_total() {
+        let raw = Some(RawUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            cache_read_input_tokens: Some(900),
+            cache_creation_input_tokens: Some(10),
+        });
+        let u = normalize_usage(&raw);
+        assert_eq!(u.input_tokens, 1010); // 100 + 900 + 10
+        assert_eq!(u.cached_input_tokens, 900);
+        assert_eq!(u.cache_creation_tokens, 10);
+        assert_eq!(u.output_tokens, 50);
+    }
+
+    #[test]
+    fn normalize_usage_missing_returns_default() {
+        // Usage doesn't implement PartialEq — check field-by-field.
+        let u = normalize_usage(&None);
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 0);
+        assert_eq!(u.cached_input_tokens, 0);
+        assert_eq!(u.cache_creation_tokens, 0);
+    }
+
+    #[test]
+    fn map_stop_reason_known_subtypes() {
+        assert_eq!(map_stop_reason(Some("success")), StopReason::EndTurn);
+        assert_eq!(map_stop_reason(None), StopReason::EndTurn);
+        assert_eq!(map_stop_reason(Some("max_tokens")), StopReason::MaxTokens);
+        assert_eq!(map_stop_reason(Some("nonsense")), StopReason::Other);
+    }
+
+    /// End-to-end smoke: spawn a real `node server.mjs --stdio` child
+    /// and round-trip a request. `#[ignore]` so CI / plain `cargo test`
+    /// skip it unless the operator has a working node + the SDK
+    /// installed. Run with:
+    ///   cargo test -p tars-provider --lib backends::claude_sdk -- --ignored
+    #[tokio::test]
+    #[ignore = "spawns node + uses live Anthropic OAuth"]
+    async fn smoke_stdio_roundtrip() {
+        // No `script_path` → exercises the default search chain
+        // (CWD-ancestor lookup should find `tools/claude-daemon/server.mjs`
+        // in the worktree). If the operator's CWD isn't inside the
+        // worktree, set `TARS_CLAUDE_SDK_SCRIPT` to override.
+        let p = ClaudeSdkProviderBuilder::new("claude_sdk_smoke")
+            .default_model("claude-sonnet-4-5")
+            .build();
+        let req = ChatRequest::user(
+            ModelHint::Explicit("claude-sonnet-4-5".into()),
+            "Reply with only the literal word: pong",
+        );
+        let resp = p
+            .clone()
+            .complete(req, tars_types::RequestContext::test_default())
+            .await
+            .expect("daemon round-trip");
+        let text = resp.text.to_lowercase();
+        assert!(
+            text.contains("pong"),
+            "expected reply to contain 'pong', got: {:?}",
+            resp.text
+        );
+        assert!(resp.usage.output_tokens >= 1);
+    }
+
+    /// Two concurrent requests on the same provider — proves the
+    /// reader task demuxes correctly by `id`. The two replies can land
+    /// in either order.
+    #[tokio::test]
+    #[ignore = "spawns node + uses live Anthropic OAuth"]
+    async fn smoke_stdio_concurrent_requests() {
+        // Same default-search path as `smoke_stdio_roundtrip`.
+        let p = ClaudeSdkProviderBuilder::new("claude_sdk_smoke_concurrent")
+            .default_model("claude-sonnet-4-5")
+            .build();
+        let req_a = ChatRequest::user(
+            ModelHint::Explicit("claude-sonnet-4-5".into()),
+            "Reply with only: alpha",
+        );
+        let req_b = ChatRequest::user(
+            ModelHint::Explicit("claude-sonnet-4-5".into()),
+            "Reply with only: beta",
+        );
+        let p2 = p.clone();
+        let p3 = p.clone();
+        let (a, b) = tokio::join!(
+            p2.complete(req_a, tars_types::RequestContext::test_default()),
+            p3.complete(req_b, tars_types::RequestContext::test_default()),
+        );
+        let a = a.expect("alpha");
+        let b = b.expect("beta");
+        assert!(a.text.to_lowercase().contains("alpha"), "{:?}", a.text);
+        assert!(b.text.to_lowercase().contains("beta"), "{:?}", b.text);
+    }
+}

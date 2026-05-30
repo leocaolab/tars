@@ -199,6 +199,45 @@ pub enum ProviderConfig {
         default_model: String,
     },
 
+    /// Claude SDK child process — tars spawns a long-lived
+    /// `@anthropic-ai/claude-agent-sdk` Node process and multiplexes
+    /// requests over its stdin / stdout (NDJSON, one JSON object per
+    /// line). The child owns subscription OAuth and prompt-cache
+    /// lifetime; tars owns the pipe.
+    ///
+    /// Eliminates the per-call cold start of [`Self::ClaudeCli`]
+    /// (which spawns a fresh `claude` subprocess per request) while
+    /// avoiding the operator burden of [`Self::ClaudeCli`]'s
+    /// alternative — a long-running HTTP daemon — by tying child
+    /// lifetime to tars's. See
+    /// `crates/tars-provider/src/backends/claude_sdk.rs` for the
+    /// transport, and `tools/claude-daemon/server.mjs --stdio` for
+    /// the reference child script.
+    ClaudeSdk {
+        /// Node-compatible runtime that hosts the SDK script. Default
+        /// `node`. Override e.g. to `bun` or a pinned path.
+        #[serde(default = "default_node_executable")]
+        executable: String,
+        /// Path to `server.mjs --stdio`. **Optional** — when unset
+        /// (the common case), the backend searches in order:
+        /// 1. `TARS_CLAUDE_SDK_SCRIPT` env var
+        /// 2. `tools/claude-daemon/server.mjs` walking up from the CWD
+        ///    (works inside the tars checkout)
+        /// 3. `~/.tars/claude-daemon/server.mjs` (standard install)
+        ///
+        /// Set this explicitly to pin a specific copy or to use a
+        /// non-standard layout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script_path: Option<String>,
+        /// Round-trip cap on a single LLM call. The child stays warm
+        /// across calls; this is only how long we wait for any one
+        /// reply before declaring it lost. Default 300s parallels
+        /// other CLI-shaped backends.
+        #[serde(default = "default_cli_timeout_secs")]
+        timeout_secs: u64,
+        default_model: String,
+    },
+
     /// OpenAI Codex CLI subscription path (ChatGPT Plus/Pro).
     CodexCli {
         #[serde(default = "default_codex_executable")]
@@ -248,6 +287,10 @@ fn default_cli_timeout_secs() -> u64 {
 
 fn default_codex_timeout_secs() -> u64 {
     600
+}
+
+fn default_node_executable() -> String {
+    "node".into()
 }
 
 fn default_true() -> bool {
@@ -387,6 +430,7 @@ impl ProviderConfig {
             Mlx { .. } => "mlx",
             Llamacpp { .. } => "llamacpp",
             ClaudeCli { .. } => "claude_cli",
+            ClaudeSdk { .. } => "claude_sdk",
             GeminiCli { .. } => "gemini_cli",
             CodexCli { .. } => "codex_cli",
             Mock { .. } => "mock",
@@ -406,6 +450,7 @@ impl ProviderConfig {
             | Mlx { default_model, .. }
             | Llamacpp { default_model, .. }
             | ClaudeCli { default_model, .. }
+            | ClaudeSdk { default_model, .. }
             | GeminiCli { default_model, .. }
             | CodexCli { default_model, .. } => default_model,
             Mock { .. } => "mock-model",
@@ -589,6 +634,31 @@ impl ProviderConfig {
             } => {
                 if executable.trim().is_empty() {
                     sink.push(ValidationError::new(key("executable"), "must not be empty"));
+                }
+                check_timeout(*timeout_secs, sink);
+                check_default_model(default_model, sink);
+            }
+            ProviderConfig::ClaudeSdk {
+                executable,
+                script_path,
+                timeout_secs,
+                default_model,
+            } => {
+                if executable.trim().is_empty() {
+                    sink.push(ValidationError::new(key("executable"), "must not be empty"));
+                }
+                // script_path is optional — when None, the backend
+                // searches CWD ancestors and ~/.tars/. We only reject
+                // an *empty* string here (someone wrote `""` instead of
+                // omitting the field), which would otherwise short-
+                // circuit the fallback search at runtime.
+                if let Some(sp) = script_path {
+                    if sp.trim().is_empty() {
+                        sink.push(ValidationError::new(
+                            key("script_path"),
+                            "must not be empty — omit the field to use the default search instead",
+                        ));
+                    }
                 }
                 check_timeout(*timeout_secs, sink);
                 check_default_model(default_model, sink);

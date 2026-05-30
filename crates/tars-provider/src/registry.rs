@@ -21,6 +21,7 @@ use tars_types::{Auth, ProviderId};
 use crate::auth::AuthResolver;
 use crate::backends::anthropic::AnthropicProviderBuilder;
 use crate::backends::claude_cli::ClaudeCliProviderBuilder;
+use crate::backends::claude_sdk::ClaudeSdkProviderBuilder;
 use crate::backends::codex_cli::{CodexCliProviderBuilder, SandboxMode};
 use crate::backends::gemini::GeminiProviderBuilder;
 use crate::backends::gemini_cli::GeminiCliProviderBuilder;
@@ -323,6 +324,22 @@ fn build_one(
             .executable(executable.clone())
             .timeout(Duration::from_secs(*timeout_secs))
             .build(),
+
+        ProviderConfig::ClaudeSdk {
+            executable,
+            script_path,
+            timeout_secs,
+            default_model,
+        } => {
+            let mut b = ClaudeSdkProviderBuilder::new(id)
+                .executable(executable.clone())
+                .default_model(default_model.clone())
+                .timeout(Duration::from_secs(*timeout_secs));
+            if let Some(sp) = script_path {
+                b = b.script_path(sp.clone());
+            }
+            b.build()
+        }
 
         ProviderConfig::CodexCli {
             executable,

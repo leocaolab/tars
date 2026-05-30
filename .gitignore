@@ -2,6 +2,10 @@
 logs/
 selfplay_log.txt
 
+# Node tooling (tools/claude-daemon/, etc.) — installed deps are large
+# and reproducible from package-lock.json.
+node_modules/
+
 # Per-invocation log dumps from downstream consumer CLIs
 *.log.jsonl
 
