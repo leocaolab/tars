@@ -210,14 +210,19 @@ impl ClaudeSdkProvider {
             prompt: &prompt,
             system: req.system.as_deref(),
             model: model.as_deref(),
-            // Was 1 for "pure single-shot LLM, no tool agency".
-            // Empirically sonnet-4-5 with extended thinking emits
-            // `thinking_block → text_block` which the SDK counts as
-            // 2 turns and hits `Reached maximum number of turns (1)`
-            // before the answer finishes. 3 covers thinking + answer +
-            // one safety-net spare; tools are still disabled on the
-            // daemon side so the model can't go agentic regardless.
-            max_turns: 3,
+            // History: 1 → 3 → 7. The 1→3 bump fit sonnet-4-5
+            // extended thinking (`thinking_block → text_block` is
+            // counted as 2 turns). 3→7 covers heavier
+            // think-iterate-refine patterns the L4 critic exhibits
+            // on dense files: under `arc auto` we saw "Reached
+            // maximum number of turns (3)" on ~3% of 154 files
+            // (validation/builtin.rs, etc.) where the model wants
+            // to think → draft → re-read → refine before emitting
+            // its verdict. 7 covers up to 3 think/refine rounds
+            // plus the final answer; tools are still disabled on
+            // the daemon side so the model can't go agentic
+            // regardless of how high this counter climbs.
+            max_turns: 7,
         };
         let mut line = serde_json::to_string(&body)
             .map_err(|e| ProviderError::Internal(format!("claude_sdk: encode body: {e}")))?;

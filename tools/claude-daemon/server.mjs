@@ -21,12 +21,17 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import readline from 'node:readline';
 
-// Default maxTurns=3: sonnet-4-5 with extended thinking emits a
-// `thinking_block → text_block` pair the SDK counts as 2 turns; 1
-// trips "Reached maximum number of turns". 3 covers thinking +
-// answer + one spare. Tools are still disabled below
-// (`disallowedTools: ['*']`) so the model can't go agentic.
-async function handleChat({ prompt, system, model, max_turns = 3 }) {
+// Default maxTurns=7: history is 1 → 3 → 7. The 1→3 bump fit
+// sonnet-4-5 extended thinking (`thinking_block → text_block` =
+// 2 turns). 3→7 covers heavier think-iterate-refine patterns
+// the L4 critic shows on dense files — under `arc auto` we saw
+// "Reached maximum number of turns (3)" on a handful of 154
+// files where the model wants to think → draft → re-read →
+// refine before emitting. 7 covers up to 3 such rounds plus
+// the final answer. Tools stay disabled below (`disallowedTools:
+// ['*']`) so the model can't go agentic regardless of this
+// counter.
+async function handleChat({ prompt, system, model, max_turns = 7 }) {
   if (typeof prompt !== 'string' || !prompt.length) {
     throw new Error('prompt (string) is required');
   }
