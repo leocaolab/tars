@@ -322,13 +322,9 @@ impl RetryAttemptPy {
     }
 }
 
-/// Public re-export wrapper for `truncate_for_repr` so the
-/// validation submodule can format truncated text the same way.
-pub(crate) fn truncate_for_repr_pub(s: &str, max: usize) -> String {
-    truncate_for_repr(s, max)
-}
-
-fn truncate_for_repr(s: &str, max: usize) -> String {
+/// Shared repr truncation so submodules (e.g. `validation`) format
+/// truncated text the same way the top-level reprs do.
+pub(crate) fn truncate_for_repr(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {

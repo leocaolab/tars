@@ -195,7 +195,7 @@ fn build_tier_dispatch(
     // policy is StaticPolicy. See run.rs's previous comment for the
     // rationale (CLI's req.model is always Explicit, so TierPolicy's
     // Tier-keyed lookup wouldn't fire).
-    let policy = Arc::new(StaticPolicy::new(candidates.clone()));
+    let policy = Arc::new(StaticPolicy::new(candidates.clone())?);
     let inner: Arc<dyn LlmService> = RoutingService::new(registry.clone(), policy);
     let label = format!(
         "tier `{tier:?}` (candidates: {})",

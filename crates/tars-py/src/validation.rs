@@ -127,7 +127,7 @@ impl PyFilterText {
     fn __repr__(&self) -> String {
         format!(
             "FilterText(text={:?}, dropped_n={})",
-            crate::truncate_for_repr_pub(&self.text, 40),
+            crate::truncate_for_repr(&self.text, 40),
             self.dropped.len()
         )
     }

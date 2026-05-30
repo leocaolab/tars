@@ -79,16 +79,26 @@ pub struct StaticPolicy {
 }
 
 impl StaticPolicy {
-    pub fn new(candidates: Vec<ProviderId>) -> Self {
-        assert!(
-            !candidates.is_empty(),
-            "StaticPolicy requires at least one candidate ProviderId",
-        );
-        Self { candidates }
+    /// Construct from a candidate list. Returns
+    /// [`ProviderError::InvalidRequest`] on an empty list: a policy
+    /// with no candidates would have `select` yield an empty route,
+    /// which the routing service treats as "no provider available".
+    /// Rejecting at construction keeps that invalid state out of the
+    /// type entirely.
+    pub fn new(candidates: Vec<ProviderId>) -> Result<Self, ProviderError> {
+        if candidates.is_empty() {
+            return Err(ProviderError::InvalidRequest(
+                "StaticPolicy requires at least one candidate ProviderId".into(),
+            ));
+        }
+        Ok(Self { candidates })
     }
 
+    /// Single-candidate policy. Infallible — exactly one candidate is
+    /// statically guaranteed, so the empty-list invariant can't be
+    /// violated.
     pub fn single(id: ProviderId) -> Self {
-        Self::new(vec![id])
+        Self { candidates: vec![id] }
     }
 }
 
@@ -580,7 +590,7 @@ mod tests {
     // ── StaticPolicy ────────────────────────────────────────────────────
     #[tokio::test]
     async fn static_policy_returns_its_list_unchanged() {
-        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]);
+        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]).unwrap();
         let r = policy
             .select(
                 &req(ModelHint::Explicit("m".into())),
@@ -592,9 +602,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "at least one candidate")]
     fn static_policy_rejects_empty_list_at_construction() {
-        let _ = StaticPolicy::new(vec![]);
+        let err = StaticPolicy::new(vec![]).unwrap_err();
+        assert!(
+            matches!(err, ProviderError::InvalidRequest(_)),
+            "expected InvalidRequest, got {err:?}"
+        );
     }
 
     // ── TierPolicy ──────────────────────────────────────────────────────
@@ -669,7 +682,7 @@ mod tests {
         let (b, calls_b) = scripted("b", ScriptedOutcome::Ok);
 
         let fake = FakeRegistry::new(vec![(ProviderId::new("a"), a), (ProviderId::new("b"), b)]);
-        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]);
+        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]).unwrap();
 
         let stream = drive_routing(
             &fake,
@@ -694,7 +707,7 @@ mod tests {
         let (b, calls_b) = scripted("b", ScriptedOutcome::Ok);
 
         let fake = FakeRegistry::new(vec![(ProviderId::new("a"), a), (ProviderId::new("b"), b)]);
-        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]);
+        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]).unwrap();
 
         let result = drive_routing(
             &fake,
@@ -718,7 +731,7 @@ mod tests {
         );
 
         let fake = FakeRegistry::new(vec![(ProviderId::new("a"), a), (ProviderId::new("b"), b)]);
-        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]);
+        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]).unwrap();
 
         let result = drive_routing(
             &fake,
@@ -741,7 +754,8 @@ mod tests {
         // the registry, real does → should land on real without error.
         let (real, calls_real) = scripted("real", ScriptedOutcome::Ok);
         let fake = FakeRegistry::new(vec![(ProviderId::new("real"), real)]);
-        let policy = StaticPolicy::new(vec![ProviderId::new("phantom"), ProviderId::new("real")]);
+        let policy =
+            StaticPolicy::new(vec![ProviderId::new("phantom"), ProviderId::new("real")]).unwrap();
 
         let stream = drive_routing(
             &fake,
@@ -797,7 +811,8 @@ mod tests {
         let policy = StaticPolicy::new(vec![
             ProviderId::new("no_tools"),
             ProviderId::new("with_tools"),
-        ]);
+        ])
+        .unwrap();
 
         let mut req = req(ModelHint::Explicit("any".into()));
         req.tools.push(tars_types::ToolSpec {
@@ -833,7 +848,7 @@ mod tests {
             (ProviderId::new("a"), p_a as _),
             (ProviderId::new("b"), p_b as _),
         ]);
-        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]);
+        let policy = StaticPolicy::new(vec![ProviderId::new("a"), ProviderId::new("b")]).unwrap();
 
         let mut req = req(ModelHint::Explicit("any".into()));
         req.tools.push(tars_types::ToolSpec {
@@ -868,7 +883,7 @@ mod tests {
         // Expected: first provider serves the request normally.
         let (p_a, calls_a) = scripted_with_caps("a", ScriptedOutcome::Ok, caps_with_tools(false));
         let fake = FakeRegistry::new(vec![(ProviderId::new("a"), p_a as _)]);
-        let policy = StaticPolicy::new(vec![ProviderId::new("a")]);
+        let policy = StaticPolicy::new(vec![ProviderId::new("a")]).unwrap();
 
         let stream = drive_routing(
             &fake,
