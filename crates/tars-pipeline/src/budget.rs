@@ -54,72 +54,109 @@ pub struct PerCallBudgetMiddleware {
     default_max_output_tokens: u32,
 }
 
+/// Construction error for the budget middleware. Returned by
+/// [`PerCallBudgetMiddleware::try_new`] and
+/// [`PerCallBudgetMiddleware::try_from_parts`] when the configuration
+/// would produce silently-broken budgeting (NaN/inf/negative cap or
+/// pricing rates). Previously this was a `panic!` — fine for
+/// programmer-error invariants but inappropriate for config-derived
+/// input (`arc scan --judge` finding `ARC-L5-EF-9`).
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum BudgetConfigError {
+    #[error(
+        "PerCallBudgetMiddleware cap_usd must be finite and non-negative, got {value}"
+    )]
+    InvalidCap { value: f64 },
+    #[error(
+        "Pricing.{field} must be finite and non-negative, got {value}"
+    )]
+    InvalidPricing {
+        field: &'static str,
+        value: f64,
+    },
+}
+
 impl PerCallBudgetMiddleware {
     /// Construct from a provider's capability snapshot — the natural
-    /// caller path is `provider.capabilities()`.
-    ///
-    /// `cap_usd` is the per-call upper bound. Estimates at or above
-    /// this value are rejected with [`ProviderError::BudgetExceeded`].
+    /// caller path is `provider.capabilities()`. Capabilities-sourced
+    /// pricing should already be valid, so `expect` is fine here; the
+    /// fallible flavour lives below as [`Self::try_new`].
     pub fn new(cap_usd: f64, capabilities: &Capabilities) -> Self {
-        validate_cap(cap_usd);
-        validate_pricing(&capabilities.pricing);
-        Self {
+        Self::try_new(cap_usd, capabilities)
+            .expect("Capabilities.pricing should be pre-validated; use try_new to handle errors")
+    }
+
+    /// Fallible construction from a provider's capability snapshot.
+    /// Returns [`BudgetConfigError`] when `cap_usd` or
+    /// `capabilities.pricing` would silently break budgeting.
+    pub fn try_new(
+        cap_usd: f64,
+        capabilities: &Capabilities,
+    ) -> Result<Self, BudgetConfigError> {
+        validate_cap(cap_usd)?;
+        validate_pricing(&capabilities.pricing)?;
+        Ok(Self {
             cap_usd,
             pricing: capabilities.pricing,
             default_max_output_tokens: capabilities.max_output_tokens,
-        }
+        })
     }
 
     /// Construct from explicit pricing + worst-case output bound. Use
     /// when you don't have a `Capabilities` handy (tests, hand-rolled
-    /// services).
+    /// services). Panics on invalid input; the fallible flavour is
+    /// [`Self::try_from_parts`].
     pub fn from_parts(cap_usd: f64, pricing: Pricing, default_max_output_tokens: u32) -> Self {
-        validate_cap(cap_usd);
-        validate_pricing(&pricing);
-        Self {
+        Self::try_from_parts(cap_usd, pricing, default_max_output_tokens)
+            .expect("try_from_parts: invalid budget config (use try_from_parts to handle)")
+    }
+
+    /// Fallible variant of [`Self::from_parts`]. Surfaces the same
+    /// validation issues as [`BudgetConfigError`] so configuration-
+    /// driven callers can recover gracefully instead of crashing.
+    pub fn try_from_parts(
+        cap_usd: f64,
+        pricing: Pricing,
+        default_max_output_tokens: u32,
+    ) -> Result<Self, BudgetConfigError> {
+        validate_cap(cap_usd)?;
+        validate_pricing(&pricing)?;
+        Ok(Self {
             cap_usd,
             pricing,
             default_max_output_tokens,
-        }
+        })
     }
 }
 
 /// Reject a non-finite or negative cap at construction. A NaN cap would
 /// make `estimate >= cap_usd` always false (NaN compares false), silently
-/// disabling the budget; a negative cap would reject every call. Both are
-/// configuration bugs, so fail loudly where they're introduced.
-fn validate_cap(cap_usd: f64) {
-    assert!(
-        cap_usd.is_finite() && cap_usd >= 0.0,
-        "PerCallBudgetMiddleware cap_usd must be finite and non-negative, got {cap_usd}"
-    );
+/// disabling the budget; a negative cap would reject every call.
+fn validate_cap(cap_usd: f64) -> Result<(), BudgetConfigError> {
+    if cap_usd.is_finite() && cap_usd >= 0.0 {
+        Ok(())
+    } else {
+        Err(BudgetConfigError::InvalidCap { value: cap_usd })
+    }
 }
 
 /// Reject non-finite or negative pricing rates. A NaN/inf rate would
 /// propagate into the cost estimate and bypass (NaN) or always-trip (inf)
-/// the budget. `Capabilities`-sourced pricing should already be valid;
-/// this guards the hand-rolled `from_parts` path too.
-///
-/// Pairs with [`validate_cap`] above — same fail-fast invariant
-/// pattern, same panic semantics. `arc scan --judge` flagged this
-/// site as ROT ("recoverable input validation") while flagging
-/// `validate_cap` as essential; the two are symmetric programmer-
-/// error guards and both stay as `assert!`. All current callers of
-/// `from_parts` and `new` pass either typed `Capabilities.pricing`
-/// (already validated upstream) or hard-coded test values, so this
-/// fires only on a genuine bug at the call site — exactly when a
-/// loud panic is most useful.
-fn validate_pricing(pricing: &Pricing) {
-    assert!(
-        pricing.input_per_million.is_finite() && pricing.input_per_million >= 0.0,
-        "Pricing.input_per_million must be finite and non-negative, got {}",
-        pricing.input_per_million
-    );
-    assert!(
-        pricing.output_per_million.is_finite() && pricing.output_per_million >= 0.0,
-        "Pricing.output_per_million must be finite and non-negative, got {}",
-        pricing.output_per_million
-    );
+/// the budget.
+fn validate_pricing(pricing: &Pricing) -> Result<(), BudgetConfigError> {
+    if !(pricing.input_per_million.is_finite() && pricing.input_per_million >= 0.0) {
+        return Err(BudgetConfigError::InvalidPricing {
+            field: "input_per_million",
+            value: pricing.input_per_million,
+        });
+    }
+    if !(pricing.output_per_million.is_finite() && pricing.output_per_million >= 0.0) {
+        return Err(BudgetConfigError::InvalidPricing {
+            field: "output_per_million",
+            value: pricing.output_per_million,
+        });
+    }
+    Ok(())
 }
 
 impl Middleware for PerCallBudgetMiddleware {
@@ -414,5 +451,56 @@ mod tests {
         assert_eq!(mw.pricing.input_per_million, 3.0);
         assert_eq!(mw.default_max_output_tokens, 4096);
         assert_eq!(mw.cap_usd, 0.10);
+    }
+
+    #[test]
+    fn try_from_parts_rejects_nan_cap() {
+        let err =
+            PerCallBudgetMiddleware::try_from_parts(f64::NAN, priced(3.0, 15.0), 1000)
+                .unwrap_err();
+        assert!(matches!(err, BudgetConfigError::InvalidCap { value } if value.is_nan()));
+    }
+
+    #[test]
+    fn try_from_parts_rejects_negative_cap() {
+        let err =
+            PerCallBudgetMiddleware::try_from_parts(-1.0, priced(3.0, 15.0), 1000)
+                .unwrap_err();
+        assert!(matches!(err, BudgetConfigError::InvalidCap { value } if value < 0.0));
+    }
+
+    #[test]
+    fn try_from_parts_rejects_negative_pricing() {
+        let err = PerCallBudgetMiddleware::try_from_parts(0.05, priced(-3.0, 15.0), 1000)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            BudgetConfigError::InvalidPricing { field: "input_per_million", value } if value < 0.0
+        ));
+    }
+
+    #[test]
+    fn try_from_parts_rejects_infinite_output_rate() {
+        let err = PerCallBudgetMiddleware::try_from_parts(
+            0.05,
+            priced(3.0, f64::INFINITY),
+            1000,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            BudgetConfigError::InvalidPricing {
+                field: "output_per_million",
+                value
+            } if value.is_infinite()
+        ));
+    }
+
+    #[test]
+    fn try_from_parts_happy_path_constructs() {
+        let mw = PerCallBudgetMiddleware::try_from_parts(0.05, priced(3.0, 15.0), 1000)
+            .expect("valid config");
+        assert_eq!(mw.cap_usd, 0.05);
+        assert_eq!(mw.default_max_output_tokens, 1000);
     }
 }
