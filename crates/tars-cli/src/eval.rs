@@ -48,14 +48,15 @@ use clap::{Args, Subcommand};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-// ─── fs helpers ──────────────────────────────────────────────────────
+// ─── fs helpers (ARC-L5-COH-20) ──────────────────────────────────────
 //
-// `arc scan --judge` flagged 13 `std::fs` mutation sites concentrated
-// in this file and recommended aggregating them into an `fs_ops`
-// helper. The 4 `write_pretty_json` and 2 `ensure_dir` patterns below
-// cover the meaningful repetition; the rest are one-offs that don't
-// benefit from a helper (a one-line `fs::read_to_string` doesn't need
-// a wrapper).
+// `arc scan --judge` flagged scattered `std::fs` usage in this file.
+// Batch 7 extracted `write_pretty_json` + `ensure_dir`; this commit
+// (Task #18) finishes the consolidation by adding three read helpers
+// so every production fs call site goes through a wrapper with a
+// uniform error-context wording (`writing <path>`, `reading <path>`,
+// `creating dir <path>`, `listing <path>`). Result: the eval-loop
+// body shows the *eval logic*, not the I/O-error-context boilerplate.
 
 /// `fs::write` of a serialized pretty-JSON body with a uniform error
 /// message (`writing <path>`). Used by every eval artifact write.
@@ -64,11 +65,43 @@ fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     fs::write(path, body).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Plain `fs::write` of bytes/str with the same `writing <path>`
+/// context as [`write_pretty_json`].
+fn write_text(path: &Path, body: impl AsRef<[u8]>) -> Result<()> {
+    fs::write(path, body).with_context(|| format!("writing {}", path.display()))
+}
+
 /// `fs::create_dir_all` with a uniform error message (`creating dir
 /// <path>`). The eval output layout is the only caller — bundling the
 /// context here keeps the eval-loop body terser.
 fn ensure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("creating dir {}", path.display()))
+}
+
+/// `fs::read_to_string` with a uniform `reading <path>` error
+/// context. Used by the corpus loader + manifest reader where a
+/// missing file IS an error (the eval invocation must fail loud).
+fn read_text(path: &Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// `fs::read_to_string` where the file is **optional**. Returns
+/// `Ok(None)` if the path doesn't exist (NotFound), bubbles other I/O
+/// errors with a `reading <path>` context. Used by the per-case
+/// `checks.json` and similar opt-in artifacts.
+fn read_optional_text(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            Err(anyhow::Error::from(e)).with_context(|| format!("reading {}", path.display()))
+        }
+    }
+}
+
+/// `fs::read_dir` with a uniform `listing <path>` error context.
+fn list_dir(path: &Path) -> Result<fs::ReadDir> {
+    fs::read_dir(path).with_context(|| format!("listing {}", path.display()))
 }
 
 use tars_pipeline::{
@@ -284,6 +317,7 @@ impl CaseCheckResult {
     /// Optional diagnostic string, projected from whichever variant
     /// carries one. `Passed.note` and `Failed.reason` flatten through
     /// here for callers that want the legacy `Option<String>` view.
+    #[allow(dead_code)] // public accessor for an eval-report consumer that may not exist yet
     pub fn detail(&self) -> Option<&str> {
         match self {
             Self::Passed { note, .. } => note.as_deref(),
@@ -401,7 +435,7 @@ async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<
             continue;
         }
         let case_dir = args.run.join(&case.case_id);
-        let output = read_optional(&case_dir.join("output.txt"))?.unwrap_or_default();
+        let output = read_optional_text(&case_dir.join("output.txt"))?.unwrap_or_default();
         // input/expected: the corpus isn't copied into the run dir, so
         // we read what we can. output.txt always present; expected may
         // be carried alongside if the run recorded it (future). For now
@@ -411,7 +445,7 @@ async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<
             item_id: case.case_id.clone(),
             input: case.case_id.clone(),
             output,
-            expected: read_optional(&case_dir.join("expected.txt"))?,
+            expected: read_optional_text(&case_dir.join("expected.txt"))?,
             context: None,
         });
     }
@@ -451,8 +485,7 @@ async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<
 
 fn load_manifest(dir: &Path) -> Result<EvalRunManifest> {
     let path = dir.join("manifest.json");
-    let body = fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let body = read_text(&path)?;
     serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -595,7 +628,7 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
 
 fn load_judge_report(dir: &Path) -> Option<tars_types::JudgeReport> {
     let path = dir.join("judge_report.json");
-    let body = fs::read_to_string(path).ok()?;
+    let body = read_optional_text(&path).ok().flatten()?;
     serde_json::from_str(&body).ok()
 }
 
@@ -720,8 +753,7 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         // Persist response text + per-case report regardless of outcome.
         let output_path = case_out_dir.join("output.txt");
         let output_text = report.output_text.clone();
-        fs::write(&output_path, output_text)
-            .with_context(|| format!("writing {}", output_path.display()))?;
+        write_text(&output_path, output_text)?;
         let report_path = case_out_dir.join("report.json");
         write_pretty_json(&report_path, &report.summary)?;
 
@@ -945,7 +977,7 @@ fn load_corpus(root: &Path) -> Result<Vec<Case>> {
         anyhow::bail!("corpus path is not a directory: {}", root.display());
     }
     let mut cases: Vec<Case> = Vec::new();
-    for entry in fs::read_dir(root)? {
+    for entry in list_dir(root)? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_dir() {
@@ -964,10 +996,9 @@ fn load_corpus(root: &Path) -> Result<Vec<Case>> {
             tracing::warn!(case = %id, "skipping case: no input.txt");
             continue;
         }
-        let input = fs::read_to_string(&input_path)
-            .with_context(|| format!("reading {}", input_path.display()))?;
-        let system = read_optional(&path.join("system.txt"))?;
-        let expected = read_optional(&path.join("expected.txt"))?;
+        let input = read_text(&input_path)?;
+        let system = read_optional_text(&path.join("system.txt"))?;
+        let expected = read_optional_text(&path.join("expected.txt"))?;
         cases.push(Case {
             id,
             input,
@@ -979,14 +1010,6 @@ fn load_corpus(root: &Path) -> Result<Vec<Case>> {
     // sort lexically with zero-padding; we don't otherwise re-order.
     cases.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(cases)
-}
-
-fn read_optional(path: &Path) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(s) => Ok(Some(s)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-    }
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────
