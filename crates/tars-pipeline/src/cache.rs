@@ -832,4 +832,96 @@ mod tests {
         // Default CachePolicy enables L1/L2; just sanity-check.
         assert!(p.any_enabled());
     }
+
+    /// Stronger version of the wire-compat check: feed
+    /// `read_policy` the EXACT flat JSON shape a pre-typify
+    /// persistence layer would have written, and verify the
+    /// production reader lifts it cleanly into the typed enum. This
+    /// is the regression anchor for "did the B-7 serde adapter
+    /// actually preserve back-compat against historical payloads"
+    /// — the existing `*_distinguishes_*` tests round-trip through
+    /// the new typed Serialize, this one starts from a legacy byte
+    /// shape we hand-construct (so it can't drift with the typed
+    /// shape).
+    #[test]
+    fn read_policy_lifts_handcrafted_legacy_wire() {
+        let ctx = RequestContext::test_default();
+
+        // Shape 1 — default-ish: l1 + l2 on, l3 off, no overrides.
+        let legacy_default = serde_json::json!({
+            "l1": true,
+            "l2": true,
+            "l3": false,
+            "l1_ttl": null,
+            "l2_ttl": null,
+            "l3_ttl": null,
+        });
+        ctx.attributes
+            .write()
+            .unwrap()
+            .insert(POLICY_ATTR.to_string(), legacy_default);
+        let p = read_policy(&ctx);
+        assert!(p.l1.is_enabled());
+        assert!(p.l2.is_enabled());
+        assert!(!p.l3.is_enabled());
+        assert!(p.l1_ttl_effective().is_none(), "no override means None");
+
+        // Shape 2 — L1 with explicit TTL override (300s).
+        let legacy_override = serde_json::json!({
+            "l1": true,
+            "l2": false,
+            "l3": false,
+            "l1_ttl": {"secs": 300, "nanos": 0},
+            "l2_ttl": null,
+            "l3_ttl": null,
+        });
+        ctx.attributes
+            .write()
+            .unwrap()
+            .insert(POLICY_ATTR.to_string(), legacy_override);
+        let p = read_policy(&ctx);
+        assert_eq!(
+            p.l1_ttl_effective(),
+            Some(std::time::Duration::from_secs(300)),
+            "legacy override TTL must lift to Override variant"
+        );
+
+        // Shape 3 — the previously-meaningless `(l1=false,
+        // l1_ttl=Some)` combo. The typed enum literally can't
+        // represent this; the adapter normalises to Disabled and the
+        // override is silently dropped. This is the *cure* the
+        // refactor delivered — historical garbage payloads can't
+        // confuse a typed caller.
+        let legacy_garbage = serde_json::json!({
+            "l1": false,
+            "l2": false,
+            "l3": false,
+            "l1_ttl": {"secs": 999, "nanos": 0},
+            "l2_ttl": null,
+            "l3_ttl": null,
+        });
+        ctx.attributes
+            .write()
+            .unwrap()
+            .insert(POLICY_ATTR.to_string(), legacy_garbage);
+        let p = read_policy(&ctx);
+        assert!(!p.l1.is_enabled());
+        assert!(p.l1_ttl_effective().is_none(), "garbage override dropped");
+
+        // Shape 4 — a payload from a *future* writer that omits the
+        // `*_ttl` fields entirely (serde `default` should cover it).
+        // The flat-JSON adapter's `serde(default)` on the wire struct
+        // is what makes this work.
+        let legacy_minimal = serde_json::json!({
+            "l1": true,
+            "l2": true,
+            "l3": false,
+        });
+        ctx.attributes
+            .write()
+            .unwrap()
+            .insert(POLICY_ATTR.to_string(), legacy_minimal);
+        let p = read_policy(&ctx);
+        assert_eq!(p.l1, tars_cache::CacheLayerPolicy::Default);
+    }
 }
