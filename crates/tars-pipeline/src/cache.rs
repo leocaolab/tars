@@ -191,48 +191,79 @@ impl LlmService for CacheLookupService {
     }
 }
 
-/// Read [`CachePolicy`] from `ctx.attributes` under `"cache.policy"`.
-/// Falls back to `CachePolicy::default()` if missing/malformed.
-///
-/// The default-on-error path is **intentional graceful degradation**:
-/// `read_policy` sits on the hot path of every request; treating a
-/// malformed cache-policy attribute as a fatal error would fail the
-/// whole call, when the safer behavior is to skip caching for this
-/// request and continue. The warn-level log + default-policy fallback
-/// IS the audit trail. `arc scan --judge` flagged this as ROT
-/// ("callers unable to distinguish valid config from malformed
-/// fallback"); the trace event in the warn log is how an operator
-/// distinguishes them.
 const POLICY_ATTR: &str = "cache.policy";
 
-fn read_policy(ctx: &RequestContext) -> CachePolicy {
-    // Audit `tars-pipeline-src-cache-1`: lock poisoning previously
-    // degraded silently to default. Poison = a panic occurred
-    // while another task held the write side; treating that as
-    // "default policy is fine" hides the underlying bug. Log loud,
-    // then degrade.
+/// Outcome of [`read_policy_raw`]: surfaces the three distinguishable
+/// cases the previous `-> CachePolicy` shape collapsed into one
+/// (`arc scan --judge` finding `ARC-L5-SW-10`).
+///
+/// Callers that want the historical "graceful degrade" behavior use
+/// [`read_policy`], which logs the failure mode at the appropriate
+/// level and returns `CachePolicy::default()`. Callers that want to
+/// fail strictly on malformed config use [`read_policy_raw`] directly.
+#[derive(Debug)]
+enum PolicySource {
+    /// Caller didn't set `"cache.policy"`. Default applies.
+    Unset,
+    /// Caller set the attribute and it decoded cleanly.
+    Set(CachePolicy),
+    /// Attribute was present but couldn't be deserialised. Caller
+    /// decides whether to fail the call or fall back to defaults.
+    Malformed(serde_json::Error),
+    /// The `ctx.attributes` `RwLock` was poisoned (a prior task
+    /// panicked while holding it). The underlying invariant on the
+    /// attributes map is broken; the caller's decision again.
+    AttributesPoisoned,
+}
+
+/// Read the raw policy state from `ctx.attributes`. Distinguishes
+/// "unset" / "valid" / "malformed" / "lock poisoned" so callers can
+/// pick their failure mode rather than getting a silent
+/// `CachePolicy::default()` for any of the failure cases.
+fn read_policy_raw(ctx: &RequestContext) -> PolicySource {
     let attrs = match ctx.attributes.read() {
         Ok(a) => a,
-        Err(e) => {
-            tracing::error!(
+        Err(_) => return PolicySource::AttributesPoisoned,
+    };
+    let Some(v) = attrs.get(POLICY_ATTR) else {
+        return PolicySource::Unset;
+    };
+    match serde_json::from_value::<CachePolicy>(v.clone()) {
+        Ok(p) => PolicySource::Set(p),
+        Err(e) => PolicySource::Malformed(e),
+    }
+}
+
+/// Read [`CachePolicy`] from `ctx.attributes` with the cache
+/// middleware's documented graceful-degradation semantics:
+///   - `Unset` → `CachePolicy::default()`
+///   - `Set(p)` → `p`
+///   - `Malformed(e)` → warn-log, then `CachePolicy::default()`
+///   - `AttributesPoisoned` → error-log, then `CachePolicy::default()`
+///
+/// The middleware uses this on the hot path; surfacing the failure
+/// modes via tracing keeps cache misses caused by malformed config
+/// observable to an operator without failing the whole LLM call.
+fn read_policy(ctx: &RequestContext) -> CachePolicy {
+    match read_policy_raw(ctx) {
+        PolicySource::Set(p) => p,
+        PolicySource::Unset => CachePolicy::default(),
+        PolicySource::Malformed(e) => {
+            tracing::warn!(
                 error = %e,
+                "cache: `{POLICY_ATTR}` attribute couldn't be deserialized; using default",
+            );
+            CachePolicy::default()
+        }
+        PolicySource::AttributesPoisoned => {
+            tracing::error!(
                 "cache: ctx.attributes RwLock poisoned during read; \
                  falling back to default policy. The underlying panic \
                  should be investigated.",
             );
-            return CachePolicy::default();
+            CachePolicy::default()
         }
-    };
-    let Some(v) = attrs.get(POLICY_ATTR) else {
-        return CachePolicy::default();
-    };
-    serde_json::from_value::<CachePolicy>(v.clone()).unwrap_or_else(|e| {
-        tracing::warn!(
-            error = %e,
-            "cache: `{POLICY_ATTR}` attribute couldn't be deserialized; using default",
-        );
-        CachePolicy::default()
-    })
+    }
 }
 
 /// Wrap an upstream event stream so we observe every event AND
@@ -751,5 +782,54 @@ mod tests {
             0,
             "errored stream must not be cached"
         );
+    }
+
+    // ── read_policy_raw — typed distinguishability (ARC-L5-SW-10) ──
+
+    #[test]
+    fn read_policy_raw_distinguishes_unset_set_malformed() {
+        let ctx = RequestContext::test_default();
+        // Unset: no `cache.policy` attribute.
+        assert!(matches!(
+            read_policy_raw(&ctx),
+            PolicySource::Unset
+        ));
+
+        // Set: well-formed CachePolicy.
+        let policy_value = serde_json::to_value(CachePolicy::default()).unwrap();
+        ctx.attributes
+            .write()
+            .unwrap()
+            .insert(POLICY_ATTR.to_string(), policy_value);
+        match read_policy_raw(&ctx) {
+            PolicySource::Set(_) => {}
+            other => panic!("expected Set, got {other:?}"),
+        }
+
+        // Malformed: wrong shape (`123` is not a CachePolicy object).
+        ctx.attributes
+            .write()
+            .unwrap()
+            .insert(POLICY_ATTR.to_string(), serde_json::json!(123));
+        match read_policy_raw(&ctx) {
+            PolicySource::Malformed(_) => {}
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_policy_degrades_to_default_on_malformed() {
+        // The graceful-degrade wrapper still returns a usable
+        // `CachePolicy` so the middleware stays on the hot path; the
+        // distinguishability is recovered via `read_policy_raw` for
+        // callers that want to fail strictly.
+        let ctx = RequestContext::test_default();
+        ctx.attributes
+            .write()
+            .unwrap()
+            .insert(POLICY_ATTR.to_string(), serde_json::json!("not a policy"));
+        let p = read_policy(&ctx);
+        // Default CachePolicy enables L1/L2; just sanity-check.
+        assert!(p.any_enabled());
     }
 }

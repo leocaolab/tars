@@ -193,19 +193,31 @@ impl CircuitBreaker {
     }
 
     fn check(&self, now: Instant) -> Decision {
-        // Poison-recovery is **intentional graceful degradation** for a
-        // primitive whose entire job is to keep traffic flowing under
-        // failure. `into_inner` salvages the last-known state; the
-        // worst case is one extra Allow before the next failure
-        // re-arms the breaker — better than panicking inside every LLM
-        // call site downstream. `arc scan --judge` flagged this as
-        // ROT; converting to Result would cascade `Result<Decision>`
-        // through the breaker's entire surface and force every
-        // consumer to handle a "your reliability primitive is itself
-        // unreliable" arm — defeating the abstraction. The poisoning
-        // event is still observable via the panic's own stack trace
-        // and any tracing instrumentation around the panicking task.
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        // Poison handling (per `arc scan --judge` ARC-L5-SW-11): a
+        // poisoned mutex means a prior task panicked while holding
+        // breaker state — by definition the breaker can't make a
+        // sound decision from that state. Fail-safe to `Reject` with
+        // a short cooldown rather than silently `into_inner()` the
+        // (possibly inconsistent) state and `Allow`. The previous
+        // commit's "graceful degradation by recovering" was wrong:
+        // the breaker's job is to reject when the inner is
+        // unhealthy, and a panicked state IS an unhealthy state.
+        // Logged so an operator notices the panic that caused this.
+        let mut state = match self.state.lock() {
+            Ok(s) => s,
+            Err(poison) => {
+                tracing::error!(
+                    "circuit_breaker: state mutex poisoned (prior task panicked while \
+                     holding it); fail-safe Reject + 100ms cooldown until next probe. \
+                     Investigate the panicking task — breaker state may be inconsistent."
+                );
+                // Drop the poisoned guard without using its state.
+                drop(poison);
+                return Decision::Reject {
+                    until: now + Duration::from_millis(100),
+                };
+            }
+        };
         match state.kind {
             BreakerStateKind::Closed => Decision::Allow { is_probe: false },
             BreakerStateKind::Open => {
