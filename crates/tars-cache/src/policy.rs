@@ -133,11 +133,6 @@ impl CachePolicy {
     pub fn l2_ttl_effective(&self) -> Option<Duration> {
         self.l2.ttl_override()
     }
-
-    /// See [`Self::l1_ttl_effective`].
-    pub fn l3_ttl_effective(&self) -> Option<Duration> {
-        self.l3.ttl_override()
-    }
 }
 
 // ─── Wire-format adapter — preserves legacy flat JSON shape ────────

@@ -193,11 +193,6 @@ impl ToolCallBuffer {
         Ok((acc.id, acc.name, value))
     }
 
-    /// Whether any tool call is currently in-flight.
-    pub fn has_inflight(&self) -> bool {
-        !self.inflight.is_empty()
-    }
-
     /// Drain all remaining buffers without finalizing — used on stream
     /// abort to avoid leaking partial state.
     pub fn discard(&mut self) {
@@ -265,8 +260,8 @@ mod tests {
     fn discard_clears_state() {
         let mut b = ToolCallBuffer::new();
         b.on_start(0, "c1".into(), "f".into());
-        assert!(b.has_inflight());
+        assert!(!b.inflight.is_empty());
         b.discard();
-        assert!(!b.has_inflight());
+        assert!(b.inflight.is_empty());
     }
 }
