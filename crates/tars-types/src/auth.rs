@@ -45,10 +45,6 @@ impl Auth {
         }
     }
 
-    /// True iff this Auth doesn't need to look anything up.
-    pub fn is_passive(&self) -> bool {
-        matches!(self, Self::None | Self::Delegate)
-    }
 }
 
 #[cfg(test)]
@@ -77,13 +73,6 @@ mod tests {
             } => assert_eq!(var, "OPENAI_API_KEY"),
             _ => panic!("wrong"),
         }
-    }
-
-    #[test]
-    fn passive_classifier() {
-        assert!(Auth::None.is_passive());
-        assert!(Auth::Delegate.is_passive());
-        assert!(!Auth::env("X").is_passive());
     }
 
     #[test]

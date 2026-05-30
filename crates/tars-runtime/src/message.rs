@@ -128,6 +128,20 @@ impl AgentMessage {
     /// before the loop decides its next move. PlanIssued and
     /// PartialResult are intermediate; Verdict and
     /// NeedsClarification are terminal.
+    ///
+    /// **Forward-compat, no production caller yet** — the
+    /// orchestrator loop body that consumes this predicate is the
+    /// in-flight work item in `crates/tars-runtime/src/orchestrator.rs`
+    /// (the module exists but its loop body uses the typed
+    /// `OrchestratorError` channel today, not this predicate). Kept
+    /// `pub` because the variant taxonomy (which `AgentMessage`
+    /// variants halt the loop) is non-trivial design knowledge: a
+    /// future orchestrator implementer would otherwise re-derive
+    /// Verdict + NeedsClarification = terminal vs PlanIssued +
+    /// PartialResult = intermediate by walking match arms.
+    /// `arc scan --judge` reflagging as "no production callers"
+    /// is the expected scanner blind spot — it sees the test
+    /// callers but not the future loop-body caller.
     pub fn is_terminal_for_orchestrator(&self) -> bool {
         matches!(self, Self::Verdict { .. } | Self::NeedsClarification { .. })
     }

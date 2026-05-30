@@ -182,24 +182,6 @@ impl SqliteCacheRegistry {
         Ok(())
     }
 
-    /// L2-only count of non-expired rows. Test-only: exposes a peek
-    /// at internal state for assertions; production callers should use
-    /// the cache's `lookup` / `insert` surface and let metrics flow
-    /// through the telemetry middleware. Promoted out of `cfg(test)`
-    /// only if a real production caller appears.
-    #[cfg(test)]
-    pub(crate) fn l2_entry_count(&self) -> Result<u64, CacheError> {
-        let now = now_ms();
-        let conn = self.l2.lock().expect("l2 mutex poisoned");
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM cache_entries WHERE expires_at_ms > ?",
-                params![now],
-                |r| r.get(0),
-            )
-            .map_err(|e| CacheError::Backend(format!("count rows: {e}")))?;
-        Ok(n as u64)
-    }
 }
 
 #[async_trait]
@@ -378,6 +360,27 @@ mod tests {
     use super::*;
     use crate::CacheLayerPolicy;
     use tars_types::{CacheHitInfo, ChatResponse, ProviderId, StopReason, Usage};
+
+    /// L2-only count of non-expired rows. Test-only assertion helper,
+    /// scoped to this `mod tests` so it doesn't appear as a `pub(crate)`
+    /// fn in the production source surface (`arc scan --judge` finding
+    /// `ARC-L5-DEAD-13`). Production callers should observe L2 through
+    /// the cache's `lookup` / `insert` surface and let metrics flow
+    /// through the telemetry middleware.
+    impl SqliteCacheRegistry {
+        pub(super) fn l2_entry_count(&self) -> Result<u64, CacheError> {
+            let now = now_ms();
+            let conn = self.l2.lock().expect("l2 mutex poisoned");
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM cache_entries WHERE expires_at_ms > ?",
+                    params![now],
+                    |r| r.get(0),
+                )
+                .map_err(|e| CacheError::Backend(format!("count rows: {e}")))?;
+            Ok(n as u64)
+        }
+    }
 
     fn key(id: u8) -> CacheKey {
         let mut fp = [0u8; 32];
