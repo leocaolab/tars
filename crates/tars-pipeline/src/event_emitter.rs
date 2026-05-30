@@ -124,9 +124,7 @@ impl LlmService for EventEmitterService {
         // to wait until the stream drains so we capture the response.
         let result_for_error = match &result {
             Ok(_) => None,
-            Err(e) => Some(CallResult::Error {
-                kind: e.kind().to_string(),
-            }),
+            Err(e) => Some(CallResult::Error { kind: e.kind() }),
         };
 
         match result {
@@ -403,11 +401,9 @@ fn wrap_stream_for_emit(
 
         let result = match (saw_terminal, stream_error_kind) {
             (true, None) => CallResult::Ok,
-            (_, Some(kind)) => CallResult::Error {
-                kind: kind.as_str().to_string(),
-            },
+            (_, Some(kind)) => CallResult::Error { kind },
             (false, None) => CallResult::Error {
-                kind: tars_types::ProviderErrorKind::Internal.as_str().to_string(),
+                kind: tars_types::ProviderErrorKind::Internal,
             },
         };
 

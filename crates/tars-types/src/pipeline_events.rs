@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::content_ref::ContentRef;
+use crate::error::ProviderErrorKind;
 use crate::events::StopReason;
 use crate::ids::{ProviderId, SessionId, TenantId, TraceId};
 use crate::telemetry::TelemetryAccumulator;
@@ -123,10 +124,13 @@ pub struct LlmCallFinished {
 pub enum CallResult {
     Ok,
     Error {
-        /// Snake-case error kind matching `ProviderError.kind` /
-        /// `TarsProviderError.kind` ("rate_limited", "network",
-        /// "validation_failed", ...).
-        kind: String,
+        /// Typed error discriminator — the same [`ProviderErrorKind`]
+        /// every other consumer (telemetry's `error_kind`,
+        /// `TarsProviderError.kind`) is keyed on. Serializes to the
+        /// identical snake_case wire string ("rate_limited", "network",
+        /// "validation_failed", ...) it used to carry as a raw `String`,
+        /// so the persisted JSON form is unchanged.
+        kind: ProviderErrorKind,
     },
 }
 
@@ -229,7 +233,7 @@ mod tests {
     #[test]
     fn call_result_serialises_with_kind_field() {
         let r = CallResult::Error {
-            kind: "rate_limited".into(),
+            kind: ProviderErrorKind::RateLimited,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["result"], "error");

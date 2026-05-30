@@ -21,6 +21,17 @@ use tars_types::{
 use crate::error::RuntimeError;
 use crate::event::AgentEvent;
 
+/// Get-or-insert `map[key]` and bump its `field` by one, saturating.
+/// Centralizes the entry-or-default + `saturating_add` idiom the
+/// event-aggregation loop repeats per breakdown bucket, so adding a
+/// new counter can't silently drop the saturation on one site.
+macro_rules! bump {
+    ($map:expr, $key:expr, $field:ident) => {{
+        let entry = $map.entry($key).or_default();
+        entry.$field = entry.$field.saturating_add(1);
+    }};
+}
+
 /// Build a [`RunReport`] for `trajectory_id` by replaying its event log.
 ///
 /// Returns [`RuntimeError::TrajectoryNotFound`] when the trajectory
@@ -85,8 +96,7 @@ pub async fn build_run_report(
                 step_seq, agent, ..
             } => {
                 step_agent.insert(step_seq, agent.clone());
-                let entry = by_agent.entry(agent).or_default();
-                entry.step_count = entry.step_count.saturating_add(1);
+                bump!(by_agent, agent, step_count);
                 step_count = step_count.saturating_add(1);
             }
             AgentEvent::StepCompleted {
@@ -110,8 +120,7 @@ pub async fn build_run_report(
             } => {
                 failed_step_count = failed_step_count.saturating_add(1);
                 if let Some(agent) = step_agent.get(&step_seq) {
-                    let entry = by_agent.entry(agent.clone()).or_default();
-                    entry.failed_step_count = entry.failed_step_count.saturating_add(1);
+                    bump!(by_agent, agent.clone(), failed_step_count);
                 }
                 errors.push(RunErrorSummary {
                     step_seq,
@@ -143,8 +152,7 @@ pub async fn build_run_report(
                 // that's a worker-side bug to surface — easier to
                 // notice in a report than buried in raw events.
                 if let Some(agent) = step_agent.get(&step_seq) {
-                    let agent_entry = by_agent.entry(agent.clone()).or_default();
-                    agent_entry.llm_calls = agent_entry.llm_calls.saturating_add(1);
+                    bump!(by_agent, agent.clone(), llm_calls);
                 }
             }
         }

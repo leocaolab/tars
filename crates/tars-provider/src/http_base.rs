@@ -309,6 +309,19 @@ pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// UTF-8-safe truncation to `max` bytes; appends an ellipsis if
+/// anything was dropped. Shared by the backend mapping layers (each
+/// previously carried a byte-identical copy) — see `truncate_utf8`
+/// for the boundary-safety guarantee it builds on.
+pub(crate) fn truncate(s: &str, max: usize) -> String {
+    let trimmed = truncate_utf8(s, max);
+    if trimmed.len() == s.len() {
+        s.to_string()
+    } else {
+        format!("{trimmed}…")
+    }
+}
+
 /// Parse the standard rate-limit cooldown headers that providers
 /// send back on 429 responses. Tries three forms in order:
 ///

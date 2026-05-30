@@ -418,29 +418,6 @@ impl AuthDefaults for Auth {
 }
 
 impl ProviderConfig {
-    /// Diagnostic name for logs/audit. Currently test-only — only the
-    /// unit tests reference it. Promote out of `cfg(test)` (and back
-    /// to `pub`) if an external logger / metrics surface starts
-    /// wanting it.
-    #[cfg(test)]
-    pub(crate) fn type_label(&self) -> &'static str {
-        use ProviderConfig::*;
-        match self {
-            Openai { .. } => "openai",
-            OpenaiCompat { .. } => "openai_compat",
-            Anthropic { .. } => "anthropic",
-            Gemini { .. } => "gemini",
-            Vllm { .. } => "vllm",
-            Mlx { .. } => "mlx",
-            Llamacpp { .. } => "llamacpp",
-            ClaudeCli { .. } => "claude_cli",
-            ClaudeSdk { .. } => "claude_sdk",
-            GeminiCli { .. } => "gemini_cli",
-            CodexCli { .. } => "codex_cli",
-            Mock { .. } => "mock",
-        }
-    }
-
     /// What model the provider defaults to. CLI providers and Mock
     /// always have one; Mock returns "mock-model".
     pub fn default_model(&self) -> &str {
@@ -1125,14 +1102,6 @@ mod tests {
         let mut errs = Vec::new();
         cfg.validate(&mut errs);
         assert!(errs.is_empty(), "expected no errors, got: {errs:?}");
-    }
-
-    #[test]
-    fn type_label_round_trips() {
-        let cfg = ProviderConfig::Mock {
-            canned_response: "ok".into(),
-        };
-        assert_eq!(cfg.type_label(), "mock");
     }
 
     #[test]
