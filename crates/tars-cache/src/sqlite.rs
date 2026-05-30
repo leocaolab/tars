@@ -278,8 +278,13 @@ impl CacheRegistry for SqliteCacheRegistry {
         let blob = serde_json::to_vec(&value)
             .map_err(|e| CacheError::Backend(format!("encode for l2: {e}")))?;
         let now = now_ms();
+        // `l2_ttl_effective` returns `None` if L2 is off; we already
+        // returned above when `!policy.l2` so this is equivalent to
+        // `policy.l2_ttl` here — but going through the accessor keeps
+        // future refactors honest (no chance of a reader landing here
+        // that forgot the `!policy.l2` guard above).
         let ttl_ms = policy
-            .l2_ttl
+            .l2_ttl_effective()
             .unwrap_or(self.l2_ttl)
             .as_millis()
             .min(i64::MAX as u128) as i64;

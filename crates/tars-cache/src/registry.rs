@@ -157,7 +157,11 @@ impl CacheRegistry for MemoryCacheRegistry {
         // path DOES honor `l1_ttl` (per its own builder); a future
         // moka builder rev that exposes per-entry insert can plumb
         // this through here.
-        if let Some(requested) = policy.l1_ttl {
+        // Read via `l1_ttl_effective` so a caller that passes `l1=false`
+        // with an override doesn't log a misleading "we ignored your
+        // ttl" — the override is genuinely meaningless when L1 is off,
+        // and the accessor surfaces that as `None`.
+        if let Some(requested) = policy.l1_ttl_effective() {
             if requested != self.default_ttl {
                 tracing::debug!(
                     requested_ms = requested.as_millis() as u64,

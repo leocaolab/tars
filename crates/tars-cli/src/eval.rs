@@ -221,6 +221,14 @@ pub struct EvalCaseReport {
     pub checks: Vec<CaseCheckResult>,
 }
 
+/// One invariant check's outcome for one eval case. `detail` is
+/// **independent** of `passed`: a failure carries a reason here, but a
+/// pass may also carry a note (e.g. "validator skipped: no oracle
+/// available"). `arc scan --judge` flagged the `(bool, Option<String>)`
+/// shape as sum-as-product on the assumption that detail is
+/// failure-only — that's not the contract this type implements. See
+/// [`tars_runtime::check::CheckResult`] for the upstream source whose
+/// docstring spells out "Why it failed (or any note on pass)".
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CaseCheckResult {
     pub name: String,
@@ -908,13 +916,24 @@ fn utc_now_stamp() -> String {
     let m = (secs / 60) % 60;
     let h = (secs / 3600) % 24;
     let days_since_epoch = secs / 86400;
-    let (y, mo, d) = civil_from_days(days_since_epoch as i64);
+    let date = civil_from_days(days_since_epoch as i64);
+    let (y, mo, d) = (date.year, date.month, date.day);
     format!("{y:04}-{mo:02}-{d:02}T{h:02}-{m:02}-{s:02}")
 }
 
-/// Days since 1970-01-01 → (year, month, day). Pure function, no
-/// timezone, no leap-second handling — good enough for filenames.
-fn civil_from_days(z: i64) -> (i32, u32, u32) {
+/// Calendar date — return shape for [`civil_from_days`]. Named fields
+/// so callers can't transpose y/m/d on destructure (the specific
+/// `arc scan --judge` finding for this fn).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CivilDate {
+    year: i32,
+    month: u32,
+    day: u32,
+}
+
+/// Days since 1970-01-01 → calendar date. Pure function, no timezone,
+/// no leap-second handling — good enough for filenames.
+fn civil_from_days(z: i64) -> CivilDate {
     // Howard Hinnant's date algorithm, simplified for >=1970.
     let z = z + 719_468;
     let era = z.div_euclid(146097);
@@ -926,7 +945,11 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
     let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+    CivilDate {
+        year: y,
+        month: m,
+        day: d,
+    }
 }
 
 #[cfg(test)]
@@ -1040,7 +1063,7 @@ mod tests {
     fn civil_from_days_anchor_2026_05_20() {
         // 56 years × 365 + 14 leap years + (31+28+31+30+19) day-of-year
         // = 20454 + 139 = 20593 days from 1970-01-01 to 2026-05-20.
-        let (y, mo, d) = civil_from_days(20_593);
-        assert_eq!((y, mo, d), (2026, 5, 20));
+        let d = civil_from_days(20_593);
+        assert_eq!((d.year, d.month, d.day), (2026, 5, 20));
     }
 }

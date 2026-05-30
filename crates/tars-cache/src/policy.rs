@@ -9,6 +9,19 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+/// Per-level on/off + optional TTL override.
+///
+/// Note on the shape: a cleaner sum-as-product encoding would be
+/// `Option<LevelPolicy>` per tier so a disabled level can't carry a
+/// meaningless TTL. We keep the flat `(bool, Option<Duration>)` shape
+/// because `CachePolicy` is serialized into `RequestContext.attributes`
+/// (JSON) and is read by multiple consumers across the workspace;
+/// changing the wire format would force every reader to migrate at
+/// the same time. The `arc scan --judge` finding for this struct
+/// (l1_ttl meaningful only when l1=true) is mitigated by the
+/// `*_ttl_effective` accessors below, which return `None` when the
+/// corresponding level is off — readers that go through them can't
+/// observe the contradiction.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct CachePolicy {
     pub l1: bool,
@@ -16,8 +29,15 @@ pub struct CachePolicy {
     pub l2: bool,
     /// **Not yet honoured** — landed when `ExplicitCacheProvider` (D-1) ships.
     pub l3: bool,
+    /// TTL override for L1. **Ignored** when `l1 == false`; prefer
+    /// [`Self::l1_ttl_effective`] to read this value, which surfaces
+    /// the meaningless-when-disabled state as `None`.
     pub l1_ttl: Option<Duration>,
+    /// TTL override for L2. **Ignored** when `l2 == false`; prefer
+    /// [`Self::l2_ttl_effective`].
     pub l2_ttl: Option<Duration>,
+    /// TTL override for L3. **Ignored** when `l3 == false`; prefer
+    /// [`Self::l3_ttl_effective`].
     pub l3_ttl: Option<Duration>,
 }
 
@@ -62,6 +82,24 @@ impl CachePolicy {
     /// no write) when this returns false.
     pub fn any_enabled(&self) -> bool {
         self.l1 || self.l2 || self.l3
+    }
+
+    /// L1 TTL override, observing the "ignored when L1 is off" rule —
+    /// returns `None` if `l1=false`, regardless of `l1_ttl`. Use this
+    /// in preference to reading [`Self::l1_ttl`] directly so the
+    /// disabled-level case can't leak through.
+    pub fn l1_ttl_effective(&self) -> Option<Duration> {
+        if self.l1 { self.l1_ttl } else { None }
+    }
+
+    /// See [`Self::l1_ttl_effective`].
+    pub fn l2_ttl_effective(&self) -> Option<Duration> {
+        if self.l2 { self.l2_ttl } else { None }
+    }
+
+    /// See [`Self::l1_ttl_effective`].
+    pub fn l3_ttl_effective(&self) -> Option<Duration> {
+        if self.l3 { self.l3_ttl } else { None }
     }
 }
 
