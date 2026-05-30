@@ -418,8 +418,12 @@ impl AuthDefaults for Auth {
 }
 
 impl ProviderConfig {
-    /// Diagnostic name for logs/audit.
-    pub fn type_label(&self) -> &'static str {
+    /// Diagnostic name for logs/audit. Currently test-only — only the
+    /// unit tests reference it. Promote out of `cfg(test)` (and back
+    /// to `pub`) if an external logger / metrics surface starts
+    /// wanting it.
+    #[cfg(test)]
+    pub(crate) fn type_label(&self) -> &'static str {
         use ProviderConfig::*;
         match self {
             Openai { .. } => "openai",

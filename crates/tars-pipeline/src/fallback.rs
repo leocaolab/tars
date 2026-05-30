@@ -17,19 +17,18 @@
 //! # Composition
 //!
 //! ```ignore
-//! let primary = Arc::new(anthropic_opus);
-//! let sonnet  = Arc::new(anthropic_sonnet);
-//! let local   = Arc::new(vllm_local);
+//! let primary_svc = RetryMiddleware::default().wrap(ProviderService::new(primary));
+//! let sonnet_svc  = RetryMiddleware::default().wrap(ProviderService::new(sonnet));
+//! let local_svc   = RetryMiddleware::default().wrap(ProviderService::new(local));
 //!
 //! let mw = FallbackMiddleware::builder()
-//!     .fallback_to_provider(sonnet, FallbackTrigger::cost_related())
-//!     .fallback_to_provider(local,  FallbackTrigger::availability())
+//!     .fallback_to_service(sonnet_svc, FallbackTrigger::cost_related())
+//!     .fallback_to_service(local_svc,  FallbackTrigger::availability())
 //!     .build();
 //!
-//! let pipeline = Pipeline::builder(primary)
+//! let pipeline = Pipeline::builder(primary_svc)
 //!     .layer(TelemetryMiddleware::new())
 //!     .layer(mw)                            // Fallback OUTSIDE
-//!     .layer(RetryMiddleware::default())    // Retry INSIDE
 //!     .build();
 //! ```
 
@@ -38,12 +37,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use tars_provider::{LlmEventStream, LlmProvider};
+use tars_provider::LlmEventStream;
 use tars_types::{ChatRequest, ProviderError, RequestContext};
 
 use crate::middleware::Middleware;
-use crate::retry::RetryMiddleware;
-use crate::service::{LlmService, ProviderService};
+use crate::service::LlmService;
 
 /// Which `ProviderError` kinds should trigger a fallback hop.
 ///
@@ -115,18 +113,6 @@ impl FallbackBuilder {
     ) -> Self {
         self.hops.push((svc, trigger));
         self
-    }
-
-    /// Add a hop from a bare provider — wraps it in default retry so
-    /// each hop is an independent "primary attempt" (matches the
-    /// behavior described in `docs/roadmap.md §2`).
-    pub fn fallback_to_provider(
-        self,
-        provider: Arc<dyn LlmProvider>,
-        trigger: FallbackTrigger,
-    ) -> Self {
-        let svc = RetryMiddleware::default().wrap(ProviderService::new(provider));
-        self.fallback_to_service(svc, trigger)
     }
 
     pub fn build(self) -> FallbackMiddleware {
@@ -238,6 +224,8 @@ mod tests {
     use futures::StreamExt;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
     use tars_types::{ChatEvent, ModelHint};
+
+    use crate::service::ProviderService;
 
     /// Service that returns a canned error every call.
     struct AlwaysFails {

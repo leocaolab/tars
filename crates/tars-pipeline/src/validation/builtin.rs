@@ -37,13 +37,6 @@ impl JsonShapeValidator {
     pub fn new() -> Self {
         Self::default()
     }
-
-    /// Override the validator name (for distinguishing instances in
-    /// `ValidationSummary.outcomes`).
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = name.into();
-        self
-    }
 }
 
 impl OutputValidator for JsonShapeValidator {
@@ -99,18 +92,6 @@ impl Default for NotEmptyValidator {
 impl NotEmptyValidator {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn for_field(field: ResponseField) -> Self {
-        Self {
-            field,
-            ..Self::default()
-        }
-    }
-
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = name.into();
-        self
     }
 }
 
@@ -189,15 +170,6 @@ impl MaxLengthValidator {
         }
     }
 
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = name.into();
-        self
-    }
-
-    pub fn for_field(mut self, field: ResponseField) -> Self {
-        self.field = field;
-        self
-    }
 }
 
 impl OutputValidator for MaxLengthValidator {

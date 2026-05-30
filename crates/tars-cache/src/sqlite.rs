@@ -182,9 +182,13 @@ impl SqliteCacheRegistry {
         Ok(())
     }
 
-    /// L2-only count of non-expired rows. Useful for diagnostics +
-    /// tests; not in the trait surface to avoid pretending it's free.
-    pub fn l2_entry_count(&self) -> Result<u64, CacheError> {
+    /// L2-only count of non-expired rows. Test-only: exposes a peek
+    /// at internal state for assertions; production callers should use
+    /// the cache's `lookup` / `insert` surface and let metrics flow
+    /// through the telemetry middleware. Promoted out of `cfg(test)`
+    /// only if a real production caller appears.
+    #[cfg(test)]
+    pub(crate) fn l2_entry_count(&self) -> Result<u64, CacheError> {
         let now = now_ms();
         let conn = self.l2.lock().expect("l2 mutex poisoned");
         let n: i64 = conn

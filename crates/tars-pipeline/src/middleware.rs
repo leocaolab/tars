@@ -215,13 +215,6 @@ impl PipelineBuilder {
         self
     }
 
-    /// Add a boxed middleware. Useful when layer composition is itself
-    /// driven by config (each variant produces a `Box<dyn Middleware>`).
-    pub fn layer_boxed(mut self, mw: Box<dyn Middleware>) -> Self {
-        self.layers_outer_to_inner.push(mw);
-        self
-    }
-
     pub fn build(self) -> Pipeline {
         let mut svc = self.inner;
         // Wrap from innermost outward — last added → first wrapped.
