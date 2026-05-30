@@ -44,7 +44,7 @@ use tokio::sync::Mutex;
 
 use tars_provider::LlmEventStream;
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, ContentBlock, Pricing, ProviderError, RequestContext,
+    Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, RequestContext,
     TenantId,
 };
 
@@ -218,38 +218,18 @@ struct TenantBudgetService {
 
 impl TenantBudgetService {
     fn is_zero_pricing(&self) -> bool {
-        self.pricing.input_per_million == 0.0 && self.pricing.output_per_million == 0.0
+        self.pricing.is_zero()
     }
 
-    /// Best-effort pre-call USD estimate (chars/4 input + max_output ×
-    /// output). **Not** a strict upper bound: the `chars/4` heuristic is
-    /// tuned for English and *underestimates* token count for CJK and
-    /// other multi-byte scripts (a Chinese character is ~1 token but
-    /// only ~0.75 here). That's acceptable given the module-level
-    /// soft-cap contract — the real cost is reconciled post-call via the
-    /// `Finished` event's actual `Usage` — but callers needing a hard
-    /// cap must enforce it in their own `BudgetStore`.
-    ///
-    /// Mirrors [`crate::PerCallBudgetMiddleware`] — kept duplicated rather
-    /// than pulled into a shared util because the two middlewares are
-    /// likely to diverge (V2 may add cache-discount estimates here).
+    /// Best-effort pre-call USD estimate. Delegated to
+    /// [`Pricing::estimate_chat_cost`] — same formula as the per-call
+    /// middleware. The earlier "kept duplicated for likely
+    /// divergence" comment didn't pan out; if V2 wants a cache-discount
+    /// estimate, it'll land on `Pricing` itself so both budget
+    /// middlewares pick it up.
     fn estimate_cost_usd(&self, req: &ChatRequest) -> f64 {
-        let mut input_chars: usize = req.system.as_deref().map(str::len).unwrap_or(0);
-        for m in &req.messages {
-            for block in m.content() {
-                if let ContentBlock::Text { text } = block {
-                    input_chars += text.len();
-                }
-            }
-        }
-        let estimated_input_tokens = (input_chars as f64) / 4.0;
-        let max_output_tokens = req
-            .max_output_tokens
-            .map(|t| t as f64)
-            .unwrap_or(self.default_max_output_tokens as f64);
-
-        estimated_input_tokens * self.pricing.input_per_million / 1_000_000.0
-            + max_output_tokens * self.pricing.output_per_million / 1_000_000.0
+        self.pricing
+            .estimate_chat_cost(req, self.default_max_output_tokens)
     }
 }
 

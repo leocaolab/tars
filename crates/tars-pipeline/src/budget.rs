@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 
 use tars_provider::LlmEventStream;
-use tars_types::{Capabilities, ChatRequest, ContentBlock, Pricing, ProviderError, RequestContext};
+use tars_types::{Capabilities, ChatRequest, Pricing, ProviderError, RequestContext};
 
 use crate::middleware::Middleware;
 use crate::service::LlmService;
@@ -150,32 +150,14 @@ struct PerCallBudgetService {
 
 impl PerCallBudgetService {
     fn is_zero_pricing(&self) -> bool {
-        self.pricing.input_per_million == 0.0 && self.pricing.output_per_million == 0.0
+        self.pricing.is_zero()
     }
 
-    /// Strict upper-bound USD estimate for `req`. See module docs for
-    /// the exact formula.
+    /// Strict upper-bound USD estimate for `req`. Delegated to
+    /// [`Pricing::estimate_chat_cost`] — see that for the formula.
     fn estimate_cost_usd(&self, req: &ChatRequest) -> f64 {
-        let mut input_chars: usize = req.system.as_deref().map(str::len).unwrap_or(0);
-        for m in &req.messages {
-            for block in m.content() {
-                if let ContentBlock::Text { text } = block {
-                    input_chars += text.len();
-                }
-                // Image blocks: no char-based proxy. Vision token counts
-                // are model-specific (Anthropic ~1.6k/image, OpenAI scales
-                // by tile count). V1 punts and treats image-bearing
-                // messages as char-only; document as a known gap.
-            }
-        }
-        let estimated_input_tokens = (input_chars as f64) / 4.0;
-        let max_output_tokens = req
-            .max_output_tokens
-            .map(|t| t as f64)
-            .unwrap_or(self.default_max_output_tokens as f64);
-
-        estimated_input_tokens * self.pricing.input_per_million / 1_000_000.0
-            + max_output_tokens * self.pricing.output_per_million / 1_000_000.0
+        self.pricing
+            .estimate_chat_cost(req, self.default_max_output_tokens)
     }
 }
 

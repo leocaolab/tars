@@ -111,6 +111,50 @@ pub struct Pricing {
 }
 
 impl Pricing {
+    /// True iff this provider is on a flat-rate / subscription /
+    /// local-server plan where per-call dollar cost is meaningless.
+    /// Budget middleware short-circuits to "no cap" on these — same
+    /// rule used by both `PerCallBudgetService` and
+    /// `TenantBudgetService` (formerly two copies of this check).
+    pub fn is_zero(&self) -> bool {
+        self.input_per_million == 0.0 && self.output_per_million == 0.0
+    }
+
+    /// Best-effort *pre-call* USD estimate for `req`: chars/4 input
+    /// tokens + the request's `max_output_tokens` (or
+    /// `default_max_output` when unset). Not a strict upper bound —
+    /// chars/4 underestimates CJK / multi-byte scripts; image content
+    /// isn't counted. Budget middleware uses this for soft caps and
+    /// reconciles against the real `Usage` post-call via
+    /// [`Self::cost_for`].
+    ///
+    /// Extracted from the previously-duplicated `estimate_cost_usd`
+    /// methods on `PerCallBudgetService` and `TenantBudgetService`
+    /// (the explicit "kept duplicated" comment on the latter was the
+    /// `arc scan --judge` finding for this clone).
+    pub fn estimate_chat_cost(&self, req: &crate::ChatRequest, default_max_output: u32) -> f64 {
+        let mut input_chars: usize = req.system.as_deref().map(str::len).unwrap_or(0);
+        for m in &req.messages {
+            for block in m.content() {
+                if let crate::ContentBlock::Text { text } = block {
+                    input_chars = input_chars.saturating_add(text.len());
+                }
+                // Image blocks: no char-based proxy. Vision token counts
+                // are model-specific (Anthropic ~1.6k/image, OpenAI
+                // scales by tile count). V1 punts and treats
+                // image-bearing messages as char-only.
+            }
+        }
+        let estimated_input_tokens = (input_chars as f64) / 4.0;
+        let max_output_tokens = req
+            .max_output_tokens
+            .map(|t| t as f64)
+            .unwrap_or(default_max_output as f64);
+
+        estimated_input_tokens * self.input_per_million / 1_000_000.0
+            + max_output_tokens * self.output_per_million / 1_000_000.0
+    }
+
     pub fn cost_for(&self, usage: &Usage) -> CostUsd {
         // `cached_input_tokens` and `cache_creation_tokens` are subsets
         // of `input_tokens` per the documented convention on `Usage`;
