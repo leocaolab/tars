@@ -53,7 +53,7 @@ mod telemetry;
 mod tenant_budget;
 mod validation;
 
-pub use budget::PerCallBudgetMiddleware;
+pub use budget::{BudgetConfigError, PerCallBudgetMiddleware};
 pub use cache::{CacheLookupMiddleware, set_cache_policy};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use event_emitter::EventEmitterMiddleware;
