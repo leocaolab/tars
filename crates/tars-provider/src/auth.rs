@@ -25,6 +25,59 @@ const MAX_CREDENTIAL_BYTES: usize = 64 * 1024;
 pub use tars_types::Auth;
 use tars_types::{ProviderError, RequestContext, SecretRef};
 
+/// Origin tag used by [`validate_credential`] to label the failing
+/// source in error messages. Per-arm-specific so the message
+/// continues to point a user at the right config knob without each
+/// arm assembling the prose itself.
+enum CredentialSource<'a> {
+    Inline,
+    Env { var: &'a str },
+    File { path: &'a std::path::Path },
+}
+
+impl CredentialSource<'_> {
+    /// Human-readable label embedded into the size-cap / empty error
+    /// messages. Stable wording — operators grep for these strings.
+    fn label(&self) -> String {
+        match self {
+            CredentialSource::Inline => "inline credential".into(),
+            CredentialSource::Env { var } => format!("env var `{var}`"),
+            CredentialSource::File { path } => {
+                format!("credential file `{}`", path.display())
+            }
+        }
+    }
+}
+
+/// Shared validation step for every [`SecretRef`] arm: enforce the
+/// size cap, trim whitespace, and reject an empty/whitespace-only
+/// secret. Extracted from the three previously-duplicated bodies of
+/// `BasicAuthResolver::resolve` (`arc scan --judge` finding
+/// `ARC-L5-DUP-1`): "the validation logic (size cap, trim, empty-
+/// check) is identical credential hygiene that does not vary by
+/// backend or context; forgetting to update one site when changing
+/// the other creates drift risk."
+fn validate_credential(raw: &str, source: CredentialSource<'_>) -> Result<String, AuthError> {
+    if raw.len() > MAX_CREDENTIAL_BYTES {
+        return Err(AuthError::Internal(format!(
+            "{} exceeds credential size cap ({} bytes > {MAX_CREDENTIAL_BYTES})",
+            source.label(),
+            raw.len()
+        )));
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        // The Env arm previously said "is set but empty" — that
+        // distinction was useful (helps the operator separate "var
+        // unset" from "var set to ''"). The Env arm's outer
+        // VarError::NotPresent branch still surfaces the unset case;
+        // here we land only when the var IS set and the value is
+        // whitespace-only, so the simpler wording is accurate.
+        return Err(AuthError::Missing(format!("{} is empty", source.label())));
+    }
+    Ok(trimmed.to_string())
+}
+
 #[derive(Debug, Error)]
 pub enum AuthError {
     #[error("missing credential: {0}")]
@@ -114,41 +167,22 @@ impl AuthResolver for BasicAuthResolver {
                             );
                         }
                     }
+                    // `validate_credential` handles the size cap + trim
+                    // + empty check uniformly across all three sources
+                    // (ARC-L5-DUP-1: extracted from the three SecretRef
+                    // arms below). The size cap fires only on a paste-
+                    // accident inline; in production, `SecretRef::Env`
+                    // and `SecretRef::File` are the real paths.
                     let raw = value.expose();
-                    // Enforce the same size cap as Env/File sources: an
-                    // oversized inline secret (paste accident, wrong field)
-                    // would otherwise be cloned around inside ResolvedAuth
-                    // unchecked.
-                    if raw.len() > MAX_CREDENTIAL_BYTES {
-                        return Err(AuthError::Internal(format!(
-                            "inline credential exceeds size cap ({} bytes > {MAX_CREDENTIAL_BYTES})",
-                            raw.len()
-                        )));
-                    }
-                    let trimmed = raw.trim();
-                    if trimmed.is_empty() {
-                        return Err(AuthError::Missing("inline credential is empty".into()));
-                    }
-                    Ok(ResolvedAuth::ApiKey(trimmed.to_string()))
+                    let trimmed =
+                        validate_credential(&raw, CredentialSource::Inline)?;
+                    Ok(ResolvedAuth::ApiKey(trimmed))
                 }
                 SecretRef::Env { var } => match std::env::var(var) {
                     Ok(v) => {
-                        if v.len() > MAX_CREDENTIAL_BYTES {
-                            return Err(AuthError::Internal(format!(
-                                "env var `{var}` exceeds credential size cap ({} bytes > {MAX_CREDENTIAL_BYTES})",
-                                v.len()
-                            )));
-                        }
-                        // An empty / whitespace-only env var produces
-                        // mysterious 401s downstream — surface it as a
-                        // missing credential here.
-                        let trimmed = v.trim();
-                        if trimmed.is_empty() {
-                            return Err(AuthError::Missing(format!(
-                                "env var `{var}` is set but empty"
-                            )));
-                        }
-                        Ok(ResolvedAuth::ApiKey(trimmed.to_string()))
+                        let trimmed =
+                            validate_credential(&v, CredentialSource::Env { var })?;
+                        Ok(ResolvedAuth::ApiKey(trimmed))
                     }
                     // Audit `tars-provider-src-auth-1`: VarError has
                     // two distinct cases — surfacing them separately
@@ -166,7 +200,7 @@ impl AuthResolver for BasicAuthResolver {
                     // Cap the read size: a misconfigured path pointing
                     // at /dev/zero or a multi-GB file must not OOM the
                     // process. Read up to MAX+1 bytes; if we hit the
-                    // limit, reject the file.
+                    // limit, `validate_credential` rejects below.
                     use tokio::io::AsyncReadExt;
                     let mut file = tokio::fs::File::open(path)
                         .await
@@ -177,26 +211,15 @@ impl AuthResolver for BasicAuthResolver {
                         .read_to_end(&mut buf)
                         .await
                         .map_err(|e| AuthError::Io(format!("reading {}: {e}", path.display())))?;
-                    if buf.len() > MAX_CREDENTIAL_BYTES {
-                        return Err(AuthError::Internal(format!(
-                            "credential file `{}` exceeds size cap ({MAX_CREDENTIAL_BYTES} bytes)",
-                            path.display()
-                        )));
-                    }
                     let raw = String::from_utf8(buf).map_err(|e| {
                         AuthError::Internal(format!(
                             "credential file `{}` is not valid UTF-8: {e}",
                             path.display()
                         ))
                     })?;
-                    let trimmed = raw.trim();
-                    if trimmed.is_empty() {
-                        return Err(AuthError::Missing(format!(
-                            "credential file `{}` is empty",
-                            path.display()
-                        )));
-                    }
-                    Ok(ResolvedAuth::ApiKey(trimmed.to_string()))
+                    let trimmed =
+                        validate_credential(&raw, CredentialSource::File { path })?;
+                    Ok(ResolvedAuth::ApiKey(trimmed))
                 }
             },
         }
