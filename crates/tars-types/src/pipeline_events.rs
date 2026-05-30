@@ -72,7 +72,14 @@ pub struct LlmCallFinished {
     pub trace_id: Option<TraceId>,
 
     // ── request (inline scalars + body ref) ─────────────────────
-    pub provider_id: ProviderId,
+    /// Provider that actually ran the call. `None` when routing
+    /// short-circuited before provider resolution (cache hit, early
+    /// validation failure) — historically the same state was carried
+    /// as the `ProviderId::new("unresolved")` sentinel string (fix
+    /// ARC-L5-SW-10); old events with that literal value are
+    /// rewritten to `None` by the tars-storage v1→v2 schema
+    /// migration.
+    pub provider_id: Option<ProviderId>,
     /// Model actually called — post-routing resolution, not the
     /// caller's `ModelHint`. Useful for "which model did each
     /// candidate routing actually pick" queries.
@@ -183,7 +190,7 @@ mod tests {
             tenant_id: TenantId::new("t"),
             session_id: None,
             trace_id: None,
-            provider_id: ProviderId::new("p"),
+            provider_id: Some(ProviderId::new("p")),
             actual_model: "m".into(),
             request_fingerprint: [0u8; 32],
             request_ref: ContentRef::from_body(TenantId::new("t"), b"req"),

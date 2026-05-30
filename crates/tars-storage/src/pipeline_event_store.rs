@@ -23,7 +23,15 @@ use tars_types::{PipelineEvent, TenantId};
 
 use crate::error::StorageError;
 
-const SCHEMA_VERSION: i64 = 1;
+/// Pipeline event store schema version.
+///
+/// **v1 → v2** (`ARC-L5-SW-10`): `LlmCallFinished.provider_id` changed
+/// from `ProviderId` (with a `"unresolved"` sentinel string for the
+/// "no provider ran" case) to `Option<ProviderId>`. The v1→v2
+/// migration walks the `pipeline_events` rows and rewrites any
+/// payload carrying `provider_id: "unresolved"` to
+/// `provider_id: null`. Idempotent.
+const SCHEMA_VERSION: i64 = 2;
 
 /// Filter for `PipelineEventStore::query`. All fields are `AND`-ed
 /// together; `None` means "don't filter on this dimension."
@@ -123,41 +131,137 @@ impl SqlitePipelineEventStore {
         if current == SCHEMA_VERSION {
             return Ok(());
         }
-        if current != 0 {
+        if current != 0 && current != 1 {
             return Err(StorageError::Backend(format!(
                 "incompatible pipeline event store schema (file v{current}, code v{SCHEMA_VERSION})"
             )));
         }
-        // Schema notes:
-        // - `event_id` is TEXT for UUID readability; PRIMARY KEY makes
-        //   re-append idempotent (INSERT OR REPLACE).
-        // - Inline columns are pulled out of payload_json so cohort
-        //   queries (WHERE tenant + time range) don't have to parse
-        //   JSON for every row.
-        // - `tags_json` left as TEXT JSON; SQLite's json_each can
-        //   filter on it. The full `payload_json` is the source of
-        //   truth — inline columns are derived for query speed.
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS pipeline_events (
-                event_id        TEXT    NOT NULL PRIMARY KEY,
-                event_type      TEXT    NOT NULL,
-                timestamp_ms    INTEGER NOT NULL,
-                tenant_id       TEXT    NOT NULL,
-                payload_json    BLOB    NOT NULL
-            ) STRICT;
+        if current == 0 {
+            // Schema notes:
+            // - `event_id` is TEXT for UUID readability; PRIMARY KEY
+            //   makes re-append idempotent (INSERT OR REPLACE).
+            // - Inline columns are pulled out of payload_json so cohort
+            //   queries (WHERE tenant + time range) don't have to parse
+            //   JSON for every row.
+            // - `tags_json` left as TEXT JSON; SQLite's json_each can
+            //   filter on it. The full `payload_json` is the source of
+            //   truth — inline columns are derived for query speed.
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS pipeline_events (
+                    event_id        TEXT    NOT NULL PRIMARY KEY,
+                    event_type      TEXT    NOT NULL,
+                    timestamp_ms    INTEGER NOT NULL,
+                    tenant_id       TEXT    NOT NULL,
+                    payload_json    BLOB    NOT NULL
+                ) STRICT;
 
-            CREATE INDEX IF NOT EXISTS idx_pe_tenant_ts
-                ON pipeline_events(tenant_id, timestamp_ms);
-            CREATE INDEX IF NOT EXISTS idx_pe_ts
-                ON pipeline_events(timestamp_ms);
-            "#,
-        )
-        .map_err(|e| StorageError::Backend(format!("create pipeline event schema: {e}")))?;
+                CREATE INDEX IF NOT EXISTS idx_pe_tenant_ts
+                    ON pipeline_events(tenant_id, timestamp_ms);
+                CREATE INDEX IF NOT EXISTS idx_pe_ts
+                    ON pipeline_events(timestamp_ms);
+                "#,
+            )
+            .map_err(|e| StorageError::Backend(format!("create pipeline event schema: {e}")))?;
+        }
+
+        if current <= 1 {
+            // v1→v2: ARC-L5-SW-10. Rewrite any LlmCallFinished payload
+            // that carries the legacy `provider_id: "unresolved"`
+            // sentinel into `provider_id: null`. We do this in
+            // Rust-space rather than SQL because the column is a JSON
+            // blob — SQLite's `json_set` would work for shallow
+            // overrides but the payload is the *source of truth* for
+            // event-replay code, and a one-shot Rust pass keeps the
+            // transform colocated with the type it's rewriting.
+            migrate_v1_to_v2_unresolved_to_null(conn)?;
+        }
+
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| StorageError::Backend(format!("set user_version: {e}")))?;
         Ok(())
     }
+}
+
+/// v1→v2 schema migration (ARC-L5-SW-10). Walks `pipeline_events` for
+/// rows whose `event_type = 'llm_call_finished'` and whose payload
+/// carries `provider_id: "unresolved"`, and rewrites that field to
+/// `null` so the payload matches the new `Option<ProviderId>` shape.
+/// Idempotent — payloads already on the new shape are skipped without
+/// re-serializing (no spurious row writes).
+fn migrate_v1_to_v2_unresolved_to_null(conn: &Connection) -> Result<(), StorageError> {
+    // Scope: only `llm_call_finished` carries `provider_id`. Filter by
+    // event_type so we don't waste cycles deserializing/scanning other
+    // payload shapes.
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_id, payload_json FROM pipeline_events \
+             WHERE event_type = 'llm_call_finished'",
+        )
+        .map_err(|e| {
+            StorageError::Backend(format!("v1→v2 migrate: prepare select: {e}"))
+        })?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))
+        .map_err(|e| StorageError::Backend(format!("v1→v2 migrate: query: {e}")))?;
+
+    let mut updates: Vec<(String, Vec<u8>)> = Vec::new();
+    for row in rows {
+        let (event_id, payload) = row
+            .map_err(|e| StorageError::Backend(format!("v1→v2 migrate: read row: {e}")))?;
+        let mut v: serde_json::Value = match serde_json::from_slice(&payload) {
+            Ok(v) => v,
+            Err(_) => {
+                // A malformed payload predates our integrity checks;
+                // skip rather than fail the open so the operator can
+                // still read newer rows.
+                continue;
+            }
+        };
+        // Pipeline events use externally-tagged enum encoding; the
+        // LlmCallFinished body lives under v["LlmCallFinished"].
+        let body = match v.get_mut("LlmCallFinished") {
+            Some(b) => b,
+            None => continue,
+        };
+        let needs_rewrite = body
+            .get("provider_id")
+            .and_then(|p| p.as_str())
+            .is_some_and(|s| s == "unresolved");
+        if !needs_rewrite {
+            continue;
+        }
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("provider_id".into(), serde_json::Value::Null);
+        }
+        let new_payload = serde_json::to_vec(&v).map_err(|e| {
+            StorageError::Backend(format!(
+                "v1→v2 migrate: re-encode payload for {event_id}: {e}"
+            ))
+        })?;
+        updates.push((event_id, new_payload));
+    }
+    drop(stmt);
+
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    let mut update_stmt = conn
+        .prepare("UPDATE pipeline_events SET payload_json = ?1 WHERE event_id = ?2")
+        .map_err(|e| {
+            StorageError::Backend(format!("v1→v2 migrate: prepare update: {e}"))
+        })?;
+    for (event_id, payload) in updates {
+        update_stmt
+            .execute(rusqlite::params![payload, event_id])
+            .map_err(|e| {
+                StorageError::Backend(format!(
+                    "v1→v2 migrate: update {event_id}: {e}"
+                ))
+            })?;
+    }
+    Ok(())
 }
 
 const DEFAULT_QUERY_LIMIT: u32 = 10_000;
@@ -374,7 +478,7 @@ mod tests {
             tenant_id: TenantId::new(tenant),
             session_id: None,
             trace_id: None,
-            provider_id: ProviderId::new("p"),
+            provider_id: Some(ProviderId::new("p")),
             actual_model: "m".into(),
             request_fingerprint: [0u8; 32],
             request_ref: ContentRef::from_body(TenantId::new(tenant), b"req"),
@@ -505,5 +609,128 @@ mod tests {
         s.append(std::slice::from_ref(&ev)).await.unwrap();
         let got = s.query(&PipelineEventQuery::default()).await.unwrap();
         assert_eq!(got.len(), 1);
+    }
+
+    /// Pin v1→v2 migration: a v1 database carrying an
+    /// `LlmCallFinished` payload with `provider_id: "unresolved"`
+    /// (the legacy SW-10 sentinel) must come out the other side with
+    /// `provider_id: null`, and the row count must be unchanged.
+    /// Idempotent on a v2-shape payload (already-null stays null,
+    /// already-Some stays Some).
+    #[test]
+    fn migrate_v1_to_v2_rewrites_unresolved_sentinel_to_null() {
+        // Hand-build a v1 store: open in-memory, force user_version=1,
+        // create the v1 schema, hand-insert a row carrying the legacy
+        // sentinel payload.
+        let conn = Connection::open_in_memory().unwrap();
+        SqlitePipelineEventStore::pragma_setup(&conn).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE pipeline_events (
+                event_id        TEXT    NOT NULL PRIMARY KEY,
+                event_type      TEXT    NOT NULL,
+                timestamp_ms    INTEGER NOT NULL,
+                tenant_id       TEXT    NOT NULL,
+                payload_json    BLOB    NOT NULL
+            ) STRICT;
+            "#,
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+
+        let legacy_payload = serde_json::json!({
+            "LlmCallFinished": {
+                "event_id": "00000000-0000-0000-0000-000000000001",
+                "tenant_id": "t1",
+                "provider_id": "unresolved",
+                "actual_model": "gpt-4o",
+            }
+        });
+        let already_resolved_payload = serde_json::json!({
+            "LlmCallFinished": {
+                "event_id": "00000000-0000-0000-0000-000000000002",
+                "tenant_id": "t1",
+                "provider_id": "openai-1",
+                "actual_model": "gpt-4o",
+            }
+        });
+        let already_null_payload = serde_json::json!({
+            "LlmCallFinished": {
+                "event_id": "00000000-0000-0000-0000-000000000003",
+                "tenant_id": "t1",
+                "provider_id": null,
+                "actual_model": "gpt-4o",
+            }
+        });
+        for (id, payload) in [
+            ("00000000-0000-0000-0000-000000000001", &legacy_payload),
+            (
+                "00000000-0000-0000-0000-000000000002",
+                &already_resolved_payload,
+            ),
+            ("00000000-0000-0000-0000-000000000003", &already_null_payload),
+        ] {
+            conn.execute(
+                "INSERT INTO pipeline_events (event_id, event_type, timestamp_ms, \
+                 tenant_id, payload_json) VALUES (?1, 'llm_call_finished', 0, 't1', ?2)",
+                rusqlite::params![id, serde_json::to_vec(payload).unwrap()],
+            )
+            .unwrap();
+        }
+
+        // Run the same migrate() the production path runs at open.
+        SqlitePipelineEventStore::migrate(&conn).unwrap();
+
+        // user_version is now SCHEMA_VERSION (2).
+        let v: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+
+        // Row count unchanged.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pipeline_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3);
+
+        // The "unresolved" row is now null.
+        let body: Vec<u8> = conn
+            .query_row(
+                "SELECT payload_json FROM pipeline_events WHERE event_id = ?1",
+                ["00000000-0000-0000-0000-000000000001"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            v["LlmCallFinished"]["provider_id"].is_null(),
+            "legacy sentinel rewritten to null: {v}"
+        );
+
+        // The already-resolved row is untouched.
+        let body: Vec<u8> = conn
+            .query_row(
+                "SELECT payload_json FROM pipeline_events WHERE event_id = ?1",
+                ["00000000-0000-0000-0000-000000000002"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["LlmCallFinished"]["provider_id"], "openai-1");
+
+        // The already-null row is also untouched (idempotent on the
+        // new shape — no double-rewrite, no spurious row write).
+        let body: Vec<u8> = conn
+            .query_row(
+                "SELECT payload_json FROM pipeline_events WHERE event_id = ?1",
+                ["00000000-0000-0000-0000-000000000003"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["LlmCallFinished"]["provider_id"].is_null());
+
+        // Running migrate() again is a no-op (already at SCHEMA_VERSION).
+        SqlitePipelineEventStore::migrate(&conn).unwrap();
     }
 }

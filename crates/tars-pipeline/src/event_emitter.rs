@@ -87,11 +87,13 @@ impl LlmService for EventEmitterService {
         let tags = ctx.tags.clone();
 
         // Capture inline request properties before moving into inner.
-        // `provider_id` is set by `ProviderService` onto telemetry; we
-        // read it back in `build_event`. The empty default here is a
-        // sentinel for "not yet resolved" — never makes it into the
-        // emitted event.
-        let provider_id = tars_types::ProviderId::new("unresolved");
+        // `provider_id` is stamped on telemetry by `ProviderService`
+        // once routing resolves; we read it back in `build_event`.
+        // None here = "not resolved yet"; when no provider ever ran
+        // (cache hit short-circuit, early validation failure) the
+        // event will carry `provider_id: None` rather than the legacy
+        // "unresolved" sentinel string (ARC-L5-SW-10).
+        let provider_id: Option<tars_types::ProviderId> = None;
         let actual_model = req.model.label().to_string();
         let has_tools = !req.tools.is_empty();
         let has_thinking = !req.thinking.is_off();
@@ -219,7 +221,7 @@ struct StreamCtx {
     request_fingerprint: [u8; 32],
     request_ref: ContentRef,
     actual_model: String,
-    provider_id: tars_types::ProviderId,
+    provider_id: Option<tars_types::ProviderId>,
     tenant_id: tars_types::TenantId,
     session_id: Option<tars_types::SessionId>,
     trace_id: Option<tars_types::TraceId>,
@@ -242,7 +244,7 @@ struct EventInputs {
     request_fingerprint: [u8; 32],
     request_ref: ContentRef,
     actual_model: String,
-    provider_id: tars_types::ProviderId,
+    provider_id: Option<tars_types::ProviderId>,
     tenant_id: tars_types::TenantId,
     session_id: Option<tars_types::SessionId>,
     trace_id: Option<tars_types::TraceId>,
@@ -289,19 +291,17 @@ fn build_event(i: EventInputs) -> LlmCallFinished {
 
     // Provider id is stamped onto telemetry by `ProviderService` once
     // routing has resolved which provider runs. If telemetry never
-    // saw a provider (e.g. cache hit short-circuited), fall back to
-    // a sentinel so the event still persists.
-    let resolved_provider_id = telemetry
+    // saw a provider (cache hit short-circuited, early validation
+    // failure, …) the event simply carries `provider_id: None`. No
+    // sentinel string anymore — ARC-L5-SW-10 killed the "unresolved"
+    // fallback; old events with that literal are rewritten by the
+    // tars-storage v1→v2 schema migration so consumers no longer
+    // have to string-match a magic value to detect "not resolved."
+    let resolved_provider_id: Option<tars_types::ProviderId> = telemetry
         .provider_id
         .as_deref()
         .map(tars_types::ProviderId::new)
-        .unwrap_or_else(|| {
-            if i.provider_id.as_ref().is_empty() {
-                tars_types::ProviderId::new("unresolved")
-            } else {
-                i.provider_id.clone()
-            }
-        });
+        .or_else(|| i.provider_id.clone());
 
     LlmCallFinished {
         event_id: Uuid::new_v4(),
