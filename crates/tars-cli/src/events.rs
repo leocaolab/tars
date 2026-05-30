@@ -316,12 +316,20 @@ fn parse_since(s: &str) -> Result<Option<SystemTime>> {
 }
 
 fn format_ts(t: SystemTime) -> String {
-    let secs = t
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0).unwrap_or_default();
-    dt.format("%Y-%m-%d %H:%M:%S").to_string()
+    let Ok(d) = t.duration_since(UNIX_EPOCH) else {
+        // Pre-epoch timestamp — surface it explicitly rather than
+        // silently fall through to "1970-01-01 00:00:00", which a user
+        // can't distinguish from a legitimate epoch event.
+        return "<pre-epoch>".to_string();
+    };
+    let secs = d.as_secs();
+    match chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0) {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+        // Out-of-range timestamp (chrono limits, > +262kY) — same
+        // principle: make corruption visible instead of silently
+        // collapsing to a default-displayed value.
+        None => format!("<invalid:ts={secs}>"),
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {

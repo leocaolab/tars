@@ -99,6 +99,16 @@ fn validate_cap(cap_usd: f64) {
 /// propagate into the cost estimate and bypass (NaN) or always-trip (inf)
 /// the budget. `Capabilities`-sourced pricing should already be valid;
 /// this guards the hand-rolled `from_parts` path too.
+///
+/// Pairs with [`validate_cap`] above — same fail-fast invariant
+/// pattern, same panic semantics. `arc scan --judge` flagged this
+/// site as ROT ("recoverable input validation") while flagging
+/// `validate_cap` as essential; the two are symmetric programmer-
+/// error guards and both stay as `assert!`. All current callers of
+/// `from_parts` and `new` pass either typed `Capabilities.pricing`
+/// (already validated upstream) or hard-coded test values, so this
+/// fires only on a genuine bug at the call site — exactly when a
+/// loud panic is most useful.
 fn validate_pricing(pricing: &Pricing) {
     assert!(
         pricing.input_per_million.is_finite() && pricing.input_per_million >= 0.0,
