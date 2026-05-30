@@ -210,7 +210,14 @@ impl ClaudeSdkProvider {
             prompt: &prompt,
             system: req.system.as_deref(),
             model: model.as_deref(),
-            max_turns: 1,
+            // Was 1 for "pure single-shot LLM, no tool agency".
+            // Empirically sonnet-4-5 with extended thinking emits
+            // `thinking_block → text_block` which the SDK counts as
+            // 2 turns and hits `Reached maximum number of turns (1)`
+            // before the answer finishes. 3 covers thinking + answer +
+            // one safety-net spare; tools are still disabled on the
+            // daemon side so the model can't go agentic regardless.
+            max_turns: 3,
         };
         let mut line = serde_json::to_string(&body)
             .map_err(|e| ProviderError::Internal(format!("claude_sdk: encode body: {e}")))?;

@@ -21,7 +21,12 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import readline from 'node:readline';
 
-async function handleChat({ prompt, system, model, max_turns = 1 }) {
+// Default maxTurns=3: sonnet-4-5 with extended thinking emits a
+// `thinking_block → text_block` pair the SDK counts as 2 turns; 1
+// trips "Reached maximum number of turns". 3 covers thinking +
+// answer + one spare. Tools are still disabled below
+// (`disallowedTools: ['*']`) so the model can't go agentic.
+async function handleChat({ prompt, system, model, max_turns = 3 }) {
   if (typeof prompt !== 'string' || !prompt.length) {
     throw new Error('prompt (string) is required');
   }
