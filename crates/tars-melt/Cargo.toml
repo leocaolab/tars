@@ -10,6 +10,12 @@ description = "Telemetry init (tracing subscriber + format + future OTel) — Do
 workspace = true
 
 [dependencies]
+# tars-types brings only the `env::` module here — see lib.rs's
+# `from_verbosity` for the single use site. We accept the edge
+# because tars-types is the workspace's universal-foundation crate;
+# centralising every env-var read (ARC-L5-COH-18) is worth it.
+tars-types = { path = "../tars-types" }
+
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true

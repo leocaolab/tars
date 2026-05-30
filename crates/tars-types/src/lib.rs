@@ -31,6 +31,7 @@ pub mod chat;
 pub mod content_ref;
 pub mod run_report;
 pub mod context;
+pub mod env;
 pub mod error;
 pub mod events;
 pub mod http_extras;

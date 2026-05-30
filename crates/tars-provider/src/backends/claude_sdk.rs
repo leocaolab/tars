@@ -425,11 +425,14 @@ struct Session {
 /// 3. `$HOME/.tars/claude-daemon/server.mjs` — standard per-user
 ///    install. (`tars install-claude-daemon` lays it down here.)
 fn find_default_script_path() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("TARS_CLAUDE_SDK_SCRIPT") {
-        let pb = std::path::PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
+    // Both env reads go through tars-types::env (ARC-L5-COH-18). The
+    // `current_dir()` lookup stays inline — it's not a config knob,
+    // it's a workspace-discovery probe (where am I running from), so
+    // hoisting it would put a non-config lookup in the config module.
+    if let Some(pb) = tars_types::env::claude_sdk_script_override()
+        && pb.exists()
+    {
+        return Some(pb);
     }
     if let Ok(cwd) = std::env::current_dir() {
         for ancestor in cwd.ancestors() {
@@ -439,8 +442,8 @@ fn find_default_script_path() -> Option<std::path::PathBuf> {
             }
         }
     }
-    if let Ok(home) = std::env::var("HOME") {
-        let candidate = std::path::PathBuf::from(home).join(".tars/claude-daemon/server.mjs");
+    if let Some(home) = tars_types::env::home_dir() {
+        let candidate = home.join(".tars/claude-daemon/server.mjs");
         if candidate.exists() {
             return Some(candidate);
         }

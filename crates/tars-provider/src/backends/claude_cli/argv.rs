@@ -106,13 +106,10 @@ pub trait SubprocessRunner: Send + Sync {
 /// Stream mode is opt-in (off by default) so existing callers that depend
 /// on the buffered `--output-format json` shape are unaffected.
 pub(crate) fn streaming_enabled() -> bool {
-    match std::env::var("TARS_CLAUDE_CLI_STREAM") {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            !matches!(v.as_str(), "" | "0" | "false" | "off" | "no")
-        }
-        Err(_) => false,
-    }
+    // The TARS_CLAUDE_CLI_STREAM read lives in tars-types::env so every
+    // process-wide knob is greppable from a single import path
+    // (ARC-L5-COH-18). Default-false semantics — operator must opt in.
+    tars_types::env::claude_cli_streaming().unwrap_or(false)
 }
 
 /// Construct the full `claude` argv (without the executable itself) for

@@ -82,9 +82,13 @@ impl TelemetryConfig {
             2 => "tars=debug,info".to_string(),
             _ => "tars=trace,debug".to_string(),
         };
-        let format = match std::env::var("TARS_LOG_FORMAT") {
-            Ok(s) => TelemetryFormat::from_env_string(&s),
-            Err(std::env::VarError::NotPresent) => TelemetryFormat::default(),
+        // TARS_LOG_FORMAT read goes through tars-types::env so every
+        // process-wide knob is in one greppable place (ARC-L5-COH-18).
+        // The accessor still distinguishes "unset" from "set but
+        // unreadable" so we can keep the NotUnicode warning loud.
+        let format = match tars_types::env::log_format_raw() {
+            Ok(Some(s)) => TelemetryFormat::from_env_string(&s),
+            Ok(None) => TelemetryFormat::default(),
             Err(e) => {
                 // NotUnicode etc. — surface so the operator notices their
                 // intent was lost rather than silently getting Pretty.

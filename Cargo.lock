@@ -1992,6 +1992,7 @@ name = "tars-melt"
 version = "0.2.0"
 dependencies = [
  "serde_json",
+ "tars-types",
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",
