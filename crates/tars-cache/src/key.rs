@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use serde_json::Value;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use tars_types::{ChatRequest, ContentBlock, ImageData, Message, ModelHint, RequestContext};
@@ -283,7 +283,13 @@ fn hash_content_block(h: &mut Sha256, block: &ContentBlock) {
 /// (BTreeMap-backed) `Map`, which sorts keys alphabetically. If the
 /// workspace ever turns on the `preserve_order` feature this becomes
 /// non-deterministic — guard with the test in `tests::sorted_object_keys`.
-fn canonical_json(v: &Value) -> Result<Vec<u8>, CacheError> {
+///
+/// Generic over `T: Serialize` so call sites with typed values
+/// (`ToolCall::arguments`, request bodies, etc.) skip the
+/// intermediate `Value` allocation — `arc scan --judge` finding
+/// `ARC-L5-O-3` was precisely that the previous `&Value` signature
+/// forced callers into double-serialization at the hot path.
+fn canonical_json<T: Serialize>(v: &T) -> Result<Vec<u8>, CacheError> {
     serde_json::to_vec(v).map_err(CacheError::Serialize)
 }
 
@@ -309,7 +315,10 @@ mod tests {
             a.insert(
                 IAM_SCOPES_ATTR.into(),
                 serde_json::Value::Array(
-                    scopes.iter().map(|s| Value::String((*s).into())).collect(),
+                    scopes
+                        .iter()
+                        .map(|s| serde_json::Value::String((*s).into()))
+                        .collect(),
                 ),
             );
         }

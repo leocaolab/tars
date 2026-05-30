@@ -18,6 +18,30 @@
 //! Testability: the actual `Command::output()` call is behind a
 //! [`SubprocessRunner`] trait so tests substitute a fake without
 //! needing the real `claude` binary installed.
+//!
+//! ## `arc scan --judge` finding `ARC-L5-COH-19` (env + subprocess)
+//!
+//! This module owns three `std::env` reads and one `Command::new`
+//! site that the scan flagged as scattered cohesion: the
+//! `TARS_CLAUDE_CLI_STREAM` feature flag, the `std::env::vars()`
+//! sweep used to **strip** untrusted keys (the security boundary
+//! commented above), and the `Command::new(&inv.executable)` for the
+//! `claude -p` subprocess. They are deliberately co-located with the
+//! backend that interprets them:
+//!
+//! - `TARS_CLAUDE_CLI_STREAM` is a per-backend toggle whose semantics
+//!   ("stream-json vs single-blob JSON") only make sense alongside the
+//!   `build_argv` shape; moving it to a typed-env config crate would
+//!   scatter the var name from the call site that knows the trade-off.
+//! - The `env::vars()` sweep is a security boundary, not generic
+//!   environment access — the strip table (`STRIPPED_ENV_KEYS_UPPER`)
+//!   is specific to this backend's auth-routing concerns and would
+//!   not generalize to a shared helper.
+//! - `Command::new(&inv.executable)` is the spawn site for *this*
+//!   backend's CLI; each provider backend (claude / codex / gemini)
+//!   legitimately spawns its own provider-specific executable, which
+//!   the scan's `[coh] subprocess` row classifies as **essential**
+//!   (the `claude_cli.rs` count is one of those essential sites).
 
 use std::collections::HashSet;
 use std::sync::Arc;
