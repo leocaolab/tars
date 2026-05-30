@@ -48,6 +48,29 @@ use clap::{Args, Subcommand};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
+// ─── fs helpers ──────────────────────────────────────────────────────
+//
+// `arc scan --judge` flagged 13 `std::fs` mutation sites concentrated
+// in this file and recommended aggregating them into an `fs_ops`
+// helper. The 4 `write_pretty_json` and 2 `ensure_dir` patterns below
+// cover the meaningful repetition; the rest are one-offs that don't
+// benefit from a helper (a one-line `fs::read_to_string` doesn't need
+// a wrapper).
+
+/// `fs::write` of a serialized pretty-JSON body with a uniform error
+/// message (`writing <path>`). Used by every eval artifact write.
+fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let body = serde_json::to_string_pretty(value)?;
+    fs::write(path, body).with_context(|| format!("writing {}", path.display()))
+}
+
+/// `fs::create_dir_all` with a uniform error message (`creating dir
+/// <path>`). The eval output layout is the only caller — bundling the
+/// context here keeps the eval-loop body terser.
+fn ensure_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).with_context(|| format!("creating dir {}", path.display()))
+}
+
 use tars_pipeline::{
     JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, Pipeline, PipelineOpts,
 };
@@ -325,8 +348,7 @@ async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<
         .map_err(|e| anyhow::anyhow!("judge pass failed: {e}"))?;
 
     let report_path = args.run.join("judge_report.json");
-    fs::write(&report_path, serde_json::to_string_pretty(&report)?)
-        .with_context(|| format!("writing {}", report_path.display()))?;
+    write_pretty_json(&report_path, &report)?;
 
     let prec = report
         .precision()
@@ -589,8 +611,7 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         Some(p) => p,
         None => PathBuf::from(format!("eval-runs/{}", utc_now_stamp())),
     };
-    fs::create_dir_all(&output_dir)
-        .with_context(|| format!("creating output dir {}", output_dir.display()))?;
+    ensure_dir(&output_dir)?;
 
     // 5. Per-case loop. Failures are recorded into the report, not
     //    propagated — the value of an eval is seeing the distribution.
@@ -605,8 +626,7 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
     for case in &cases {
         eprint!("── {} ... ", case.id);
         let case_out_dir = output_dir.join(&case.id);
-        fs::create_dir_all(&case_out_dir)
-            .with_context(|| format!("creating case dir {}", case_out_dir.display()))?;
+        ensure_dir(&case_out_dir)?;
         let report = run_one_case(
             pipeline.clone(),
             case,
@@ -621,8 +641,7 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         fs::write(&output_path, output_text)
             .with_context(|| format!("writing {}", output_path.display()))?;
         let report_path = case_out_dir.join("report.json");
-        fs::write(&report_path, serde_json::to_string_pretty(&report.summary)?)
-            .with_context(|| format!("writing {}", report_path.display()))?;
+        write_pretty_json(&report_path, &report.summary)?;
 
         match &report.summary.status {
             EvalCaseStatus::Ok => {
@@ -699,8 +718,7 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         cases: reports,
     };
     let manifest_path = output_dir.join("manifest.json");
-    fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
-        .with_context(|| format!("writing {}", manifest_path.display()))?;
+    write_pretty_json(&manifest_path, &manifest)?;
 
     eprintln!(
         "── done. {} ok, {} error, total {} in / {} out tokens.",
