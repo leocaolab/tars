@@ -14,6 +14,9 @@
 //!
 //! See `docs/architecture/01-llm-provider.md`.
 
+#[macro_use]
+mod builder_macros;
+
 pub mod auth;
 pub mod backends;
 pub mod batch;

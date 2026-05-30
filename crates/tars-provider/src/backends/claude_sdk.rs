@@ -87,30 +87,11 @@ impl ClaudeSdkProviderBuilder {
         }
     }
 
-    pub fn executable(mut self, exe: impl Into<String>) -> Self {
-        self.executable = exe.into();
-        self
-    }
-
-    pub fn script_path(mut self, p: impl Into<String>) -> Self {
-        self.script_path = Some(p.into());
-        self
-    }
-
-    pub fn default_model(mut self, m: impl Into<String>) -> Self {
-        self.default_model = Some(m.into());
-        self
-    }
-
-    pub fn timeout(mut self, t: Duration) -> Self {
-        self.timeout = t;
-        self
-    }
-
-    pub fn capabilities(mut self, c: Capabilities) -> Self {
-        self.capabilities = Some(c);
-        self
-    }
+    builder_setter!(executable: into String);
+    builder_setter!(script_path: into_opt String);
+    builder_setter!(default_model: into_opt String);
+    builder_setter!(timeout: Duration);
+    builder_setter!(capabilities: opt Capabilities);
 
     pub fn build(self) -> Arc<ClaudeSdkProvider> {
         // Builders for the other CLI-shaped backends (ClaudeCli, GeminiCli)

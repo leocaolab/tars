@@ -53,63 +53,44 @@ impl ClaudeCliProviderBuilder {
         }
     }
 
-    /// Override the binary path / name. Defaults to `claude` (PATH lookup).
-    pub fn executable(mut self, e: impl Into<String>) -> Self {
-        self.executable = e.into();
-        self
+    builder_setter! {
+        /// Override the binary path / name. Defaults to `claude` (PATH lookup).
+        executable: into String
     }
-
-    pub fn timeout(mut self, t: Duration) -> Self {
-        self.timeout = t;
-        self
+    builder_setter!(timeout: Duration);
+    builder_setter!(capabilities: opt Capabilities);
+    builder_setter! {
+        /// Configure `--tools`. Default: [`ClaudeCliTools::Disabled`] — kills
+        /// the CLI's internal agent loop without affecting auth. Use
+        /// [`ClaudeCliTools::Allow`] for a curated tool whitelist or
+        /// [`ClaudeCliTools::Default`] to get the CLI's full agent behavior.
+        tools: ClaudeCliTools
     }
-
-    pub fn capabilities(mut self, c: Capabilities) -> Self {
-        self.capabilities = Some(c);
-        self
+    builder_setter! {
+        /// Set `--bare`. **Default: `false`.** Setting `true` makes the CLI
+        /// skip auto-memory / `CLAUDE.md` auto-discovery / hooks / plugin sync
+        /// — but **also disables OAuth + keychain auth**, requiring
+        /// `ANTHROPIC_API_KEY` or `apiKeyHelper` to be set. Most `claude_cli`
+        /// users authenticate via `claude login` (OAuth + keychain), so the
+        /// default is `false` to preserve that path.
+        bare: bool
     }
-
-    /// Configure `--tools`. Default: [`ClaudeCliTools::Disabled`] — kills
-    /// the CLI's internal agent loop without affecting auth. Use
-    /// [`ClaudeCliTools::Allow`] for a curated tool whitelist or
-    /// [`ClaudeCliTools::Default`] to get the CLI's full agent behavior.
-    pub fn tools(mut self, t: ClaudeCliTools) -> Self {
-        self.tools = t;
-        self
+    builder_setter! {
+        /// Set `--effort`. Default: `None` (CLI default, currently `medium`).
+        effort: Option<ClaudeCliEffort>
     }
-
-    /// Set `--bare`. **Default: `false`.** Setting `true` makes the CLI
-    /// skip auto-memory / `CLAUDE.md` auto-discovery / hooks / plugin sync
-    /// — but **also disables OAuth + keychain auth**, requiring
-    /// `ANTHROPIC_API_KEY` or `apiKeyHelper` to be set. Most `claude_cli`
-    /// users authenticate via `claude login` (OAuth + keychain), so the
-    /// default is `false` to preserve that path.
-    pub fn bare(mut self, b: bool) -> Self {
-        self.bare = b;
-        self
+    builder_setter! {
+        /// Set `--exclude-dynamic-system-prompt-sections`. Default: `true`
+        /// (improves cross-tenant prompt-cache reuse by stripping per-machine
+        /// `cwd` / `env` / `git status` sections out of the system prompt).
+        exclude_dynamic_sections: bool
     }
-
-    /// Set `--effort`. Default: `None` (CLI default, currently `medium`).
-    pub fn effort(mut self, e: Option<ClaudeCliEffort>) -> Self {
-        self.effort = e;
-        self
-    }
-
-    /// Set `--exclude-dynamic-system-prompt-sections`. Default: `true`
-    /// (improves cross-tenant prompt-cache reuse by stripping per-machine
-    /// `cwd` / `env` / `git status` sections out of the system prompt).
-    pub fn exclude_dynamic_sections(mut self, b: bool) -> Self {
-        self.exclude_dynamic_sections = b;
-        self
-    }
-
-    /// Escape hatch: append raw argv tokens after every flag the Builder
-    /// constructs. Use for flags the Builder doesn't yet model. Don't use
-    /// to override flags already set — argv order matters for some flags
-    /// and the Builder's value will win on others.
-    pub fn extra_args(mut self, a: Vec<String>) -> Self {
-        self.extra_args = a;
-        self
+    builder_setter! {
+        /// Escape hatch: append raw argv tokens after every flag the Builder
+        /// constructs. Use for flags the Builder doesn't yet model. Don't use
+        /// to override flags already set — argv order matters for some flags
+        /// and the Builder's value will win on others.
+        extra_args: Vec<String>
     }
 
     /// Build with the default real-process runner.

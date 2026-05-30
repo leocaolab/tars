@@ -114,30 +114,11 @@ impl CodexCliProviderBuilder {
         }
     }
 
-    pub fn executable(mut self, e: impl Into<String>) -> Self {
-        self.executable = e.into();
-        self
-    }
-
-    pub fn timeout(mut self, t: Duration) -> Self {
-        self.timeout = t;
-        self
-    }
-
-    pub fn sandbox(mut self, s: SandboxMode) -> Self {
-        self.sandbox = s;
-        self
-    }
-
-    pub fn skip_git_repo_check(mut self, yes: bool) -> Self {
-        self.skip_git_repo_check = yes;
-        self
-    }
-
-    pub fn capabilities(mut self, c: Capabilities) -> Self {
-        self.capabilities = Some(c);
-        self
-    }
+    builder_setter!(executable: into String);
+    builder_setter!(timeout: Duration);
+    builder_setter!(sandbox: SandboxMode);
+    builder_setter!(skip_git_repo_check: bool);
+    builder_setter!(capabilities: opt Capabilities);
 
     pub fn build(self) -> Arc<CodexCliProvider> {
         self.build_with_runner(Arc::new(RealSubprocessLineRunner))

@@ -48,25 +48,10 @@ impl AnthropicProviderBuilder {
         }
     }
 
-    pub fn base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into();
-        self
-    }
-
-    pub fn api_version(mut self, v: impl Into<String>) -> Self {
-        self.api_version = v.into();
-        self
-    }
-
-    pub fn capabilities(mut self, c: Capabilities) -> Self {
-        self.capabilities = Some(c);
-        self
-    }
-
-    pub fn extras(mut self, extras: HttpProviderExtras) -> Self {
-        self.extras = extras;
-        self
-    }
+    builder_setter!(base_url: into String);
+    builder_setter!(api_version: into String);
+    builder_setter!(capabilities: opt Capabilities);
+    builder_setter!(extras: HttpProviderExtras);
 
     pub fn build(
         self,

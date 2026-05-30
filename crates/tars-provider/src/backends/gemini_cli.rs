@@ -85,20 +85,9 @@ impl GeminiCliProviderBuilder {
         }
     }
 
-    pub fn executable(mut self, e: impl Into<String>) -> Self {
-        self.executable = e.into();
-        self
-    }
-
-    pub fn timeout(mut self, t: Duration) -> Self {
-        self.timeout = t;
-        self
-    }
-
-    pub fn capabilities(mut self, c: Capabilities) -> Self {
-        self.capabilities = Some(c);
-        self
-    }
+    builder_setter!(executable: into String);
+    builder_setter!(timeout: Duration);
+    builder_setter!(capabilities: opt Capabilities);
 
     pub fn build(self) -> Arc<GeminiCliProvider> {
         self.build_with_runner(Arc::new(RealSubprocessRunner))

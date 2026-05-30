@@ -56,24 +56,22 @@ impl OpenAiProviderBuilder {
         }
     }
 
-    /// Override base URL — for vLLM / llama.cpp / Groq / etc.
-    pub fn base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into();
-        self
+    builder_setter! {
+        /// Override base URL — for vLLM / llama.cpp / Groq / etc.
+        base_url: into String
     }
 
-    /// Override capability descriptor. Default is a vanilla GPT-4o-style
-    /// profile; OpenAI-compatible local backends should set their own.
-    pub fn capabilities(mut self, caps: Capabilities) -> Self {
-        self.capabilities = Some(caps);
-        self
+    builder_setter! {
+        /// Override capability descriptor. Default is a vanilla
+        /// GPT-4o-style profile; OpenAI-compatible local backends
+        /// should set their own.
+        capabilities: opt Capabilities
     }
 
-    /// Attach user-config-supplied http_headers / env_http_headers /
-    /// query_params (Doc 01 §6.1).
-    pub fn extras(mut self, extras: HttpProviderExtras) -> Self {
-        self.extras = extras;
-        self
+    builder_setter! {
+        /// Attach user-config-supplied http_headers / env_http_headers /
+        /// query_params (Doc 01 §6.1).
+        extras: HttpProviderExtras
     }
 
     pub fn build(

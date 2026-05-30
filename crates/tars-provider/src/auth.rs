@@ -174,8 +174,7 @@ impl AuthResolver for BasicAuthResolver {
                     // accident inline; in production, `SecretRef::Env`
                     // and `SecretRef::File` are the real paths.
                     let raw = value.expose();
-                    let trimmed =
-                        validate_credential(&raw, CredentialSource::Inline)?;
+                    let trimmed = validate_credential(raw, CredentialSource::Inline)?;
                     Ok(ResolvedAuth::ApiKey(trimmed))
                 }
                 SecretRef::Env { var } => match std::env::var(var) {
