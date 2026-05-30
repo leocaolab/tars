@@ -199,6 +199,12 @@ impl<'a> PartialResultRef<'a> {
 /// [`VerdictKind`] enum in `into_verdict_kind`. This split keeps the
 /// JSON schema simple (no oneOf at the root) so OpenAI strict mode
 /// handles it cleanly across providers.
+///
+/// `kind` is `String` deliberately: this is the wire format the LLM
+/// JSON emits, so it must be a string for the JSON schema. The
+/// internal source of truth is the [`VerdictKind`] enum that
+/// `into_verdict_kind` immediately constructs from this struct —
+/// nothing downstream of that boundary sees the string.
 #[derive(Debug, Deserialize, Serialize)]
 struct RawVerdict {
     /// `"approve"` / `"reject"` / `"refine"`. Validated below.

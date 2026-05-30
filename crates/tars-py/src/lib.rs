@@ -288,6 +288,13 @@ impl Telemetry {
 /// One retry attempt record — `kind` is the snake-case error kind that
 /// caused the retry (`"rate_limited"`, `"network"`, etc.), matching
 /// `TarsProviderError.kind`. `retry_after_ms` is the actual backoff slept.
+///
+/// `kind` is `String` deliberately: PyO3 marshalls this field straight
+/// to a Python string (Python has no native Rust enum), and the value
+/// is sourced from `ProviderError::kind() -> &'static str` which is the
+/// typed enum's stable name. Switching the field to a Rust enum would
+/// require a custom IntoPy impl that emits the same string back, adding
+/// boilerplate without changing the externally observable contract.
 #[pyclass(frozen, get_all, name = "RetryAttempt")]
 #[derive(Clone, Debug)]
 pub(crate) struct RetryAttemptPy {
@@ -1067,6 +1074,10 @@ impl CompatibilityResult {
 /// 50000, "max_tokens": 32768}` for `context_window`). Stored as JSON
 /// internally so the type is `Clone`-able for PyO3 getter generation;
 /// converted to a Python dict on demand via the `detail` getter.
+/// `kind` is `String` deliberately: same rationale as
+/// [`RetryAttemptPy::kind`] — the field crosses into Python as a
+/// string and the value is sourced from the typed
+/// `CompatibilityCheck` enum's stable kind name.
 #[pyclass(frozen, name = "CompatibilityReason")]
 #[derive(Debug)]
 pub(crate) struct CompatibilityReasonPy {
