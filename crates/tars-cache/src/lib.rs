@@ -32,7 +32,7 @@ mod sqlite;
 
 pub use error::CacheError;
 pub use key::{CacheKey, CacheKeyFactory};
-pub use policy::CachePolicy;
+pub use policy::{CacheLayerPolicy, CachePolicy};
 pub use registry::{CacheRegistry, CachedResponse, MemoryCacheRegistry, MemoryCacheRegistryConfig};
 pub use sqlite::{
     SqliteCacheRegistry, SqliteCacheRegistryConfig, default_personal_cache_path, open_at_path,

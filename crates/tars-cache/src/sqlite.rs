@@ -209,19 +209,19 @@ impl CacheRegistry for SqliteCacheRegistry {
         key: &CacheKey,
         policy: &CachePolicy,
     ) -> Result<Option<CachedResponse>, CacheError> {
-        if !policy.l1 && !policy.l2 {
+        if !policy.l1.is_enabled() && !policy.l2.is_enabled() {
             return Ok(None);
         }
 
         // L1 fast path.
-        if policy.l1 {
+        if policy.l1.is_enabled() {
             if let Some(arc) = self.l1.get(&key.fingerprint).await {
                 return Ok(Some((*arc).clone()));
             }
         }
 
         // L2 fall-through.
-        if !policy.l2 {
+        if !policy.l2.is_enabled() {
             return Ok(None);
         }
         let l2 = self.l2.clone();
@@ -248,7 +248,7 @@ impl CacheRegistry for SqliteCacheRegistry {
             .map_err(|e| CacheError::Backend(format!("decode l2 row: {e}")))?;
 
         // Refill L1 so the next lookup skips the SQLite hop.
-        if policy.l1 {
+        if policy.l1.is_enabled() {
             self.l1
                 .insert(key.fingerprint, Arc::new(value.clone()))
                 .await;
@@ -262,16 +262,16 @@ impl CacheRegistry for SqliteCacheRegistry {
         value: CachedResponse,
         policy: &CachePolicy,
     ) -> Result<(), CacheError> {
-        if !policy.l1 && !policy.l2 {
+        if !policy.l1.is_enabled() && !policy.l2.is_enabled() {
             return Ok(());
         }
 
-        if policy.l1 {
+        if policy.l1.is_enabled() {
             self.l1
                 .insert(key.fingerprint, Arc::new(value.clone()))
                 .await;
         }
-        if !policy.l2 {
+        if !policy.l2.is_enabled() {
             return Ok(());
         }
 
@@ -376,6 +376,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CacheLayerPolicy;
     use tars_types::{CacheHitInfo, ChatResponse, ProviderId, StopReason, Usage};
 
     fn key(id: u8) -> CacheKey {
@@ -414,9 +415,9 @@ mod tests {
         let r = SqliteCacheRegistry::in_memory().unwrap();
         let k = key(1);
         let policy = CachePolicy {
-            l1: true,
-            l2: true,
-            ..CachePolicy::default()
+            l1: CacheLayerPolicy::Default,
+            l2: CacheLayerPolicy::Default,
+            l3: CacheLayerPolicy::Disabled,
         };
 
         assert!(r.lookup(&k, &policy).await.unwrap().is_none());
@@ -437,19 +438,19 @@ mod tests {
         {
             let r = open_at_path(&path).unwrap();
             let policy = CachePolicy {
-                l1: true,
-                l2: true,
-                ..CachePolicy::default()
-            };
+            l1: CacheLayerPolicy::Default,
+            l2: CacheLayerPolicy::Default,
+            l3: CacheLayerPolicy::Disabled,
+        };
             r.write(key(7), value("persisted"), &policy).await.unwrap();
             // Drop r → close connection → flush WAL on next open.
         }
 
         let r2 = open_at_path(&path).unwrap();
         let policy = CachePolicy {
-            l1: true,
-            l2: true,
-            ..CachePolicy::default()
+            l1: CacheLayerPolicy::Default,
+            l2: CacheLayerPolicy::Default,
+            l3: CacheLayerPolicy::Disabled,
         };
         let hit = r2.lookup(&key(7), &policy).await.unwrap().unwrap();
         assert_eq!(hit.response.text, "persisted");
@@ -459,18 +460,18 @@ mod tests {
     async fn l1_disabled_still_uses_l2() {
         let r = SqliteCacheRegistry::in_memory().unwrap();
         let policy_l2_only = CachePolicy {
-            l1: false,
-            l2: true,
-            ..CachePolicy::default()
+            l1: CacheLayerPolicy::Disabled,
+            l2: CacheLayerPolicy::Default,
+            l3: CacheLayerPolicy::Disabled,
         };
         r.write(key(3), value("x"), &policy_l2_only).await.unwrap();
 
         // Now lookup with l1+l2: L1 misses (was never written), L2 hits,
         // and that hit refills L1 for next time.
         let policy_full = CachePolicy {
-            l1: true,
-            l2: true,
-            ..CachePolicy::default()
+            l1: CacheLayerPolicy::Default,
+            l2: CacheLayerPolicy::Default,
+            l3: CacheLayerPolicy::Disabled,
         };
         let hit = r.lookup(&key(3), &policy_full).await.unwrap().unwrap();
         assert_eq!(hit.response.text, "x");
@@ -495,9 +496,9 @@ mod tests {
     async fn invalidate_removes_from_both_layers() {
         let r = SqliteCacheRegistry::in_memory().unwrap();
         let policy = CachePolicy {
-            l1: true,
-            l2: true,
-            ..CachePolicy::default()
+            l1: CacheLayerPolicy::Default,
+            l2: CacheLayerPolicy::Default,
+            l3: CacheLayerPolicy::Disabled,
         };
         r.write(key(1), value("x"), &policy).await.unwrap();
         assert!(r.lookup(&key(1), &policy).await.unwrap().is_some());
@@ -513,10 +514,9 @@ mod tests {
         // boundaries cleanly, so use the policy's explicit TTL.
         let r = SqliteCacheRegistry::in_memory().unwrap();
         let policy_short = CachePolicy {
-            l1: false, // skip L1 so we test the L2 expiry filter directly
-            l2: true,
-            l2_ttl: Some(Duration::ZERO),
-            ..CachePolicy::default()
+            l1: CacheLayerPolicy::Disabled,
+            l2: CacheLayerPolicy::Override { ttl: Duration::ZERO },
+            l3: CacheLayerPolicy::Disabled,
         };
         r.write(key(2), value("ephemeral"), &policy_short)
             .await
@@ -530,9 +530,9 @@ mod tests {
     async fn distinct_keys_dont_collide() {
         let r = SqliteCacheRegistry::in_memory().unwrap();
         let policy = CachePolicy {
-            l1: true,
-            l2: true,
-            ..CachePolicy::default()
+            l1: CacheLayerPolicy::Default,
+            l2: CacheLayerPolicy::Default,
+            l3: CacheLayerPolicy::Disabled,
         };
         r.write(key(1), value("a"), &policy).await.unwrap();
         r.write(key(2), value("b"), &policy).await.unwrap();

@@ -130,7 +130,7 @@ impl CacheRegistry for MemoryCacheRegistry {
         key: &CacheKey,
         policy: &CachePolicy,
     ) -> Result<Option<CachedResponse>, CacheError> {
-        if !policy.l1 {
+        if !policy.l1.is_enabled() {
             return Ok(None);
         }
         let hit = self.inner.get(&key.fingerprint).await;
@@ -143,7 +143,7 @@ impl CacheRegistry for MemoryCacheRegistry {
         value: CachedResponse,
         policy: &CachePolicy,
     ) -> Result<(), CacheError> {
-        if !policy.l1 {
+        if !policy.l1.is_enabled() {
             return Ok(());
         }
         // Audit `tars-cache-src-registry-1`: previously this computed
@@ -188,6 +188,7 @@ impl CacheRegistry for MemoryCacheRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CacheLayerPolicy;
     use tars_types::{CacheHitInfo, StopReason};
 
     fn key(id: u8) -> CacheKey {
@@ -252,8 +253,9 @@ mod tests {
             .unwrap();
 
         let no_l1 = CachePolicy {
-            l1: false,
-            ..CachePolicy::default()
+            l1: CacheLayerPolicy::Disabled,
+            l2: CacheLayerPolicy::Disabled,
+            l3: CacheLayerPolicy::Disabled,
         };
         assert!(r.lookup(&k, &no_l1).await.unwrap().is_none());
         // And a write with l1=false is a no-op.
@@ -354,8 +356,11 @@ mod tests {
         });
         let k = key(1);
         let policy_short = CachePolicy {
-            l1_ttl: Some(Duration::from_millis(50)),
-            ..CachePolicy::default()
+            l1: CacheLayerPolicy::Override {
+                ttl: Duration::from_millis(50),
+            },
+            l2: CacheLayerPolicy::Disabled,
+            l3: CacheLayerPolicy::Disabled,
         };
         r.write(k.clone(), value("hi"), &policy_short)
             .await
