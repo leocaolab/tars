@@ -244,20 +244,102 @@ pub struct EvalCaseReport {
     pub checks: Vec<CaseCheckResult>,
 }
 
-/// One invariant check's outcome for one eval case. `detail` is
-/// **independent** of `passed`: a failure carries a reason here, but a
-/// pass may also carry a note (e.g. "validator skipped: no oracle
-/// available"). `arc scan --judge` flagged the `(bool, Option<String>)`
-/// shape as sum-as-product on the assumption that detail is
-/// failure-only — that's not the contract this type implements. See
-/// [`tars_runtime::check::CheckResult`] for the upstream source whose
-/// docstring spells out "Why it failed (or any note on pass)".
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CaseCheckResult {
-    pub name: String,
-    pub passed: bool,
+/// One invariant check's outcome for one eval case.
+///
+/// Sum-as-product fix for the original `(name, passed: bool, detail:
+/// Option<String>)` shape (`arc scan --judge` finding `ARC-L5-B-8`).
+/// The typed enum makes "fail without reason" unrepresentable while
+/// keeping the documented "pass with note" path available
+/// (validator-skipped notes, etc).
+///
+/// ### Wire format
+///
+/// Serialised to / from the **legacy flat shape**
+/// `{"name", "passed", "detail"}` via a custom `Serialize` /
+/// `Deserialize` below. Existing report.json artifacts and manifest
+/// payloads round-trip byte-for-byte unchanged; the typing only
+/// affects how Rust callers construct and pattern-match values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CaseCheckResult {
+    /// Invariant held. `note` is an optional diagnostic (e.g.
+    /// "validator skipped because no oracle was supplied").
+    Passed { name: String, note: Option<String> },
+    /// Invariant failed. `reason` is required — a failure without a
+    /// reason was a constructible-but-meaningless legacy state and is
+    /// now rejected at the wire boundary.
+    Failed { name: String, reason: String },
+}
+
+impl CaseCheckResult {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Passed { name, .. } | Self::Failed { name, .. } => name,
+        }
+    }
+
+    pub fn passed(&self) -> bool {
+        matches!(self, Self::Passed { .. })
+    }
+
+    /// Optional diagnostic string, projected from whichever variant
+    /// carries one. `Passed.note` and `Failed.reason` flatten through
+    /// here for callers that want the legacy `Option<String>` view.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Passed { note, .. } => note.as_deref(),
+            Self::Failed { reason, .. } => Some(reason.as_str()),
+        }
+    }
+}
+
+// ─── Wire-format adapter ─────────────────────────────────────────────
+//
+// Project / lift to the legacy
+//   {"name": "x", "passed": true, "detail": null}
+// flat shape so any existing report.json / manifest.json artifact
+// keeps round-tripping.
+
+#[derive(Serialize, Deserialize)]
+struct CaseCheckResultWire {
+    name: String,
+    passed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
+    detail: Option<String>,
+}
+
+impl Serialize for CaseCheckResult {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        let wire = match self {
+            Self::Passed { name, note } => CaseCheckResultWire {
+                name: name.clone(),
+                passed: true,
+                detail: note.clone(),
+            },
+            Self::Failed { name, reason } => CaseCheckResultWire {
+                name: name.clone(),
+                passed: false,
+                detail: Some(reason.clone()),
+            },
+        };
+        wire.serialize(ser)
+    }
+}
+
+impl<'de> Deserialize<'de> for CaseCheckResult {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let w = CaseCheckResultWire::deserialize(de)?;
+        match (w.passed, w.detail) {
+            (true, note) => Ok(Self::Passed { name: w.name, note }),
+            (false, Some(reason)) => Ok(Self::Failed {
+                name: w.name,
+                reason,
+            }),
+            (false, None) => Err(serde::de::Error::custom(format!(
+                "case check `{}`: failed=true but no detail/reason; refusing to materialize a Failed without a reason",
+                w.name
+            ))),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -671,9 +753,9 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
             let mut evaluated = 0u32;
             let mut violations = 0u32;
             for case in &reports {
-                if let Some(c) = case.checks.iter().find(|c| &c.name == name) {
+                if let Some(c) = case.checks.iter().find(|c| c.name() == name.as_str()) {
                     evaluated += 1;
-                    if !c.passed {
+                    if !c.passed() {
                         violations += 1;
                     }
                 }
@@ -819,10 +901,23 @@ async fn run_one_case(
         checks
             .run(&req_for_checks, &response)
             .into_iter()
-            .map(|(name, r)| CaseCheckResult {
-                name,
-                passed: r.passed,
-                detail: r.detail,
+            .map(|(name, r)| {
+                if r.passed {
+                    CaseCheckResult::Passed {
+                        name,
+                        note: r.detail,
+                    }
+                } else {
+                    // CheckResult::fail always populates detail; if it
+                    // somehow didn't, surface that as the failure
+                    // reason rather than swallow it.
+                    CaseCheckResult::Failed {
+                        name,
+                        reason: r
+                            .detail
+                            .unwrap_or_else(|| "(check failed without a reason)".into()),
+                    }
+                }
             })
             .collect()
     } else {
@@ -1061,10 +1156,9 @@ mod tests {
                 usage: Usage::default(),
                 output_chars: 80,
                 error: None,
-                checks: vec![CaseCheckResult {
+                checks: vec![CaseCheckResult::Passed {
                     name: "non-empty".into(),
-                    passed: true,
-                    detail: None,
+                    note: None,
                 }],
             }],
         };
@@ -1074,7 +1168,39 @@ mod tests {
         assert_eq!(back.success_count, 2);
         assert_eq!(back.cases[0].status, EvalCaseStatus::Ok);
         assert_eq!(back.checks[0].name, "non-empty");
-        assert!(back.cases[0].checks[0].passed);
+        assert!(back.cases[0].checks[0].passed());
+    }
+
+    #[test]
+    fn case_check_result_legacy_wire_round_trips() {
+        // Pin the wire-form contract: existing report.json artifacts
+        // continue to round-trip byte-identical.
+        let legacy_pass = serde_json::json!({"name": "x", "passed": true});
+        let parsed: CaseCheckResult = serde_json::from_value(legacy_pass.clone()).unwrap();
+        assert!(matches!(parsed, CaseCheckResult::Passed { ref name, note: None } if name == "x"));
+
+        let legacy_fail = serde_json::json!({"name": "y", "passed": false, "detail": "bad"});
+        let parsed: CaseCheckResult = serde_json::from_value(legacy_fail.clone()).unwrap();
+        assert!(matches!(parsed, CaseCheckResult::Failed { ref name, ref reason } if name == "y" && reason == "bad"));
+
+        // Re-serialise drops the wire form back to its legacy
+        // representation (passed=true with detail omitted because
+        // skip_serializing_if).
+        let re = serde_json::to_value(CaseCheckResult::Passed {
+            name: "x".into(),
+            note: None,
+        })
+        .unwrap();
+        assert_eq!(re, legacy_pass);
+    }
+
+    #[test]
+    fn case_check_result_rejects_failed_without_reason() {
+        // The whole point of the typed shape: "failed but no detail"
+        // is an invalid wire payload, not a default-into-empty-string.
+        let bad = serde_json::json!({"name": "z", "passed": false});
+        let err = serde_json::from_value::<CaseCheckResult>(bad).unwrap_err();
+        assert!(err.to_string().contains("no detail/reason"));
     }
 
     #[test]
