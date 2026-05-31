@@ -44,11 +44,12 @@
 
 use std::sync::Arc;
 
+use futures::stream::StreamExt;
 use tars_pipeline::LlmService;
 use tars_types::TrajectoryId;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Agent, AgentOutput};
+use crate::agent::{Agent, AgentError, AgentOutput};
 use crate::critic::{CriticAgent, CriticError};
 use crate::event::AgentEvent;
 use crate::message::{AgentMessage, VerdictKind};
@@ -304,39 +305,135 @@ pub async fn run_task(
         let mut hit_reject: Option<(String, String)> = None;
 
         'level_loop: for level in plan.execution_levels() {
-            // Run every step in this level concurrently. `try_join_all`
-            // would short-circuit on first error but also cancel pending
-            // futures, which would leave half-written trajectory steps;
-            // the explicit `join_all` + post-pass loop preserves
-            // event-log integrity.
-            let results = futures::future::join_all(
-                level
-                    .iter()
-                    .map(|step| run_one_step(&ctx, &traj, &plan, step, goal, &completed)),
-            )
-            .await;
+            // Per-level cancel token, forked from the task-level
+            // `ctx.cancel`. When the first Critic Reject in this
+            // batch lands we fire `level_cancel.cancel()` to bail
+            // any in-flight sibling LLM calls — without that, the
+            // siblings would burn their full Worker+Critic budget
+            // on work the replan loop will discard. Parent cancel
+            // (`ctx.cancel`) still propagates through (the child
+            // token observes both its own .cancel() AND the
+            // parent's), so an external Ctrl-C still kills the
+            // task as before.
+            let level_cancel = ctx.cancel.child_token();
 
-            for (step, step_res) in level.iter().zip(results) {
+            // FuturesUnordered (vs join_all) lets us stream results
+            // in completion order — the moment a Reject comes back
+            // we fire `level_cancel.cancel()`, and only THEN drain
+            // the remaining futures. Siblings still in flight will
+            // observe the cancel via their own `tokio::select!`
+            // against `ctx.cancel.cancelled()` inside the LLM
+            // stream loop (Doc 04 §4.1's cancel contract on every
+            // Agent::execute) and return `AgentError::Cancelled`,
+            // which we ignore below.
+            use futures::stream::FuturesUnordered;
+            // `async` (no `move`) so each future borrows `ctx`, `traj`,
+            // `plan`, `completed`, `step` from the enclosing scope.
+            // `cancel` + `step_id_for_label` are clones moved IN —
+            // those need per-future ownership (cancel because each
+            // step's clone of the token is its own observer; step_id
+            // because we return it as part of the result tuple after
+            // the borrow on `step` has ended).
+            let mut tasks: FuturesUnordered<_> = level
+                .iter()
+                .map(|step| {
+                    let cancel = level_cancel.clone();
+                    let step_id_for_label = step.id.clone();
+                    async {
+                        let res =
+                            run_one_step(&ctx, &traj, &plan, step, goal, &completed, cancel)
+                                .await;
+                        (step_id_for_label, res)
+                    }
+                })
+                .collect();
+
+            // Stage this level's approved outcomes in a local Vec —
+            // we can't mutate `completed` while `tasks` holds an
+            // immutable borrow of it. Within-level siblings are
+            // dependency-independent by construction (same depth),
+            // so deferring `completed` writes to AFTER the drain is
+            // semantically equivalent to writing them inline; the
+            // staging only delays visibility to the NEXT level's
+            // workers, which haven't started yet.
+            let mut level_approved: Vec<(String, StepOutcome)> = Vec::new();
+            while let Some((step_id, step_res)) = tasks.next().await {
                 match step_res {
                     Ok(StepResult::Approved(outcome)) => {
-                        completed.insert(step.id.clone(), outcome.result.clone());
-                        step_outcomes_by_id.insert(step.id.clone(), outcome);
+                        level_approved.push((step_id, outcome));
                     }
-                    Ok(StepResult::Rejected { step_id, reason }) => {
-                        // First reject signal in this iteration wins —
-                        // we still drain the rest of the batch's results
-                        // (siblings already completed, this is just the
-                        // post-pass loop) so event-log writes don't get
-                        // orphaned, then break out of the level loop to
-                        // skip remaining levels.
+                    Ok(StepResult::Rejected {
+                        step_id: rejected_id,
+                        reason,
+                    }) => {
+                        // First reject wins (subsequent rejects from
+                        // siblings whose own critic also rejected
+                        // before observing the cancel are ignored —
+                        // they're equally informative for the replan
+                        // prompt, no need to prefer one).
                         if hit_reject.is_none() {
-                            hit_reject = Some((step_id, reason));
+                            hit_reject = Some((rejected_id, reason));
+                            // Tell the still-running siblings to bail.
+                            // They'll come back via `tasks.next()` as
+                            // `Err(AgentStep { source: Cancelled })`
+                            // which we discard in the Err arm below.
+                            level_cancel.cancel();
                         }
                     }
                     Err(e) => {
+                        // After we've fired level_cancel, in-flight
+                        // siblings can come back with the synthetic
+                        // `AgentError::Cancelled` chain — drop those
+                        // silently (they're EXPECTED post-reject).
+                        // Anything else is a real failure: abandon.
+                        if hit_reject.is_some() && is_cancellation_err(&e) {
+                            continue;
+                        }
+                        // Cancel siblings on real errors too — same
+                        // rationale as reject: don't burn budget on
+                        // work the failure will discard. Drain the
+                        // remaining futures (skipping their cancelled
+                        // returns) before bailing out so the event
+                        // log stays consistent.
+                        level_cancel.cancel();
+                        // Drain the rest, discarding cancelled errors.
+                        while let Some((_, drained_res)) = tasks.next().await {
+                            if let Err(drained_err) = &drained_res {
+                                if is_cancellation_err(drained_err) {
+                                    continue;
+                                }
+                            }
+                            // Any non-cancellation outcome on the
+                            // drain path is unexpected once we've
+                            // already cancelled — log and move on
+                            // so the original `e` stays the
+                            // surfaced cause.
+                            tracing::warn!(
+                                trajectory_id = %traj,
+                                "run_task: ignoring drained-sibling result \
+                                 after first-failure cancel (cause was: {e})",
+                            );
+                        }
                         abandon(&ctx.runtime, &traj, &format!("{e}")).await;
                         return Err(e);
                     }
+                }
+            }
+            // Drain finished — but FuturesUnordered's Drop holds the
+            // borrows it captured until the value itself goes out of
+            // scope, so we drop it explicitly before mutating
+            // `completed`. (Removing this `drop()` re-introduces the
+            // E0502 we just fixed: NLL releases the immutable borrow
+            // at the LAST USE, not at the next `}`.)
+            drop(tasks);
+
+            // Apply this level's approved outcomes. Skip if we hit a
+            // reject (those outcomes are about to be discarded by the
+            // replan path anyway).
+            if hit_reject.is_none() {
+                for (step_id, outcome) in level_approved {
+                    completed.insert(step_id.clone(), outcome.result.clone());
+                    step_outcomes_by_id.insert(step_id, outcome);
                 }
             }
             if hit_reject.is_some() {
@@ -523,6 +620,13 @@ enum StepResult {
 /// surfaces this step's deps' actual outputs (not just their ids) so
 /// the worker can use upstream work instead of re-deriving it.
 ///
+/// `cancel` is the **per-level** cancel token: when one sibling step
+/// in the same level gets a Critic `Reject`, the outer level loop
+/// fires this token so in-flight workers / critics observe the
+/// cancel through their own `tokio::select!` and bail with
+/// `AgentError::Cancelled`. Distinct from `ctx.cancel` (the
+/// task-level token) which still propagates as a parent.
+///
 /// Returns `Ok(StepResult::Rejected{..})` rather than
 /// `Err(ReplanExhausted{..})` when the Critic rejects — the outer
 /// replan loop decides whether to keep trying (replan) or give up.
@@ -533,15 +637,17 @@ async fn run_one_step(
     step: &PlanStep,
     goal: &str,
     completed: &std::collections::HashMap<String, AgentMessage>,
+    cancel: CancellationToken,
 ) -> Result<StepResult, RunTaskError> {
     let mut refinements: Vec<String> = Vec::new();
     let mut attempts: u32 = 0;
     loop {
         // ── Worker ──────────────────────────────────────────────────────
-        let worker_result = run_worker(ctx, traj, plan, step, &refinements, completed).await?;
+        let worker_result =
+            run_worker(ctx, traj, plan, step, &refinements, completed, cancel.clone()).await?;
 
         // ── Critic ──────────────────────────────────────────────────────
-        let verdict_msg = run_critic(ctx, traj, plan, &worker_result, goal).await?;
+        let verdict_msg = run_critic(ctx, traj, plan, &worker_result, goal, cancel.clone()).await?;
 
         let verdict_kind = match &verdict_msg {
             AgentMessage::Verdict { verdict, .. } => verdict.clone(),
@@ -610,6 +716,7 @@ async fn run_worker(
     step: &PlanStep,
     refinements: &[String],
     completed: &std::collections::HashMap<String, AgentMessage>,
+    cancel: CancellationToken,
 ) -> Result<AgentMessage, RunTaskError> {
     let req = ctx.worker.build_worker_request(plan, step, refinements, completed);
     let agent: Arc<dyn Agent> = ctx.worker.clone();
@@ -619,7 +726,7 @@ async fn run_worker(
         ctx.llm.clone(),
         agent,
         req,
-        ctx.cancel.clone(),
+        cancel,
     )
     .await
     .map_err(|e| RunTaskError::AgentStep {
@@ -657,6 +764,7 @@ async fn run_critic(
     plan: &Plan,
     worker_result: &AgentMessage,
     goal: &str,
+    cancel: CancellationToken,
 ) -> Result<AgentMessage, RunTaskError> {
     let result_ref = crate::PartialResultRef::from_message(worker_result).ok_or_else(|| {
         RunTaskError::Critic {
@@ -677,7 +785,7 @@ async fn run_critic(
         ctx.llm.clone(),
         agent,
         req,
-        ctx.cancel.clone(),
+        cancel,
     )
     .await
     .map_err(|e| RunTaskError::AgentStep {
@@ -721,6 +829,21 @@ async fn abandon(runtime: &Arc<dyn Runtime>, traj: &TrajectoryId, cause: &str) {
             "run_task: failed to append TrajectoryAbandoned",
         );
     }
+}
+
+/// True iff `err` is a "this step was cancelled" signal (as opposed
+/// to a real failure). Used by the level loop to discard sibling
+/// results that came back as `AgentError::Cancelled` after we fired
+/// `level_cancel.cancel()` — those are EXPECTED post-reject, not
+/// failures to abandon the trajectory for.
+fn is_cancellation_err(err: &RunTaskError) -> bool {
+    matches!(
+        err,
+        RunTaskError::AgentStep {
+            source: AgentExecutionError::Agent(AgentError::Cancelled),
+            ..
+        }
+    )
 }
 
 #[cfg(test)]

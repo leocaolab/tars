@@ -828,3 +828,212 @@ async fn replan_exhausted_after_max_replans_consecutive_rejects() {
         other => panic!("expected ReplanExhausted, got {other:?}"),
     }
 }
+
+/// Cancel-on-reject — when one step in the same level emits a Critic
+/// Reject, in-flight sibling steps in that batch should be cancelled
+/// rather than allowed to burn their full Worker + Critic budget on
+/// work the replan loop will discard.
+///
+/// Setup: 3-step fan-out plan (s1 ∥ s2 ∥ s3, all roots — level 0 runs
+/// them all in parallel). A `GatedProvider` makes the FIRST worker
+/// call return instantly (so SOME worker — whichever wins the start
+/// race — flows through fast, then its critic rejects); the OTHER
+/// two worker calls block on a `tokio::sync::Notify` that the test
+/// NEVER fires. So the only way the task can return is if the level
+/// loop's `level_cancel.cancel()` drops those blocked futures
+/// mid-await.
+///
+/// Why this proves cancel-on-reject specifically:
+///  - Without the cancel call, the level loop would block at
+///    `tasks.next().await` forever waiting for the gated siblings.
+///  - With cancel-on-reject (as implemented in task.rs), the first
+///    Critic Reject triggers `level_cancel.cancel()`, which fires
+///    `drive_llm_call`'s `tokio::select!` against `cancel.cancelled()`,
+///    which drops the in-flight provider futures (and their inner
+///    Notify await) — so `run_one_step` returns
+///    `Err(AgentError::Cancelled)`, the drain loop discards those,
+///    and the task can finally return `ReplanExhausted`.
+///  - We track `entered_gate_count` to prove the gated arm WAS
+///    reached (not just that the first worker bailed before any
+///    sibling started) — so the deadlock-avoidance is genuinely
+///    about cancel propagation through an actively-awaiting future.
+///
+/// `max_replans = 0` so the first Reject is immediately terminal —
+/// keeps the assertion shape simple (ReplanExhausted{replans:0})
+/// and isolates the cancel signal from replan-loop semantics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_on_reject_terminates_in_flight_sibling_workers() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+
+    /// Returns canned text; the FIRST `WorkerResult` call answers
+    /// instantly, the rest park on a never-notified `Notify`. Plan
+    /// + Verdict responses always answer instantly so the
+    /// orchestrator and rejecting critic can complete their calls.
+    struct GatedProvider {
+        id: ProviderId,
+        capabilities: Capabilities,
+        /// Never notified by the test — the gated workers only exit
+        /// by being dropped via cancel.
+        gate: Arc<Notify>,
+        worker_call_count: AtomicUsize,
+        /// Bumped when a worker enters the gated `Notify::notified()`
+        /// await. Counts entrances, not exits — drop-cancel never
+        /// reaches the exit side of the await.
+        entered_gate_count: Arc<AtomicUsize>,
+        plan_response: String,
+        fast_worker_response: String,
+        reject_response: String,
+    }
+
+    impl GatedProvider {
+        fn new(plan_response: String, fast_worker_response: String, reject_response: String) -> Arc<Self> {
+            Arc::new(Self {
+                id: ProviderId::new("gated"),
+                capabilities: Capabilities::text_only_baseline(Pricing::default()),
+                gate: Arc::new(Notify::new()),
+                worker_call_count: AtomicUsize::new(0),
+                entered_gate_count: Arc::new(AtomicUsize::new(0)),
+                plan_response,
+                fast_worker_response,
+                reject_response,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for GatedProvider {
+        fn id(&self) -> &ProviderId {
+            &self.id
+        }
+        fn capabilities(&self) -> &Capabilities {
+            &self.capabilities
+        }
+        async fn stream(
+            self: Arc<Self>,
+            req: ChatRequest,
+            _ctx: RequestContext,
+        ) -> Result<LlmEventStream, ProviderError> {
+            let schema_name = req
+                .structured_output
+                .as_ref()
+                .and_then(|s| s.name.as_deref())
+                .unwrap_or("");
+            let text = match schema_name {
+                "Plan" => self.plan_response.clone(),
+                "Verdict" => self.reject_response.clone(),
+                "WorkerResult" => {
+                    let n = self.worker_call_count.fetch_add(1, Ordering::SeqCst);
+                    if n == 0 {
+                        // First worker wins the race, answers fast →
+                        // its critic then sees a Reject verdict, which
+                        // triggers level_cancel.cancel() upstream.
+                        self.fast_worker_response.clone()
+                    } else {
+                        // Park forever. We rely on the OUTER
+                        // `drive_llm_call`'s `tokio::select!` to drop
+                        // this future once level_cancel fires — there
+                        // is no path here that completes the await
+                        // (the gate is never notified). If
+                        // cancel-on-reject is broken, the task hangs.
+                        self.entered_gate_count.fetch_add(1, Ordering::SeqCst);
+                        self.gate.notified().await;
+                        // Unreachable in this test, but the future
+                        // contract still needs a valid return.
+                        unreachable!("test never notifies the gate")
+                    }
+                }
+                other => {
+                    return Err(ProviderError::Internal(format!(
+                        "GatedProvider: unknown schema {other:?}"
+                    )))
+                }
+            };
+            let events: Vec<Result<ChatEvent, ProviderError>> = vec![
+                Ok(ChatEvent::started(req.model.label())),
+                Ok(ChatEvent::Delta { text: text.clone() }),
+                Ok(ChatEvent::Finished {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage {
+                        input_tokens: 0,
+                        output_tokens: text.len() as u64 / 4,
+                        ..Default::default()
+                    },
+                }),
+            ];
+            Ok(Box::pin(stream::iter(events)))
+        }
+    }
+
+    let provider = GatedProvider::new(
+        fanout_three_roots_plan(),
+        worker_ok("fast worker output"),
+        reject("no good"),
+    );
+    let entered_gate_handle = provider.entered_gate_count.clone();
+    let inner: Arc<dyn LlmService> = ProviderService::new(provider);
+    let llm: Arc<dyn LlmService> = Arc::new(Pipeline::builder_with_inner(inner).build());
+    let (rt, _dir) = fresh_runtime().await;
+    let (orch, worker, critic) = agents();
+
+    // Hard timeout wrapper: if cancel-on-reject is broken this would
+    // hang, so cap the wait at 5s and surface a clear assertion
+    // message rather than a CI timeout 10 minutes later.
+    let task_fut = run_task(
+        rt.clone() as Arc<dyn Runtime>,
+        llm,
+        orch,
+        worker,
+        critic,
+        "fan out three roots; one rejects",
+        RunTaskConfig {
+            max_refinements_per_step: 0, // single attempt — Reject is terminal
+            max_replans: 0,              // first Reject ⇒ ReplanExhausted{replans:0}
+        },
+        CancellationToken::new(),
+    );
+    let err = tokio::time::timeout(std::time::Duration::from_secs(5), task_fut)
+        .await
+        .expect(
+            "run_task hung past 5s — cancel-on-reject probably regressed: \
+             the gated sibling worker futures were not dropped on Reject, \
+             so the level loop blocked at tasks.next().await forever.",
+        )
+        .expect_err("task should abandon on reject (max_replans=0)");
+
+    // Reject path landed (vs hanging on the gated siblings).
+    match &err {
+        RunTaskError::ReplanExhausted { replans, .. } => {
+            assert_eq!(*replans, 0);
+        }
+        other => panic!("expected ReplanExhausted{{replans:0}}, got {other:?}"),
+    }
+
+    // At least one gated sibling actually entered the never-notified
+    // await — i.e. the test wasn't trivially satisfied by a worker
+    // bailing before any sibling started.
+    let entered = entered_gate_handle.load(Ordering::SeqCst);
+    assert!(
+        entered >= 1,
+        "expected at least one gated sibling worker to reach the never-notified \
+         Notify::notified() await; got entered_gate_count = {entered}. The cancel \
+         signal needs an in-flight pending future to actually be propagating \
+         through.",
+    );
+}
+
+fn fanout_three_roots_plan() -> String {
+    // Three independent roots — all run in parallel at level 0.
+    // No merge step; the test only cares about level-0 cancel
+    // propagation.
+    r#"{
+        "plan_id": "fan3",
+        "goal": "three independent",
+        "steps": [
+            {"id":"s1","worker_role":"summarise","instruction":"Leaf A","depends_on":[]},
+            {"id":"s2","worker_role":"summarise","instruction":"Leaf B","depends_on":[]},
+            {"id":"s3","worker_role":"summarise","instruction":"Leaf C","depends_on":[]}
+        ]
+    }"#
+    .to_string()
+}
