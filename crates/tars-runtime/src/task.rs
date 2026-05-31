@@ -1,10 +1,31 @@
 //! [`run_task`] — the multi-step Orchestrator → Worker → Critic loop.
 //!
-//! This is the **first user-facing M3 milestone**: given a goal, drive
-//! a real triad of agents end-to-end with full trajectory logging and
-//! Critic-driven retry. Doc 04 §4.2's typed [`AgentMessage`] envelope
-//! threads through all the agent boundaries; the loop never falls back
-//! to free-form text.
+//! Public LLM-agent entry point. Given a free-form `goal`, drives a
+//! real triad of agents end-to-end with full trajectory logging,
+//! Critic-driven refinement, and replan-on-reject.
+//!
+//! ## Layering after the executor extraction
+//!
+//! Since `tars-runtime` 0.3, the DAG primitives (cancel-on-reject,
+//! FuturesUnordered level batching, skip-cascade, refinement loop)
+//! live in [`crate::executor`]. `run_task` is a thin LLM-flavored
+//! shell that:
+//!   1. Creates a trajectory.
+//!   2. Calls [`OrchestratorAgent`] to produce a [`Plan`].
+//!   3. Wraps the supplied `WorkerAgent` + `CriticAgent` as
+//!      [`LlmWorker`](crate::LlmWorker) + [`LlmCritic`](crate::LlmCritic)
+//!      and hands them to [`crate::run_plan`].
+//!   4. On [`RunPlanError::Rejected`] — calls the orchestrator's
+//!      replan path with the failed plan + partial results, loops
+//!      back to step 3 with the new plan, up to
+//!      `config.max_replans`.
+//!   5. Closes the trajectory.
+//!
+//! Callers who already have a `Plan` (e.g. arc auto's
+//! deterministic `scan → fix → verify` chain) should call
+//! [`crate::run_plan`] directly — skips the Orchestrator LLM round
+//! AND the replan loop, and accepts non-LLM workers via the
+//! [`crate::Worker`] trait.
 //!
 //! ## Loop shape
 //!
@@ -44,7 +65,6 @@
 
 use std::sync::Arc;
 
-use futures::stream::StreamExt;
 use tars_pipeline::LlmService;
 use tars_types::TrajectoryId;
 use tokio_util::sync::CancellationToken;
@@ -52,8 +72,8 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::{Agent, AgentError, AgentOutput};
 use crate::critic::{CriticAgent, CriticError};
 use crate::event::AgentEvent;
-use crate::message::{AgentMessage, VerdictKind};
-use crate::orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep};
+use crate::message::AgentMessage;
+use crate::orchestrator::{OrchestratorAgent, OrchestratorError, Plan};
 use crate::runtime::{AgentExecutionError, Runtime, execute_agent_step};
 use crate::worker::{WorkerAgent, WorkerError};
 
@@ -82,87 +102,12 @@ impl Default for RunTaskConfig {
     }
 }
 
-/// Per-step record in the [`TaskOutcome`].
-///
-/// A step is either [`Completed`](Self::Completed) (Worker ran +
-/// Critic approved) or [`Skipped`](Self::Skipped) (the step's
-/// `StepCondition` evaluated false, or one of its deps was itself
-/// skipped — cascade). The enum lets the per-step Vec in
-/// [`TaskOutcome::steps`] preserve plan order even when some steps
-/// don't run: skipped entries appear in declaration order
-/// alongside completed ones, so `outcome.steps[i].step_id() ==
-/// plan.steps[i].id` still holds.
-///
-/// Accessors:
-/// - [`step_id`](Self::step_id) — always available.
-/// - [`as_completed`](Self::as_completed) — `Some` only for the
-///   `Completed` variant, lets call sites pattern-match without
-///   re-deriving the discriminant.
-#[derive(Clone, Debug)]
-pub enum StepOutcome {
-    /// Step ran: Worker produced a [`AgentMessage::PartialResult`],
-    /// Critic returned [`VerdictKind::Approve`].
-    Completed {
-        step_id: String,
-        /// The Worker's final accepted output for this step.
-        result: AgentMessage,
-        /// The Critic's accepting verdict (always
-        /// `VerdictKind::Approve` for a completed step).
-        verdict: AgentMessage,
-        /// How many refinement loops were needed before approval.
-        /// `0` = approved on first attempt.
-        refinement_attempts: u32,
-    },
-    /// Step was gated out: either its `StepCondition` evaluated false,
-    /// or a transitively-depended-on step was itself skipped.
-    /// No Worker / Critic LLM calls were issued for this step; the
-    /// trajectory log carries a matching `AgentEvent::StepSkipped`
-    /// with the same `reason` for forensics.
-    Skipped {
-        step_id: String,
-        /// Human-readable cause — same string written into the
-        /// trajectory's `StepSkipped::reason` field.
-        reason: String,
-    },
-}
-
-impl StepOutcome {
-    /// Plan step id — always available regardless of variant.
-    pub fn step_id(&self) -> &str {
-        match self {
-            Self::Completed { step_id, .. } | Self::Skipped { step_id, .. } => step_id,
-        }
-    }
-
-    /// `Some((result, verdict, refinement_attempts))` for completed
-    /// steps; `None` for skipped. Use this from caller code that
-    /// wants the worker output without re-matching the enum:
-    /// `for s in &outcome.steps { if let Some((r, _, _)) = s.as_completed() { ... } }`.
-    pub fn as_completed(&self) -> Option<(&AgentMessage, &AgentMessage, u32)> {
-        match self {
-            Self::Completed {
-                result,
-                verdict,
-                refinement_attempts,
-                ..
-            } => Some((result, verdict, *refinement_attempts)),
-            Self::Skipped { .. } => None,
-        }
-    }
-
-    /// `true` iff this outcome is a [`Skipped`](Self::Skipped) variant.
-    pub fn is_skipped(&self) -> bool {
-        matches!(self, Self::Skipped { .. })
-    }
-}
-
-/// What [`run_task`] returns on success.
-#[derive(Clone, Debug)]
-pub struct TaskOutcome {
-    pub trajectory_id: TrajectoryId,
-    pub plan: Plan,
-    pub steps: Vec<StepOutcome>,
-}
+// `StepOutcome` and `TaskOutcome` moved to [`crate::executor`] in
+// the executor-extraction refactor. Re-exported here so existing
+// imports `use tars_runtime::{StepOutcome, TaskOutcome}` keep
+// working unchanged. New callers should import from the top-level
+// crate root.
+pub use crate::executor::{StepOutcome, TaskOutcome};
 
 /// Errors [`run_task`] can surface. All variants carry the
 /// `trajectory_id` so callers can replay the trajectory log to see
@@ -249,20 +194,6 @@ impl RunTaskError {
     }
 }
 
-/// Bundles the runtime + LLM + agent triad + cancel token + tunables
-/// so the loop's internal helpers can take a single `&LoopCtx`
-/// instead of seven-plus discrete arguments. Built once at the top of
-/// [`run_task`] and never mutated.
-struct LoopCtx {
-    runtime: Arc<dyn Runtime>,
-    llm: Arc<dyn LlmService>,
-    orchestrator: Arc<OrchestratorAgent>,
-    worker: Arc<WorkerAgent>,
-    critic: Arc<CriticAgent>,
-    config: RunTaskConfig,
-    cancel: CancellationToken,
-}
-
 /// Drive the Orchestrator → Worker → Critic loop for `goal`. See
 /// module docs for the loop shape.
 ///
@@ -286,17 +217,7 @@ pub async fn run_task(
     config: RunTaskConfig,
     cancel: CancellationToken,
 ) -> Result<TaskOutcome, RunTaskError> {
-    let ctx = LoopCtx {
-        runtime,
-        llm,
-        orchestrator,
-        worker,
-        critic,
-        config,
-        cancel,
-    };
-    let traj = ctx
-        .runtime
+    let traj = runtime
         .create_trajectory(None, &format!("run_task: {goal}"))
         .await
         .map_err(|e| RunTaskError::Runtime {
@@ -304,41 +225,56 @@ pub async fn run_task(
             source: e,
         })?;
 
-    // ── 1+2. Plan → Execute (DAG, depth-batched) → on Critic Reject, ──
-    // ── replan from current state and retry the whole task ──
+    // Wrap the LLM-flavored agents as executor [`Worker`] / [`Critic`]
+    // trait impls. The same LlmWorker handles every worker_role
+    // (single default registration — `run_task` exposes one
+    // WorkerAgent), and the critic is always present (its absence is
+    // the `run_plan` direct-call path, not the LLM agent loop).
+    let llm_worker_impl: Arc<dyn crate::executor::Worker> =
+        crate::llm_adapters::LlmWorker::new(worker.clone(), llm.clone());
+    let llm_critic_impl: Arc<dyn crate::executor::Critic> =
+        crate::llm_adapters::LlmCritic::new(critic.clone(), llm.clone());
+    let workers = crate::executor::WorkerRegistry::new().with_default(llm_worker_impl);
+    let run_plan_config = crate::executor::RunPlanConfig {
+        max_refinements_per_step: config.max_refinements_per_step,
+    };
+
+    // Build the plan/replan helper closure context. The orchestrator
+    // is the only piece that lives outside `run_plan` (it produces
+    // the Plan that `run_plan` then executes).
+    let plan_ctx = OrchestratorCallCtx {
+        runtime: runtime.clone(),
+        llm: llm.clone(),
+        orchestrator: orchestrator.clone(),
+        cancel: cancel.clone(),
+    };
+
+    // ── 1+2. Plan → run_plan → on Reject, replan from prior context. ──
     //
-    // Plan ↔ execute is wrapped in a replan loop. On the first
-    // iteration we call `plan_step` (fresh plan from the goal alone).
-    // On subsequent iterations we call `replan_step` with the prior
-    // plan + partial results + reject reason, so the orchestrator can
-    // propose a different decomposition rather than re-trying the
-    // same shape and rejecting again.
+    // First iteration: `plan_step` produces a fresh Plan from the goal
+    // alone. Subsequent iterations (after a Reject lands inside
+    // `run_plan` and budget remains) use `replan_step` with the prior
+    // plan + partial results + reject reason so the orchestrator can
+    // propose a different decomposition. `run_plan` itself handles
+    // the DAG (level batching, cancel-on-reject, refinement, skip /
+    // cascade) — `run_task` is just the outer LLM agent-loop shell.
     //
-    // Execute phase is unchanged from the DAG commit: depth-batched
-    // join_all per level, dep results threaded into dependent
-    // workers' prompts. A Critic Reject in any step BREAKS out of
-    // the level loop (but doesn't abandon — we wait for in-flight
-    // siblings to finish so the event log stays consistent) and the
-    // outer replan loop kicks in. Refine and other errors keep their
-    // pre-replan semantics (refine retries in place, hard errors
-    // abandon the trajectory).
     use std::collections::HashMap;
     let mut replan_attempt: u32 = 0;
-    let mut plan: Plan;
-    let mut step_outcomes_by_id: HashMap<String, StepOutcome>;
     let mut prior_plan: Option<Plan> = None;
     let mut prior_completed: HashMap<String, AgentMessage> = HashMap::new();
     let mut last_reject: Option<(String, String)> = None;
-    loop {
+
+    let outcome = loop {
         // ── Plan or replan ───────────────────────────────────────────
-        plan = match if replan_attempt == 0 {
-            plan_step(&ctx, &traj, goal).await
+        let plan = match if replan_attempt == 0 {
+            plan_step(&plan_ctx, &traj, goal).await
         } else {
             let (rejected_step, reject_reason) = last_reject
                 .as_ref()
                 .expect("replan path entered only via Reject, which sets last_reject");
             replan_step(
-                &ctx,
+                &plan_ctx,
                 &traj,
                 goal,
                 prior_plan
@@ -353,284 +289,65 @@ pub async fn run_task(
         } {
             Ok(p) => p,
             Err(e) => {
-                abandon(&ctx.runtime, &traj, &format!("orchestrator failed: {e}")).await;
+                abandon(&runtime, &traj, &format!("orchestrator failed: {e}")).await;
                 return Err(e);
             }
         };
 
-        // ── Execute (DAG depth-batched parallel) ─────────────────────
-        step_outcomes_by_id = HashMap::with_capacity(plan.steps.len());
-        let mut completed: HashMap<String, AgentMessage> =
-            HashMap::with_capacity(plan.steps.len());
-        // Steps whose `StepCondition` evaluated false OR whose dep
-        // chain hit a skipped step. Used for skip-cascade across
-        // levels: a step at level N is skipped iff any of its deps
-        // (which sit at level < N) is in this set.
-        let mut skipped_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut hit_reject: Option<(String, String)> = None;
-
-        'level_loop: for level in plan.execution_levels() {
-            // ── Pre-pass: classify every step in this level as RUN
-            // or SKIP before we build the FuturesUnordered batch.
-            // Two skip reasons, in priority order:
-            //   1. cascade — any dep is in `skipped_ids`.
-            //   2. condition — predicate evaluates false against
-            //      `completed`.
-            // Skipped steps emit a single `AgentEvent::StepSkipped`
-            // (allocated a step_seq via runtime.next_step_seq) and
-            // are recorded in `step_outcomes_by_id` as
-            // `StepOutcome::Skipped`. Their ids land in
-            // `skipped_ids` so descendants at the NEXT level cascade
-            // correctly.
-            //
-            // Pre-pass — not interleaved with the parallel batch —
-            // because the skip decision is purely a function of
-            // already-completed levels: there's no upside to deferring
-            // it, and doing it up front keeps the FuturesUnordered
-            // body (the only point where ctx is mutably borrowed via
-            // its loop body) lean.
-            let mut to_run: Vec<&PlanStep> = Vec::with_capacity(level.len());
-            for step in &level {
-                // Cascade check: a dep that was skipped means we
-                // can't run this step (we'd have no input).
-                let cascade_dep = step
-                    .depends_on
-                    .iter()
-                    .find(|d| skipped_ids.contains(d.as_str()));
-                if let Some(dep) = cascade_dep {
-                    let reason = format!("dep `{dep}` was skipped");
-                    log_skip(&ctx, &traj, step, &reason).await?;
-                    skipped_ids.insert(step.id.clone());
-                    step_outcomes_by_id.insert(
-                        step.id.clone(),
-                        StepOutcome::Skipped {
-                            step_id: step.id.clone(),
-                            reason,
-                        },
-                    );
-                    continue;
-                }
-                // Condition check: predicate against the already-
-                // completed deps' PartialResults.
-                if !step.condition.matches(&completed) {
-                    let reason = step.condition.skip_reason();
-                    log_skip(&ctx, &traj, step, &reason).await?;
-                    skipped_ids.insert(step.id.clone());
-                    step_outcomes_by_id.insert(
-                        step.id.clone(),
-                        StepOutcome::Skipped {
-                            step_id: step.id.clone(),
-                            reason,
-                        },
-                    );
-                    continue;
-                }
-                to_run.push(step);
-            }
-            // If every step in this level was skipped, there's
-            // nothing to schedule — advance to the next level.
-            if to_run.is_empty() {
-                continue 'level_loop;
-            }
-            // Per-level cancel token, forked from the task-level
-            // `ctx.cancel`. When the first Critic Reject in this
-            // batch lands we fire `level_cancel.cancel()` to bail
-            // any in-flight sibling LLM calls — without that, the
-            // siblings would burn their full Worker+Critic budget
-            // on work the replan loop will discard. Parent cancel
-            // (`ctx.cancel`) still propagates through (the child
-            // token observes both its own .cancel() AND the
-            // parent's), so an external Ctrl-C still kills the
-            // task as before.
-            let level_cancel = ctx.cancel.child_token();
-
-            // FuturesUnordered (vs join_all) lets us stream results
-            // in completion order — the moment a Reject comes back
-            // we fire `level_cancel.cancel()`, and only THEN drain
-            // the remaining futures. Siblings still in flight will
-            // observe the cancel via their own `tokio::select!`
-            // against `ctx.cancel.cancelled()` inside the LLM
-            // stream loop (Doc 04 §4.1's cancel contract on every
-            // Agent::execute) and return `AgentError::Cancelled`,
-            // which we ignore below.
-            use futures::stream::FuturesUnordered;
-            // `async` (no `move`) so each future borrows `ctx`, `traj`,
-            // `plan`, `completed`, `step` from the enclosing scope.
-            // `cancel` + `step_id_for_label` are clones moved IN —
-            // those need per-future ownership (cancel because each
-            // step's clone of the token is its own observer; step_id
-            // because we return it as part of the result tuple after
-            // the borrow on `step` has ended).
-            let mut tasks: FuturesUnordered<_> = to_run
-                .iter()
-                .map(|step| {
-                    let cancel = level_cancel.clone();
-                    let step_id_for_label = step.id.clone();
-                    async {
-                        let res =
-                            run_one_step(&ctx, &traj, &plan, step, goal, &completed, cancel)
-                                .await;
-                        (step_id_for_label, res)
-                    }
-                })
-                .collect();
-
-            // Stage this level's approved outcomes in a local Vec —
-            // we can't mutate `completed` while `tasks` holds an
-            // immutable borrow of it. Within-level siblings are
-            // dependency-independent by construction (same depth),
-            // so deferring `completed` writes to AFTER the drain is
-            // semantically equivalent to writing them inline; the
-            // staging only delays visibility to the NEXT level's
-            // workers, which haven't started yet.
-            let mut level_approved: Vec<(String, StepOutcome)> = Vec::new();
-            while let Some((step_id, step_res)) = tasks.next().await {
-                match step_res {
-                    Ok(StepResult::Approved(outcome)) => {
-                        level_approved.push((step_id, outcome));
-                    }
-                    Ok(StepResult::Rejected {
-                        step_id: rejected_id,
+        // ── Execute via the DAG executor ─────────────────────────────
+        match crate::executor::run_plan(
+            runtime.clone(),
+            traj.clone(),
+            plan,
+            workers.clone(),
+            Some(llm_critic_impl.clone()),
+            run_plan_config.clone(),
+            cancel.clone(),
+        )
+        .await
+        {
+            Ok(o) => break o,
+            Err(crate::executor::RunPlanError::Rejected {
+                plan: failed_plan,
+                rejected_step_id,
+                reason,
+                completed,
+                ..
+            }) => {
+                if replan_attempt >= config.max_replans {
+                    let err = RunTaskError::ReplanExhausted {
+                        trajectory_id: traj.clone(),
+                        step_id: rejected_step_id,
                         reason,
-                    }) => {
-                        // First reject wins (subsequent rejects from
-                        // siblings whose own critic also rejected
-                        // before observing the cancel are ignored —
-                        // they're equally informative for the replan
-                        // prompt, no need to prefer one).
-                        if hit_reject.is_none() {
-                            hit_reject = Some((rejected_id, reason));
-                            // Tell the still-running siblings to bail.
-                            // They'll come back via `tasks.next()` as
-                            // `Err(AgentStep { source: Cancelled })`
-                            // which we discard in the Err arm below.
-                            level_cancel.cancel();
-                        }
-                    }
-                    Err(e) => {
-                        // After we've fired level_cancel, in-flight
-                        // siblings can come back with the synthetic
-                        // `AgentError::Cancelled` chain — drop those
-                        // silently (they're EXPECTED post-reject).
-                        // Anything else is a real failure: abandon.
-                        if hit_reject.is_some() && is_cancellation_err(&e) {
-                            continue;
-                        }
-                        // Cancel siblings on real errors too — same
-                        // rationale as reject: don't burn budget on
-                        // work the failure will discard. Drain the
-                        // remaining futures (skipping their cancelled
-                        // returns) before bailing out so the event
-                        // log stays consistent.
-                        level_cancel.cancel();
-                        // Drain the rest, discarding cancelled errors.
-                        while let Some((_, drained_res)) = tasks.next().await {
-                            if let Err(drained_err) = &drained_res {
-                                if is_cancellation_err(drained_err) {
-                                    continue;
-                                }
-                            }
-                            // Any non-cancellation outcome on the
-                            // drain path is unexpected once we've
-                            // already cancelled — log and move on
-                            // so the original `e` stays the
-                            // surfaced cause.
-                            tracing::warn!(
-                                trajectory_id = %traj,
-                                "run_task: ignoring drained-sibling result \
-                                 after first-failure cancel (cause was: {e})",
-                            );
-                        }
-                        abandon(&ctx.runtime, &traj, &format!("{e}")).await;
-                        return Err(e);
-                    }
+                        replans: replan_attempt,
+                    };
+                    abandon(&runtime, &traj, &format!("{err}")).await;
+                    return Err(err);
                 }
+                prior_completed = completed;
+                prior_plan = Some(failed_plan);
+                last_reject = Some((rejected_step_id, reason));
+                replan_attempt += 1;
+                continue;
             }
-            // Drain finished — but FuturesUnordered's Drop holds the
-            // borrows it captured until the value itself goes out of
-            // scope, so we drop it explicitly before mutating
-            // `completed`. (Removing this `drop()` re-introduces the
-            // E0502 we just fixed: NLL releases the immutable borrow
-            // at the LAST USE, not at the next `}`.)
-            drop(tasks);
-
-            // Apply this level's approved outcomes. Skip if we hit a
-            // reject (those outcomes are about to be discarded by the
-            // replan path anyway). `level_approved` only ever holds
-            // `Completed` variants — `Skipped` is recorded directly
-            // in the pre-pass above, and `run_one_step` returns
-            // `StepResult::Approved` only on critic-Approve, so the
-            // unreachable arm here exists for total-pattern hygiene.
-            if hit_reject.is_none() {
-                for (step_id, outcome) in level_approved {
-                    if let StepOutcome::Completed { result, .. } = &outcome {
-                        completed.insert(step_id.clone(), result.clone());
-                    }
-                    step_outcomes_by_id.insert(step_id, outcome);
-                }
-            }
-            if hit_reject.is_some() {
-                break 'level_loop;
+            Err(other) => {
+                let mapped = map_run_plan_error(&traj, other);
+                abandon(&runtime, &traj, &format!("{mapped}")).await;
+                return Err(mapped);
             }
         }
-
-        // ── Decide: success / replan / replan-exhausted ─────────────
-        if let Some((rejected_step, reason)) = hit_reject {
-            if replan_attempt >= ctx.config.max_replans {
-                let err = RunTaskError::ReplanExhausted {
-                    trajectory_id: traj.clone(),
-                    step_id: rejected_step,
-                    reason,
-                    replans: replan_attempt,
-                };
-                abandon(&ctx.runtime, &traj, &format!("{err}")).await;
-                return Err(err);
-            }
-            // Stash context for the next iteration's replan prompt
-            // (orchestrator sees prior plan + completed steps' results
-            // + reject reason) and loop.
-            prior_completed = completed;
-            prior_plan = Some(plan);
-            last_reject = Some((rejected_step, reason));
-            replan_attempt += 1;
-            continue;
-        }
-
-        // No reject anywhere — task succeeded. Break out of replan loop.
-        break;
-    }
-
-    // Reassemble the per-step Vec in plan-declaration order. The DAG
-    // executor produces outcomes in completion order (parallel batches
-    // arrive together); the public TaskOutcome.steps shape is documented
-    // (and tested) to follow `plan.steps` declaration order so callers
-    // can index by `outcome.steps[i].step_id() == plan.steps[i].id` for
-    // both the serial-trivial case and the parallel fan-out case.
-    // Includes BOTH `Completed` and `Skipped` variants — skipped steps
-    // appear at their declaration position so the index correspondence
-    // holds when conditional execution is in play.
-    let step_outcomes: Vec<StepOutcome> = plan
-        .steps
-        .iter()
-        .map(|s| {
-            step_outcomes_by_id.remove(&s.id).expect(
-                "every plan step was either completed, skipped, or surfaced as Reject above",
-            )
-        })
-        .collect();
+    };
 
     // ── 3. Close ───────────────────────────────────────────────────────
-    // Best-effort, mirroring `abandon`: every step already wrote its own
-    // terminal `StepCompleted` (the source of truth for what finished),
-    // so the trailing `TrajectoryCompleted` is a convenience marker. If
-    // its append fails, the work is still done — log and return the
-    // successful outcome rather than discarding it as a task failure.
-    // A trajectory missing this marker is recoverable / detectable from
-    // the step events; reporting success as failure is not.
-    let summary = format!("completed {} step(s) for goal: {goal}", step_outcomes.len(),);
-    if let Err(e) = ctx
-        .runtime
+    // Best-effort, mirroring `abandon`: every step's terminal event
+    // is already in the log (executor + worker + critic emit their
+    // own StepCompleted / StepFailed), so this trailing
+    // `TrajectoryCompleted` is a convenience marker. Logging-only
+    // failure here: task work is done, return the outcome anyway. A
+    // trajectory missing this marker is recoverable / detectable
+    // from the step events; reporting success as failure is not.
+    let summary = format!("completed {} step(s) for goal: {goal}", outcome.steps.len());
+    if let Err(e) = runtime
         .append(
             &traj,
             AgentEvent::TrajectoryCompleted {
@@ -648,17 +365,88 @@ pub async fn run_task(
         );
     }
 
-    Ok(TaskOutcome {
-        trajectory_id: traj,
-        plan,
-        steps: step_outcomes,
-    })
+    Ok(outcome)
 }
 
 // ── Internal helpers ───────────────────────────────────────────────────
 
+/// Bundles the runtime + LLM + orchestrator + cancel into one struct
+/// so the plan / replan helpers below take a single
+/// `&OrchestratorCallCtx` instead of four args. Built once at the top
+/// of `run_task`.
+struct OrchestratorCallCtx {
+    runtime: Arc<dyn Runtime>,
+    llm: Arc<dyn LlmService>,
+    orchestrator: Arc<OrchestratorAgent>,
+    cancel: CancellationToken,
+}
+
+/// Map a [`crate::executor::RunPlanError`] (other than `Rejected`,
+/// which `run_task`'s replan loop handles inline) into the
+/// equivalent [`RunTaskError`] variant. Keeps the public error shape
+/// of `run_task` stable across the executor extraction.
+fn map_run_plan_error(traj: &TrajectoryId, e: crate::executor::RunPlanError) -> RunTaskError {
+    use crate::executor::RunPlanError;
+    match e {
+        RunPlanError::Rejected { .. } => unreachable!(
+            "run_task handles RunPlanError::Rejected in its replan loop; this arm is dead",
+        ),
+        RunPlanError::RefineExhausted {
+            step_id, attempts, ..
+        } => RunTaskError::RefineExhausted {
+            trajectory_id: traj.clone(),
+            step_id,
+            attempts,
+        },
+        RunPlanError::NoWorkerForRole {
+            role, step_id, ..
+        } => RunTaskError::AgentStep {
+            trajectory_id: traj.clone(),
+            step_id,
+            source: AgentExecutionError::Agent(AgentError::Internal(format!(
+                "no worker registered for role `{role}` — run_task only registers \
+                 an LLM default worker, so the registry's default fallback should \
+                 have matched; this is a bug in run_task's wiring",
+            ))),
+        },
+        RunPlanError::Worker {
+            step_id, source, ..
+        } => RunTaskError::Worker {
+            trajectory_id: traj.clone(),
+            step_id,
+            source,
+        },
+        RunPlanError::Critic {
+            step_id, source, ..
+        } => RunTaskError::Critic {
+            trajectory_id: traj.clone(),
+            step_id,
+            source,
+        },
+        RunPlanError::AgentStep {
+            step_id, source, ..
+        } => RunTaskError::AgentStep {
+            trajectory_id: traj.clone(),
+            step_id,
+            source,
+        },
+        RunPlanError::Runtime { source, .. } => RunTaskError::Runtime {
+            trajectory_id: traj.clone(),
+            source,
+        },
+        RunPlanError::InvalidPlan(msg) => RunTaskError::Orchestrator {
+            trajectory_id: traj.clone(),
+            source: OrchestratorError::InvalidPlan(msg),
+        },
+    }
+}
+
 /// Run the Orchestrator: one trajectory step, parse JSON → typed Plan.
-async fn plan_step(ctx: &LoopCtx, traj: &TrajectoryId, goal: &str) -> Result<Plan, RunTaskError> {
+async fn plan_step(
+    ctx: &OrchestratorCallCtx,
+    traj: &TrajectoryId,
+    goal: &str,
+) -> Result<Plan, RunTaskError> {
     let req = ctx.orchestrator.build_planner_request(goal);
     drive_orchestrator_call(ctx, traj, req, "<planner>").await
 }
@@ -670,7 +458,7 @@ async fn plan_step(ctx: &LoopCtx, traj: &TrajectoryId, goal: &str) -> Result<Pla
 /// calling).
 #[allow(clippy::too_many_arguments)]
 async fn replan_step(
-    ctx: &LoopCtx,
+    ctx: &OrchestratorCallCtx,
     traj: &TrajectoryId,
     goal: &str,
     previous_plan: &Plan,
@@ -699,7 +487,7 @@ async fn replan_step(
 /// Shared body of `plan_step` + `replan_step`: drive one orchestrator
 /// LLM call via `execute_agent_step`, parse the JSON into a `Plan`.
 async fn drive_orchestrator_call(
-    ctx: &LoopCtx,
+    ctx: &OrchestratorCallCtx,
     traj: &TrajectoryId,
     req: tars_types::ChatRequest,
     step_label: &str,
@@ -739,265 +527,10 @@ async fn drive_orchestrator_call(
     })
 }
 
-/// Internal step result discriminating Approved-with-outcome from the
-/// Reject signal that the outer replan loop catches. We avoid using
-/// `RunTaskError::ReplanExhausted` here because that's a TERMINAL
-/// error (used after replan budget is exhausted) — a single-step
-/// reject is recoverable via replan and shouldn't propagate as an
-/// `Err` until the loop decides to give up.
-enum StepResult {
-    Approved(StepOutcome),
-    Rejected { step_id: String, reason: String },
-}
-
-/// Run one plan step's Worker → Critic loop with Refine retries.
-///
-/// `completed` carries the parsed `AgentMessage::PartialResult` of
-/// every step earlier in the dependency graph — the worker prompt
-/// surfaces this step's deps' actual outputs (not just their ids) so
-/// the worker can use upstream work instead of re-deriving it.
-///
-/// `cancel` is the **per-level** cancel token: when one sibling step
-/// in the same level gets a Critic `Reject`, the outer level loop
-/// fires this token so in-flight workers / critics observe the
-/// cancel through their own `tokio::select!` and bail with
-/// `AgentError::Cancelled`. Distinct from `ctx.cancel` (the
-/// task-level token) which still propagates as a parent.
-///
-/// Returns `Ok(StepResult::Rejected{..})` rather than
-/// `Err(ReplanExhausted{..})` when the Critic rejects — the outer
-/// replan loop decides whether to keep trying (replan) or give up.
-async fn run_one_step(
-    ctx: &LoopCtx,
-    traj: &TrajectoryId,
-    plan: &Plan,
-    step: &PlanStep,
-    goal: &str,
-    completed: &std::collections::HashMap<String, AgentMessage>,
-    cancel: CancellationToken,
-) -> Result<StepResult, RunTaskError> {
-    let mut refinements: Vec<String> = Vec::new();
-    let mut attempts: u32 = 0;
-    loop {
-        // ── Worker ──────────────────────────────────────────────────────
-        let worker_result =
-            run_worker(ctx, traj, plan, step, &refinements, completed, cancel.clone()).await?;
-
-        // ── Critic ──────────────────────────────────────────────────────
-        let verdict_msg = run_critic(ctx, traj, plan, &worker_result, goal, cancel.clone()).await?;
-
-        let verdict_kind = match &verdict_msg {
-            AgentMessage::Verdict { verdict, .. } => verdict.clone(),
-            other => {
-                // parse_verdict_response is supposed to guarantee Verdict;
-                // this is defensive so a future refactor can't quietly
-                // break the loop's contract.
-                return Err(RunTaskError::Critic {
-                    trajectory_id: traj.clone(),
-                    step_id: step.id.clone(),
-                    source: CriticError::UnexpectedOutput(format!(
-                        "expected Verdict envelope from critic; got {other:?}",
-                    )),
-                });
-            }
-        };
-
-        match verdict_kind {
-            VerdictKind::Approve => {
-                return Ok(StepResult::Approved(StepOutcome::Completed {
-                    step_id: step.id.clone(),
-                    result: worker_result,
-                    verdict: verdict_msg,
-                    refinement_attempts: attempts,
-                }));
-            }
-            VerdictKind::Reject { reason } => {
-                // Don't propagate as `Err` — the outer replan loop in
-                // `run_task` discriminates `StepResult::Rejected` to
-                // decide whether to try a fresh plan or give up. This
-                // keeps run_one_step's contract "I either produced a
-                // step outcome, observed a critic-reject signal, or
-                // hit a real error" — three independent failure
-                // modes, three return shapes.
-                return Ok(StepResult::Rejected {
-                    step_id: step.id.clone(),
-                    reason,
-                });
-            }
-            VerdictKind::Refine { suggestions } => {
-                if attempts >= ctx.config.max_refinements_per_step {
-                    return Err(RunTaskError::RefineExhausted {
-                        trajectory_id: traj.clone(),
-                        step_id: step.id.clone(),
-                        attempts: attempts + 1,
-                    });
-                }
-                refinements = suggestions;
-                attempts += 1;
-            }
-        }
-    }
-}
-
-/// Run one Worker call, log it as a trajectory step, parse the typed
-/// PartialResult.
-///
-/// `completed` lets the worker prompt thread the parsed outputs of
-/// this step's dependencies into the request payload — DAG execution
-/// without that threading degenerates to N independent LLM calls that
-/// can't actually use each other's work.
-async fn run_worker(
-    ctx: &LoopCtx,
-    traj: &TrajectoryId,
-    plan: &Plan,
-    step: &PlanStep,
-    refinements: &[String],
-    completed: &std::collections::HashMap<String, AgentMessage>,
-    cancel: CancellationToken,
-) -> Result<AgentMessage, RunTaskError> {
-    let req = ctx.worker.build_worker_request(plan, step, refinements, completed);
-    let agent: Arc<dyn Agent> = ctx.worker.clone();
-    let result = execute_agent_step(
-        ctx.runtime.as_ref(),
-        traj,
-        ctx.llm.clone(),
-        agent,
-        req,
-        cancel,
-    )
-    .await
-    .map_err(|e| RunTaskError::AgentStep {
-        trajectory_id: traj.clone(),
-        step_id: step.id.clone(),
-        source: e,
-    })?;
-
-    let json_text = match result.output {
-        AgentOutput::Text { text } => text,
-        other => {
-            return Err(RunTaskError::Worker {
-                trajectory_id: traj.clone(),
-                step_id: step.id.clone(),
-                source: WorkerError::UnexpectedOutput(format!(
-                    "expected JSON text from worker; got {other:?}"
-                )),
-            });
-        }
-    };
-    WorkerAgent::parse_worker_response(&json_text, ctx.worker.id(), Some(step.id.as_str())).map_err(
-        |source| RunTaskError::Worker {
-            trajectory_id: traj.clone(),
-            step_id: step.id.clone(),
-            source,
-        },
-    )
-}
-
-/// Run one Critic call, log it as a trajectory step, parse the typed
-/// Verdict envelope.
-async fn run_critic(
-    ctx: &LoopCtx,
-    traj: &TrajectoryId,
-    plan: &Plan,
-    worker_result: &AgentMessage,
-    goal: &str,
-    cancel: CancellationToken,
-) -> Result<AgentMessage, RunTaskError> {
-    let result_ref = crate::PartialResultRef::from_message(worker_result).ok_or_else(|| {
-        RunTaskError::Critic {
-            trajectory_id: traj.clone(),
-            step_id: "<critic-input>".into(),
-            source: CriticError::UnexpectedOutput(
-                "worker did not produce a PartialResult message".into(),
-            ),
-        }
-    })?;
-    let target_step_id = result_ref.step_id.map(str::to_string);
-
-    let req = ctx.critic.build_critique_request(plan, &result_ref, goal);
-    let agent: Arc<dyn Agent> = ctx.critic.clone();
-    let result = execute_agent_step(
-        ctx.runtime.as_ref(),
-        traj,
-        ctx.llm.clone(),
-        agent,
-        req,
-        cancel,
-    )
-    .await
-    .map_err(|e| RunTaskError::AgentStep {
-        trajectory_id: traj.clone(),
-        step_id: target_step_id.clone().unwrap_or_else(|| "<critic>".into()),
-        source: e,
-    })?;
-
-    let json_text = match result.output {
-        AgentOutput::Text { text } => text,
-        other => {
-            return Err(RunTaskError::Critic {
-                trajectory_id: traj.clone(),
-                step_id: target_step_id.unwrap_or_else(|| "<critic>".into()),
-                source: CriticError::UnexpectedOutput(format!(
-                    "expected JSON verdict; got {other:?}",
-                )),
-            });
-        }
-    };
-    CriticAgent::parse_verdict_response(&json_text, ctx.critic.id(), target_step_id.as_deref())
-        .map_err(|source| RunTaskError::Critic {
-            trajectory_id: traj.clone(),
-            step_id: target_step_id.unwrap_or_else(|| "<critic>".into()),
-            source,
-        })
-}
-
-/// Allocate a step_seq + append a single `AgentEvent::StepSkipped`
-/// for a step the level loop is gating out. Mirrors the
-/// step_seq-allocation contract in [`execute_agent_step`] (uses
-/// `runtime.next_step_seq` so concurrent levels stay race-safe),
-/// but emits the standalone Skipped event rather than the
-/// Started/Completed pair — skipped steps have no LLM work to log.
-///
-/// `agent` label format matches `WorkerAgent::id()` —
-/// `"worker:<role>"` — so per-agent breakdown rollups bucket the
-/// skip against the agent that WOULD have executed.
-async fn log_skip(
-    ctx: &LoopCtx,
-    traj: &TrajectoryId,
-    step: &PlanStep,
-    reason: &str,
-) -> Result<(), RunTaskError> {
-    let step_seq =
-        ctx.runtime
-            .next_step_seq(traj)
-            .await
-            .map_err(|e| RunTaskError::Runtime {
-                trajectory_id: traj.clone(),
-                source: e,
-            })?;
-    let agent_label = format!("worker:{}", step.worker_role);
-    ctx.runtime
-        .append(
-            traj,
-            AgentEvent::StepSkipped {
-                traj: traj.clone(),
-                step_seq,
-                agent: agent_label,
-                plan_step_id: step.id.clone(),
-                reason: reason.to_string(),
-            },
-        )
-        .await
-        .map_err(|e| RunTaskError::Runtime {
-            trajectory_id: traj.clone(),
-            source: e,
-        })?;
-    Ok(())
-}
-
-/// Best-effort: append `TrajectoryAbandoned` so a recovery scan sees
-/// the trajectory as terminal. Failure here is logged but doesn't
-/// override the original error the caller is about to surface.
+/// Best-effort: append `TrajectoryAbandoned` so a recovery scan
+/// sees the trajectory as terminal. Failure here is logged but
+/// doesn't override the original error the caller is about to
+/// surface.
 async fn abandon(runtime: &Arc<dyn Runtime>, traj: &TrajectoryId, cause: &str) {
     let event = AgentEvent::TrajectoryAbandoned {
         traj: traj.clone(),
@@ -1010,21 +543,6 @@ async fn abandon(runtime: &Arc<dyn Runtime>, traj: &TrajectoryId, cause: &str) {
             "run_task: failed to append TrajectoryAbandoned",
         );
     }
-}
-
-/// True iff `err` is a "this step was cancelled" signal (as opposed
-/// to a real failure). Used by the level loop to discard sibling
-/// results that came back as `AgentError::Cancelled` after we fired
-/// `level_cancel.cancel()` — those are EXPECTED post-reject, not
-/// failures to abandon the trajectory for.
-fn is_cancellation_err(err: &RunTaskError) -> bool {
-    matches!(
-        err,
-        RunTaskError::AgentStep {
-            source: AgentExecutionError::Agent(AgentError::Cancelled),
-            ..
-        }
-    )
 }
 
 #[cfg(test)]

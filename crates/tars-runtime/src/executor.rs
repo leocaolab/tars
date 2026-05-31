@@ -1,0 +1,966 @@
+//! Caller-supplied DAG executor — runs a [`Plan`] without forcing
+//! an LLM Orchestrator (caller provides the plan) or Critic (caller
+//! may pass `None`).
+//!
+//! ## When to use this directly vs [`crate::run_task`]
+//!
+//! - **[`run_plan`]** (this module): you already know the plan shape
+//!   (e.g. arc auto's `scan → fix-fanout → merge_sweep → test →
+//!   coverage` chain). No LLM planning round, no forced critic;
+//!   workers can be subprocesses / pure Rust functions / mocks —
+//!   only those that want LLM features impl [`Worker`] backed by an
+//!   LLM call.
+//!
+//! - **[`crate::run_task`]**: free-form goal string + full LLM agent
+//!   loop (plan + execute + critic-judge + replan-on-reject).
+//!   Internally builds an [`LlmWorker`](crate::LlmWorker) +
+//!   [`LlmCritic`](crate::LlmCritic) over the existing
+//!   [`WorkerAgent`](crate::WorkerAgent) /
+//!   [`CriticAgent`](crate::CriticAgent) and calls `run_plan` inside
+//!   its replan loop — so the DAG primitives (cancel-on-reject,
+//!   conditional skip, skip-cascade, FuturesUnordered level batching,
+//!   trajectory event log) live HERE and `run_task` is a thin
+//!   LLM-flavored shell on top.
+//!
+//! ## Worker contract
+//!
+//! Workers return a [`WorkerOutput`] carrying:
+//!   - `message` — must be [`AgentMessage::PartialResult`]; the
+//!     envelope itself is LLM-agnostic (see `message.rs`).
+//!   - `usage` — token counts. LLM workers fill real numbers;
+//!     non-LLM workers pass [`Usage::default()`] so
+//!     [`RunReport.llm_call_count`](tars_types::RunReport) /
+//!     `tokens` read as honest zeros, not fake values.
+//!
+//! ## Event responsibility split
+//!
+//! - **Executor** emits [`AgentEvent::StepSkipped`] (its job — the
+//!   worker never gets called for a skipped step).
+//! - **Worker** emits its own `StepStarted` / `StepCompleted` /
+//!   `StepFailed` (and `LlmCallCaptured` for LLM workers). LLM
+//!   workers do this via [`crate::execute_agent_step`]; non-LLM
+//!   workers either call the runtime directly or use the
+//!   convenience helper [`emit_step_lifecycle`] in this module.
+//!
+//! This split lets LLM workers reuse the existing
+//! [`execute_agent_step`](crate::execute_agent_step) path unchanged
+//! (no double-emission), while non-LLM workers get a single helper
+//! to wrap their work without re-implementing the event shape.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use futures::stream::{FuturesUnordered, StreamExt};
+use thiserror::Error;
+use tokio_util::sync::CancellationToken;
+
+use tars_types::{TrajectoryId, Usage};
+
+use crate::agent::AgentError;
+use crate::critic::CriticError;
+use crate::event::AgentEvent;
+use crate::message::{AgentMessage, VerdictKind};
+use crate::orchestrator::{Plan, PlanStep};
+use crate::runtime::{AgentExecutionError, Runtime};
+use crate::worker::WorkerError;
+
+// ─── Public types ──────────────────────────────────────────────────────
+
+/// What a [`Worker::run`] returns on success.
+///
+/// `message` MUST be the [`AgentMessage::PartialResult`] variant —
+/// the executor's downstream wiring (`prior_results` threading,
+/// trajectory log shape, [`Critic`] input) assumes that shape. The
+/// executor surfaces a non-conforming return as
+/// [`RunPlanError::Worker`] with a `WorkerError::UnexpectedOutput`
+/// chain so the bug fails loud rather than corrupting the event log.
+#[derive(Clone, Debug)]
+pub struct WorkerOutput {
+    /// Must be [`AgentMessage::PartialResult`]. Other variants are
+    /// rejected by the executor.
+    pub message: AgentMessage,
+    /// Token usage for this step. LLM workers fill real counts;
+    /// non-LLM workers pass [`Usage::default()`].
+    pub usage: Usage,
+}
+
+/// Per-invocation context handed to a [`Worker`]. The worker is
+/// responsible for emitting its own `StepStarted` / `StepCompleted`
+/// / `StepFailed` (and `LlmCallCaptured` for LLM workers) via
+/// `runtime`. LLM workers reuse [`crate::execute_agent_step`] which
+/// does that automatically; non-LLM workers can call
+/// [`emit_step_lifecycle`] to wrap their body without writing the
+/// event-emission boilerplate themselves.
+pub struct WorkerContext {
+    pub runtime: Arc<dyn Runtime>,
+    pub trajectory_id: TrajectoryId,
+    pub cancel: CancellationToken,
+    /// Critic suggestions from the previous refinement attempt.
+    /// Empty on the first attempt for each step. LLM workers thread
+    /// these into the next prompt; non-LLM workers ignore them
+    /// (their Critic — if any — is whatever they encode internally).
+    pub refinements: Vec<String>,
+}
+
+/// Per-invocation context handed to a [`Critic`]. Same shape as
+/// [`WorkerContext`] minus `refinements` (critics emit them, not
+/// consume them).
+pub struct CriticContext {
+    pub runtime: Arc<dyn Runtime>,
+    pub trajectory_id: TrajectoryId,
+    pub cancel: CancellationToken,
+}
+
+/// Executes one [`PlanStep`]. Trait so callers can plug in:
+///   - LLM-backed workers ([`LlmWorker`](crate::LlmWorker)) — wrap a
+///     [`WorkerAgent`](crate::WorkerAgent) + `LlmService`
+///   - Subprocess workers (spawn an external process, parse stdout)
+///   - Pure Rust workers (no I/O — useful for testing or for
+///     deterministic glue steps like `merge_sweep` / `cargo_test` /
+///     coverage rollup)
+///
+/// The executor calls `run` after appending `StepStarted`. On `Ok`
+/// the executor appends `StepCompleted`; on `Err` it appends
+/// `StepFailed` with the error's classification.
+#[async_trait]
+pub trait Worker: Send + Sync {
+    async fn run(
+        &self,
+        plan: &Plan,
+        step: &PlanStep,
+        prior_results: &HashMap<String, AgentMessage>,
+        ctx: WorkerContext,
+    ) -> Result<WorkerOutput, WorkerError>;
+}
+
+/// Judges a [`Worker`]'s output and returns a [`VerdictKind`]:
+/// `Approve` ends the step; `Refine{suggestions}` re-runs the worker
+/// with the suggestions threaded into the next attempt's
+/// `WorkerContext.refinements` (up to `RunPlanConfig.max_refinements_per_step`);
+/// `Reject{reason}` bubbles up as [`RunPlanError::Rejected`] —
+/// callers like [`crate::run_task`] catch it for replan.
+///
+/// **Optional**. Pass `None` to [`run_plan`] for a no-critic flow —
+/// every `Ok` from a worker is auto-approved, no extra LLM call.
+/// Use when the worker already encodes its own success criteria
+/// (e.g. arc's per-finding critic lives inside the fix-worker loop;
+/// no benefit to a second judging pass).
+#[async_trait]
+pub trait Critic: Send + Sync {
+    async fn judge(
+        &self,
+        plan: &Plan,
+        step: &PlanStep,
+        worker_output: &AgentMessage,
+        ctx: CriticContext,
+    ) -> Result<VerdictKind, CriticError>;
+}
+
+/// Per-`worker_role` dispatch table. The executor looks up
+/// `step.worker_role` in `per_role` first; on miss falls back to
+/// `default`. If neither exists for a role, the executor returns
+/// [`RunPlanError::NoWorkerForRole`] before scheduling the step.
+#[derive(Clone)]
+pub struct WorkerRegistry {
+    per_role: HashMap<String, Arc<dyn Worker>>,
+    default: Option<Arc<dyn Worker>>,
+}
+
+impl WorkerRegistry {
+    pub fn new() -> Self {
+        Self {
+            per_role: HashMap::new(),
+            default: None,
+        }
+    }
+
+    /// Register an impl for the given `worker_role`. Replaces any
+    /// previous entry under that role (last write wins).
+    pub fn register(&mut self, role: impl Into<String>, worker: Arc<dyn Worker>) -> &mut Self {
+        self.per_role.insert(role.into(), worker);
+        self
+    }
+
+    /// Fallback for any `step.worker_role` that has no per-role
+    /// entry. Useful for an LLM-backed default that handles every
+    /// role generically (the [`crate::run_task`] use case).
+    pub fn with_default(mut self, worker: Arc<dyn Worker>) -> Self {
+        self.default = Some(worker);
+        self
+    }
+
+    /// Resolve a worker for `role`. Used internally by the executor;
+    /// exposed `pub` so callers building unusual flows can introspect.
+    pub fn find(&self, role: &str) -> Option<Arc<dyn Worker>> {
+        self.per_role
+            .get(role)
+            .cloned()
+            .or_else(|| self.default.clone())
+    }
+}
+
+impl Default for WorkerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tunables for [`run_plan`]. Defaults match
+/// [`crate::RunTaskConfig`]'s historical defaults so existing
+/// callers see no behavioural change after the executor refactor.
+#[derive(Clone, Debug)]
+pub struct RunPlanConfig {
+    /// Maximum number of `Refine` retries per step (NOT counting
+    /// the initial attempt). `0` = worker gets exactly one shot per
+    /// step; any `Refine` verdict immediately fails the step with
+    /// [`RunPlanError::RefineExhausted`].
+    pub max_refinements_per_step: u32,
+}
+
+impl Default for RunPlanConfig {
+    fn default() -> Self {
+        Self {
+            max_refinements_per_step: 2,
+        }
+    }
+}
+
+/// Per-step record in [`TaskOutcome`].
+///
+/// A step is either [`Completed`](Self::Completed) (worker ran +
+/// critic approved — or no critic was configured) or
+/// [`Skipped`](Self::Skipped) (the step's
+/// [`StepCondition`](crate::StepCondition) evaluated false, or one
+/// of its deps was itself skipped — cascade).
+#[derive(Clone, Debug)]
+pub enum StepOutcome {
+    Completed {
+        step_id: String,
+        /// The worker's accepted output (always
+        /// [`AgentMessage::PartialResult`]).
+        result: AgentMessage,
+        /// The critic's approving verdict, if a critic was
+        /// configured. Synthesised as
+        /// [`AgentMessage::Verdict`]`{ verdict: Approve, .. }` when
+        /// `critic = None` so callers reading `verdict` don't have
+        /// to special-case the no-critic flow.
+        verdict: AgentMessage,
+        /// How many refinement loops were needed before approval.
+        /// `0` = approved on first attempt.
+        refinement_attempts: u32,
+    },
+    Skipped {
+        step_id: String,
+        /// Human-readable cause — same string written into the
+        /// trajectory's [`AgentEvent::StepSkipped::reason`].
+        reason: String,
+    },
+}
+
+impl StepOutcome {
+    pub fn step_id(&self) -> &str {
+        match self {
+            Self::Completed { step_id, .. } | Self::Skipped { step_id, .. } => step_id,
+        }
+    }
+
+    /// `Some((result, verdict, refinement_attempts))` for completed
+    /// steps; `None` for skipped.
+    pub fn as_completed(&self) -> Option<(&AgentMessage, &AgentMessage, u32)> {
+        match self {
+            Self::Completed {
+                result,
+                verdict,
+                refinement_attempts,
+                ..
+            } => Some((result, verdict, *refinement_attempts)),
+            Self::Skipped { .. } => None,
+        }
+    }
+
+    pub fn is_skipped(&self) -> bool {
+        matches!(self, Self::Skipped { .. })
+    }
+}
+
+/// What [`run_plan`] returns on success — the executed plan plus
+/// per-step outcomes in plan-declaration order (so
+/// `outcome.steps[i].step_id() == plan.steps[i].id`).
+#[derive(Clone, Debug)]
+pub struct TaskOutcome {
+    pub trajectory_id: TrajectoryId,
+    pub plan: Plan,
+    pub steps: Vec<StepOutcome>,
+}
+
+/// Errors [`run_plan`] surfaces. The trajectory is NOT closed by
+/// `run_plan` itself — that's the caller's job (so [`crate::run_task`]
+/// can keep one trajectory across multiple plan iterations during
+/// replan). Every variant carries `trajectory_id` for forensics.
+#[derive(Debug, Error)]
+pub enum RunPlanError {
+    /// Critic returned `Reject` for some step. Carries the failed
+    /// plan + partial results so a higher-level replan loop (see
+    /// [`crate::run_task`]) can prompt the orchestrator with the
+    /// failed context. `completed` holds the parsed
+    /// `PartialResult`s for steps that were approved before the
+    /// reject landed; the rejected step itself is NOT in the map.
+    #[error("rejected step `{rejected_step_id}`: {reason}")]
+    Rejected {
+        trajectory_id: TrajectoryId,
+        plan: Plan,
+        rejected_step_id: String,
+        reason: String,
+        completed: HashMap<String, AgentMessage>,
+    },
+    /// Critic kept asking for `Refine` and we hit
+    /// `max_refinements_per_step`.
+    #[error("refine exhausted (step `{step_id}`) after {attempts} attempts")]
+    RefineExhausted {
+        trajectory_id: TrajectoryId,
+        step_id: String,
+        attempts: u32,
+    },
+    /// A step's `worker_role` had no registered impl AND no
+    /// `WorkerRegistry::default` was set. Surfaced before any step
+    /// in the offending level starts.
+    #[error("no worker registered for role `{role}` (step `{step_id}`)")]
+    NoWorkerForRole {
+        trajectory_id: TrajectoryId,
+        role: String,
+        step_id: String,
+    },
+    /// A worker returned a non-`PartialResult` message variant.
+    /// Wraps the worker's own error chain when it raised, or
+    /// synthesises one when the variant alone is the violation.
+    #[error("worker (step `{step_id}`): {source}")]
+    Worker {
+        trajectory_id: TrajectoryId,
+        step_id: String,
+        #[source]
+        source: WorkerError,
+    },
+    /// Critic LLM call failed or its output was malformed.
+    #[error("critic (step `{step_id}`): {source}")]
+    Critic {
+        trajectory_id: TrajectoryId,
+        step_id: String,
+        #[source]
+        source: CriticError,
+    },
+    /// Underlying agent step failed (LLM provider error, cancel,
+    /// internal). Wraps [`AgentExecutionError`] from
+    /// [`crate::execute_agent_step`].
+    #[error("agent step (step `{step_id}`): {source}")]
+    AgentStep {
+        trajectory_id: TrajectoryId,
+        step_id: String,
+        #[source]
+        source: AgentExecutionError,
+    },
+    /// Trajectory event-store write failed.
+    #[error("runtime: {source}")]
+    Runtime {
+        trajectory_id: TrajectoryId,
+        #[source]
+        source: crate::RuntimeError,
+    },
+    /// Plan failed [`Plan::validate`]. The executor calls validate
+    /// up front so a bad plan fails fast before any step runs.
+    #[error("invalid plan: {0}")]
+    InvalidPlan(String),
+}
+
+impl RunPlanError {
+    pub fn trajectory_id(&self) -> Option<&TrajectoryId> {
+        match self {
+            Self::Rejected { trajectory_id, .. }
+            | Self::RefineExhausted { trajectory_id, .. }
+            | Self::NoWorkerForRole { trajectory_id, .. }
+            | Self::Worker { trajectory_id, .. }
+            | Self::Critic { trajectory_id, .. }
+            | Self::AgentStep { trajectory_id, .. }
+            | Self::Runtime { trajectory_id, .. } => Some(trajectory_id),
+            Self::InvalidPlan(_) => None,
+        }
+    }
+}
+
+// ─── run_plan ──────────────────────────────────────────────────────────
+
+/// Internal step outcome — discriminates "approved with worker output"
+/// from "rejected by critic" so the level loop can react to either
+/// without conflating them with the hard-error path.
+enum StepDecision {
+    Approved(StepOutcome),
+    Rejected { step_id: String, reason: String },
+}
+
+/// Execute `plan` against the supplied `workers` + optional `critic`,
+/// appending lifecycle events to the existing `trajectory_id`. The
+/// caller is responsible for creating + closing the trajectory
+/// (e.g. [`Runtime::create_trajectory`] before, `TrajectoryCompleted`
+/// / `TrajectoryAbandoned` after).
+///
+/// ## Behaviour preserved from the historical `run_task` level loop
+///
+/// - **Depth-batched parallel execution**: each [`Plan::execution_levels`]
+///   tier runs concurrently via [`FuturesUnordered`].
+/// - **Cancel-on-reject**: the first `Reject` (or hard error) in a
+///   level fires a per-level cancel token; in-flight siblings
+///   observe `cancel.cancelled()` and bail with
+///   [`AgentError::Cancelled`], which the level loop discards.
+/// - **Skip-cascade + conditional**: pre-pass classifies each
+///   level's steps before scheduling. A step is skipped if any dep
+///   is skipped (cascade) or its [`StepCondition`](crate::StepCondition)
+///   evaluates false. Skipped steps emit
+///   [`AgentEvent::StepSkipped`] and land as
+///   [`StepOutcome::Skipped`].
+/// - **Per-step refinement loop**: critic returns `Refine` → worker
+///   re-runs with suggestions threaded; up to
+///   `config.max_refinements_per_step` attempts. `Approve` ends the
+///   step; `Reject` bubbles up as [`RunPlanError::Rejected`].
+/// - **Plan-order outcome reassembly**: `outcome.steps[i].step_id()`
+///   == `plan.steps[i].id`, including skipped entries.
+///
+/// ## Trajectory event log shape (per non-skipped step)
+///
+/// ```text
+/// StepStarted(step_seq=N, agent="worker:<role>")
+///   ↳ possibly LlmCallCaptured(step_seq=N)   # LLM workers only
+/// StepCompleted(step_seq=N, usage=<from WorkerOutput>)
+/// [if critic configured:]
+/// StepStarted(step_seq=N+1, agent="critic:<id>")
+///   ↳ possibly LlmCallCaptured(step_seq=N+1)
+/// StepCompleted(step_seq=N+1, usage=<from critic>)
+/// ```
+///
+/// (Refinement loops emit a fresh pair of `StepStarted` /
+/// `StepCompleted` per attempt — one worker invocation, one critic
+/// invocation, all sharing the parent step's `worker_role`.)
+pub async fn run_plan(
+    runtime: Arc<dyn Runtime>,
+    trajectory_id: TrajectoryId,
+    plan: Plan,
+    workers: WorkerRegistry,
+    critic: Option<Arc<dyn Critic>>,
+    config: RunPlanConfig,
+    cancel: CancellationToken,
+) -> Result<TaskOutcome, RunPlanError> {
+    // ── Pre-flight: plan validation + worker resolution ──────────────
+    // Both checks happen up front so a bad plan fails before we
+    // start emitting events. validate() also rules out cycles
+    // (transitively, via the "deps point at earlier-declared steps"
+    // rule), so `execution_levels()` below can't loop.
+    plan.validate()
+        .map_err(|e| RunPlanError::InvalidPlan(e.to_string()))?;
+    for step in &plan.steps {
+        if workers.find(&step.worker_role).is_none() {
+            return Err(RunPlanError::NoWorkerForRole {
+                trajectory_id: trajectory_id.clone(),
+                role: step.worker_role.clone(),
+                step_id: step.id.clone(),
+            });
+        }
+    }
+
+    let mut step_outcomes_by_id: HashMap<String, StepOutcome> =
+        HashMap::with_capacity(plan.steps.len());
+    let mut completed: HashMap<String, AgentMessage> =
+        HashMap::with_capacity(plan.steps.len());
+    let mut skipped_ids: HashSet<String> = HashSet::new();
+    let mut hit_reject: Option<(String, String)> = None;
+
+    'level_loop: for level in plan.execution_levels() {
+        // ── Pre-pass: classify each step as RUN or SKIP. ─────────────
+        // Two skip reasons, in priority order:
+        //  1. cascade — any dep is in `skipped_ids`.
+        //  2. condition — predicate evaluates false against `completed`.
+        // Skipped steps emit a single `AgentEvent::StepSkipped` and
+        // are recorded immediately so this level's RUN steps can be
+        // dispatched into FuturesUnordered without further bookkeeping.
+        let mut to_run: Vec<&PlanStep> = Vec::with_capacity(level.len());
+        for step in &level {
+            let cascade_dep = step
+                .depends_on
+                .iter()
+                .find(|d| skipped_ids.contains(d.as_str()));
+            if let Some(dep) = cascade_dep {
+                let reason = format!("dep `{dep}` was skipped");
+                log_skip(&runtime, &trajectory_id, step, &reason).await?;
+                skipped_ids.insert(step.id.clone());
+                step_outcomes_by_id.insert(
+                    step.id.clone(),
+                    StepOutcome::Skipped {
+                        step_id: step.id.clone(),
+                        reason,
+                    },
+                );
+                continue;
+            }
+            if !step.condition.matches(&completed) {
+                let reason = step.condition.skip_reason();
+                log_skip(&runtime, &trajectory_id, step, &reason).await?;
+                skipped_ids.insert(step.id.clone());
+                step_outcomes_by_id.insert(
+                    step.id.clone(),
+                    StepOutcome::Skipped {
+                        step_id: step.id.clone(),
+                        reason,
+                    },
+                );
+                continue;
+            }
+            to_run.push(step);
+        }
+        if to_run.is_empty() {
+            continue 'level_loop;
+        }
+
+        // ── Schedule the run-eligible siblings in parallel. ──────────
+        let level_cancel = cancel.child_token();
+        let workers_ref = &workers;
+        let critic_ref = critic.as_deref();
+        let runtime_ref = runtime.clone();
+        let plan_ref = &plan;
+        let completed_ref = &completed;
+        let traj_ref = &trajectory_id;
+        let config_ref = &config;
+
+        let mut tasks: FuturesUnordered<_> = to_run
+            .iter()
+            .map(|step| {
+                let cancel = level_cancel.clone();
+                let step_id_for_label = step.id.clone();
+                let runtime = runtime_ref.clone();
+                async move {
+                    let res = run_one_step(
+                        runtime,
+                        traj_ref,
+                        plan_ref,
+                        step,
+                        completed_ref,
+                        workers_ref,
+                        critic_ref,
+                        config_ref,
+                        cancel,
+                    )
+                    .await;
+                    (step_id_for_label, res)
+                }
+            })
+            .collect();
+
+        let mut level_approved: Vec<(String, StepOutcome)> = Vec::new();
+        while let Some((step_id, step_res)) = tasks.next().await {
+            match step_res {
+                Ok(StepDecision::Approved(outcome)) => {
+                    level_approved.push((step_id, outcome));
+                }
+                Ok(StepDecision::Rejected {
+                    step_id: rejected_id,
+                    reason,
+                }) => {
+                    if hit_reject.is_none() {
+                        hit_reject = Some((rejected_id, reason));
+                        // Tell still-running siblings to bail — drop
+                        // futures via their cancel observation. The
+                        // Cancelled returns get discarded below.
+                        level_cancel.cancel();
+                    }
+                }
+                Err(e) => {
+                    if hit_reject.is_some() && is_cancellation_err(&e) {
+                        continue;
+                    }
+                    level_cancel.cancel();
+                    while let Some((_, drained_res)) = tasks.next().await {
+                        if let Err(drained_err) = &drained_res
+                            && is_cancellation_err(drained_err)
+                        {
+                            continue;
+                        }
+                        tracing::warn!(
+                            trajectory_id = %trajectory_id,
+                            "run_plan: discarding drained-sibling result after first-failure cancel (cause: {e})",
+                        );
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        drop(tasks);
+
+        if hit_reject.is_none() {
+            for (step_id, outcome) in level_approved {
+                if let StepOutcome::Completed { result, .. } = &outcome {
+                    completed.insert(step_id.clone(), result.clone());
+                }
+                step_outcomes_by_id.insert(step_id, outcome);
+            }
+        }
+        if hit_reject.is_some() {
+            break 'level_loop;
+        }
+    }
+
+    // ── Decide: success or Rejected ──────────────────────────────────
+    if let Some((rejected_step_id, reason)) = hit_reject {
+        return Err(RunPlanError::Rejected {
+            trajectory_id: trajectory_id.clone(),
+            plan,
+            rejected_step_id,
+            reason,
+            completed,
+        });
+    }
+
+    // ── Reassemble in plan-declaration order. ────────────────────────
+    let step_outcomes: Vec<StepOutcome> = plan
+        .steps
+        .iter()
+        .map(|s| {
+            step_outcomes_by_id.remove(&s.id).expect(
+                "every plan step was classified as Completed, Skipped, or surfaced as Reject",
+            )
+        })
+        .collect();
+
+    Ok(TaskOutcome {
+        trajectory_id,
+        plan,
+        steps: step_outcomes,
+    })
+}
+
+// ─── Per-step inner loop ───────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn run_one_step(
+    runtime: Arc<dyn Runtime>,
+    trajectory_id: &TrajectoryId,
+    plan: &Plan,
+    step: &PlanStep,
+    completed: &HashMap<String, AgentMessage>,
+    workers: &WorkerRegistry,
+    critic: Option<&(dyn Critic + '_)>,
+    config: &RunPlanConfig,
+    cancel: CancellationToken,
+) -> Result<StepDecision, RunPlanError> {
+    let worker = workers
+        .find(&step.worker_role)
+        .expect("pre-flight ensured every step.worker_role has a registered impl");
+    let mut refinements: Vec<String> = Vec::new();
+    let mut attempts: u32 = 0;
+    loop {
+        // ── Worker invocation ────────────────────────────────────────
+        // Worker is responsible for its own StepStarted/Completed/Failed
+        // events (LLM workers via execute_agent_step, non-LLM via
+        // emit_step_lifecycle or manual append). Executor only enforces
+        // the WorkerOutput shape invariant + error mapping.
+        let wctx = WorkerContext {
+            runtime: runtime.clone(),
+            trajectory_id: trajectory_id.clone(),
+            cancel: cancel.clone(),
+            refinements: refinements.clone(),
+        };
+        let worker_msg = match worker.run(plan, step, completed, wctx).await {
+            Ok(out) => {
+                if !matches!(out.message, AgentMessage::PartialResult { .. }) {
+                    return Err(RunPlanError::Worker {
+                        trajectory_id: trajectory_id.clone(),
+                        step_id: step.id.clone(),
+                        source: WorkerError::UnexpectedOutput(format!(
+                            "Worker::run must return AgentMessage::PartialResult; got {:?}",
+                            out.message,
+                        )),
+                    });
+                }
+                // `out.usage` is informational at this layer — the
+                // worker's own StepCompleted event already captured it
+                // for RunReport rollup. We don't re-emit here.
+                let _ = out.usage;
+                out.message
+            }
+            Err(e) => return Err(map_worker_error(trajectory_id, step.id.clone(), e)),
+        };
+
+        // ── Critic invocation (optional) ─────────────────────────────
+        // Same lifecycle contract as Worker: Critic owns its own
+        // StepStarted/Completed events. When `critic = None` we
+        // synthesise an Approve verdict without emitting anything
+        // (no extra step in the trajectory log either — there's no
+        // judging activity to record).
+        let verdict_msg = match critic {
+            None => AgentMessage::Verdict {
+                from_agent: tars_types::AgentId::new("no-critic"),
+                target_step_id: Some(step.id.clone()),
+                verdict: VerdictKind::Approve,
+            },
+            Some(c) => {
+                let cctx = CriticContext {
+                    runtime: runtime.clone(),
+                    trajectory_id: trajectory_id.clone(),
+                    cancel: cancel.clone(),
+                };
+                match c.judge(plan, step, &worker_msg, cctx).await {
+                    Ok(v) => AgentMessage::Verdict {
+                        from_agent: tars_types::AgentId::new("critic"),
+                        target_step_id: Some(step.id.clone()),
+                        verdict: v,
+                    },
+                    Err(e) => return Err(map_critic_error(trajectory_id, step.id.clone(), e)),
+                }
+            }
+        };
+
+        // ── Verdict dispatch ─────────────────────────────────────────
+        let verdict_kind = match &verdict_msg {
+            AgentMessage::Verdict { verdict, .. } => verdict.clone(),
+            other => {
+                return Err(RunPlanError::Critic {
+                    trajectory_id: trajectory_id.clone(),
+                    step_id: step.id.clone(),
+                    source: CriticError::UnexpectedOutput(format!(
+                        "expected Verdict envelope; got {other:?}",
+                    )),
+                });
+            }
+        };
+        match verdict_kind {
+            VerdictKind::Approve => {
+                return Ok(StepDecision::Approved(StepOutcome::Completed {
+                    step_id: step.id.clone(),
+                    result: worker_msg,
+                    verdict: verdict_msg,
+                    refinement_attempts: attempts,
+                }));
+            }
+            VerdictKind::Reject { reason } => {
+                return Ok(StepDecision::Rejected {
+                    step_id: step.id.clone(),
+                    reason,
+                });
+            }
+            VerdictKind::Refine { suggestions } => {
+                if attempts >= config.max_refinements_per_step {
+                    return Err(RunPlanError::RefineExhausted {
+                        trajectory_id: trajectory_id.clone(),
+                        step_id: step.id.clone(),
+                        attempts: attempts + 1,
+                    });
+                }
+                refinements = suggestions;
+                attempts += 1;
+            }
+        }
+    }
+}
+
+// ─── Trajectory event helpers ──────────────────────────────────────────
+
+/// Convenience for non-LLM [`Worker`] implementations: wraps `body`
+/// in a `StepStarted` → ... → `StepCompleted` / `StepFailed` event
+/// triple, with `step_seq` allocated via
+/// [`Runtime::next_step_seq`].
+///
+/// LLM workers should NOT call this — they should call
+/// [`crate::execute_agent_step`] which produces the same event
+/// shape plus `LlmCallCaptured`.
+///
+/// The body returns `(T, Usage)` on success — the `Usage` is folded
+/// into the `StepCompleted` event for cost rollup. Pass
+/// `Usage::default()` if the worker does no LLM / token-billable
+/// work.
+///
+/// ## Example
+///
+/// ```ignore
+/// #[async_trait::async_trait]
+/// impl Worker for MergeSweepWorker {
+///     async fn run(
+///         &self,
+///         _plan: &Plan,
+///         step: &PlanStep,
+///         _prior: &HashMap<String, AgentMessage>,
+///         ctx: WorkerContext,
+///     ) -> Result<WorkerOutput, WorkerError> {
+///         let (report, usage) = emit_step_lifecycle(
+///             &ctx.runtime,
+///             &ctx.trajectory_id,
+///             &format!("worker:{}", step.worker_role),
+///             format!("merge_sweep for step {}", step.id),
+///             |_step_seq| async {
+///                 let r = merge_sweep::run(&self.repo).await?;
+///                 Ok::<_, MergeSweepError>((r, Usage::default()))
+///             },
+///         )
+///         .await
+///         .map_err(|e| WorkerError::InvalidResult(e.to_string()))?;
+///         Ok(WorkerOutput {
+///             message: AgentMessage::PartialResult {
+///                 from_agent: AgentId::new("arc-merge-sweep"),
+///                 step_id: Some(step.id.clone()),
+///                 summary: format!("{} applied", report.ok),
+///                 confidence: 1.0,
+///             },
+///             usage,
+///         })
+///     }
+/// }
+/// ```
+pub async fn emit_step_lifecycle<T, E, F, Fut>(
+    runtime: &Arc<dyn Runtime>,
+    traj: &TrajectoryId,
+    agent_label: &str,
+    input_summary: impl Into<String>,
+    body: F,
+) -> Result<(T, Usage), E>
+where
+    F: FnOnce(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<(T, Usage), E>>,
+    E: std::fmt::Display,
+{
+    let input_summary = input_summary.into();
+    // Best-effort: a runtime.next_step_seq failure here would
+    // mean the event store is broken — we still call `body` with
+    // step_seq=0 so the worker can do its work, but the trajectory
+    // log will be missing this lifecycle. Same posture as the
+    // existing `abandon` / `TrajectoryCompleted` helpers in task.rs:
+    // never fail the work over a logging hiccup.
+    let step_seq = match runtime.next_step_seq(traj).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "emit_step_lifecycle: next_step_seq failed; using 0");
+            0
+        }
+    };
+    let idempotency_key =
+        crate::event::StepIdempotencyKey::compute(traj, step_seq, &input_summary);
+    let _ = runtime
+        .append(
+            traj,
+            AgentEvent::StepStarted {
+                traj: traj.clone(),
+                step_seq,
+                agent: agent_label.to_string(),
+                idempotency_key,
+                input_summary: input_summary.clone(),
+            },
+        )
+        .await;
+    let result = body(step_seq).await;
+    match &result {
+        Ok((_, usage)) => {
+            let _ = runtime
+                .append(
+                    traj,
+                    AgentEvent::StepCompleted {
+                        traj: traj.clone(),
+                        step_seq,
+                        output_summary: input_summary,
+                        usage: usage.clone(),
+                    },
+                )
+                .await;
+        }
+        Err(e) => {
+            let _ = runtime
+                .append(
+                    traj,
+                    AgentEvent::StepFailed {
+                        traj: traj.clone(),
+                        step_seq,
+                        error: e.to_string(),
+                        classification: "permanent".into(),
+                    },
+                )
+                .await;
+        }
+    }
+    result
+}
+
+async fn log_skip(
+    runtime: &Arc<dyn Runtime>,
+    traj: &TrajectoryId,
+    step: &PlanStep,
+    reason: &str,
+) -> Result<(), RunPlanError> {
+    let step_seq = runtime
+        .next_step_seq(traj)
+        .await
+        .map_err(|source| RunPlanError::Runtime {
+            trajectory_id: traj.clone(),
+            source,
+        })?;
+    runtime
+        .append(
+            traj,
+            AgentEvent::StepSkipped {
+                traj: traj.clone(),
+                step_seq,
+                agent: format!("worker:{}", step.worker_role),
+                plan_step_id: step.id.clone(),
+                reason: reason.to_string(),
+            },
+        )
+        .await
+        .map_err(|source| RunPlanError::Runtime {
+            trajectory_id: traj.clone(),
+            source,
+        })?;
+    Ok(())
+}
+
+// ─── Error mapping ─────────────────────────────────────────────────────
+
+fn map_worker_error(traj: &TrajectoryId, step_id: String, e: WorkerError) -> RunPlanError {
+    // LLM-backed workers bubble `WorkerError::Agent(AgentError)`;
+    // surface those as `AgentStep` so the cancel-detection helper +
+    // existing `RunTaskError::AgentStep` mapping in `run_task`
+    // continue to recognise them. Non-LLM workers' decode / shape
+    // errors land in the catch-all Worker variant.
+    match e {
+        WorkerError::Agent(agent_err) => RunPlanError::AgentStep {
+            trajectory_id: traj.clone(),
+            step_id,
+            source: AgentExecutionError::Agent(agent_err),
+        },
+        other => RunPlanError::Worker {
+            trajectory_id: traj.clone(),
+            step_id,
+            source: other,
+        },
+    }
+}
+
+fn map_critic_error(traj: &TrajectoryId, step_id: String, e: CriticError) -> RunPlanError {
+    match e {
+        CriticError::Agent(agent_err) => RunPlanError::AgentStep {
+            trajectory_id: traj.clone(),
+            step_id,
+            source: AgentExecutionError::Agent(agent_err),
+        },
+        other => RunPlanError::Critic {
+            trajectory_id: traj.clone(),
+            step_id,
+            source: other,
+        },
+    }
+}
+
+/// True iff `err` is the synthetic "cancelled" return that
+/// post-reject sibling tasks come back with. The level loop
+/// discards these to avoid abandoning the trajectory on what is
+/// expected drain behaviour.
+fn is_cancellation_err(err: &RunPlanError) -> bool {
+    matches!(
+        err,
+        RunPlanError::AgentStep {
+            source: AgentExecutionError::Agent(AgentError::Cancelled),
+            ..
+        }
+    )
+}

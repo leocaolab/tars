@@ -38,6 +38,8 @@ pub mod check;
 mod critic;
 mod error;
 mod event;
+mod executor;
+mod llm_adapters;
 pub mod judge;
 mod message;
 pub mod metamorphic;
@@ -57,6 +59,11 @@ pub use check::{CheckResult, CheckRunner, Invariant, MembershipInvariant, Valida
 pub use critic::{CriticAgent, CriticError, PartialResultRef};
 pub use error::RuntimeError;
 pub use event::{AgentEvent, StepIdempotencyKey};
+pub use executor::{
+    Critic, CriticContext, RunPlanConfig, RunPlanError, Worker, WorkerContext, WorkerOutput,
+    WorkerRegistry, emit_step_lifecycle, run_plan,
+};
+pub use llm_adapters::{LlmCritic, LlmWorker};
 pub use judge::{
     DEFAULT_JUDGE_PROMPT, Judge, JudgeError, LlmJudge, ensure_anti_incest, run_judge_pass,
 };
