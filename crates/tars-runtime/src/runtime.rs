@@ -84,6 +84,26 @@ pub trait Runtime: Send + Sync + 'static {
             .count();
         Ok(u32::try_from(n).unwrap_or(u32::MAX))
     }
+
+    /// Allocate the next `step_seq` for `traj`. **Must be linearisable
+    /// across concurrent callers** when the runtime is used to drive
+    /// parallel agent execution (e.g. a DAG executor running
+    /// independent plan steps in flight at the same time).
+    ///
+    /// The default impl is `count_started_steps + 1`, which is
+    /// race-prone under concurrency: two callers can both read
+    /// `count = N` and both append events claiming `step_seq = N+1`.
+    /// That collision is invisible to the event store (no unique
+    /// constraint on step_seq) but corrupts the invariant that
+    /// step_seq monotonically identifies a logical step.
+    ///
+    /// Storage-aware / runtime-owned impls SHOULD override this with
+    /// a serialised counter (mutex-protected, cached after first DB
+    /// read). `LocalRuntime` does so. The default lives on for test
+    /// mocks where parallelism isn't exercised.
+    async fn next_step_seq(&self, traj: &TrajectoryId) -> Result<u32, RuntimeError> {
+        Ok(self.count_started_steps(traj).await?.saturating_add(1))
+    }
 }
 
 /// Production runtime backed by an [`EventStore`].
@@ -94,11 +114,24 @@ pub trait Runtime: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct LocalRuntime {
     event_store: Arc<dyn EventStore>,
+    /// Per-trajectory cached `next step_seq` for the parallel-safe
+    /// allocator (`next_step_seq` override). Lazily initialised on
+    /// first allocation by replaying `count_started_steps`; all
+    /// subsequent allocations under the same trajectory hit the cache
+    /// and increment under the mutex. Trajectories are short-lived
+    /// per run, so the HashMap never grows unbounded in practice; if
+    /// it ever did, an LRU layer would slot in here without API churn.
+    step_seq_counters: Arc<tokio::sync::Mutex<std::collections::HashMap<TrajectoryId, u32>>>,
 }
 
 impl LocalRuntime {
     pub fn new(event_store: Arc<dyn EventStore>) -> Arc<Self> {
-        Arc::new(Self { event_store })
+        Arc::new(Self {
+            event_store,
+            step_seq_counters: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+        })
     }
 
     /// Mint a fresh trajectory id. Default: `uuid v4` formatted as
@@ -173,6 +206,43 @@ impl Runtime for LocalRuntime {
     async fn list_trajectories(&self) -> Result<Vec<TrajectoryId>, RuntimeError> {
         Ok(self.event_store.list_trajectories().await?)
     }
+
+    /// Parallel-safe `step_seq` allocator. Holds a per-trajectory
+    /// in-memory counter under a mutex, populated lazily from the
+    /// event store on first allocation. Subsequent allocations are
+    /// pure cache hits, so concurrent `execute_agent_step` calls from
+    /// a DAG executor each get a distinct, monotonically increasing
+    /// `step_seq` with no race window.
+    ///
+    /// The default trait impl (`count_started_steps + 1`) is
+    /// race-prone — two parallel callers both read N and both write
+    /// N+1. This override is what makes parallel run_task safe.
+    async fn next_step_seq(&self, traj: &TrajectoryId) -> Result<u32, RuntimeError> {
+        // Fast path: cache hit. Increment in place under the mutex,
+        // observers serialise on the lock so two parallel callers see
+        // distinct successive values.
+        {
+            let mut guard = self.step_seq_counters.lock().await;
+            if let Some(c) = guard.get_mut(traj) {
+                let next = c.saturating_add(1);
+                *c = next;
+                return Ok(next);
+            }
+        }
+        // Slow path: lazy seed from the event store. Run OUTSIDE the
+        // mutex so storage I/O doesn't serialise unrelated trajectories.
+        // Multiple threads racing here may both query — that's fine, the
+        // `entry().or_insert` below resolves on the LAST writer winning
+        // *only when first seeding*; once seeded, the in-place
+        // increment guarantees monotonic distinct values for all
+        // subsequent callers.
+        let from_store = self.count_started_steps(traj).await?;
+        let mut guard = self.step_seq_counters.lock().await;
+        let entry = guard.entry(traj.clone()).or_insert(from_store);
+        let next = entry.saturating_add(1);
+        *entry = next;
+        Ok(next)
+    }
 }
 
 /// Drive `agent.execute()` through one trajectory step, with full
@@ -238,7 +308,14 @@ pub async fn execute_agent_step(
     //    a fresh trajectory's first step would otherwise come out
     //    as step_seq=2). Doc 04 §3.2 invariant 3 makes step_seq the
     //    LOGICAL step identifier; event sequencing is orthogonal.
-    let step_seq: u32 = runtime.count_started_steps(traj).await?.saturating_add(1);
+    // Parallel-safe allocation: under a DAG executor with concurrent
+    // step calls, the bare `count + 1` shape would race (two callers
+    // both read N, both append step_seq=N+1). `next_step_seq` is the
+    // serialised entry point — production runtimes (LocalRuntime)
+    // override it with a mutex-protected counter; test stubs default
+    // to the historical race-prone shape, which is fine when calls
+    // are serial.
+    let step_seq: u32 = runtime.next_step_seq(traj).await?;
 
     // 2. StepStarted
     let input_summary = format!(

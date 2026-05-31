@@ -79,6 +79,54 @@ pub struct PlanStep {
 }
 
 impl Plan {
+    /// Group `steps` into dependency depth-levels for parallel
+    /// execution. Level 0 = no deps (roots). Level N = steps whose
+    /// deepest dep is at level N-1. Steps in the same level have no
+    /// dep on each other and can run concurrently.
+    ///
+    /// **Pre-condition**: `validate()` must succeed first. Without that,
+    /// the depth computation may panic on missing-dep lookups or
+    /// silently return wrong levels on a cycle. (`validate()` already
+    /// rules out cycles by requiring deps to point at earlier-declared
+    /// steps — a topological order is implicit, so no explicit cycle
+    /// detection is needed here.)
+    pub fn execution_levels(&self) -> Vec<Vec<&PlanStep>> {
+        use std::collections::HashMap;
+        // depths: step.id → 0 (no deps) or 1 + max(dep depths).
+        // Because deps point at earlier steps, by the time we reach
+        // step S every dep's depth is already in the map.
+        let mut depths: HashMap<&str, usize> = HashMap::with_capacity(self.steps.len());
+        for step in &self.steps {
+            let d = step
+                .depends_on
+                .iter()
+                .map(|dep| {
+                    depths.get(dep.as_str()).copied().unwrap_or_else(|| {
+                        // validate() ruled this out; the unreachable
+                        // path defends against a future caller skipping
+                        // validation.
+                        panic!(
+                            "execution_levels: step `{}` depends on unknown `{}` — call validate() first",
+                            step.id, dep,
+                        )
+                    }) + 1
+                })
+                .max()
+                .unwrap_or(0);
+            depths.insert(step.id.as_str(), d);
+        }
+        // Group steps by depth, preserving declaration order within
+        // each level (callers may want stable batch composition for
+        // logging / replay).
+        let max_depth = depths.values().copied().max().unwrap_or(0);
+        let mut levels: Vec<Vec<&PlanStep>> = (0..=max_depth).map(|_| Vec::new()).collect();
+        for step in &self.steps {
+            let d = depths[step.id.as_str()];
+            levels[d].push(step);
+        }
+        levels
+    }
+
     /// True iff the dependency graph is well-formed: every id is
     /// unique, every `depends_on` references a known step, and no
     /// step depends on itself or on a later-declared step (cycles
@@ -323,6 +371,91 @@ mod tests {
                     depends_on: vec!["s1".into()],
                 },
             ],
+        }
+    }
+
+    /// `execution_levels` groups deps-free steps into level 0, every
+    /// step whose deepest dep is at level N-1 into level N, etc.
+    /// Within a level steps are sibling (independent); across levels
+    /// they're sequential. This is the contract the DAG executor in
+    /// task.rs relies on for its `for level in plan.execution_levels()`
+    /// → `join_all(level)` shape.
+    #[test]
+    fn execution_levels_groups_diamond_fanout_into_three_layers() {
+        // diamond:
+        //     s1 ──┐
+        //          ├─→ s4
+        //     s2 ──┤
+        //          └─→ s5
+        //     s3 ──┘
+        //                  s4 + s5 → s6 (the merge)
+        let plan = Plan {
+            plan_id: "diamond".into(),
+            goal: "fan out then merge".into(),
+            steps: vec![
+                step("s1", "a", vec![]),
+                step("s2", "a", vec![]),
+                step("s3", "a", vec![]),
+                step("s4", "a", vec!["s1", "s2"]),
+                step("s5", "a", vec!["s2", "s3"]),
+                step("s6", "a", vec!["s4", "s5"]),
+            ],
+        };
+        plan.validate().expect("diamond is well-formed");
+        let levels = plan.execution_levels();
+        assert_eq!(levels.len(), 3, "diamond has depths 0, 1, 2");
+        fn ids<'a>(lv: &[&'a PlanStep]) -> Vec<&'a str> {
+            lv.iter().map(|s| s.id.as_str()).collect()
+        }
+        assert_eq!(ids(&levels[0]), vec!["s1", "s2", "s3"]);
+        assert_eq!(ids(&levels[1]), vec!["s4", "s5"]);
+        assert_eq!(ids(&levels[2]), vec!["s6"]);
+    }
+
+    #[test]
+    fn execution_levels_handles_pure_serial_chain_as_one_step_per_level() {
+        // Pure chain s1 → s2 → s3 → s4: each step its own level.
+        let plan = Plan {
+            plan_id: "chain".into(),
+            goal: "linear".into(),
+            steps: vec![
+                step("s1", "a", vec![]),
+                step("s2", "a", vec!["s1"]),
+                step("s3", "a", vec!["s2"]),
+                step("s4", "a", vec!["s3"]),
+            ],
+        };
+        plan.validate().unwrap();
+        let levels = plan.execution_levels();
+        assert_eq!(levels.len(), 4, "chain has 4 distinct depths");
+        for (i, lv) in levels.iter().enumerate() {
+            assert_eq!(lv.len(), 1, "chain level {i} should have exactly 1 step");
+        }
+    }
+
+    #[test]
+    fn execution_levels_handles_all_independent_steps_as_a_single_wide_level() {
+        let plan = Plan {
+            plan_id: "wide".into(),
+            goal: "all independent".into(),
+            steps: vec![
+                step("s1", "a", vec![]),
+                step("s2", "a", vec![]),
+                step("s3", "a", vec![]),
+            ],
+        };
+        plan.validate().unwrap();
+        let levels = plan.execution_levels();
+        assert_eq!(levels.len(), 1, "all roots → one level");
+        assert_eq!(levels[0].len(), 3);
+    }
+
+    fn step(id: &str, role: &str, deps: Vec<&str>) -> PlanStep {
+        PlanStep {
+            id: id.into(),
+            worker_role: role.into(),
+            instruction: format!("do {id}"),
+            depends_on: deps.into_iter().map(String::from).collect(),
         }
     }
 

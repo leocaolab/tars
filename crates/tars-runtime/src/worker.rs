@@ -164,7 +164,14 @@ impl WorkerAgent {
         step: &PlanStep,
         refinements: &[String],
     ) -> Result<AgentMessage, WorkerError> {
-        let req = self.build_worker_request(plan, step, refinements);
+        // Convenience path: no upstream-result threading. The DAG
+        // executor (`run_task`) calls `build_worker_request` directly
+        // with the per-step `completed` map; this lower-level entry
+        // exists for callers that drive single steps in isolation
+        // (tests, ad-hoc scripts) where no prior results need
+        // surfacing.
+        let empty = std::collections::HashMap::new();
+        let req = self.build_worker_request(plan, step, refinements, &empty);
         let agent_result = self.clone().execute(ctx, req).await?;
         let json_text = match agent_result.output {
             AgentOutput::Text { text } => text,
@@ -186,7 +193,31 @@ impl WorkerAgent {
         plan: &Plan,
         step: &PlanStep,
         refinements: &[String],
+        completed: &std::collections::HashMap<String, crate::message::AgentMessage>,
     ) -> ChatRequest {
+        // Surface the parsed outputs of this step's deps directly in
+        // the worker's prompt — without this, a step that
+        // `depends_on: ["s1"]` sees only the literal string "s1" and
+        // has no way to consume s1's actual result. `prior_results`
+        // maps each dep id to the serialised
+        // `AgentMessage::PartialResult` the worker emitted for that
+        // dep, so a downstream worker sees the same
+        // `{summary, confidence, …}` payload it would have re-running
+        // the dep itself. Empty when the step is a DAG root
+        // (depends_on.is_empty()) — most plans have at least one root.
+        let prior_results: serde_json::Map<String, serde_json::Value> = step
+            .depends_on
+            .iter()
+            .filter_map(|dep_id| {
+                completed.get(dep_id).map(|msg| {
+                    let v = serde_json::to_value(msg).unwrap_or_else(|e| {
+                        serde_json::json!({"error": format!("encode dep result: {e}")})
+                    });
+                    (dep_id.clone(), v)
+                })
+            })
+            .collect();
+
         let payload = serde_json::json!({
             "goal": plan.goal,
             "step": {
@@ -196,6 +227,7 @@ impl WorkerAgent {
                 "depends_on": step.depends_on,
             },
             "refinements": refinements,
+            "prior_results": prior_results,
         });
         let user_text = serde_json::to_string_pretty(&payload)
             .expect("JSON encoding of plan/step is infallible for valid types");
@@ -563,7 +595,8 @@ mod tests {
     fn build_worker_request_sets_strict_schema_and_temperature() {
         let w = WorkerAgent::new(AgentId::new("w"), "gpt-4o", "summarise");
         let plan = sample_plan();
-        let req = w.build_worker_request(&plan, &plan.steps[0], &[]);
+        let empty = std::collections::HashMap::new();
+        let req = w.build_worker_request(&plan, &plan.steps[0], &[], &empty);
         assert_eq!(req.temperature, Some(0.0));
         assert!(req.system.as_ref().unwrap().contains("Worker"));
         let schema = req
@@ -583,11 +616,72 @@ mod tests {
     }
 
     #[test]
+    fn build_worker_request_threads_prior_results_for_listed_deps_only() {
+        // Verifies the DAG executor's dependency-result threading at
+        // the prompt-construction layer. The worker for step s2
+        // (deps_on s1) should see s1's prior_results in its payload;
+        // a step depending on nothing should see an empty map.
+        use crate::message::AgentMessage;
+        let w = WorkerAgent::new(AgentId::new("w"), "gpt-4o", "summarise");
+        // Local two-step plan: s1 (root) → s2 (deps_on s1). The
+        // module-level `sample_plan` is only one step.
+        let plan = Plan {
+            plan_id: "p1".into(),
+            goal: "fan + merge".into(),
+            steps: vec![
+                PlanStep {
+                    id: "s1".into(),
+                    worker_role: "summarise".into(),
+                    instruction: "Leaf A".into(),
+                    depends_on: vec![],
+                },
+                PlanStep {
+                    id: "s2".into(),
+                    worker_role: "summarise".into(),
+                    instruction: "Consume A".into(),
+                    depends_on: vec!["s1".into()],
+                },
+            ],
+        };
+        let mut completed = std::collections::HashMap::new();
+        completed.insert(
+            "s1".to_string(),
+            AgentMessage::PartialResult {
+                from_agent: AgentId::new("w"),
+                step_id: Some("s1".into()),
+                summary: "diff is 5 lines in foo.rs".into(),
+                confidence: 0.9,
+            },
+        );
+        // s1 has no deps → prior_results is empty regardless of `completed`
+        let s1_req = w.build_worker_request(&plan, &plan.steps[0], &[], &completed);
+        let s1_text = s1_req.messages[0].content()[0].as_text().unwrap();
+        let s1_parsed: serde_json::Value = serde_json::from_str(s1_text).unwrap();
+        assert!(
+            s1_parsed["prior_results"]
+                .as_object()
+                .is_some_and(|m| m.is_empty()),
+            "root step gets empty prior_results: {s1_text}"
+        );
+        // s2 depends on s1 → prior_results carries s1's payload
+        let s2_req = w.build_worker_request(&plan, &plan.steps[1], &[], &completed);
+        let s2_text = s2_req.messages[0].content()[0].as_text().unwrap();
+        let s2_parsed: serde_json::Value = serde_json::from_str(s2_text).unwrap();
+        assert!(
+            s2_parsed["prior_results"]["s1"]["summary"]
+                .as_str()
+                .is_some_and(|s| s.contains("5 lines")),
+            "s2's prior_results must surface s1's summary: {s2_text}"
+        );
+    }
+
+    #[test]
     fn build_worker_request_payload_includes_step_and_goal_and_refinements() {
         let w = WorkerAgent::new(AgentId::new("w"), "gpt-4o", "summarise");
         let plan = sample_plan();
         let refinements = vec!["mention security".to_string(), "shorter".to_string()];
-        let req = w.build_worker_request(&plan, &plan.steps[0], &refinements);
+        let empty = std::collections::HashMap::new();
+        let req = w.build_worker_request(&plan, &plan.steps[0], &refinements, &empty);
         let user_text = req.messages[0].content()[0].as_text().unwrap();
         assert!(user_text.contains("summarise PR #42"));
         assert!(user_text.contains("\"step\""));

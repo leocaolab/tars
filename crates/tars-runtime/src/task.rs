@@ -234,18 +234,77 @@ pub async fn run_task(
         }
     };
 
-    // ── 2. Execute each plan step with Critic-driven retry ─────────────
-    let mut step_outcomes = Vec::with_capacity(plan.steps.len());
-    for step in &plan.steps {
-        let outcome = match run_one_step(&ctx, &traj, &plan, step, goal).await {
-            Ok(o) => o,
-            Err(e) => {
-                abandon(&ctx.runtime, &traj, &format!("{e}")).await;
-                return Err(e);
+    // ── 2. Execute the plan as a DAG — depth-batched parallel ──────────
+    //
+    // Steps grouped by dependency depth (`Plan::execution_levels`).
+    // Level 0 = roots (no deps); level N = steps whose deepest dep is
+    // at N-1. Within a level the steps are independent, so we fan them
+    // out via `join_all`; across levels we wait for the previous batch
+    // before starting the next. Earlier the loop was serial-by-
+    // declaration; identical behaviour falls out for any plan where
+    // every step depends on the previous one, but a fan-out plan
+    // (two leaves into one merge) now actually runs the leaves in
+    // parallel instead of single-file.
+    //
+    // Prior step results thread into dependent steps' worker prompts:
+    // `completed` carries the parsed `AgentMessage::PartialResult` of
+    // every step a downstream worker depends on, so the worker can see
+    // what its inputs actually said. Without this, a step would only
+    // know its deps by id, not by their content — defeating most of
+    // the point of a multi-step plan.
+    //
+    // Failure semantics: if any step in a level fails, we still await
+    // every concurrent sibling (so their event-log writes finish and
+    // the trajectory state is consistent) and then bail out with the
+    // first failure. Future work: cancel siblings via the
+    // CancellationToken to stop wasting LLM calls — left as
+    // a follow-up to keep this commit focused on the DAG topology.
+    use std::collections::HashMap;
+    let mut step_outcomes_by_id: HashMap<String, StepOutcome> =
+        HashMap::with_capacity(plan.steps.len());
+    let mut completed: HashMap<String, AgentMessage> = HashMap::with_capacity(plan.steps.len());
+
+    for level in plan.execution_levels() {
+        // Run every step in this level concurrently. `try_join_all` would
+        // short-circuit on first error but also cancel pending futures,
+        // which would leave half-written trajectory steps; the explicit
+        // `join_all` + post-pass loop preserves event-log integrity.
+        let results = futures::future::join_all(
+            level
+                .iter()
+                .map(|step| run_one_step(&ctx, &traj, &plan, step, goal, &completed)),
+        )
+        .await;
+
+        for (step, outcome_res) in level.iter().zip(results) {
+            match outcome_res {
+                Ok(outcome) => {
+                    completed.insert(step.id.clone(), outcome.result.clone());
+                    step_outcomes_by_id.insert(step.id.clone(), outcome);
+                }
+                Err(e) => {
+                    abandon(&ctx.runtime, &traj, &format!("{e}")).await;
+                    return Err(e);
+                }
             }
-        };
-        step_outcomes.push(outcome);
+        }
     }
+
+    // Reassemble the per-step Vec in plan-declaration order. The DAG
+    // executor produces outcomes in completion order (parallel batches
+    // arrive together); the public TaskOutcome.steps shape is documented
+    // (and tested) to follow `plan.steps` declaration order so callers
+    // can index by `outcome.steps[i].step_id == plan.steps[i].id` for
+    // both the serial-trivial case and the parallel fan-out case.
+    let step_outcomes: Vec<StepOutcome> = plan
+        .steps
+        .iter()
+        .map(|s| {
+            step_outcomes_by_id
+                .remove(&s.id)
+                .expect("every plan step was either completed or surfaced as Err above")
+        })
+        .collect();
 
     // ── 3. Close ───────────────────────────────────────────────────────
     // Best-effort, mirroring `abandon`: every step already wrote its own
@@ -323,18 +382,24 @@ async fn plan_step(ctx: &LoopCtx, traj: &TrajectoryId, goal: &str) -> Result<Pla
 }
 
 /// Run one plan step's Worker → Critic loop with Refine retries.
+///
+/// `completed` carries the parsed `AgentMessage::PartialResult` of
+/// every step earlier in the dependency graph — the worker prompt
+/// surfaces this step's deps' actual outputs (not just their ids) so
+/// the worker can use upstream work instead of re-deriving it.
 async fn run_one_step(
     ctx: &LoopCtx,
     traj: &TrajectoryId,
     plan: &Plan,
     step: &PlanStep,
     goal: &str,
+    completed: &std::collections::HashMap<String, AgentMessage>,
 ) -> Result<StepOutcome, RunTaskError> {
     let mut refinements: Vec<String> = Vec::new();
     let mut attempts: u32 = 0;
     loop {
         // ── Worker ──────────────────────────────────────────────────────
-        let worker_result = run_worker(ctx, traj, plan, step, &refinements).await?;
+        let worker_result = run_worker(ctx, traj, plan, step, &refinements, completed).await?;
 
         // ── Critic ──────────────────────────────────────────────────────
         let verdict_msg = run_critic(ctx, traj, plan, &worker_result, goal).await?;
@@ -388,14 +453,20 @@ async fn run_one_step(
 
 /// Run one Worker call, log it as a trajectory step, parse the typed
 /// PartialResult.
+///
+/// `completed` lets the worker prompt thread the parsed outputs of
+/// this step's dependencies into the request payload — DAG execution
+/// without that threading degenerates to N independent LLM calls that
+/// can't actually use each other's work.
 async fn run_worker(
     ctx: &LoopCtx,
     traj: &TrajectoryId,
     plan: &Plan,
     step: &PlanStep,
     refinements: &[String],
+    completed: &std::collections::HashMap<String, AgentMessage>,
 ) -> Result<AgentMessage, RunTaskError> {
-    let req = ctx.worker.build_worker_request(plan, step, refinements);
+    let req = ctx.worker.build_worker_request(plan, step, refinements, completed);
     let agent: Arc<dyn Agent> = ctx.worker.clone();
     let result = execute_agent_step(
         ctx.runtime.as_ref(),
