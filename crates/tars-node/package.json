@@ -1,6 +1,6 @@
 {
   "name": "@leocaolab/tars-node",
-  "version": "0.1.0-alpha.0",
+  "version": "0.2.0-alpha.0",
   "description": "Node.js bindings for tars — call Pipeline.complete() from TypeScript.",
   "license": "MIT",
   "main": "index.js",

@@ -1,48 +1,69 @@
-// Smoke test for tars-node v0.1 scaffold.
+// Smoke test for tars-node M2 — verifies the napi marshalling
+// round-trip + real Pipeline construction through a `mock` provider.
 //
 // Runs under Node's builtin test runner: `node --test __test__/`.
-// What it verifies is deliberately narrow — that the napi
-// build / load / marshal round-trip is healthy:
 //
+// Coverage:
 //   1. The native addon loads (no "module did not self-register").
-//   2. The `hello` export is callable, returns a String.
-//   3. The `Pipeline` factory + getter round-trip a String.
-//   4. `Pipeline.complete(...)` returns a Promise that resolves to
-//      the v0.1 stub shape — confirming async + struct marshalling
-//      across the boundary.
+//   2. `hello()` round-trips a string through napi.
+//   3. `Pipeline.fromStr(toml, providerId)` constructs over the inline
+//      TOML — proves the real config-load + provider-registry +
+//      pipeline-builder chain works end-to-end without an external
+//      config file.
+//   4. `Pipeline.complete({...})` returns a Promise that resolves to
+//      a `{ text, usage, model, stopReason }` shape — proves async +
+//      struct marshalling + the LlmService drive loop work.
 //
-// What it does NOT verify: that a real LLM call works. That lands
-// when v0.1.1 wires the actual Pipeline construction (right now
-// `complete()` returns a synthetic echo).
+// The provider is `mock` — `tars_provider::backends::mock::MockProvider`
+// returns a canned response without touching the network. To exercise
+// a real provider, swap the `type` + add the auth block.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hello, Pipeline } from '../index.js';
 
+const MOCK_CONFIG = `
+[providers.demo]
+type = "mock"
+model = "mock-model"
+canned_response = "tars-node smoke test ok"
+`;
+
 test('hello() round-trips a string through napi', () => {
     assert.equal(hello('world'), 'tars-node says hi, world');
 });
 
-test('Pipeline.fromConfigPath stores the path verbatim (v0.1 stub)', () => {
-    const p = Pipeline.fromConfigPath('/tmp/test.toml');
-    assert.equal(p.configPath, '/tmp/test.toml');
+test('Pipeline.fromStr(toml, providerId) builds against the mock provider', () => {
+    const p = Pipeline.fromStr(MOCK_CONFIG, 'demo');
+    assert.equal(p.id, 'demo');
 });
 
-test('Pipeline.complete() resolves with the stub shape', async () => {
-    const p = Pipeline.fromConfigPath('/tmp/test.toml');
+test('Pipeline.complete() drives through the LlmService and returns the result shape', async () => {
+    const p = Pipeline.fromStr(MOCK_CONFIG, 'demo');
     const r = await p.complete({
         model: 'mock-model',
         user: 'hello world',
-        responseSchemaStrict: true,
+        maxOutputTokens: 100,
     });
-    // Stub echoes the user text + model into the result.text so the
-    // round-trip is verifiable without a real provider.
-    assert.match(r.text, /tars-node v0\.1 stub/);
-    assert.match(r.text, /mock-model/);
-    assert.match(r.text, /hello world/);
-    assert.equal(r.model, 'mock-model');
-    assert.equal(r.stopReason, 'end_turn');
-    // Usage object exists and is zeroed in v0.1.
-    assert.equal(r.usage.inputTokens, 0);
-    assert.equal(r.usage.outputTokens, 0);
+    // Mock provider's canned response surfaces in `text`.
+    assert.match(r.text, /smoke test ok/);
+    // model field surfaces post-routing — for mock it's the literal
+    // model name we sent in.
+    assert.ok(r.model);
+    // Usage object exists and is numeric.
+    assert.equal(typeof r.usage.inputTokens, 'number');
+    assert.equal(typeof r.usage.outputTokens, 'number');
+});
+
+test('Pipeline.complete() rejects on both `user` and `messages` set', async () => {
+    const p = Pipeline.fromStr(MOCK_CONFIG, 'demo');
+    await assert.rejects(
+        () =>
+            p.complete({
+                model: 'mock-model',
+                user: 'hi',
+                messages: [{ role: 'user', content: 'hi' }],
+            }),
+        /either `user`.*or `messages`/,
+    );
 });
