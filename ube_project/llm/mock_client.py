@@ -24,6 +24,6 @@ class MockClient(LLMClient):
     def chat_multi(self, system: str, messages: list[dict[str, str]], max_tokens: int = 16_384) -> str:
         self.last_system = system
         self.last_messages = messages
-        self.last_user = messages[-1]["content"] if messages else ""
+        self.last_user = messages[-1].get("content", "") if messages else ""
         self.call_count += 1
         return self.response

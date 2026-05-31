@@ -1,6 +1,7 @@
 """前台面试官 Agent：零知识传声筒，只接收 Meta Prompt + 导演指令，不知道题目/Rubric/约束"""
 
 from .llm import LLMClient
+from .llm.errors import LLMClientError
 
 # 固定的 Meta Prompt — Actor 永远只看到这段话，与业务完全解耦
 META_PROMPT = """\
@@ -21,16 +22,22 @@ class ActorAgent:
 
     def act(self, directive: str) -> str:
         """接收一条纯文本导演指令，生成面试官发言。不接触黑板。"""
-        return self._client.chat(
-            system=META_PROMPT,
-            user=directive,
-        )
+        try:
+            return self._client.chat(
+                system=META_PROMPT,
+                user=directive,
+            )
+        except Exception as e:
+            raise LLMClientError(f"面试官发言生成失败: {e}") from e
 
     def act_with_history(self, directive: str, history: list[dict[str, str]]) -> str:
         """带对话历史的多轮版本。"""
         # 将导演指令作为最新的 user message 注入
-        messages = history + [{"role": "user", "content": f"[导演指令] {directive}"}]
-        return self._client.chat_multi(
-            system=META_PROMPT,
-            messages=messages,
-        )
+        messages = (history or []) + [{"role": "user", "content": f"[导演指令] {directive}"}]
+        try:
+            return self._client.chat_multi(
+                system=META_PROMPT,
+                messages=messages,
+            )
+        except Exception as e:
+            raise LLMClientError(f"面试官多轮发言生成失败: {e}") from e

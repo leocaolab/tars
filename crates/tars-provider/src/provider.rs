@@ -42,6 +42,13 @@ pub trait LlmProvider: Send + Sync + 'static {
 
     /// Default: consume `stream` and accumulate. Override only if the
     /// provider has a non-streaming fast-path that's strictly better.
+    ///
+    /// **All-or-nothing contract:** this returns either a fully
+    /// accumulated [`ChatResponse`] or the first mid-stream error. If the
+    /// stream errors after emitting some deltas, the partially
+    /// accumulated state is discarded and the `Err` is returned — callers
+    /// who need the partial text must drive [`Self::stream`] directly and
+    /// aggregate themselves.
     async fn complete(
         self: Arc<Self>,
         req: ChatRequest,
@@ -79,7 +86,10 @@ pub trait LlmProvider: Send + Sync + 'static {
             }
         }
         // Rough heuristic — 4 chars per token for English mix.
-        Ok((chars as u64).div_ceil(4))
+        // `usize as u64` is lossless on all supported targets, but use
+        // try_from to make that explicit and stay correct if usize ever
+        // exceeds 64 bits.
+        Ok(u64::try_from(chars).unwrap_or(u64::MAX).div_ceil(4))
     }
 
     /// Compute USD cost from observed usage. Defaults to `pricing.cost_for`.

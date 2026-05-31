@@ -232,7 +232,14 @@ impl WorkerAgent {
         if raw.summary.trim().is_empty() {
             return Err(WorkerError::InvalidResult("summary is empty".into()));
         }
-        let confidence = raw.confidence.clamp(0.0, 1.0);
+        // `f32::clamp` passes NaN through unchanged (it only orders
+        // against finite bounds), so map NaN → 0.0 ("no idea") before
+        // clamping the finite range.
+        let confidence = if raw.confidence.is_nan() {
+            0.0
+        } else {
+            raw.confidence.clamp(0.0, 1.0)
+        };
         Ok(AgentMessage::PartialResult {
             from_agent: from_agent.clone(),
             step_id: step_id.map(str::to_string),
@@ -293,6 +300,15 @@ impl WorkerAgent {
     ) -> Result<AgentStepResult, AgentError> {
         let mut req = initial_input;
         let mut total_usage = tars_types::Usage::default();
+        // Count consecutive iterations in which *every* dispatched tool
+        // call returned an error. A tool result with `is_error` is fed
+        // back to the model on purpose (so it can recover), but if the
+        // model keeps emitting calls that all fail round after round
+        // it's either broken tooling or a stuck model — short-circuit
+        // rather than burn every iteration. A single good call resets
+        // the streak.
+        const MAX_CONSECUTIVE_ALL_ERROR_ITERS: u32 = 3;
+        let mut consecutive_all_error: u32 = 0;
         for iteration in 0..self.max_tool_iterations {
             // One LLM round-trip — same cancel-aware drain shape as
             // `agent::drive_llm_call`.
@@ -300,8 +316,16 @@ impl WorkerAgent {
             total_usage = total_usage.merge(response.usage);
 
             if response.tool_calls.is_empty() {
-                // Final answer — text only. Build the AgentStepResult
-                // and return.
+                // Final answer — text only. Return the raw text as
+                // `AgentOutput`; schema validation against the worker
+                // result shape is NOT done here. It's the same contract
+                // as the stub-worker path (`drive_llm_call`): both
+                // return raw `AgentOutput`, and the typed entry point
+                // `execute_step` runs `parse_worker_response` on the
+                // text afterward. The drive_with_tools loop deliberately
+                // doesn't re-impose provider-side structured_output mid
+                // tool-loop (some providers can't combine tools + strict
+                // schema), so the single validation point is execute_step.
                 let output = AgentOutput::from_response_parts(response.text, vec![]);
                 return Ok(AgentStepResult {
                     output,
@@ -323,18 +347,38 @@ impl WorkerAgent {
             };
             req.messages.push(assistant_msg);
 
+            let mut errors_this_iter = 0usize;
             for call in &response.tool_calls {
                 let tool_ctx = ToolContext {
                     cancel: ctx.cancel.clone(),
                     cwd: None,
                 };
                 let tool_msg = registry.dispatch(call, tool_ctx).await;
+                if matches!(&tool_msg, Message::Tool { is_error: true, .. }) {
+                    errors_this_iter += 1;
+                }
                 req.messages.push(tool_msg);
+            }
+
+            if errors_this_iter == response.tool_calls.len() {
+                consecutive_all_error += 1;
+                if consecutive_all_error >= MAX_CONSECUTIVE_ALL_ERROR_ITERS {
+                    return Err(AgentError::Internal(format!(
+                        "worker tool loop aborted: every tool call failed for \
+                         {consecutive_all_error} consecutive iterations \
+                         (last iteration: {errors_this_iter}/{} calls errored) — \
+                         broken tooling or stuck model",
+                        response.tool_calls.len(),
+                    )));
+                }
+            } else {
+                consecutive_all_error = 0;
             }
 
             tracing::debug!(
                 iteration = iteration + 1,
                 tool_calls = response.tool_calls.len(),
+                errors = errors_this_iter,
                 "worker: dispatched tools, looping",
             );
         }
@@ -355,6 +399,12 @@ async fn drain_one_call(
     ctx: &AgentContext,
     input: ChatRequest,
 ) -> Result<tars_types::ChatResponse, AgentError> {
+    // Same RequestContext construction as `agent::drive_llm_call` —
+    // the canonical agent LLM path. `AgentContext` carries no
+    // RequestContext (only `cancel`), so cancel is the only field
+    // there is to forward; IAM / principal / tenant land once
+    // tars-security exists, at which point AgentContext gains a real
+    // RequestContext and both this and `drive_llm_call` thread it.
     let mut req_ctx = RequestContext::test_default();
     req_ctx.cancel = ctx.cancel.clone();
 

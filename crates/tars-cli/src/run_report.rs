@@ -64,6 +64,10 @@ pub async fn execute(args: RunReportArgs) -> Result<()> {
     } else {
         render_human(&report, &mut out).context("stdout write")?;
     }
+    // Explicit flush so a write error (e.g. broken pipe to `head`)
+    // surfaces as a non-zero exit instead of being silently dropped
+    // when the locked stdout handle is dropped.
+    out.flush().context("flush stdout")?;
     Ok(())
 }
 
@@ -114,7 +118,9 @@ fn render_human(r: &RunReport, out: &mut dyn Write) -> std::io::Result<()> {
             "  {:<24}  {:>5}  {:>6}  {:>6}  {:>10}  {:>10}",
             "agent", "steps", "failed", "calls", "in_tok", "out_tok"
         )?;
-        writeln!(out, "  {}", "-".repeat(76))?;
+        // Match the column block width: 24+2+5+2+6+2+6+2+10+2+10 = 71
+        // (same convention as the by-provider separator's 56).
+        writeln!(out, "  {}", "-".repeat(71))?;
         for (agent, b) in &r.by_agent {
             writeln!(
                 out,

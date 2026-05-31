@@ -102,15 +102,20 @@ impl LlmService for EventEmitterService {
         let max_output_tokens = req.max_output_tokens;
 
         // Serialize the request body once — used for both the
-        // ContentRef hash and the BodyStore write.
+        // ContentRef hash and the BodyStore write. If this fails we
+        // cannot produce a meaningful request_fingerprint or request_ref
+        // (an empty body would hash to a constant and the stored body
+        // would be corrupt), so skip event emission entirely and just
+        // pass the call through — same "never emit a broken event"
+        // posture as the body-write failure branches below.
         let req_body_bytes = match serde_json::to_vec(&req) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "event_emitter: request serialize failed; emitting empty body ref",
+                    "event_emitter: request serialize failed; skipping event emission for this call",
                 );
-                Vec::new()
+                return self.inner.clone().call(req, ctx).await;
             }
         };
         let request_fingerprint: [u8; 32] = {

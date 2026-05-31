@@ -40,7 +40,7 @@ use tars_runtime::{
     AgentEvent, LocalRuntime, OrchestratorAgent, Runtime, StepIdempotencyKey, execute_agent_step,
 };
 use tars_storage::EventStore;
-use tars_types::{AgentId, ChatRequest, ModelHint, TrajectoryId};
+use tars_types::{AgentId, TrajectoryId};
 use tokio_util::sync::CancellationToken;
 
 use crate::dispatch::{
@@ -101,31 +101,42 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
     let agent = OrchestratorAgent::new(AgentId::new("orchestrator"), dispatch.model_label.clone());
 
     // The planner builds its OWN ChatRequest (system prompt + Plan
-    // schema). We construct a placeholder ChatRequest for
-    // execute_agent_step's input (it gets replaced by the planner's
-    // internal one); this is awkward and will smooth out once the
-    // Agent trait grows a typed-input variant. For now, we use the
-    // typed orchestrator.plan() helper directly via a tiny adapter
-    // closure, bypassing execute_agent_step's generic input shape —
-    // we still want the trajectory log writes, so we replicate the
-    // log lifecycle inline below.
+    // schema) via `OrchestratorAgent::build_planner_request`. The
+    // trajectory path drives that SAME request through
+    // execute_agent_step so the runtime layer manages step_seq + log
+    // writes while the LLM sees the real planner shape — `execute()`
+    // is a pure pass-through (it does NOT swap the request), so the
+    // request we hand in is exactly what the model receives. The
+    // no-trajectory path calls the typed `plan()` helper, which builds
+    // the identical request internally.
 
     let traj = trajectory_logger.as_ref().map(|t| t.traj.clone());
     let goal = args.goal.clone();
-    let model = dispatch.model_label.clone();
 
     // Build the AgentContext OrchestratorAgent.plan() needs. Its
     // step_seq is computed by the same "count of StepStarted" rule
     // execute_agent_step uses; for the no-trajectory case we just
     // pass step_seq=1 (irrelevant since we won't log).
+    //
+    // Wire the cancellation token to Ctrl-C so an interrupted plan
+    // actually cancels the in-flight LLM call (and lets the trajectory
+    // close as Abandoned) rather than the token being inert.
     let cancel = CancellationToken::new();
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                cancel.cancel();
+            }
+        });
+    }
     let plan_result = if let (Some(logger), Some(traj_id)) = (&trajectory_logger, traj.as_ref()) {
-        // Use execute_agent_step path: builds the planner request
-        // ourselves but lets the runtime layer manage step_seq +
-        // log writes. We need to construct a request that mirrors
-        // what plan() would build internally so the trajectory log
-        // sees the right model/system.
-        let req = build_planner_request_for_log(&model, &goal);
+        // Use execute_agent_step path: hand it the REAL planner
+        // request (same one plan() builds internally) so the runtime
+        // layer manages step_seq + log writes while the model sees the
+        // correct system prompt + strict Plan schema. `execute()` is a
+        // pass-through, so this request is what actually reaches the LLM.
+        let req = agent.build_planner_request(&goal);
         let result = execute_agent_step(
             logger.runtime.as_ref(),
             traj_id,
@@ -153,67 +164,48 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
             .context("orchestrator.plan() failed")
     };
 
-    // Fold JSON encoding into the outcome BEFORE closing the
-    // trajectory: a serialization failure is just as much a failure of
-    // this operation as a planning failure, and closing on
+    // Fold JSON encoding AND stdout delivery into the outcome BEFORE
+    // closing the trajectory: a serialization failure — or a failed
+    // delivery (broken pipe) — is just as much a failure of this
+    // operation as a planning failure, and closing on
     // `plan_result.is_ok()` alone would mark the trajectory Completed
     // while the CLI exits non-zero (StepStarted with no honest
-    // terminal). Compute the full success/failure once, then close.
-    let json_result = plan_result.and_then(|plan| {
-        // Output: pretty by default, compact via flag.
-        if args.compact {
-            serde_json::to_string(&plan)
-        } else {
-            serde_json::to_string_pretty(&plan)
-        }
-        .context("encode plan as JSON")
-    });
+    // terminal). We use `write!` + explicit error handling rather than
+    // `println!` so a broken pipe surfaces as an `Err` we can fold in,
+    // instead of an unwind that would leave the trajectory already
+    // marked Completed. Compute the full success/failure once, close,
+    // then propagate.
+    let delivered = plan_result
+        .and_then(|plan| {
+            // Output: pretty by default, compact via flag.
+            if args.compact {
+                serde_json::to_string(&plan)
+            } else {
+                serde_json::to_string_pretty(&plan)
+            }
+            .context("encode plan as JSON")
+        })
+        .and_then(|json| {
+            use std::io::Write as _;
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            writeln!(out, "{json}").context("writing plan to stdout")?;
+            out.flush().context("flushing plan to stdout")
+        });
 
-    // Close the trajectory before returning, reflecting the *complete*
-    // outcome (plan produced AND serialized).
+    // Close the trajectory, reflecting the *complete* outcome (plan
+    // produced AND serialized AND delivered to stdout).
     if let Some(logger) = &trajectory_logger {
-        logger.close_with(json_result.is_ok()).await;
+        logger.close_with(delivered.is_ok()).await;
     }
 
-    let json = json_result?;
-    println!("{json}");
+    delivered?;
 
     if let Some(logger) = &trajectory_logger {
         eprintln!("── trajectory: {}", logger.traj);
     }
 
     Ok(())
-}
-
-/// Build a placeholder ChatRequest that mirrors what
-/// OrchestratorAgent.plan() would build internally. Used only when we
-/// drive the agent through execute_agent_step (trajectory mode) so
-/// the trajectory log sees the planner shape; the OrchestratorAgent
-/// passes this through to its inner drive_llm_call unchanged.
-fn build_planner_request_for_log(model: &str, goal: &str) -> ChatRequest {
-    use tars_types::JsonSchema;
-    let mut req = ChatRequest::user(ModelHint::Explicit(model.to_string()), goal);
-    req.system = Some(planner_system_prompt_mirror().to_string());
-    req.structured_output = Some(JsonSchema::strict("Plan", plan_schema_mirror()));
-    req.temperature = Some(0.0);
-    req
-}
-
-/// Mirror of OrchestratorAgent's PLANNER_SYSTEM_PROMPT — kept
-/// in-sync by hand. If they ever drift, the trajectory log just
-/// records a slightly different system summary; nothing functional
-/// breaks. (TODO: expose the constant from tars-runtime so this
-/// duplication goes away.)
-fn planner_system_prompt_mirror() -> &'static str {
-    "(see tars_runtime::OrchestratorAgent for the canonical planner system prompt)"
-}
-
-fn plan_schema_mirror() -> serde_json::Value {
-    // Same shape as the real schema; we keep this stub minimal
-    // because the LLM only sees what OrchestratorAgent constructs.
-    // The placeholder we send through execute_agent_step is replaced
-    // by the agent's internal request anyway.
-    serde_json::json!({"type": "object"})
 }
 
 /// Decode the AgentStepResult from execute_agent_step into a typed

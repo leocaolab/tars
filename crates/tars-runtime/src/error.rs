@@ -20,4 +20,12 @@ pub enum RuntimeError {
     /// "not started" rather than "broken".
     #[error("trajectory not found: {0}")]
     TrajectoryNotFound(String),
+
+    /// An event was handed to `append` whose `trajectory_id` doesn't
+    /// match the append target. This is a *caller* bug (an event built
+    /// for the wrong trajectory), NOT an I/O fault — kept distinct from
+    /// `Storage` so retry logic doesn't pointlessly retry a
+    /// deterministic programming error.
+    #[error("event trajectory mismatch: event targets `{event}` but append target is `{target}`")]
+    TrajectoryMismatch { event: String, target: String },
 }

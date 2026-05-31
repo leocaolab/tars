@@ -75,7 +75,10 @@ pub enum AgentMessage {
     /// part of a plan (e.g. an ad-hoc Q&A worker).
     /// `confidence` is `0.0..=1.0` — `0.0` "no idea, asked the model
     /// and got nothing useful", `1.0` "I'm sure". Critic + Aggregator
-    /// can weigh on this; values outside the range are clamped.
+    /// can weigh on this. The construction boundary
+    /// (`WorkerAgent::parse_worker_response`) clamps out-of-range
+    /// values and maps `NaN`→`0.0`; [`AgentMessage::validate`] rejects
+    /// any that slip in via another path.
     PartialResult {
         from_agent: AgentId,
         step_id: Option<String>,
@@ -146,6 +149,49 @@ impl AgentMessage {
         matches!(self, Self::Verdict { .. } | Self::NeedsClarification { .. })
     }
 
+    /// Semantic validation gate for a message that crossed a trust
+    /// boundary (deserialized from LLM / wire / disk). The variant
+    /// fields are `pub` for ergonomic construction in-process, so this
+    /// is the single place that enforces the invariants the doc
+    /// comments promise:
+    ///
+    /// - `PartialResult.summary`, `Reject.reason`,
+    ///   `NeedsClarification.question` are non-empty (after trim).
+    /// - `PartialResult.confidence` is finite and within `0.0..=1.0`.
+    /// - `Refine.suggestions` is non-empty and not all-whitespace.
+    ///
+    /// The primary construction paths (`WorkerAgent::parse_worker_response`,
+    /// `RawVerdict::into_verdict_kind`) already enforce these at parse
+    /// time; call this when ingesting an `AgentMessage` from anywhere
+    /// else (a persisted trajectory, an external producer).
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::PlanIssued { .. } => Ok(()),
+            Self::PartialResult {
+                summary,
+                confidence,
+                ..
+            } => {
+                if summary.trim().is_empty() {
+                    return Err("PartialResult.summary is empty / whitespace-only".into());
+                }
+                if !confidence.is_finite() || *confidence < 0.0 || *confidence > 1.0 {
+                    return Err(format!(
+                        "PartialResult.confidence out of range / non-finite: {confidence}"
+                    ));
+                }
+                Ok(())
+            }
+            Self::Verdict { verdict, .. } => verdict.validate(),
+            Self::NeedsClarification { question, .. } => {
+                if question.trim().is_empty() {
+                    return Err("NeedsClarification.question is empty / whitespace-only".into());
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Best-effort one-line summary for the trajectory log
     /// (`AgentEvent::LlmCallCaptured::response_summary` etc.).
     /// Always returns something short; never panics.
@@ -192,6 +238,30 @@ impl VerdictKind {
     /// plan after seeing this verdict.
     pub fn approves(&self) -> bool {
         matches!(self, Self::Approve)
+    }
+
+    /// Enforce the per-variant semantics: a `Reject` must carry a
+    /// non-empty reason and a `Refine` a non-empty, non-all-whitespace
+    /// suggestion list. Mirrors `RawVerdict::into_verdict_kind` for
+    /// verdicts that didn't come through the critic parse path.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Approve => Ok(()),
+            Self::Reject { reason } => {
+                if reason.trim().is_empty() {
+                    Err("Reject.reason is empty / whitespace-only".into())
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Refine { suggestions } => {
+                if suggestions.is_empty() || suggestions.iter().all(|s| s.trim().is_empty()) {
+                    Err("Refine.suggestions is empty / all whitespace-only".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 }
 

@@ -1,7 +1,10 @@
 import json
+import logging
 from rich.console import Console
 from rich.panel import Panel
 from .models import Blackboard, EvaluatorPatch
+
+logger = logging.getLogger(__name__)
 from .evaluator import EvaluatorAgent
 from .actor import ActorAgent
 from .candidate import CandidateAgent
@@ -68,6 +71,11 @@ def apply_patch(board: Blackboard, patch: EvaluatorPatch) -> None:
     for node_id, new_status in patch.updates.items():
         if node_id in board.state_tree:
             board.state_tree[node_id].status = new_status
+        else:
+            logger.warning(
+                "Evaluator patch references unknown node_id %r (status=%r); skipping.",
+                node_id, new_status,
+            )
     for node_id, signal in patch.new_positive_signals.items():
         if node_id in board.state_tree:
             board.state_tree[node_id].positive_signals.append(signal)
@@ -97,6 +105,12 @@ def extract_directive(board: Blackboard) -> str:
         for node_id, node in board.state_tree.items()
         if node.status not in ("SATISFIED",) and node.probe_suggestion
     ]
+    for node_id, node in candidates:
+        if node.status not in _PRIORITY:
+            logger.warning(
+                "Node %r has unknown status %r; treating as lowest priority.",
+                node_id, node.status,
+            )
     candidates.sort(key=lambda x: _PRIORITY.get(x[1].status, 0), reverse=True)
 
     if candidates:
@@ -123,21 +137,29 @@ def _invoke_actor(board: Blackboard, actor: ActorAgent, directive: str) -> str:
     return actor.act(directive)
 
 
-def save_log(board: Blackboard, log_dir: str = "logs") -> str:
-    """将终端输出 + 黑板 JSON 快照保存到日志文件"""
+def save_log(board: Blackboard, log_dir: str = "logs") -> str | None:
+    """将终端输出 + 黑板 JSON 快照保存到日志文件。
+
+    I/O 失败（磁盘满 / 只读 / 权限）不会让整个流程崩溃：记录错误并返回 None。
+    """
     from pathlib import Path
     import time
 
-    path = Path(log_dir)
-    path.mkdir(exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
-    log_file = path / f"selfplay_{board.session_id}_{ts}.txt"
-    json_file = path / f"blackboard_{board.session_id}_{ts}.json"
+    try:
+        path = Path(log_dir)
+        path.mkdir(exist_ok=True)
+        log_file = path / f"selfplay_{board.session_id}_{ts}.txt"
+        json_file = path / f"blackboard_{board.session_id}_{ts}.json"
 
-    # 终端输出
-    log_file.write_text(console.export_text(), encoding="utf-8")
-    # 黑板 JSON 快照
-    json_file.write_text(board.model_dump_json(indent=2, exclude={"rubric"}), encoding="utf-8")
+        # 终端输出
+        log_file.write_text(console.export_text(), encoding="utf-8")
+        # 黑板 JSON 快照
+        json_file.write_text(board.model_dump_json(indent=2, exclude={"rubric"}), encoding="utf-8")
+    except OSError as e:
+        logger.error("Failed to save log to %r: %s", log_dir, e)
+        console.print(f"\n[dim][ Engine ] [red]日志保存失败 → {e}[/]")
+        return None
 
     console.print(f"\n[dim][ Engine ] 日志已保存 → {log_file}[/]")
     console.print(f"[dim][ Engine ] 黑板快照 → {json_file}[/]")
@@ -183,9 +205,27 @@ def _run_turn(
     actor: ActorAgent,
     user_input: str,
 ) -> None:
-    """一个完整回合：候选人发言 → 考官评估 → 引擎提取指令 → Actor 发问"""
-    board.history.append({"role": "user", "content": user_input})
+    """一个完整回合：候选人发言 → 考官评估 → 引擎提取指令 → Actor 发问
 
+    history 必须成对：若评估或 Actor 调用抛错，回滚刚追加的 user message，
+    避免下一轮在不平衡（user 无 assistant 对应）的历史上继续。
+    """
+    board.history.append({"role": "user", "content": user_input})
+    try:
+        _run_turn_body(board, evaluator, actor, user_input)
+    except Exception:
+        # 回滚未配对的 user message，保持 history 平衡
+        if board.history and board.history[-1] == {"role": "user", "content": user_input}:
+            board.history.pop()
+        raise
+
+
+def _run_turn_body(
+    board: Blackboard,
+    evaluator: EvaluatorAgent,
+    actor: ActorAgent,
+    user_input: str,
+) -> None:
     # 阶段 A：考官静默评估
     console.print("\n[dim][ Engine ] 唤醒后台考官评估中...[/]")
     patch = evaluator.evaluate(board, user_input)
@@ -259,6 +299,8 @@ def run_auto(
             Panel(answer, title="[bold green]AI 候选人[/]", border_style="green")
         )
 
+        # _run_turn 在失败时会回滚 user message；让异常向上传播给 run_auto
+        # 的调用方处理（main 会 save_log 兜底），不再继续下一轮。
         _run_turn(board, evaluator, actor, answer)
 
     # 结束总结

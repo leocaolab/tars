@@ -143,6 +143,22 @@ impl BudgetStore for InMemoryBudgetStore {
         tenant: &TenantId,
         amount_usd: f64,
     ) -> Result<Option<f64>, BudgetStoreError> {
+        // Defend the in-memory balance against a non-finite/negative
+        // debit. `set()` already validates stored balances; without the
+        // same guard here a NaN/inf `amount_usd` would poison the balance
+        // (`x -= NaN` → NaN, after which every `estimate > remaining`
+        // pre-check goes false and silently uncaps the tenant) and a
+        // negative amount would *credit* the tenant. Driving the balance
+        // legitimately below zero (soft-cap race) is still allowed.
+        if !amount_usd.is_finite() || amount_usd < 0.0 {
+            tracing::error!(
+                event = "tenant_budget.invalid_debit",
+                tenant_id = %tenant,
+                amount_usd,
+                "rejected non-finite/negative debit amount; skipping debit to protect balance",
+            );
+            return Ok(self.balances.lock().await.get(tenant).copied());
+        }
         let mut guard = self.balances.lock().await;
         if let Some(balance) = guard.get_mut(tenant) {
             *balance -= amount_usd;
@@ -266,6 +282,21 @@ impl LlmService for TenantBudgetService {
 
         // Pre-check.
         let estimate = self.estimate_cost_usd(&req);
+        // A non-finite/negative estimate (e.g. a bad Pricing rate that
+        // slipped past construction, or overflow) would make
+        // `estimate > remaining` evaluate to `false` for NaN and
+        // silently uncap the tenant. Fail-closed instead.
+        if !estimate.is_finite() || estimate < 0.0 {
+            tracing::error!(
+                event = "tenant_budget.invalid_estimate",
+                tenant_id = %ctx.tenant_id,
+                estimate_usd = estimate,
+                trace_id = %ctx.trace_id,
+            );
+            return Err(ProviderError::Internal(
+                "tenant budget produced an invalid (non-finite/negative) cost estimate".into(),
+            ));
+        }
         match self.store.remaining(&ctx.tenant_id).await {
             Ok(Some(remaining)) => {
                 // The trait can't statically forbid a buggy/malicious

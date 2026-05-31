@@ -326,11 +326,32 @@ impl SubprocessLineRunner for RealSubprocessLineRunner {
         let stderr = child.stderr.take();
         let timeout = inv.timeout;
 
+        // Drain stderr CONCURRENTLY with stdout. Reading it only after
+        // stdout EOF (as before) deadlocks: codex blocks on a full
+        // stderr pipe (~64KB on Linux) once it has written that much
+        // without us reading, so it never reaches the point of closing
+        // stdout, and we wait on stdout forever until the timeout — with
+        // the actual error message stuck in the unread stderr buffer.
+        let stderr_task = stderr.map(|mut se| {
+            tokio::spawn(async move {
+                let mut buf = String::new();
+                if let Err(e) = tokio::io::AsyncReadExt::read_to_string(&mut se, &mut buf).await {
+                    tracing::warn!(error = %e, "codex_cli: failed to read child stderr");
+                    if buf.is_empty() {
+                        buf.push_str("(stderr unavailable: read failed)");
+                    } else {
+                        buf.push_str(" (stderr truncated: read failed)");
+                    }
+                }
+                buf
+            })
+        });
+
         let line_stream = stream! {
             // The child is moved into the stream so kill_on_drop fires
             // when the consumer drops the stream mid-read.
             let mut child = child;
-            let stderr = stderr;
+            let stderr_task = stderr_task;
             let mut lines = BufReader::new(stdout).lines();
             let deadline = tokio::time::Instant::now() + timeout;
 
@@ -366,25 +387,15 @@ impl SubprocessLineRunner for RealSubprocessLineRunner {
             // small grace period so we can attribute non-zero exits.
             match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
                 Ok(Ok(status)) if !status.success() => {
-                    let stderr_text = if let Some(mut se) = stderr {
-                        let mut buf = String::new();
-                        if let Err(e) =
-                            tokio::io::AsyncReadExt::read_to_string(&mut se, &mut buf).await
-                        {
-                            // Don't swallow: a failed/partial read means
-                            // the diagnostic the user needs may be
-                            // missing, so log it and mark the gap inline
-                            // rather than emitting a bare "exited non-zero".
-                            tracing::warn!(error = %e, "codex_cli: failed to read child stderr");
-                            if buf.is_empty() {
-                                buf.push_str("(stderr unavailable: read failed)");
-                            } else {
-                                buf.push_str(" (stderr truncated: read failed)");
-                            }
-                        }
-                        buf
-                    } else {
-                        String::new()
+                    // The concurrent drain task has the full stderr by now
+                    // (the child has exited, so its stderr pipe is closed
+                    // and the reader has hit EOF). Join it for the text.
+                    let stderr_text = match stderr_task {
+                        Some(t) => t.await.unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, "codex_cli: stderr drain task panicked");
+                            String::new()
+                        }),
+                        None => String::new(),
                     };
                     let truncated = truncate(&stderr_text, 500);
                     yield Err(ProviderError::CliSubprocessDied {

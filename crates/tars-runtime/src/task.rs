@@ -248,8 +248,16 @@ pub async fn run_task(
     }
 
     // ── 3. Close ───────────────────────────────────────────────────────
+    // Best-effort, mirroring `abandon`: every step already wrote its own
+    // terminal `StepCompleted` (the source of truth for what finished),
+    // so the trailing `TrajectoryCompleted` is a convenience marker. If
+    // its append fails, the work is still done — log and return the
+    // successful outcome rather than discarding it as a task failure.
+    // A trajectory missing this marker is recoverable / detectable from
+    // the step events; reporting success as failure is not.
     let summary = format!("completed {} step(s) for goal: {goal}", step_outcomes.len(),);
-    ctx.runtime
+    if let Err(e) = ctx
+        .runtime
         .append(
             &traj,
             AgentEvent::TrajectoryCompleted {
@@ -258,10 +266,14 @@ pub async fn run_task(
             },
         )
         .await
-        .map_err(|e| RunTaskError::Runtime {
-            trajectory_id: traj.clone(),
-            source: e,
-        })?;
+    {
+        tracing::warn!(
+            trajectory_id = %traj,
+            error = %e,
+            "run_task: failed to append TrajectoryCompleted; task work \
+             succeeded, returning outcome anyway",
+        );
+    }
 
     Ok(TaskOutcome {
         trajectory_id: traj,

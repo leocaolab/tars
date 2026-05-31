@@ -61,18 +61,27 @@ impl SubprocessRunner for RealSubprocessRunner {
             },
         })?;
 
-        // Write the prompt on stdin and close it.
-        if let Some(mut stdin) = child.stdin.take() {
+        // Write the prompt on stdin and close it. stdin must be present
+        // (Stdio::piped above); if it isn't, fail loudly rather than
+        // silently skip the write and let the child block on an EOF that
+        // never comes until the timeout fires.
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            ProviderError::Internal("claude child has no stdin pipe (Stdio::piped above)".into())
+        })?;
+        {
             use tokio::io::AsyncWriteExt;
             stdin.write_all(inv.prompt.as_bytes()).await.map_err(|e| {
                 ProviderError::CliSubprocessDied {
                     exit_code: None,
-                    stderr: format!("stdin write failed: {e}"),
+                    stderr: format!(
+                        "stdin write failed after {} prompt bytes: {e}",
+                        inv.prompt.len()
+                    ),
                 }
             })?;
-            // dropping `stdin` here closes the pipe so the child sees EOF
-            drop(stdin);
         }
+        // dropping `stdin` here closes the pipe so the child sees EOF
+        drop(stdin);
 
         // Streaming branch — `TARS_CLAUDE_CLI_STREAM=1`: read stdout line
         // by line as NDJSON events, tee a pretty per-event summary to
@@ -92,6 +101,11 @@ impl SubprocessRunner for RealSubprocessRunner {
                 });
             }
             Err(_) => {
+                // Timed out. `wait_with_output()` owns `child`, so the
+                // child is killed deterministically the moment the timed-
+                // out future is dropped (we set `kill_on_drop(true)` at
+                // spawn) — i.e. as this match arm returns. No leaked
+                // process survives the timeout.
                 return Err(ProviderError::CliSubprocessDied {
                     exit_code: None,
                     stderr: format!(

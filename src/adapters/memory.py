@@ -1,4 +1,6 @@
 import asyncio
+import functools
+import logging
 from typing import Any, Callable, Dict, List
 from ..types import (
     IBlackboardStore,
@@ -8,6 +10,8 @@ from ..types import (
     ChatMessage,
     ControlState,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LocalEventBus(IEventBus):
@@ -20,12 +24,28 @@ class LocalEventBus(IEventBus):
         self._handlers[event].append(handler)
 
     async def emit(self, event: str, session_id: str, new_state: ControlState) -> None:
-        if event in self._handlers:
-            for handler in self._handlers[event]:
+        if event not in self._handlers:
+            return
+        for handler in self._handlers[event]:
+            # Isolate handlers: a failure in one must not prevent the
+            # remaining handlers from running.
+            try:
                 if asyncio.iscoroutinefunction(handler):
                     await handler(session_id, new_state)
                 else:
-                    handler(session_id, new_state)
+                    # Run sync handlers off the event loop so a blocking
+                    # handler does not stall the loop.
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(
+                        None, functools.partial(handler, session_id, new_state)
+                    )
+            except Exception:
+                logger.exception(
+                    "Event handler for %r failed (session_id=%s, new_state=%s)",
+                    event,
+                    session_id,
+                    new_state,
+                )
 
 
 class MemoryStore(IBlackboardStore):
@@ -37,6 +57,11 @@ class MemoryStore(IBlackboardStore):
         return board.model_copy(deep=True) if board else None
 
     async def create(self, session_id: str, initial_state: Any) -> None:
+        if session_id in self.db:
+            raise KeyError(
+                f"Session {session_id!r} already exists; "
+                "refusing to overwrite existing history."
+            )
         self.db[session_id] = Blackboard(
             session_id=session_id,
             control_state="USER_TURN",
@@ -44,13 +69,17 @@ class MemoryStore(IBlackboardStore):
         )
 
     async def append_message(self, session_id: str, message: ChatMessage) -> None:
-        if session_id in self.db:
-            self.db[session_id].history.append(message)
+        try:
+            board = self.db[session_id]
+        except KeyError:
+            raise KeyError(f"Unknown session: {session_id!r}")
+        board.history.append(message)
 
     async def update_patch(self, session_id: str, patch: Patch) -> None:
-        if session_id not in self.db:
-            return
-        board = self.db[session_id]
+        try:
+            board = self.db[session_id]
+        except KeyError:
+            raise KeyError(f"Unknown session: {session_id!r}")
 
         for key, value in patch.items():
             if key == "control_state":

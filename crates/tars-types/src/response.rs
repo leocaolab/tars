@@ -83,8 +83,14 @@ impl ChatResponse {
             });
         }
         // A cached response that lacks a stop_reason is incoherent (we
-        // refuse to cache mid-stream failures), but preserve EndTurn as
-        // a sane default so consumers always see a terminal event.
+        // refuse to cache mid-stream failures). Enforce that invariant
+        // loudly in CI; in release, fall back to EndTurn so consumers
+        // still see a terminal event rather than a truncated stream.
+        debug_assert!(
+            stop_reason.is_some(),
+            "into_events called on a response with no stop_reason — \
+             a mid-stream/incomplete response must never reach the cache-replay path",
+        );
         out.push(ChatEvent::Finished {
             stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
             usage,
@@ -132,27 +138,65 @@ impl ChatResponseBuilder {
                 self.inner.thinking.push_str(&text);
             }
             ChatEvent::ToolCallStart { index, id, name } => {
+                // A second Start for the same index is a provider
+                // protocol violation — the first call's accumulated
+                // args would be silently dropped. Log it rather than
+                // overwrite blindly.
+                if self.tool_args_buffer.contains_key(&index) {
+                    tracing::warn!(
+                        index,
+                        new_id = %id,
+                        "duplicate ToolCallStart for index — overwriting prior partial tool call"
+                    );
+                }
                 let entry = self.tool_args_buffer.entry(index).or_default();
                 entry.id = id;
                 entry.name = name;
                 entry.args.clear();
             }
             ChatEvent::ToolCallArgsDelta { index, args_delta } => {
-                let entry = self.tool_args_buffer.entry(index).or_default();
-                entry.args.push_str(&args_delta);
+                // An args delta for an index we never saw a Start for
+                // would create an entry with an empty id/name — a
+                // malformed tool call. Skip it and log; don't fabricate.
+                match self.tool_args_buffer.get_mut(&index) {
+                    Some(entry) => entry.args.push_str(&args_delta),
+                    None => tracing::warn!(
+                        index,
+                        "ToolCallArgsDelta for index with no prior ToolCallStart — dropping delta"
+                    ),
+                }
             }
             ChatEvent::ToolCallEnd {
                 index,
                 id,
                 parsed_args,
             } => {
-                // Prefer the provider's parsed value; if `index` is
-                // missing we still record the call.
-                let name = self
-                    .tool_args_buffer
-                    .remove(&index)
-                    .map(|a| a.name)
-                    .unwrap_or_default();
+                // Prefer the provider's parsed value. Correlate against
+                // the buffered Start: a missing Start or an id mismatch
+                // is a protocol violation we surface rather than paper
+                // over with an empty name / wrong id.
+                let started = self.tool_args_buffer.remove(&index);
+                let name = match &started {
+                    Some(a) => {
+                        if !a.id.is_empty() && a.id != id {
+                            tracing::warn!(
+                                index,
+                                start_id = %a.id,
+                                end_id = %id,
+                                "ToolCallEnd id does not match the ToolCallStart id for this index"
+                            );
+                        }
+                        a.name.clone()
+                    }
+                    None => {
+                        tracing::warn!(
+                            index,
+                            id = %id,
+                            "ToolCallEnd with no prior ToolCallStart — tool call will have an empty name"
+                        );
+                        String::new()
+                    }
+                };
                 self.inner
                     .tool_calls
                     .push(ToolCall::new(id, name, parsed_args));
@@ -176,10 +220,71 @@ impl ChatResponseBuilder {
     /// `ChatResponse`. If the stream was terminated abnormally
     /// (`stop_reason == None`), the caller decides whether to treat
     /// it as an error.
+    ///
+    /// Logs a warning when the stream looks incomplete — no terminal
+    /// `Finished` event (`stop_reason == None`) and/or tool-call Starts
+    /// that never got a matching End (their buffered args are dropped).
+    /// Use [`finish_checked`](Self::finish_checked) when you want that
+    /// surfaced as a hard error instead of a log line.
     pub fn finish(self) -> ChatResponse {
+        if self.inner.stop_reason.is_none() {
+            tracing::warn!(
+                buffered_tool_calls = self.tool_args_buffer.len(),
+                "ChatResponseBuilder::finish on a stream with no Finished event (stop_reason=None)"
+            );
+        } else if !self.tool_args_buffer.is_empty() {
+            tracing::warn!(
+                buffered_tool_calls = self.tool_args_buffer.len(),
+                "ChatResponseBuilder::finish dropping tool-call Start(s) that never got a matching End"
+            );
+        }
         self.inner
     }
+
+    /// Like [`finish`](Self::finish) but rejects an incomplete stream:
+    /// `Err` carries the partially-built response so the caller can
+    /// still inspect/log it. Incomplete means either no terminal
+    /// `Finished` event, or one or more tool-call Starts that never
+    /// received a matching End (whose buffered args would be lost).
+    pub fn finish_checked(self) -> Result<ChatResponse, IncompleteStream> {
+        let no_terminal = self.inner.stop_reason.is_none();
+        let unfinished_tool_calls = self.tool_args_buffer.len();
+        if no_terminal || unfinished_tool_calls > 0 {
+            Err(IncompleteStream {
+                no_terminal,
+                unfinished_tool_calls,
+                partial: self.inner,
+            })
+        } else {
+            Ok(self.inner)
+        }
+    }
 }
+
+/// Returned by [`ChatResponseBuilder::finish_checked`] when the event
+/// stream ended in a non-terminal state.
+#[derive(Debug)]
+pub struct IncompleteStream {
+    /// True iff no `Finished` event was applied (`stop_reason == None`).
+    pub no_terminal: bool,
+    /// Count of tool-call Starts left in the buffer with no matching End.
+    pub unfinished_tool_calls: usize,
+    /// The partially-accumulated response, so callers can still inspect
+    /// or log what arrived before the stream broke.
+    pub partial: ChatResponse,
+}
+
+impl std::fmt::Display for IncompleteStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "incomplete chat stream (no_terminal={}, unfinished_tool_calls={})",
+            self.no_terminal, self.unfinished_tool_calls
+        )
+    }
+}
+
+impl std::error::Error for IncompleteStream {}
 
 #[cfg(test)]
 mod tests {

@@ -144,17 +144,22 @@ fn validate_cap(cap_usd: f64) -> Result<(), BudgetConfigError> {
 /// propagate into the cost estimate and bypass (NaN) or always-trip (inf)
 /// the budget.
 fn validate_pricing(pricing: &Pricing) -> Result<(), BudgetConfigError> {
-    if !(pricing.input_per_million.is_finite() && pricing.input_per_million >= 0.0) {
-        return Err(BudgetConfigError::InvalidPricing {
-            field: "input_per_million",
-            value: pricing.input_per_million,
-        });
-    }
-    if !(pricing.output_per_million.is_finite() && pricing.output_per_million >= 0.0) {
-        return Err(BudgetConfigError::InvalidPricing {
-            field: "output_per_million",
-            value: pricing.output_per_million,
-        });
+    // Validate every rate that participates in cost accounting. Even
+    // though the per-call estimate currently only multiplies input +
+    // output, the cached-input / cache-creation / thinking rates feed
+    // `Pricing::cost_for` (used by the tenant-budget post-debit path),
+    // and a NaN/inf there would silently corrupt the running balance.
+    // Reject all five at construction so a bad table can't sneak in.
+    for (field, value) in [
+        ("input_per_million", pricing.input_per_million),
+        ("output_per_million", pricing.output_per_million),
+        ("cached_input_per_million", pricing.cached_input_per_million),
+        ("cache_creation_per_million", pricing.cache_creation_per_million),
+        ("thinking_per_million", pricing.thinking_per_million),
+    ] {
+        if !(value.is_finite() && value >= 0.0) {
+            return Err(BudgetConfigError::InvalidPricing { field, value });
+        }
     }
     Ok(())
 }
@@ -235,7 +240,12 @@ impl LlmService for PerCallBudgetService {
         }
 
         let estimate = self.estimate_cost_usd(&req);
-        if estimate >= self.cap_usd {
+        // Strict `>`: an estimate exactly at the cap is allowed, which
+        // matches the "exceeds" wording in the log/error and is
+        // consistent with `TenantBudgetService`'s `estimate > remaining`
+        // pre-check. (A zero cap with a zero estimate therefore passes;
+        // that's the documented subscription/zero-pricing path anyway.)
+        if estimate > self.cap_usd {
             tracing::warn!(
                 event = "per_call_budget.exceeded",
                 estimate_usd = estimate,
@@ -312,7 +322,8 @@ mod tests {
     async fn drain(stream: LlmEventStream) {
         let mut s = stream;
         while let Some(ev) = s.next().await {
-            if matches!(ev.unwrap(), ChatEvent::Finished { .. }) {
+            let ev = ev.expect("drain: stream yielded a provider error");
+            if matches!(ev, ChatEvent::Finished { .. }) {
                 break;
             }
         }

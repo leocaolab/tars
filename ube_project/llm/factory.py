@@ -31,5 +31,11 @@ def create_client(provider: str, api_key: str, model: str) -> LLMClient:
 
     import importlib
     module = importlib.import_module(module_path)
-    cls = getattr(module, class_name)
+    try:
+        cls = getattr(module, class_name)
+    except AttributeError as e:
+        raise ValueError(
+            f"Registry misconfiguration: module '{module_path}' has no "
+            f"class '{class_name}' for provider '{provider}'"
+        ) from e
     return cls(api_key=api_key, model=model)

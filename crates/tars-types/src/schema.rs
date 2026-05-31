@@ -16,6 +16,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JsonSchema {
     /// The schema document. Must be a JSON object at the root.
+    ///
+    /// **Not enforced by the [`strict`](Self::strict) /
+    /// [`loose`](Self::loose) constructors** — they accept any
+    /// `serde_json::Value` so call sites that build from a known-good
+    /// object literal stay ergonomic. The root-object invariant is
+    /// checked at the provider trust boundary via
+    /// [`is_root_object`](Self::is_root_object) /
+    /// [`validate`](Self::validate); adapters MUST call one of those
+    /// before translating the schema to the wire format, since a
+    /// non-object root would produce an invalid `response_format` /
+    /// `responseSchema` payload.
     pub schema: serde_json::Value,
     /// If true, ask the provider to enforce structural compliance at
     /// decode time (when supported). When false, the provider is free
@@ -40,6 +51,23 @@ impl JsonSchema {
             schema,
             strict: false,
             name: None,
+        }
+    }
+
+    /// True iff the schema document's root is a JSON object, as the
+    /// type's documented invariant requires.
+    pub fn is_root_object(&self) -> bool {
+        self.schema.is_object()
+    }
+
+    /// Enforce the root-object invariant at a trust boundary (provider
+    /// adapter before wire translation). `Err` carries the offending
+    /// JSON value kind for diagnostics.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.is_root_object() {
+            Ok(())
+        } else {
+            Err("JsonSchema.schema root must be a JSON object")
         }
     }
 }

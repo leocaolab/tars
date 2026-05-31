@@ -78,6 +78,26 @@ pub struct TelemetryAccumulator {
     pub provider_id: Option<String>,
 }
 
+impl TelemetryAccumulator {
+    /// True iff `retry_count` agrees with `retry_attempts.len()`.
+    ///
+    /// `retry_count` and the `retry_attempts` log are two views of the
+    /// same fact and can drift if a middleware bumps one without
+    /// pushing the other. Prefer [`retries`](Self::retries) as the
+    /// single source of truth when reading; call this in tests / debug
+    /// asserts to catch a writer that forgot to keep them in sync.
+    pub fn retries_consistent(&self) -> bool {
+        self.retry_count as usize == self.retry_attempts.len()
+    }
+
+    /// Canonical retry count, derived from the attempt log so it can't
+    /// disagree with `retry_attempts`. Readers should prefer this over
+    /// the raw `retry_count` field.
+    pub fn retries(&self) -> usize {
+        self.retry_attempts.len()
+    }
+}
+
 /// One retry attempt summary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetryAttempt {
@@ -107,6 +127,26 @@ pub type SharedTelemetry = Arc<Mutex<TelemetryAccumulator>>;
 
 /// Construct a fresh telemetry handle. Convenient for callers that
 /// build a `RequestContext` from scratch.
+///
+/// **Poisoning contract.** The inner `Mutex` is poisoned if a thread
+/// panics while holding the lock. Telemetry is *advisory* metadata, not
+/// load-bearing state — a poisoned accumulator must never abort an
+/// otherwise-successful request. Callers therefore MUST NOT
+/// `.lock().unwrap()`; recover the guard with [`lock_telemetry`], which
+/// treats a `PoisonError` as "use the data anyway" (the worst case is a
+/// partially-written observation, which is acceptable for telemetry).
 pub fn new_shared_telemetry() -> SharedTelemetry {
     Arc::new(Mutex::new(TelemetryAccumulator::default()))
+}
+
+/// Lock a [`SharedTelemetry`], recovering from poisoning.
+///
+/// Telemetry is advisory, so a panic elsewhere that poisoned the mutex
+/// should not propagate into every later telemetry write. This returns
+/// the guard regardless, unwrapping the `PoisonError` to its inner
+/// guard. Use this everywhere instead of `.lock().unwrap()`.
+pub fn lock_telemetry(
+    t: &SharedTelemetry,
+) -> std::sync::MutexGuard<'_, TelemetryAccumulator> {
+    t.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

@@ -204,24 +204,30 @@ impl LlmProvider for ClaudeCliProvider {
         let usage = extract_usage(&payload);
 
         let max_chars = req.max_output_tokens.map(|t| (t as usize) * 4);
-        let truncated = match max_chars {
+        let (truncated, was_truncated) = match max_chars {
             // Truncate on a UTF-8 char boundary — `cap` (max_output_tokens
             // * 4) can land mid-codepoint, and byte-indexing `[..cap]`
             // would panic. `truncate_utf8` rounds down to the previous
             // boundary (no ellipsis, so the byte cap is still honored).
             Some(cap) if response_text.len() > cap => {
-                crate::http_base::truncate_utf8(&response_text, cap).to_string()
+                (crate::http_base::truncate_utf8(&response_text, cap).to_string(), true)
             }
-            _ => response_text,
+            _ => (response_text, false),
+        };
+
+        // Report MaxTokens when WE clipped the output to honor the
+        // caller's budget — otherwise a truncated reply looks like a
+        // natural end-of-turn and consumers won't know it was cut.
+        let stop_reason = if was_truncated {
+            StopReason::MaxTokens
+        } else {
+            StopReason::EndTurn
         };
 
         let events: Vec<Result<ChatEvent, ProviderError>> = vec![
             Ok(ChatEvent::started(model)),
             Ok(ChatEvent::Delta { text: truncated }),
-            Ok(ChatEvent::Finished {
-                stop_reason: StopReason::EndTurn,
-                usage,
-            }),
+            Ok(ChatEvent::Finished { stop_reason, usage }),
         ];
 
         Ok(Box::pin(futures::stream::iter(events)))

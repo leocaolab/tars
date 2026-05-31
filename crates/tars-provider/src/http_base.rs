@@ -262,7 +262,7 @@ pub(crate) const ERROR_BODY_CAP_BYTES: usize = 8 * 1024;
 /// instead of an empty input. The returned `String` may end on a
 /// non-UTF-8 boundary at the cap; `truncate_utf8` (called by the
 /// caller) walks back to a codepoint boundary.
-async fn read_bounded_body(response: reqwest::Response, cap: usize) -> String {
+pub(crate) async fn read_bounded_body(response: reqwest::Response, cap: usize) -> String {
     use futures::StreamExt;
     let mut stream = response.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(cap.min(1024));

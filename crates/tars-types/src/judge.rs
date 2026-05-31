@@ -85,9 +85,27 @@ pub struct JudgedItem {
 }
 
 impl JudgeReport {
+    /// True iff the tallies are internally consistent:
+    /// `true_positives + false_positives + unsure == item_count`.
+    ///
+    /// The fields are public (serde + ergonomic test fixtures), so a
+    /// caller can build a report where the counts don't add up — which
+    /// would make [`unsure_rate`](Self::unsure_rate) exceed 1.0 and
+    /// [`precision`](Self::precision) lie. Call this before trusting the
+    /// ratios; the canonical builder in `tars-runtime::judge` upholds it.
+    pub fn counts_consistent(&self) -> bool {
+        self.true_positives
+            .checked_add(self.false_positives)
+            .and_then(|s| s.checked_add(self.unsure))
+            == Some(self.item_count)
+    }
+
     /// `TP / (TP + FP)`. `None` when no decisive verdicts.
     pub fn precision(&self) -> Option<f64> {
-        let total = self.true_positives + self.false_positives;
+        // Saturating: counts are u32 and could in principle sum past
+        // u32::MAX; a wrapping add in release would yield a bogus
+        // denominator. Saturation keeps the ratio sane at the extreme.
+        let total = self.true_positives.saturating_add(self.false_positives);
         if total == 0 {
             None
         } else {
@@ -109,7 +127,9 @@ impl JudgeReport {
     /// `confidence_level` must be in (0, 1); 0.95 is the common default.
     /// Reference: <https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval>
     pub fn precision_with_ci(&self, confidence_level: f64) -> Option<(f64, f64, f64)> {
-        let n = (self.true_positives + self.false_positives) as f64;
+        // Add as f64 (after widening) so the denominator can't wrap in
+        // release the way a u32 `tp + fp` would. Same fix as `precision`.
+        let n = self.true_positives as f64 + self.false_positives as f64;
         if n == 0.0 {
             return None;
         }
@@ -190,13 +210,16 @@ pub fn mcnemar(
     for (id, &base_correct) in baseline {
         if let Some(&cand_correct) = candidate.get(id) {
             match (base_correct, cand_correct) {
-                (true, false) => b += 1,
-                (false, true) => c += 1,
+                // Saturating: corpora are nowhere near u32::MAX, but a
+                // wrapping `+= 1` in release would silently corrupt the
+                // χ² statistic at the extreme.
+                (true, false) => b = b.saturating_add(1),
+                (false, true) => c = c.saturating_add(1),
                 _ => {} // concordant — carries no information
             }
         }
     }
-    let n = b + c;
+    let n = b.saturating_add(c);
     let chi_squared = if n == 0 {
         None
     } else {

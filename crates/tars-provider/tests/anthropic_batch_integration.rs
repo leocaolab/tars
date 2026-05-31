@@ -67,7 +67,7 @@ async fn submit_posts_requests_array_and_returns_job_id() {
                 BatchItemId::new("draft-2"),
                 ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "draft two"),
             ),
-        ])
+        ], &tars_types::RequestContext::test_default())
         .await
         .unwrap();
     assert_eq!(id.as_str(), "msgbatch_01abc");
@@ -80,7 +80,7 @@ async fn submit_empty_items_is_invalid_request() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
 
-    let err = submitter.submit(vec![]).await.expect_err("must reject");
+    let err = submitter.submit(vec![], &tars_types::RequestContext::test_default()).await.expect_err("must reject");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));
 }
 
@@ -106,7 +106,7 @@ async fn status_translates_in_progress() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     let st = submitter
-        .status(&BatchJobId::new("msgbatch_01abc"))
+        .status(&BatchJobId::new("msgbatch_01abc"), &tars_types::RequestContext::test_default())
         .await
         .unwrap();
     match st {
@@ -145,7 +145,7 @@ async fn status_translates_ended_to_completed() {
     let submitter = provider.as_batch_submitter().unwrap();
     assert_eq!(
         submitter
-            .status(&BatchJobId::new("msgbatch_done"))
+            .status(&BatchJobId::new("msgbatch_done"), &tars_types::RequestContext::test_default())
             .await
             .unwrap(),
         BatchStatus::Completed,
@@ -175,7 +175,7 @@ async fn status_all_expired_maps_to_expired() {
     let submitter = provider.as_batch_submitter().unwrap();
     assert_eq!(
         submitter
-            .status(&BatchJobId::new("msgbatch_exp"))
+            .status(&BatchJobId::new("msgbatch_exp"), &tars_types::RequestContext::test_default())
             .await
             .unwrap(),
         BatchStatus::Expired,
@@ -214,7 +214,7 @@ async fn results_parses_jsonl_with_mixed_outcomes() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     let results = submitter
-        .results(&BatchJobId::new("msgbatch_done"))
+        .results(&BatchJobId::new("msgbatch_done"), &tars_types::RequestContext::test_default())
         .await
         .unwrap();
     assert_eq!(results.len(), 2);
@@ -253,7 +253,7 @@ async fn results_on_non_terminal_returns_invalid_request_without_fetching() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .results(&BatchJobId::new("msgbatch_pending"))
+        .results(&BatchJobId::new("msgbatch_pending"), &tars_types::RequestContext::test_default())
         .await
         .expect_err("must refuse on non-terminal");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));
@@ -275,7 +275,7 @@ async fn cancel_posts_to_cancel_endpoint() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     submitter
-        .cancel(&BatchJobId::new("msgbatch_01abc"))
+        .cancel(&BatchJobId::new("msgbatch_01abc"), &tars_types::RequestContext::test_default())
         .await
         .unwrap();
 }
@@ -300,7 +300,7 @@ async fn submit_propagates_http_error_via_classifier() {
         .submit(vec![(
             BatchItemId::new("x"),
             ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "hi"),
-        )])
+        )], &tars_types::RequestContext::test_default())
         .await
         .expect_err("401 should error");
     // Adapter's classify_error maps 401 → Auth. We don't pin the kind to

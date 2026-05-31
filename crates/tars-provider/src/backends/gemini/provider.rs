@@ -194,22 +194,32 @@ impl BatchSubmitter for GeminiProvider {
     async fn submit(
         &self,
         _items: Vec<(BatchItemId, ChatRequest)>,
+        _ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError> {
         Err(ProviderError::InvalidRequest(GEMINI_BATCH_NOT_SUPPORTED.into()))
     }
 
-    async fn status(&self, _id: &BatchJobId) -> Result<BatchStatus, ProviderError> {
+    async fn status(
+        &self,
+        _id: &BatchJobId,
+        _ctx: &RequestContext,
+    ) -> Result<BatchStatus, ProviderError> {
         Err(ProviderError::InvalidRequest(GEMINI_BATCH_NOT_SUPPORTED.into()))
     }
 
     async fn results(
         &self,
         _id: &BatchJobId,
+        _ctx: &RequestContext,
     ) -> Result<Vec<BatchResultItem>, ProviderError> {
         Err(ProviderError::InvalidRequest(GEMINI_BATCH_NOT_SUPPORTED.into()))
     }
 
-    async fn cancel(&self, _id: &BatchJobId) -> Result<(), ProviderError> {
+    async fn cancel(
+        &self,
+        _id: &BatchJobId,
+        _ctx: &RequestContext,
+    ) -> Result<(), ProviderError> {
         Err(ProviderError::InvalidRequest(GEMINI_BATCH_NOT_SUPPORTED.into()))
     }
 }

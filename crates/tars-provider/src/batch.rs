@@ -32,7 +32,7 @@ use tokio::sync::Mutex;
 
 use tars_types::{
     BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ChatRequest, ChatResponse,
-    ProviderError,
+    ProviderError, RequestContext,
 };
 
 /// Submit batches of [`ChatRequest`] for offline processing.
@@ -47,6 +47,11 @@ pub trait BatchSubmitter: Send + Sync + 'static {
     /// caller-chosen [`BatchItemId`] which is echoed back in results
     /// so each output can be matched to its input regardless of order.
     ///
+    /// `ctx` carries the per-request principal / tenant / trace the
+    /// auth resolver needs to mint a real (e.g. Vault-issued, IAM-scoped)
+    /// credential — production resolvers reject a test fixture, so it
+    /// must be threaded from the caller rather than fabricated here.
+    ///
     /// Errors:
     /// - [`ProviderError::Auth`] — bad credential
     /// - [`ProviderError::InvalidRequest`] — exceeded vendor batch size
@@ -55,11 +60,16 @@ pub trait BatchSubmitter: Send + Sync + 'static {
     async fn submit(
         &self,
         items: Vec<(BatchItemId, ChatRequest)>,
+        ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError>;
 
     /// Poll one job's current status. Idempotent / safe to call as
     /// often as the vendor's rate limit allows.
-    async fn status(&self, id: &BatchJobId) -> Result<BatchStatus, ProviderError>;
+    async fn status(
+        &self,
+        id: &BatchJobId,
+        ctx: &RequestContext,
+    ) -> Result<BatchStatus, ProviderError>;
 
     /// Fetch the per-item results for a `Completed` job. Calling
     /// on a non-terminal job is a caller error — implementations
@@ -67,13 +77,15 @@ pub trait BatchSubmitter: Send + Sync + 'static {
     async fn results(
         &self,
         id: &BatchJobId,
+        ctx: &RequestContext,
     ) -> Result<Vec<BatchResultItem>, ProviderError>;
 
     /// Optional cancel — vendors that support it (Anthropic) move the
     /// job to `Cancelled`; vendors that don't (some OpenAI states)
     /// return `InvalidRequest`. Default: not supported.
-    async fn cancel(&self, id: &BatchJobId) -> Result<(), ProviderError> {
+    async fn cancel(&self, id: &BatchJobId, ctx: &RequestContext) -> Result<(), ProviderError> {
         let _ = id;
+        let _ = ctx;
         Err(ProviderError::InvalidRequest(
             "cancel not supported by this provider's batch backend".into(),
         ))
@@ -151,6 +163,7 @@ impl BatchSubmitter for MockBatchSubmitter {
     async fn submit(
         &self,
         items: Vec<(BatchItemId, ChatRequest)>,
+        _ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError> {
         let mut state = self.state.lock().await;
         let seq = state.next_job_seq;
@@ -167,7 +180,11 @@ impl BatchSubmitter for MockBatchSubmitter {
         Ok(job_id)
     }
 
-    async fn status(&self, id: &BatchJobId) -> Result<BatchStatus, ProviderError> {
+    async fn status(
+        &self,
+        id: &BatchJobId,
+        _ctx: &RequestContext,
+    ) -> Result<BatchStatus, ProviderError> {
         match self.state.lock().await.jobs.get(id) {
             Some(job) => Ok(job.status.clone()),
             None => Err(ProviderError::InvalidRequest(format!(
@@ -179,6 +196,7 @@ impl BatchSubmitter for MockBatchSubmitter {
     async fn results(
         &self,
         id: &BatchJobId,
+        _ctx: &RequestContext,
     ) -> Result<Vec<BatchResultItem>, ProviderError> {
         let state = self.state.lock().await;
         let job = state.jobs.get(id).ok_or_else(|| {
@@ -195,16 +213,19 @@ impl BatchSubmitter for MockBatchSubmitter {
             // which isn't Clone, so we have to fabricate per-item clones via re-marshal.
             // Tests calling set_results get their results back unchanged here is the contract,
             // but since Result<ChatResponse, _> isn't Clone we serialize/deserialize.
-            return Ok(custom
+            return custom
                 .iter()
-                .map(|item| BatchResultItem {
-                    item_id: item.item_id.clone(),
-                    result: match &item.result {
-                        Ok(resp) => Ok(clone_via_serde(resp)),
+                .map(|item| {
+                    let result = match &item.result {
+                        Ok(resp) => Ok(clone_via_serde(resp)?),
                         Err(e) => Err(clone_provider_error(e)),
-                    },
+                    };
+                    Ok(BatchResultItem {
+                        item_id: item.item_id.clone(),
+                        result,
+                    })
                 })
-                .collect());
+                .collect();
         }
         // Default: echo each input as a text response.
         Ok(job
@@ -232,9 +253,14 @@ fn echo_response(req: &ChatRequest) -> ChatResponse {
     acc.finish()
 }
 
-fn clone_via_serde(resp: &ChatResponse) -> ChatResponse {
-    let v = serde_json::to_value(resp).expect("ChatResponse serializes");
-    serde_json::from_value(v).expect("ChatResponse round-trips")
+fn clone_via_serde(resp: &ChatResponse) -> Result<ChatResponse, ProviderError> {
+    // Don't `expect` here: this runs inside `results()` while the state
+    // lock is held, so a panic would unwind through the guard. Surface a
+    // typed error instead and let the caller decide.
+    let v = serde_json::to_value(resp)
+        .map_err(|e| ProviderError::Internal(format!("mock results: ChatResponse serialize: {e}")))?;
+    serde_json::from_value(v)
+        .map_err(|e| ProviderError::Internal(format!("mock results: ChatResponse round-trip: {e}")))
 }
 
 fn clone_provider_error(e: &ProviderError) -> ProviderError {
@@ -246,21 +272,25 @@ fn clone_provider_error(e: &ProviderError) -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_types::{ChatRequest, ModelHint};
+    use tars_types::{ChatRequest, ModelHint, RequestContext};
 
     fn req(text: &str) -> ChatRequest {
         ChatRequest::user(ModelHint::Explicit("m".into()), text)
+    }
+
+    fn ctx() -> RequestContext {
+        RequestContext::test_default()
     }
 
     #[tokio::test]
     async fn submit_assigns_unique_job_ids() {
         let m = MockBatchSubmitter::new();
         let id1 = m
-            .submit(vec![(BatchItemId::new("a"), req("hello"))])
+            .submit(vec![(BatchItemId::new("a"), req("hello"))], &ctx())
             .await
             .unwrap();
         let id2 = m
-            .submit(vec![(BatchItemId::new("b"), req("world"))])
+            .submit(vec![(BatchItemId::new("b"), req("world"))], &ctx())
             .await
             .unwrap();
         assert_ne!(id1, id2);
@@ -270,17 +300,17 @@ mod tests {
     async fn status_after_submit_is_completed_by_default() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))])
+            .submit(vec![(BatchItemId::new("a"), req("x"))], &ctx())
             .await
             .unwrap();
-        assert_eq!(m.status(&id).await.unwrap(), BatchStatus::Completed);
+        assert_eq!(m.status(&id, &ctx()).await.unwrap(), BatchStatus::Completed);
     }
 
     #[tokio::test]
     async fn status_unknown_job_errors() {
         let m = MockBatchSubmitter::new();
         let err = m
-            .status(&BatchJobId::new("does-not-exist"))
+            .status(&BatchJobId::new("does-not-exist"), &ctx())
             .await
             .expect_err("must error");
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
@@ -294,8 +324,8 @@ mod tests {
             (BatchItemId::new("draft-2"), req("input 2")),
             (BatchItemId::new("draft-3"), req("input 3")),
         ];
-        let id = m.submit(items.clone()).await.unwrap();
-        let results = m.results(&id).await.unwrap();
+        let id = m.submit(items.clone(), &ctx()).await.unwrap();
+        let results = m.results(&id, &ctx()).await.unwrap();
         assert_eq!(results.len(), 3);
         for (input, output) in items.iter().zip(results.iter()) {
             assert_eq!(input.0, output.item_id);
@@ -307,7 +337,7 @@ mod tests {
     async fn results_non_terminal_status_errors() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))])
+            .submit(vec![(BatchItemId::new("a"), req("x"))], &ctx())
             .await
             .unwrap();
         m.set_status(
@@ -320,7 +350,7 @@ mod tests {
         )
         .await;
         let err = m
-            .results(&id)
+            .results(&id, &ctx())
             .await
             .expect_err("must reject results() on non-terminal");
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
@@ -330,12 +360,12 @@ mod tests {
     async fn set_status_drives_polling_simulation() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))])
+            .submit(vec![(BatchItemId::new("a"), req("x"))], &ctx())
             .await
             .unwrap();
         // Simulate progress polling.
         m.set_status(&id, BatchStatus::Submitted).await;
-        assert!(!m.status(&id).await.unwrap().is_terminal());
+        assert!(!m.status(&id, &ctx()).await.unwrap().is_terminal());
         m.set_status(
             &id,
             BatchStatus::InProgress {
@@ -345,19 +375,19 @@ mod tests {
             },
         )
         .await;
-        assert!(!m.status(&id).await.unwrap().is_terminal());
+        assert!(!m.status(&id, &ctx()).await.unwrap().is_terminal());
         m.set_status(&id, BatchStatus::Completed).await;
-        assert!(m.status(&id).await.unwrap().is_terminal());
+        assert!(m.status(&id, &ctx()).await.unwrap().is_terminal());
     }
 
     #[tokio::test]
     async fn cancel_default_returns_unsupported() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))])
+            .submit(vec![(BatchItemId::new("a"), req("x"))], &ctx())
             .await
             .unwrap();
-        let err = m.cancel(&id).await.expect_err("default unsupported");
+        let err = m.cancel(&id, &ctx()).await.expect_err("default unsupported");
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
     }
 

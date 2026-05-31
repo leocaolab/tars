@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use serde_json::Value;
-use tars_types::{ProviderError, StopReason};
+use tars_types::{ProviderError, StopReason, Usage};
 
 /// Per-call slot for accumulating streaming tool args.
 #[derive(Debug, Default)]
@@ -45,6 +45,13 @@ pub struct ToolCallBuffer {
     /// usage-only chunk emitted Finished with a hardcoded EndTurn,
     /// silently overriding the real reason (ToolUse, MaxTokens, …).
     pending_stop_reason: Option<StopReason>,
+    /// Last `stop_reason` / `usage` observed on an intermediate finish
+    /// payload (e.g. Anthropic's `message_delta`). Lets an adapter
+    /// recover the real values when it has to synthesize a terminal
+    /// `Finished` from a bare protocol terminator (`message_stop`)
+    /// instead of discarding them as `Other` / `Usage::default()`.
+    last_stop_reason: Option<StopReason>,
+    last_usage: Option<Usage>,
 }
 
 impl ToolCallBuffer {
@@ -77,6 +84,21 @@ impl ToolCallBuffer {
         }
     }
 
+    /// Record the `stop_reason` / `usage` seen on an intermediate
+    /// finish payload so a later synthetic terminator can recover them.
+    pub fn record_finish_state(&mut self, stop_reason: StopReason, usage: Usage) {
+        self.last_stop_reason = Some(stop_reason);
+        self.last_usage = Some(usage);
+    }
+
+    /// Recover the last-seen finish state, defaulting any missing piece.
+    pub fn recovered_finish_state(&self) -> (StopReason, Usage) {
+        (
+            self.last_stop_reason.unwrap_or(StopReason::Other),
+            self.last_usage.unwrap_or_default(),
+        )
+    }
+
     /// Mark Finished as emitted. Called by adapters right after they
     /// push a `ChatEvent::Finished` so the matching `*_stop`-style
     /// event handler can decide whether a synthetic terminator is
@@ -88,6 +110,16 @@ impl ToolCallBuffer {
     /// Whether `mark_finished` was called previously on this buffer.
     pub fn finished_emitted(&self) -> bool {
         self.finished_emitted
+    }
+
+    /// Whether a tool call has been registered (via `on_start` /
+    /// `on_delta`) at this index. Adapters use this to distinguish a
+    /// `*_stop` event for a real tool block (where a `finalize` failure
+    /// is fatal — the consumer would hang waiting for ToolCallEnd) from
+    /// one for a text/thinking block (which was never registered, so a
+    /// `finalize` miss is the expected path).
+    pub fn is_inflight(&self, index: usize) -> bool {
+        self.inflight.contains_key(&index)
     }
 
     pub fn on_start(&mut self, index: usize, id: String, name: String) {

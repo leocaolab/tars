@@ -140,9 +140,18 @@ pub mod systemtime_millis {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(t: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
         let millis = match t.duration_since(UNIX_EPOCH) {
-            Ok(d) => d.as_millis() as i64,
-            Err(e) => -(e.duration().as_millis() as i64),
+            // `as_millis` returns u128; reject values that don't fit in
+            // i64 rather than silently wrapping into a negative (which
+            // deserialize would read back as a pre-1970 time).
+            Ok(d) => i64::try_from(d.as_millis())
+                .map_err(|_| S::Error::custom("SystemTime too far in the future for i64 millis"))?,
+            Err(e) => {
+                let neg = i64::try_from(e.duration().as_millis())
+                    .map_err(|_| S::Error::custom("SystemTime too far in the past for i64 millis"))?;
+                -neg
+            }
         };
         s.serialize_i64(millis)
     }
@@ -152,7 +161,9 @@ pub mod systemtime_millis {
         if millis >= 0 {
             Ok(UNIX_EPOCH + Duration::from_millis(millis as u64))
         } else {
-            Ok(UNIX_EPOCH - Duration::from_millis((-millis) as u64))
+            // `unsigned_abs()` handles i64::MIN, which `-millis` would
+            // overflow on.
+            Ok(UNIX_EPOCH - Duration::from_millis(millis.unsigned_abs()))
         }
     }
 }

@@ -52,7 +52,7 @@ async fn submit_returns_not_implemented_invalid_request() {
         .submit(vec![(
             BatchItemId::new("x"),
             ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "hi"),
-        )])
+        )], &tars_types::RequestContext::test_default())
         .await
         .expect_err("must reject");
     assert_not_implemented(err);
@@ -63,7 +63,7 @@ async fn status_returns_not_implemented_invalid_request() {
     let provider = build_provider();
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .status(&BatchJobId::new("ignored"))
+        .status(&BatchJobId::new("ignored"), &tars_types::RequestContext::test_default())
         .await
         .expect_err("must reject");
     assert_not_implemented(err);
@@ -74,7 +74,7 @@ async fn results_returns_not_implemented_invalid_request() {
     let provider = build_provider();
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .results(&BatchJobId::new("ignored"))
+        .results(&BatchJobId::new("ignored"), &tars_types::RequestContext::test_default())
         .await
         .expect_err("must reject");
     assert_not_implemented(err);
@@ -85,7 +85,7 @@ async fn cancel_returns_not_implemented_invalid_request() {
     let provider = build_provider();
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .cancel(&BatchJobId::new("ignored"))
+        .cancel(&BatchJobId::new("ignored"), &tars_types::RequestContext::test_default())
         .await
         .expect_err("must reject");
     assert_not_implemented(err);

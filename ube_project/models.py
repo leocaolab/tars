@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Dict, Literal, Optional
 
 # 运行时状态机的五个绝对状态
@@ -16,6 +16,15 @@ class RubricManifest(BaseModel):
     """静态配置：Rubric Manifest（能力维度打分卡）"""
     interview_level: str = "Staff/Principal"
     dimensions: List[RubricDimension] = Field(default_factory=list)
+
+    @field_validator("dimensions")
+    @classmethod
+    def _unique_node_ids(cls, v: List[RubricDimension]) -> List[RubricDimension]:
+        seen: set[str] = set()
+        dups = {d.node_id for d in v if d.node_id in seen or seen.add(d.node_id)}
+        if dups:
+            raise ValueError(f"dimensions contains duplicate node_id(s): {sorted(dups)}")
+        return v
 
 
 class RubricNode(BaseModel):
@@ -51,6 +60,15 @@ class ProblemBlueprint(BaseModel):
     global_constants: Dict[str, str] = Field(description="不可篡改的物理约束")
     rubric_nodes: List[BlueprintNode] = Field(description="引用的考纲维度 ID 列表 + 初始探针")
 
+    @field_validator("rubric_nodes")
+    @classmethod
+    def _unique_ids(cls, v: List[BlueprintNode]) -> List[BlueprintNode]:
+        seen: set[str] = set()
+        dups = {n.id for n in v if n.id in seen or seen.add(n.id)}
+        if dups:
+            raise ValueError(f"rubric_nodes contains duplicate id(s): {sorted(dups)}")
+        return v
+
 
 class EvaluatorPatch(BaseModel):
     """考官输出的增量补丁 — LLM 强制返回此结构"""
@@ -65,5 +83,9 @@ class EvaluatorPatch(BaseModel):
         default_factory=dict, description="为对应考点追加的负面证据/盲点，Key 为 node_id"
     )
     probe_suggestions: Dict[str, str] = Field(
-        default_factory=dict, description="为 NEEDS_PROBING 的考点提供追问建议，Key 为 node_id"
+        default_factory=dict,
+        description=(
+            "追问建议，Key 为 node_id。约定用于状态为 NEEDS_PROBING 的考点，"
+            "但该约束不在此模型层强制，由补丁消费方 (engine.apply_patch) 负责校验。"
+        ),
     )

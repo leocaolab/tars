@@ -1,7 +1,7 @@
 import json
 import uuid
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 from .models import (
     Blackboard,
@@ -12,7 +12,7 @@ from .models import (
 )
 
 
-def load_rubric(path: str = None) -> RubricManifest:
+def load_rubric(path: Optional[str] = None) -> RubricManifest:
     """从 JSON 文件加载静态考纲"""
     if path is None:
         path = str(Path(__file__).parent / "rubric.json")
@@ -31,10 +31,12 @@ class SessionFactory:
 
     def __init__(self, rubric: RubricManifest):
         self.rubric = rubric
-        # 建立 node_id → RubricDimension 的索引
-        self._dim_index: Dict[str, RubricDimension] = {
-            d.node_id: d for d in rubric.dimensions
-        }
+        # 建立 node_id → RubricDimension 的索引（拒绝重复 node_id）
+        self._dim_index: Dict[str, RubricDimension] = {}
+        for d in rubric.dimensions:
+            if d.node_id in self._dim_index:
+                raise ValueError(f"考纲维度存在重复 node_id: {d.node_id}")
+            self._dim_index[d.node_id] = d
 
     def create(self, blueprint: ProblemBlueprint) -> Blackboard:
         """
@@ -55,6 +57,8 @@ class SessionFactory:
         # 2. 组装运行时状态树（全部 INIT，注入蓝图预设的 initial_probe）
         state_tree: Dict[str, RubricNode] = {}
         for bp_node in blueprint.rubric_nodes:
+            if bp_node.id in state_tree:
+                raise ValueError(f"蓝图存在重复的考点 id: {bp_node.id}")
             state_tree[bp_node.id] = RubricNode(
                 probe_suggestion=bp_node.initial_probe,
             )
@@ -69,7 +73,7 @@ class SessionFactory:
         history = [{"role": "system", "content": system_prompt}]
 
         # 4. 实例化强类型 Pydantic 黑板
-        session_id = f"intv_{uuid.uuid4().hex[:8]}"
+        session_id = f"intv_{uuid.uuid4().hex}"
         return Blackboard(
             session_id=session_id,
             topic=blueprint.title,

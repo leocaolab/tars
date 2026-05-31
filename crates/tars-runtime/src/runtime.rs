@@ -64,6 +64,26 @@ pub trait Runtime: Send + Sync + 'static {
         let events = self.replay(traj).await?;
         Ok(events.last().is_some_and(AgentEvent::is_terminal))
     }
+
+    /// Count `StepStarted` events for `traj` (the trajectory's logical
+    /// step count, used to assign the next `step_seq`).
+    ///
+    /// The default impl replays the whole log and counts — fine for
+    /// short trajectories but O(events) in memory, so a long-running
+    /// trajectory risks OOM. A storage-aware impl SHOULD override this
+    /// with a bounded query (e.g. SQLite
+    /// `SELECT COUNT(*) ... WHERE payload->>'type' = 'step_started'`),
+    /// which needs no in-memory materialization. Extracted as its own
+    /// trait method precisely so that override can land without
+    /// touching `execute_agent_step`.
+    async fn count_started_steps(&self, traj: &TrajectoryId) -> Result<u32, RuntimeError> {
+        let events = self.replay(traj).await?;
+        let n = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::StepStarted { .. }))
+            .count();
+        Ok(u32::try_from(n).unwrap_or(u32::MAX))
+    }
 }
 
 /// Production runtime backed by an [`EventStore`].
@@ -103,7 +123,13 @@ impl Runtime for LocalRuntime {
             reason: reason.to_string(),
         };
         let payload = serde_json::to_value(&event)?;
-        self.event_store.append(&traj, &[payload]).await?;
+        // The returned sequence_no is deliberately ignored:
+        // `TrajectoryStarted` is invariantly the first event of a fresh
+        // trajectory (event_seq == 1, see `execute_agent_step` step 1),
+        // and the caller identifies the trajectory by the returned
+        // `TrajectoryId`, not by this event's seq. Nothing downstream
+        // needs the number here.
+        let _seq = self.event_store.append(&traj, &[payload]).await?;
         tracing::debug!(
             trajectory_id = %traj,
             reason,
@@ -118,13 +144,10 @@ impl Runtime for LocalRuntime {
         // at the runtime layer rather than letting the row land
         // misfiled in the store.
         if event.trajectory_id() != traj {
-            return Err(RuntimeError::Storage(tars_storage::StorageError::Backend(
-                format!(
-                    "AgentEvent's trajectory_id ({}) doesn't match append target ({})",
-                    event.trajectory_id(),
-                    traj,
-                ),
-            )));
+            return Err(RuntimeError::TrajectoryMismatch {
+                event: event.trajectory_id().to_string(),
+                target: traj.to_string(),
+            });
         }
         let payload = serde_json::to_value(&event)?;
         let seq = self.event_store.append(traj, &[payload]).await?;
@@ -175,6 +198,31 @@ impl Runtime for LocalRuntime {
 /// degrade silently" pattern, here we're an internal building block
 /// where storage failures matter (the next step's `step_seq` would
 /// be wrong if a `StepStarted` write silently dropped).
+///
+/// ## Crash / recovery contract (NOT exactly-once)
+///
+/// This function is **at-most-once-effect, at-least-once-attempt**, not
+/// exactly-once. A crash between step 2 (`StepStarted`) and the
+/// terminal event (step 4 `StepCompleted` / step 5 `StepFailed`) leaves
+/// a `StepStarted` with no terminal — an *orphan*. Recovery is the
+/// caller's job and works as follows:
+///
+/// - Each step carries a [`StepIdempotencyKey`] = hash of
+///   `(traj, step_seq, input_summary)`. On retry, the recomputed key
+///   for the same logical step is identical, so a recovery pass can
+///   detect "I already started step N" by scanning for a `StepStarted`
+///   whose key matches and which lacks a terminal event.
+/// - This function does **not** itself dedupe on that key — appending
+///   is unconditional. An orphaned `StepStarted` followed by a fresh
+///   call to `execute_agent_step` will allocate `step_seq = orphan + 1`
+///   (the orphan still counts), so the orphan is left in place as an
+///   audit record and the retry runs as a new step. Callers that want
+///   true exactly-once must check `count_started_steps` against an
+///   expected value (or scan for a key match) before re-invoking.
+///
+/// In short: side effects inside `agent.execute` (the LLM call) may run
+/// more than once across a crash+retry; the event log is the source of
+/// truth for what actually completed.
 pub async fn execute_agent_step(
     runtime: &dyn Runtime,
     traj: &TrajectoryId,
@@ -190,12 +238,7 @@ pub async fn execute_agent_step(
     //    a fresh trajectory's first step would otherwise come out
     //    as step_seq=2). Doc 04 §3.2 invariant 3 makes step_seq the
     //    LOGICAL step identifier; event sequencing is orthogonal.
-    let prior = runtime.replay(traj).await?;
-    let step_seq: u32 = (prior
-        .iter()
-        .filter(|e| matches!(e, AgentEvent::StepStarted { .. }))
-        .count() as u32)
-        .saturating_add(1);
+    let step_seq: u32 = runtime.count_started_steps(traj).await?.saturating_add(1);
 
     // 2. StepStarted
     let input_summary = format!(
@@ -224,6 +267,15 @@ pub async fn execute_agent_step(
     // agent — Doc 04 §3.2's audit pin (TODO L-1 enterprise follow-on).
     // Plain SHA256 of the bytes so an external auditor can verify with
     // `sha256sum read_file.txt`.
+    //
+    // No TOCTOU: `input` is MOVED into `execute` below, so the agent
+    // gets its own owned copy. Anything it mutates is private and
+    // cannot retroactively change the bytes hashed here. The contract
+    // this hash records is "the system prompt as handed to the agent",
+    // which is the audit fact we pin. (An agent that rewrites
+    // `input.system` before its own LLM call would send a different
+    // prompt than this hash; today's agents — SingleShot / Critic /
+    // Worker — pass `input` through unchanged, so the two coincide.)
     let provider_for_log = guess_provider_id(&input);
     let system_prompt_hash = crate::event::hash_system_prompt(input.system.as_deref());
     let ctx = AgentContext {
@@ -427,8 +479,9 @@ mod tests {
             )
             .await;
         match result {
-            Err(RuntimeError::Storage(tars_storage::StorageError::Backend(msg))) => {
-                assert!(msg.contains("doesn't match"));
+            Err(RuntimeError::TrajectoryMismatch { event, target }) => {
+                assert_eq!(event, "bogus");
+                assert_eq!(target, real.as_str());
             }
             other => panic!("expected mismatch error, got {other:?}"),
         }

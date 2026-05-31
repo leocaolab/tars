@@ -18,12 +18,44 @@ use crate::schema::JsonSchema;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolSpec {
     /// Stable name; used to match the model's tool_use response.
+    ///
+    /// **Must be non-empty.** An empty name makes the model's tool_use
+    /// response unmatchable (nothing to key the dispatch on). The
+    /// fields stay public for serde / ergonomic literals, but build via
+    /// [`ToolSpec::new`] when the name comes from config/user input, and
+    /// call [`validate`](Self::validate) at the provider boundary.
     pub name: String,
     /// What the tool does — the model uses this to decide *when* to call it.
     /// Per Doc 05 §3.3, this should explain "when to use", not just "what".
     pub description: String,
     /// JSON Schema for the input arguments object.
     pub input_schema: JsonSchema,
+}
+
+impl ToolSpec {
+    /// Build a tool spec, rejecting an empty / whitespace-only `name`.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: JsonSchema,
+    ) -> Result<Self, &'static str> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err("ToolSpec.name cannot be empty/whitespace");
+        }
+        Ok(Self {
+            name,
+            description: description.into(),
+            input_schema,
+        })
+    }
+
+    /// True iff `name` is non-empty (the matchability invariant). Call
+    /// at the provider boundary before sending `request.tools` to the
+    /// LLM.
+    pub fn has_valid_name(&self) -> bool {
+        !self.name.trim().is_empty()
+    }
 }
 
 /// Constraint on tool selection.
@@ -47,7 +79,7 @@ pub enum ToolChoice {
 /// adapters that receive string-encoded args (OpenAI) parse them
 /// before constructing this struct. The Pipeline / Agent layer never
 /// has to worry about double-decoding (Doc 01 §8).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ToolCall {
     /// Provider-side ID for correlating the call with its result message.
     /// Required by OpenAI and Anthropic; Gemini's adapter synthesizes one.
@@ -55,6 +87,37 @@ pub struct ToolCall {
     pub name: String,
     /// Always a parsed object (`Value::Object`) — never a string.
     pub arguments: serde_json::Value,
+}
+
+impl<'de> Deserialize<'de> for ToolCall {
+    /// Hand-rolled so the `arguments`-is-object invariant is enforced on
+    /// the wire too. The derived `Deserialize` would happily accept a
+    /// string / array / scalar `arguments`, bypassing the `new()`
+    /// assert and letting a malformed `ToolCall` (that downstream code
+    /// trusts to be an object) into the system (audit
+    /// `tars-types-src-tools-3`).
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            id: String,
+            name: String,
+            arguments: serde_json::Value,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if !raw.arguments.is_object() {
+            return Err(serde::de::Error::custom(
+                "ToolCall.arguments must be a JSON object",
+            ));
+        }
+        Ok(Self {
+            id: raw.id,
+            name: raw.name,
+            arguments: raw.arguments,
+        })
+    }
 }
 
 impl ToolCall {
@@ -110,5 +173,24 @@ mod tests {
         let call = ToolCall::new("call_1", "search", json!({"q": "rust"}));
         let v = serde_json::to_value(&call).unwrap();
         assert!(v["arguments"].is_object());
+    }
+
+    #[test]
+    fn tool_call_deser_rejects_non_object_arguments() {
+        // String / array / scalar arguments must not deserialize — they
+        // would violate the documented object invariant.
+        for bad in [
+            r#"{"id":"c","name":"n","arguments":"not-an-object"}"#,
+            r#"{"id":"c","name":"n","arguments":[1,2]}"#,
+            r#"{"id":"c","name":"n","arguments":42}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ToolCall>(bad).is_err(),
+                "should reject non-object arguments: {bad}"
+            );
+        }
+        // Object arguments still deserialize.
+        let ok = r#"{"id":"c","name":"n","arguments":{"q":"rust"}}"#;
+        assert!(serde_json::from_str::<ToolCall>(ok).is_ok());
     }
 }

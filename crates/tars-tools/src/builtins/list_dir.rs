@@ -241,7 +241,9 @@ enum ListOutcome {
 async fn read_dir_capped(path: &Path, cap: usize) -> std::io::Result<ListOutcome> {
     use tokio::fs;
 
-    let meta = match fs::symlink_metadata(path).await {
+    // Follow symlinks so that a symlink-to-directory is correctly recognized as
+    // a directory rather than reported as NotDirectory.
+    let meta = match fs::metadata(path).await {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ListOutcome::NotFound),
         Err(e) => return Err(e),
@@ -262,7 +264,8 @@ async fn read_dir_capped(path: &Path, cap: usize) -> std::io::Result<ListOutcome
         let child_meta = match child.metadata().await {
             Ok(m) => m,
             // Race: entry vanished between read_dir and metadata. Skip.
-            Err(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
         };
         let symlink_meta = fs::symlink_metadata(child.path()).await.ok();
         let (kind, target) = if symlink_meta

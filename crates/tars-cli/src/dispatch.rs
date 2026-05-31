@@ -168,14 +168,29 @@ fn build_tier_dispatch(
         );
     }
     let first = candidates.first().expect("non-empty checked above");
-    let cost_provider = registry.get(first).ok_or_else(|| {
-        anyhow::anyhow!("routing: tier `{tier:?}` first candidate `{first}` not in registry")
-    })?;
-    for c in candidates.iter().skip(1) {
+    // Validate EVERY candidate up front (symmetric), before building
+    // any state. Previously the first candidate was special-cased
+    // (it set `cost_provider`) while the rest went through a separate
+    // loop — same check, two code paths. Validate all here so a
+    // mis-configured later candidate fails identically to a bad first
+    // one, then fetch the cost provider knowing it's present.
+    for c in &candidates {
         if registry.get(c).is_none() {
             anyhow::bail!("routing: tier `{tier:?}` candidate `{c}` not in registry");
         }
     }
+    // Build the StaticPolicy here, right after candidate validation and
+    // BEFORE the cost-provider/model resolution below. It can fail
+    // (e.g. duplicate/empty candidates), and failing early keeps the
+    // fallible-construction steps grouped — no point resolving a model
+    // label or fetching the cost provider for a policy that can't exist.
+    // Tier→candidates resolution happens at startup; the runtime policy
+    // is StaticPolicy (CLI's req.model is always Explicit, so
+    // TierPolicy's Tier-keyed lookup wouldn't fire).
+    let policy = Arc::new(StaticPolicy::new(candidates.clone())?);
+    let cost_provider = registry.get(first).ok_or_else(|| {
+        anyhow::anyhow!("routing: tier `{tier:?}` first candidate `{first}` not in registry")
+    })?;
     let model_label = args
         .model
         .clone()
@@ -191,11 +206,6 @@ fn build_tier_dispatch(
              pass a non-empty --model"
         );
     }
-    // Tier→candidates resolution happens at startup; the runtime
-    // policy is StaticPolicy. See run.rs's previous comment for the
-    // rationale (CLI's req.model is always Explicit, so TierPolicy's
-    // Tier-keyed lookup wouldn't fire).
-    let policy = Arc::new(StaticPolicy::new(candidates.clone())?);
     let inner: Arc<dyn LlmService> = RoutingService::new(registry.clone(), policy);
     let label = format!(
         "tier `{tier:?}` (candidates: {})",

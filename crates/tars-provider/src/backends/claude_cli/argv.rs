@@ -109,7 +109,15 @@ pub(crate) fn streaming_enabled() -> bool {
     // The TARS_CLAUDE_CLI_STREAM read lives in tars-types::env so every
     // process-wide knob is greppable from a single import path
     // (ARC-L5-COH-18). Default-false semantics — operator must opt in.
-    tars_types::env::claude_cli_streaming().unwrap_or(false)
+    // A non-UTF-8 value (Err) is a misconfiguration: log it loudly
+    // rather than silently treating it as unset.
+    match tars_types::env::claude_cli_streaming() {
+        Ok(opt) => opt.unwrap_or(false),
+        Err(e) => {
+            tracing::warn!(error = %e, "TARS_CLAUDE_CLI_STREAM set but unreadable (non-UTF-8); ignoring");
+            false
+        }
+    }
 }
 
 /// Construct the full `claude` argv (without the executable itself) for
@@ -167,7 +175,26 @@ pub(super) fn build_argv_with(inv: &SubprocessInvocation, streaming: bool) -> Ve
         ClaudeCliTools::Default => { /* omit --tools entirely */ }
         ClaudeCliTools::Allow(list) => {
             argv.push("--tools".into());
-            argv.push(list.join(","));
+            // `--tools` is a single comma-joined value, so a comma inside
+            // a tool name would silently split it into two bogus tools.
+            // Drop any such name (with a warning) rather than corrupt the
+            // whitelist — a name containing a comma can never be a valid
+            // CLI tool identifier anyway.
+            let cleaned: Vec<&String> = list
+                .iter()
+                .filter(|name| {
+                    if name.contains(',') {
+                        tracing::warn!(
+                            tool = %name,
+                            "claude_cli: dropping tool name containing ',' — it would corrupt the --tools CSV",
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            argv.push(cleaned.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","));
         }
     }
 
@@ -196,6 +223,17 @@ pub(super) fn build_argv_with(inv: &SubprocessInvocation, streaming: bool) -> Ve
 
 /// Flatten our message history into the single text blob the CLI expects.
 /// Mirrors the Python `chat_multi` serializer ([role]\n content per turn).
+///
+/// **Known limitation — role-marker ambiguity.** The CLI's `-p` mode
+/// accepts only a single flat prompt string, so multi-turn history is
+/// encoded with `[role]` line markers. This transport is inherently
+/// lossy: message content that itself contains a line like `[user]` is
+/// indistinguishable from a real turn boundary once flattened. There is
+/// no out-of-band channel to disambiguate (the CLI has no structured
+/// multi-message stdin), so callers that need a faithful multi-turn
+/// transcript should prefer a structured backend (HTTP / claude_sdk).
+/// For the single-turn case this backend is mainly used for, the risk
+/// is moot — there are no intermediate boundaries to spoof.
 pub(super) fn serialize_messages_for_cli(req: &ChatRequest) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(req.messages.len());
     for m in &req.messages {
@@ -217,7 +255,11 @@ fn flatten_blocks(blocks: &[ContentBlock]) -> String {
         match b {
             ContentBlock::Text { text } => out.push(text.clone()),
             ContentBlock::Image { mime, .. } => {
-                out.push(format!("[image:{mime}]"));
+                // Strip `]` (and stray brackets) from the mime so it can't
+                // prematurely close the `[image:...]` marker — the CLI is
+                // text-only here, so this is purely a readable placeholder.
+                let safe: String = mime.chars().filter(|c| *c != ']' && *c != '[').collect();
+                out.push(format!("[image:{safe}]"));
             }
         }
     }

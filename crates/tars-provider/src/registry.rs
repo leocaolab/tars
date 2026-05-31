@@ -77,10 +77,20 @@ impl ProviderRegistry {
         let mut default_models: HashMap<ProviderId, String> = HashMap::new();
         for (id, entry) in cfg.iter() {
             let provider = build_one(id.clone(), entry, http.clone(), auth_resolver.clone())?;
-            if map.insert(id.clone(), provider).is_some() {
-                return Err(RegistryError::Duplicate(id.clone()));
+            // Keep the two maps coupled: only record the default model on
+            // the *same* path that successfully inserts the provider, via
+            // the `Entry` API. This makes the
+            // `map.keys() == default_models.keys()` invariant structural
+            // rather than two statements a refactor could split apart.
+            match map.entry(id.clone()) {
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    return Err(RegistryError::Duplicate(id.clone()));
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(provider);
+                    default_models.insert(id.clone(), entry.default_model().to_string());
+                }
             }
-            default_models.insert(id.clone(), entry.default_model().to_string());
         }
         Ok(Self {
             providers: Arc::new(map),

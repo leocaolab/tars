@@ -94,8 +94,15 @@ impl PromptBuilder {
     /// Override temperature explicitly. Mutually exclusive with
     /// [`Self::deterministic`] but the last call wins (no enforcement
     /// — they shouldn't be combined in practice).
+    ///
+    /// Non-finite (`NaN` / `±inf`) or out-of-range values are clamped
+    /// into the provider-accepted `0.0..=2.0` window — passing them
+    /// straight through would make the provider reject the request (or
+    /// worse, behave nondeterministically), so a builder is the wrong
+    /// place to surface that as a hard error. `NaN` clamps to `0.0`.
     pub fn temperature(mut self, t: f32) -> Self {
-        self.temperature = Some(t);
+        let sane = if t.is_nan() { 0.0 } else { t.clamp(0.0, 2.0) };
+        self.temperature = Some(sane);
         self
     }
 

@@ -175,6 +175,16 @@ impl LlmService for FallbackService {
             ),
         }
 
+        // Honour cancellation before the primary attempt too — the
+        // caller may have cancelled before we ran, and the hop loop
+        // already checks between hops, so the primary shouldn't be the
+        // one unchecked entry point.
+        if ctx.cancel.is_cancelled() {
+            return Err(ProviderError::Internal(
+                "cancelled before fallback primary attempt".into(),
+            ));
+        }
+
         // Try the primary first.
         let mut last_err = match self.primary.clone().call(req.clone(), ctx.clone()).await {
             Ok(stream) => return Ok(stream),

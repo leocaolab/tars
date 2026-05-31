@@ -51,6 +51,14 @@ pub struct Scope {
 }
 
 impl Scope {
+    /// Build a scope with a sorted, deduplicated action set.
+    ///
+    /// **An empty `actions` vec produces zero
+    /// [`scope_keys`](Principal::scope_keys) entries** — a scope that
+    /// grants no action contributes nothing to the per-IAM-view cache
+    /// bucket. That is a caller bug (a grant of nothing is meaningless);
+    /// use [`is_empty`](Self::is_empty) to assert non-emptiness at the
+    /// IAM boundary if you build scopes from untrusted input.
     pub fn new(resource: impl Into<String>, actions: Vec<String>) -> Self {
         let mut actions = actions;
         actions.sort();
@@ -60,14 +68,39 @@ impl Scope {
             actions,
         }
     }
+
+    /// True iff this scope grants no actions (and therefore yields no
+    /// scope keys). See the note on [`new`](Self::new).
+    pub fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
 }
 
 impl Principal {
-    /// Compute the deduplicated set of *granted* scope identifiers.
+    /// The scopes that are actually *effective* for this principal.
+    ///
+    /// For a [`PrincipalKind::DelegatedSubprocess`] the effective set is
+    /// the reduced `scope_subset` — the whole point of delegation is
+    /// that the child acts with *fewer* permissions than the parent.
+    /// For every other kind it is the principal's own `scopes`.
+    pub fn effective_scopes(&self) -> &[Scope] {
+        match &self.kind {
+            PrincipalKind::DelegatedSubprocess { scope_subset, .. } => scope_subset,
+            _ => &self.scopes,
+        }
+    }
+
+    /// Compute the deduplicated set of *effective* scope identifiers.
     /// Used by the cache key factory to make hash buckets per-IAM-view.
+    ///
+    /// Uses [`effective_scopes`](Self::effective_scopes), so a delegated
+    /// subprocess hashes against its *reduced* `scope_subset` rather
+    /// than the parent's full `scopes`. Reading `self.scopes` directly
+    /// here was a scope-reduction bypass: a subprocess would have shared
+    /// a cache bucket with the broadly-scoped parent.
     pub fn scope_keys(&self) -> Vec<String> {
         let mut set: HashSet<String> = HashSet::new();
-        for s in &self.scopes {
+        for s in self.effective_scopes() {
             for a in &s.actions {
                 set.insert(format!("{}:{}", s.resource, a));
             }
@@ -104,5 +137,27 @@ mod tests {
                 "repo:foo:write".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn delegated_subprocess_hashes_reduced_subset_not_parent_scopes() {
+        // The parent's `scopes` are broad, but the subprocess was
+        // delegated only a read on repo:foo. scope_keys() must reflect
+        // the reduced subset, not the parent's full grant.
+        let p = Principal {
+            id: PrincipalId::new("child"),
+            tenant: TenantId::new("t"),
+            display_name: "child".into(),
+            kind: PrincipalKind::DelegatedSubprocess {
+                parent: PrincipalId::new("parent"),
+                scope_subset: vec![Scope::new("repo:foo", vec!["read".into()])],
+            },
+            // Broad parent scopes that must NOT leak into the cache key.
+            scopes: vec![
+                Scope::new("repo:foo", vec!["read".into(), "write".into()]),
+                Scope::new("repo:bar", vec!["admin".into()]),
+            ],
+        };
+        assert_eq!(p.scope_keys(), vec!["repo:foo:read".to_string()]);
     }
 }

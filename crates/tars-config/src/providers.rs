@@ -6,11 +6,37 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use tars_types::{Auth, HttpProviderExtras, ProviderId};
 
 use crate::error::ValidationError;
+
+/// Deserialize a `String` field, trimming surrounding whitespace.
+///
+/// Normalising at the parse boundary keeps the stored value identical to
+/// what `validate()`'s `trim().is_empty()` checks against and to what the
+/// runtime (e.g. the HTTP client `base_url`, the CLI `executable`) actually
+/// uses — otherwise a value like `"  claude  "` would pass validation yet
+/// reach the runtime with its whitespace intact.
+fn de_trimmed_string<'de, D>(de: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(de)?;
+    Ok(s.trim().to_owned())
+}
+
+/// `Option<String>` counterpart of [`de_trimmed_string`]. A present value is
+/// trimmed; absence stays `None`. An all-whitespace value trims to `Some("")`
+/// and is then rejected by `validate()` (the "empty when set" contract).
+fn de_trimmed_opt_string<'de, D>(de: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(de)?;
+    Ok(opt.map(|s| s.trim().to_owned()))
+}
 
 /// Top-level providers section.
 ///
@@ -69,9 +95,14 @@ impl ProvidersConfig {
 pub enum ProviderConfig {
     /// Direct OpenAI HTTP API.
     Openai {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "de_trimmed_opt_string"
+        )]
         base_url: Option<String>,
         auth: Auth,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
         extras: HttpProviderExtras,
@@ -81,9 +112,11 @@ pub enum ProviderConfig {
     /// llama.cpp server, LM Studio …). Distinguished from `Openai` only
     /// because `base_url` is mandatory here — keeps configs honest.
     OpenaiCompat {
+        #[serde(deserialize_with = "de_trimmed_string")]
         base_url: String,
         #[serde(default = "Auth::none")]
         auth: Auth,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
         extras: HttpProviderExtras,
@@ -93,11 +126,20 @@ pub enum ProviderConfig {
 
     /// Anthropic HTTP API.
     Anthropic {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "de_trimmed_opt_string"
+        )]
         base_url: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "de_trimmed_opt_string"
+        )]
         api_version: Option<String>,
         auth: Auth,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
         extras: HttpProviderExtras,
@@ -105,9 +147,14 @@ pub enum ProviderConfig {
 
     /// Google Gemini HTTP API.
     Gemini {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "de_trimmed_opt_string"
+        )]
         base_url: Option<String>,
         auth: Auth,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
         extras: HttpProviderExtras,
@@ -115,10 +162,15 @@ pub enum ProviderConfig {
 
     /// vLLM local server (sub-case of openai_compat with sensible defaults).
     Vllm {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "de_trimmed_opt_string"
+        )]
         base_url: Option<String>,
         #[serde(default = "Auth::none")]
         auth: Auth,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
         extras: HttpProviderExtras,
@@ -131,10 +183,15 @@ pub enum ProviderConfig {
     /// so logs and routing can identify "this is the unified-memory
     /// box" at a glance and apply Mac-specific capability defaults.
     Mlx {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "de_trimmed_opt_string"
+        )]
         base_url: Option<String>,
         #[serde(default = "Auth::none")]
         auth: Auth,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
         extras: HttpProviderExtras,
@@ -146,10 +203,15 @@ pub enum ProviderConfig {
     /// Ryzen iGPU clusters or any host where `llama.cpp` is the
     /// preferred runner. Same wire format as the other local backends.
     Llamacpp {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "de_trimmed_opt_string"
+        )]
         base_url: Option<String>,
         #[serde(default = "Auth::none")]
         auth: Auth,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
         extras: HttpProviderExtras,
@@ -159,10 +221,14 @@ pub enum ProviderConfig {
 
     /// Claude Code CLI subscription path.
     ClaudeCli {
-        #[serde(default = "default_claude_executable")]
+        #[serde(
+            default = "default_claude_executable",
+            deserialize_with = "de_trimmed_string"
+        )]
         executable: String,
         #[serde(default = "default_cli_timeout_secs")]
         timeout_secs: u64,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         /// `--tools` knob. `"disabled"` (default) kills the CLI's
         /// internal agent loop while staying auth-neutral; `"default"`
@@ -192,10 +258,14 @@ pub enum ProviderConfig {
 
     /// Gemini CLI subscription path.
     GeminiCli {
-        #[serde(default = "default_gemini_executable")]
+        #[serde(
+            default = "default_gemini_executable",
+            deserialize_with = "de_trimmed_string"
+        )]
         executable: String,
         #[serde(default = "default_cli_timeout_secs")]
         timeout_secs: u64,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
     },
 
@@ -216,7 +286,10 @@ pub enum ProviderConfig {
     ClaudeSdk {
         /// Node-compatible runtime that hosts the SDK script. Default
         /// `node`. Override e.g. to `bun` or a pinned path.
-        #[serde(default = "default_node_executable")]
+        #[serde(
+            default = "default_node_executable",
+            deserialize_with = "de_trimmed_string"
+        )]
         executable: String,
         /// Path to `server.mjs --stdio`. **Optional** — when unset
         /// (the common case), the backend searches in order:
@@ -227,7 +300,11 @@ pub enum ProviderConfig {
         ///
         /// Set this explicitly to pin a specific copy or to use a
         /// non-standard layout.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "de_trimmed_opt_string"
+        )]
         script_path: Option<String>,
         /// Round-trip cap on a single LLM call. The child stays warm
         /// across calls; this is only how long we wait for any one
@@ -235,12 +312,16 @@ pub enum ProviderConfig {
         /// other CLI-shaped backends.
         #[serde(default = "default_cli_timeout_secs")]
         timeout_secs: u64,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
     },
 
     /// OpenAI Codex CLI subscription path (ChatGPT Plus/Pro).
     CodexCli {
-        #[serde(default = "default_codex_executable")]
+        #[serde(
+            default = "default_codex_executable",
+            deserialize_with = "de_trimmed_string"
+        )]
         executable: String,
         /// Per-call timeout. codex `exec` runs a full agent loop;
         /// default is more generous than other CLIs (10 min vs 5).
@@ -258,6 +339,7 @@ pub enum ProviderConfig {
         /// confusing wording.
         #[serde(default = "default_true")]
         skip_git_repo_check: bool,
+        #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
     },
 
@@ -490,7 +572,7 @@ impl ProviderConfig {
                     key("timeout_secs"),
                     format!(
                         "must be <= {MAX_CLI_TIMEOUT_SECS} (24h); larger values are almost \
-                         certainly a typo and risk overflow in downstream timeout arithmetic"
+                         certainly a typo — a per-call timeout beyond a day is never intended"
                     ),
                 ));
             }
@@ -650,8 +732,10 @@ impl ProviderConfig {
 }
 
 /// Upper bound on CLI timeouts — 24h. Anything beyond this is almost
-/// certainly a typo, and very large values risk overflow when the
-/// downstream timeout arithmetic adds slack/jitter.
+/// certainly a typo: a per-call timeout longer than a day is never a
+/// real intent. (The value is passed straight to
+/// `tokio::time::timeout(Duration::from_secs(_), …)` with no arithmetic,
+/// so this cap is a sanity guard, not an overflow guard.)
 const MAX_CLI_TIMEOUT_SECS: u64 = 86_400;
 
 impl ProvidersConfig {

@@ -66,7 +66,7 @@ pub struct SqliteBodyStore {
 impl SqliteBodyStore {
     pub fn open(config: SqliteBodyStoreConfig) -> Result<Arc<Self>, StorageError> {
         let conn = Connection::open(&config.path).map_err(|e| {
-            StorageError::Backend(format!("opening body store at {:?}: {e}", config.path))
+            StorageError::backend_source(format!("opening body store at {:?}", config.path), e)
         })?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
@@ -77,7 +77,7 @@ impl SqliteBodyStore {
 
     pub fn in_memory() -> Result<Arc<Self>, StorageError> {
         let conn = Connection::open_in_memory()
-            .map_err(|e| StorageError::Backend(format!("opening in-memory body store: {e}")))?;
+            .map_err(|e| StorageError::backend_source("opening in-memory body store", e))?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
         Ok(Arc::new(Self {
@@ -92,7 +92,7 @@ impl SqliteBodyStore {
             ("temp_store", "MEMORY"),
         ] {
             conn.pragma_update(None, name, value)
-                .map_err(|e| StorageError::Backend(format!("pragma {name}: {e}")))?;
+                .map_err(|e| StorageError::backend_source("pragma {name}", e))?;
         }
         Ok(())
     }
@@ -100,12 +100,12 @@ impl SqliteBodyStore {
     fn migrate(conn: &Connection) -> Result<(), StorageError> {
         let current: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(|e| StorageError::Backend(format!("read user_version: {e}")))?;
+            .map_err(|e| StorageError::backend_source("read user_version", e))?;
         if current == SCHEMA_VERSION {
             return Ok(());
         }
         if current != 0 {
-            return Err(StorageError::Backend(format!(
+            return Err(StorageError::backend(format!(
                 "incompatible body store schema (file v{current}, code v{SCHEMA_VERSION})"
             )));
         }
@@ -123,26 +123,45 @@ impl SqliteBodyStore {
                 ON bodies(created_at);
             "#,
         )
-        .map_err(|e| StorageError::Backend(format!("create body schema: {e}")))?;
+        .map_err(|e| StorageError::backend_source("create body schema", e))?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(|e| StorageError::Backend(format!("set user_version: {e}")))?;
+            .map_err(|e| StorageError::backend_source("set user_version", e))?;
         Ok(())
     }
 }
 
-fn now_ms() -> i64 {
+/// Current wall-clock time as milliseconds since the Unix epoch, for
+/// stamping `created_at`.
+///
+/// Returns `Err` if the clock is before `UNIX_EPOCH`: falling back to
+/// `0` would stamp every body with the smallest possible `created_at`,
+/// making it instantly eligible for `purge_before` and silently
+/// dropping freshly-written bodies. Far-future is clamped to `i64::MAX`
+/// so the `as i64` cast can't wrap negative.
+fn now_ms() -> Result<i64, StorageError> {
     use std::time::UNIX_EPOCH;
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .map_err(|e| StorageError::backend_source("system clock is before the Unix epoch", e))
 }
 
-fn cutoff_to_ms(t: SystemTime) -> i64 {
+/// Convert a caller-supplied `purge_before` cutoff to epoch ms.
+///
+/// Returns `Err` for a pre-epoch cutoff rather than silently flooring to
+/// `0` (which would make the `DELETE WHERE created_at < 0` a guaranteed
+/// no-op and mask the invalid input). Far-future is clamped so the cast
+/// can't wrap.
+fn cutoff_to_ms(t: SystemTime) -> Result<i64, StorageError> {
     use std::time::UNIX_EPOCH;
     t.duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .map_err(|_| {
+            StorageError::backend(
+                "purge_before cutoff is before the Unix epoch; refusing to interpret \
+                 a pre-epoch cutoff (would silently match nothing)",
+            )
+        })
 }
 
 #[async_trait]
@@ -151,10 +170,15 @@ impl BodyStore for SqliteBodyStore {
         let conn = self.conn.clone();
         let tenant = r.tenant_id().as_ref().to_string();
         let hash = r.body_hash().to_vec();
-        let now = now_ms();
         let body = bytes.to_vec();
 
         tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
+            // Capture the timestamp inside the blocking closure so it
+            // reflects the moment the row is actually written, not the
+            // (possibly much earlier, under load) moment `put` was
+            // called — otherwise a delayed write could race a concurrent
+            // `purge_before` and be stamped as already-purgeable.
+            let now = now_ms()?;
             let conn = conn.lock().expect("body store mutex poisoned");
             // INSERT OR IGNORE — idempotent CAS write. Re-storing
             // identical bytes for the same (tenant, hash) is a no-op.
@@ -163,11 +187,11 @@ impl BodyStore for SqliteBodyStore {
                  VALUES (?, ?, ?, ?)",
                 params![tenant, hash, body, now],
             )
-            .map_err(|e| StorageError::Backend(format!("insert body: {e}")))?;
+            .map_err(|e| StorageError::backend_source("insert body", e))?;
             Ok(())
         })
         .await
-        .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
 
         Ok(())
     }
@@ -186,17 +210,17 @@ impl BodyStore for SqliteBodyStore {
                     |row| row.get::<_, Vec<u8>>(0),
                 )
                 .optional()
-                .map_err(|e| StorageError::Backend(format!("fetch body: {e}")))
+                .map_err(|e| StorageError::backend_source("fetch body", e))
             })
             .await
-            .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+            .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
 
         Ok(bytes.map(Bytes::from))
     }
 
     async fn purge_before(&self, cutoff: SystemTime) -> Result<u64, StorageError> {
         let conn = self.conn.clone();
-        let cutoff_ms = cutoff_to_ms(cutoff);
+        let cutoff_ms = cutoff_to_ms(cutoff)?;
 
         let n = tokio::task::spawn_blocking(move || -> Result<u64, StorageError> {
             let conn = conn.lock().expect("body store mutex poisoned");
@@ -205,11 +229,11 @@ impl BodyStore for SqliteBodyStore {
                     "DELETE FROM bodies WHERE created_at < ?",
                     params![cutoff_ms],
                 )
-                .map_err(|e| StorageError::Backend(format!("purge_before: {e}")))?;
+                .map_err(|e| StorageError::backend_source("purge_before", e))?;
             Ok(n as u64)
         })
         .await
-        .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
 
         Ok(n)
     }
@@ -222,11 +246,11 @@ impl BodyStore for SqliteBodyStore {
             let conn = conn.lock().expect("body store mutex poisoned");
             let n = conn
                 .execute("DELETE FROM bodies WHERE tenant_id = ?", params![tenant])
-                .map_err(|e| StorageError::Backend(format!("purge_tenant: {e}")))?;
+                .map_err(|e| StorageError::backend_source("purge_tenant", e))?;
             Ok(n as u64)
         })
         .await
-        .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
 
         Ok(n)
     }

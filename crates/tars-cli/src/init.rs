@@ -85,7 +85,8 @@ pub struct InitArgs {
 pub async fn execute(args: InitArgs) -> Result<()> {
     let target = match args.path {
         Some(p) => p,
-        None => default_config_path().ok_or_else(|| anyhow!("could not resolve home directory"))?,
+        None => default_config_path()
+            .ok_or_else(|| anyhow!("could not resolve default config directory"))?,
     };
 
     // Filesystem work is blocking; run it on the blocking pool so it
@@ -97,7 +98,7 @@ pub async fn execute(args: InitArgs) -> Result<()> {
         Ok(target)
     })
     .await
-    .context("init filesystem task panicked")??;
+    .context("init filesystem task did not complete (panicked or was cancelled)")??;
 
     print_next_steps(&target);
     Ok(())
@@ -119,21 +120,63 @@ fn write_starter_config(target: &Path, force: bool) -> Result<()> {
         }
     }
 
+    use std::io::Write;
+
     if force {
-        std::fs::write(target, STARTER_TEMPLATE)
+        // Refuse to follow a symlink planted at the target: a plain
+        // `fs::write` (or `OpenOptions::write` without the guard) would
+        // clobber the symlink's *destination* — a TOCTOU / symlink-attack
+        // vector. `symlink_metadata` does NOT traverse the link, so we
+        // can detect and reject it. There's still an inherent race
+        // between the check and the open, but rejecting an existing
+        // symlink closes the common case; the open below truncates a
+        // real file in place.
+        match std::fs::symlink_metadata(target) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(anyhow!(
+                    "{} is a symlink; refusing to overwrite (could clobber its target). \
+                     Remove it first if you really want to write here.",
+                    target.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("inspecting {} before overwrite", target.display()));
+            }
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(target)
+            .with_context(|| format!("opening {} for overwrite", target.display()))?;
+        f.write_all(STARTER_TEMPLATE.as_bytes())
             .with_context(|| format!("writing starter config to {}", target.display()))?;
+        // Flush + sync so a write/fsync error surfaces here rather than
+        // leaving a silently-truncated config behind.
+        f.flush()
+            .with_context(|| format!("flushing starter config to {}", target.display()))?;
+        f.sync_all()
+            .with_context(|| format!("syncing starter config to {}", target.display()))?;
         return Ok(());
     }
 
-    use std::io::Write;
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(target)
     {
-        Ok(mut f) => f
-            .write_all(STARTER_TEMPLATE.as_bytes())
-            .with_context(|| format!("writing starter config to {}", target.display())),
+        Ok(mut f) => {
+            f.write_all(STARTER_TEMPLATE.as_bytes())
+                .with_context(|| format!("writing starter config to {}", target.display()))?;
+            // Surface write/fsync errors before we report success.
+            f.flush()
+                .with_context(|| format!("flushing starter config to {}", target.display()))?;
+            f.sync_all()
+                .with_context(|| format!("syncing starter config to {}", target.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(anyhow!(
             "{} already exists; pass --force to overwrite",
             target.display()

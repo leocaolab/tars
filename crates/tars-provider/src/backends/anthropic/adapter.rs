@@ -12,7 +12,6 @@ use url::Url;
 
 use tars_types::{
     CacheDirective, ChatEvent, ChatRequest, ContentBlock, ImageData, Message, ProviderError,
-    StopReason, Usage,
 };
 
 use crate::auth::ResolvedAuth;
@@ -23,6 +22,18 @@ use super::mapping::{map_stop_reason, parse_usage, truncate};
 
 /// Synthetic tool name used to emulate structured output (Doc 01 §9).
 pub(super) const STRUCTURED_OUTPUT_TOOL: &str = "__respond_with__";
+
+/// Read an SSE event's `index` field as a `usize`. Anthropic's wire
+/// `index` is a JSON number; a missing one defaults to 0 (first block),
+/// and we use `usize::try_from` rather than `as usize` so a value that
+/// overflows `usize` on a 32-bit target surfaces as a parse error
+/// instead of silently truncating into the wrong buffer slot.
+fn block_index(v: &Value) -> Result<usize, ProviderError> {
+    let raw = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+    usize::try_from(raw).map_err(|_| {
+        ProviderError::Parse(format!("anthropic sse: block index {raw} exceeds usize"))
+    })
+}
 
 pub struct AnthropicAdapter {
     pub(super) base_url: String,
@@ -108,8 +119,17 @@ impl AnthropicAdapter {
             // into a user-role text block prefixed with "[system]" so
             // it isn't indistinguishable from a real user turn.
             Message::System { content } => {
+                // Fold the system text into the marker prefix as a single
+                // block. An empty system message would otherwise yield a
+                // user turn whose only content is the literal "[system]"
+                // marker — confusing and indistinguishable from a real
+                // user message; emit an explicit "(empty)" instead.
                 let mut blocks: Vec<Value> = content.iter().map(Self::translate_block).collect();
-                blocks.insert(0, json!({"type": "text", "text": "[system]"}));
+                if blocks.is_empty() {
+                    blocks.push(json!({"type": "text", "text": "[system] (empty)"}));
+                } else {
+                    blocks.insert(0, json!({"type": "text", "text": "[system]"}));
+                }
                 json!({
                     "role": "user",
                     "content": Value::Array(blocks),
@@ -219,6 +239,15 @@ impl HttpAdapter for AnthropicAdapter {
             ));
         }
 
+        // Fail fast on an obviously-invalid budget before doing any of
+        // the more expensive per-tool / per-message work below.
+        let max_tokens = req.max_output_tokens.unwrap_or(4096);
+        if max_tokens == 0 {
+            return Err(ProviderError::InvalidRequest(
+                "anthropic: max_output_tokens must be > 0".into(),
+            ));
+        }
+
         // Anthropic rejects requests with duplicate tool names with a
         // 400; surface a clear error before the round-trip.
         let mut seen = std::collections::HashSet::new();
@@ -241,13 +270,6 @@ impl HttpAdapter for AnthropicAdapter {
         }
 
         let messages: Vec<Value> = req.messages.iter().map(Self::translate_message).collect();
-
-        let max_tokens = req.max_output_tokens.unwrap_or(4096);
-        if max_tokens == 0 {
-            return Err(ProviderError::InvalidRequest(
-                "anthropic: max_output_tokens must be > 0".into(),
-            ));
-        }
 
         let mut body = json!({
             "model": model,
@@ -388,19 +410,34 @@ impl HttpAdapter for AnthropicAdapter {
                 });
             }
             "content_block_start" => {
-                let index = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let index = block_index(&v)?;
                 let cb = v.get("content_block").cloned().unwrap_or(Value::Null);
                 match cb.get("type").and_then(|t| t.as_str()) {
                     Some("tool_use") => {
+                        // id + name are required to route the tool result
+                        // back; an empty fallback silently breaks tracking
+                        // and most providers reject the follow-up message.
                         let id = cb
                             .get("id")
                             .and_then(|s| s.as_str())
-                            .unwrap_or("")
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| {
+                                ProviderError::Parse(
+                                    "anthropic content_block_start: tool_use missing/empty `id`"
+                                        .into(),
+                                )
+                            })?
                             .to_string();
                         let name = cb
                             .get("name")
                             .and_then(|s| s.as_str())
-                            .unwrap_or("")
+                            .filter(|s| !s.is_empty())
+                            .ok_or_else(|| {
+                                ProviderError::Parse(
+                                    "anthropic content_block_start: tool_use missing/empty `name`"
+                                        .into(),
+                                )
+                            })?
                             .to_string();
                         out.push(ChatEvent::ToolCallStart {
                             index,
@@ -433,7 +470,7 @@ impl HttpAdapter for AnthropicAdapter {
                 }
             }
             "content_block_delta" => {
-                let index = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                let index = block_index(&v)?;
                 let delta = v.get("delta").cloned().unwrap_or(Value::Null);
                 match delta.get("type").and_then(|t| t.as_str()) {
                     Some("text_delta") => {
@@ -464,11 +501,15 @@ impl HttpAdapter for AnthropicAdapter {
                 }
             }
             "content_block_stop" => {
-                let index = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                // Finalize any tool call at this index. Non-tool
-                // content blocks (text / thinking) return an error
-                // here because they were never registered with the
-                // buffer; that's the expected path, log at trace.
+                let index = block_index(&v)?;
+                // Only blocks that were registered as tool calls need a
+                // ToolCallEnd. Non-tool content blocks (text / thinking)
+                // were never registered with the buffer, so a finalize
+                // miss there is the expected path — log at trace. But a
+                // finalize *failure* for a block that WAS registered
+                // (malformed args JSON, empty id/name) means ToolCallEnd
+                // never fires and the consumer hangs — propagate it.
+                let was_tool = buf.is_inflight(index);
                 match buf.finalize(index) {
                     Ok((id, _name, parsed)) => {
                         out.push(ChatEvent::ToolCallEnd {
@@ -477,11 +518,12 @@ impl HttpAdapter for AnthropicAdapter {
                             parsed_args: parsed,
                         });
                     }
+                    Err(e) if was_tool => return Err(e),
                     Err(e) => {
                         tracing::trace!(
                             index,
                             error = %e,
-                            "anthropic: content_block_stop finalize miss (likely text/thinking block)",
+                            "anthropic: content_block_stop finalize miss (text/thinking block)",
                         );
                     }
                 }
@@ -493,6 +535,13 @@ impl HttpAdapter for AnthropicAdapter {
                     .and_then(|s| s.as_str())
                     .map(map_stop_reason);
                 let usage = v.get("usage").and_then(|u| u.as_object()).cloned();
+                // Stash whatever we saw so a synthetic terminator at
+                // message_stop can recover the real values instead of
+                // discarding them (ISSUE-68).
+                if let Some(stop) = stop {
+                    let parsed = usage.as_ref().map(parse_usage).unwrap_or_default();
+                    buf.record_finish_state(stop, parsed);
+                }
                 if let (Some(stop), Some(u)) = (stop, usage) {
                     out.push(ChatEvent::Finished {
                         stop_reason: stop,
@@ -507,13 +556,16 @@ impl HttpAdapter for AnthropicAdapter {
             // consumers waiting forever. Emit a synthetic Finished as a
             // last resort.
             "message_stop" if !buf.finished_emitted() => {
+                // Recover the stop_reason / usage from the last
+                // message_delta if we saw a partial one (ISSUE-68);
+                // only fall back to Other / default for the genuinely
+                // empty case.
+                let (stop_reason, usage) = buf.recovered_finish_state();
                 tracing::warn!(
+                    ?stop_reason,
                     "anthropic: message_stop without prior Finished; emitting synthetic terminator",
                 );
-                out.push(ChatEvent::Finished {
-                    stop_reason: StopReason::Other,
-                    usage: Usage::default(),
-                });
+                out.push(ChatEvent::Finished { stop_reason, usage });
                 buf.mark_finished();
             }
             _ => {} // unknown events are tolerated
@@ -546,11 +598,27 @@ impl HttpAdapter for AnthropicAdapter {
             }
             StatusCode::BAD_REQUEST => {
                 let lower = message.to_lowercase();
-                if lower.contains("max_tokens") || lower.contains("context") {
-                    ProviderError::ContextTooLong {
-                        limit: 0,
-                        requested: 0,
-                    }
+                // Match the actual context-overflow phrasing Anthropic
+                // emits ("prompt is too long: N tokens > M maximum")
+                // rather than a bare `max_tokens` substring — the latter
+                // also appears in schema errors like
+                // "max_tokens_to_sample: field required", which are
+                // InvalidRequest, not context overflow.
+                let is_overflow = lower.contains("prompt is too long")
+                    || lower.contains("too many tokens")
+                    || (lower.contains("context") && lower.contains("token"));
+                if is_overflow {
+                    // Best-effort recovery of the two token counts from
+                    // the message ("… N tokens > M maximum …"); 0 when
+                    // the provider didn't include them.
+                    let nums: Vec<u32> = message
+                        .split(|c: char| !c.is_ascii_digit())
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
+                    let requested = nums.first().copied().unwrap_or(0);
+                    let limit = nums.get(1).copied().unwrap_or(0);
+                    ProviderError::ContextTooLong { limit, requested }
                 } else {
                     ProviderError::InvalidRequest(message)
                 }
@@ -568,6 +636,7 @@ impl HttpAdapter for AnthropicAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tars_types::StopReason;
 
     const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
     const DEFAULT_API_VERSION: &str = "2023-06-01";

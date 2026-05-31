@@ -76,8 +76,11 @@ pub(super) fn translate_openai_batch_status(v: &Value) -> Result<BatchStatus, Pr
         "expired" => Ok(BatchStatus::Expired),
         "cancelled" => Ok(BatchStatus::Cancelled),
         "failed" => {
-            // OpenAI surfaces the top-level reason via the `errors` array.
-            // We collapse to one-message Failed.
+            // OpenAI surfaces batch-level reasons via the `errors`
+            // object, whose `data` field is an array of
+            // `{code, message, param, line}` entries (it is a list
+            // wrapper, not a bare array). We pull the first entry's
+            // `message` and collapse to a one-message Failed.
             let message = v
                 .get("errors")
                 .and_then(|e| e.get("data"))

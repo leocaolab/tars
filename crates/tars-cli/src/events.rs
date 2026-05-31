@@ -293,7 +293,12 @@ fn parse_since(s: &str) -> Result<Option<SystemTime>> {
     if s == "all" {
         return Ok(None);
     }
-    let (num, unit) = s.split_at(s.len().saturating_sub(1));
+    // Split off the trailing unit *character* (not byte): slicing at
+    // `len()-1` would land mid-codepoint and panic on a multibyte
+    // suffix like `1д`. `char_indices().last()` gives the byte offset
+    // of the final char's first byte, a guaranteed UTF-8 boundary.
+    let split = s.char_indices().last().map(|(i, _)| i).unwrap_or(0);
+    let (num, unit) = s.split_at(split);
     let n: u64 = num.parse().with_context(|| {
         format!("invalid --since value: {s} (expected like `1d`, `2h`, `30m`, `45s`, or `all`)")
     })?;
@@ -323,7 +328,14 @@ fn format_ts(t: SystemTime) -> String {
         return "<pre-epoch>".to_string();
     };
     let secs = d.as_secs();
-    match chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0) {
+    // `secs` is u64; `as i64` would WRAP to a negative value for
+    // secs > i64::MAX, sneaking past `from_timestamp`'s range check and
+    // defeating the `<invalid>` branch below. Convert fallibly so an
+    // out-of-i64-range timestamp falls straight into the invalid arm.
+    let dt = i64::try_from(secs)
+        .ok()
+        .and_then(|s| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0));
+    match dt {
         Some(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         // Out-of-range timestamp (chrono limits, > +262kY) — same
         // principle: make corruption visible instead of silently
@@ -333,9 +345,18 @@ fn format_ts(t: SystemTime) -> String {
 }
 
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
+    // Count/slice by character, not byte: a byte slice at `n-1` can land
+    // mid-codepoint and panic on multibyte input (e.g. a model id with
+    // non-ASCII). `char_indices` gives UTF-8-boundary offsets.
+    if s.chars().count() <= n {
         s.to_string()
     } else {
-        format!("{}…", &s[..n.saturating_sub(1)])
+        let keep = n.saturating_sub(1);
+        let end = s
+            .char_indices()
+            .nth(keep)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
+        format!("{}…", &s[..end])
     }
 }

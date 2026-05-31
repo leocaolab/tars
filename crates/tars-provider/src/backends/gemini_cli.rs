@@ -184,7 +184,11 @@ impl LlmProvider for GeminiCliProvider {
 
         let max_chars = req.max_output_tokens.map(|t| (t as usize) * 4);
         let truncated = match max_chars {
-            Some(cap) if response_text.len() > cap => response_text[..cap].to_string(),
+            // Char-boundary-safe: `response_text[..cap]` panics if `cap`
+            // falls mid-codepoint (multibyte UTF-8 output).
+            Some(cap) if response_text.len() > cap => {
+                crate::http_base::truncate_utf8(&response_text, cap).to_string()
+            }
             _ => response_text,
         };
 
@@ -240,7 +244,7 @@ impl SubprocessRunner for RealSubprocessRunner {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let child = cmd.spawn().map_err(|e| match e.kind() {
+        let mut child = cmd.spawn().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => ProviderError::CliSubprocessDied {
                 exit_code: None,
                 stderr: format!("`{}` not found in PATH", inv.executable),
@@ -255,8 +259,32 @@ impl SubprocessRunner for RealSubprocessRunner {
             },
         })?;
 
-        let output = match tokio::time::timeout(inv.timeout, child.wait_with_output()).await {
-            Ok(Ok(o)) => o,
+        // Drain stdout/stderr concurrently with the wait so a full pipe
+        // can't deadlock the child, while keeping `child` borrowed (not
+        // moved, as `wait_with_output` would) so we can kill it on
+        // timeout.
+        use tokio::io::AsyncReadExt;
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+        let collect = async {
+            let read_out = async {
+                if let Some(p) = stdout_pipe.as_mut() {
+                    let _ = p.read_to_end(&mut stdout_buf).await;
+                }
+            };
+            let read_err = async {
+                if let Some(p) = stderr_pipe.as_mut() {
+                    let _ = p.read_to_end(&mut stderr_buf).await;
+                }
+            };
+            let (status, _, _) = tokio::join!(child.wait(), read_out, read_err);
+            status
+        };
+
+        let status = match tokio::time::timeout(inv.timeout, collect).await {
+            Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 return Err(ProviderError::CliSubprocessDied {
                     exit_code: None,
@@ -264,6 +292,11 @@ impl SubprocessRunner for RealSubprocessRunner {
                 });
             }
             Err(_) => {
+                // Explicit kill — don't rely solely on kill_on_drop's
+                // deferred reap. start_kill signals immediately; we reap
+                // so we don't leave a zombie.
+                let _ = child.start_kill();
+                let _ = child.wait().await;
                 return Err(ProviderError::CliSubprocessDied {
                     exit_code: None,
                     stderr: format!(
@@ -274,14 +307,17 @@ impl SubprocessRunner for RealSubprocessRunner {
                 });
             }
         };
+        let output = std::process::Output {
+            status,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let truncated = if stderr.len() > 500 {
-                stderr[..500].to_string()
-            } else {
-                stderr
-            };
+            // Char-boundary-safe: a raw `stderr[..500]` panics if byte
+            // 500 lands mid-codepoint.
+            let truncated = crate::http_base::truncate_utf8(&stderr, 500).to_string();
             return Err(ProviderError::CliSubprocessDied {
                 exit_code: output.status.code(),
                 stderr: truncated,
@@ -356,8 +392,13 @@ fn extract_response_text(payload: &Value) -> String {
 }
 
 fn extract_usage(payload: &Value, model: &str) -> Usage {
+    // RFC 6901: `~` and `/` are reference-token metacharacters and must
+    // be escaped (`~`→`~0`, `/`→`~1`) before interpolation, or a model
+    // name containing them silently mis-resolves to None. Order matters:
+    // `~0` first would double-escape the `/` replacement's intro.
+    let escaped_model = model.replace('~', "~0").replace('/', "~1");
     let tokens = payload
-        .pointer(&format!("/stats/models/{model}/tokens"))
+        .pointer(&format!("/stats/models/{escaped_model}/tokens"))
         .and_then(|v| v.as_object());
     let tokens = match tokens {
         Some(t) => t,

@@ -142,6 +142,7 @@ impl BatchSubmitter for AnthropicProvider {
     async fn submit(
         &self,
         items: Vec<(BatchItemId, ChatRequest)>,
+        ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError> {
         if items.is_empty() {
             return Err(ProviderError::InvalidRequest(
@@ -162,10 +163,7 @@ impl BatchSubmitter for AnthropicProvider {
         }
         let body = json!({ "requests": requests });
 
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
+        let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let headers = self.adapter.build_headers(&auth)?;
         let url = self.adapter.batch_url("")?;
 
@@ -205,11 +203,12 @@ impl BatchSubmitter for AnthropicProvider {
         Ok(BatchJobId::new(id))
     }
 
-    async fn status(&self, id: &BatchJobId) -> Result<BatchStatus, ProviderError> {
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
+    async fn status(
+        &self,
+        id: &BatchJobId,
+        ctx: &RequestContext,
+    ) -> Result<BatchStatus, ProviderError> {
+        let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let headers = self.adapter.build_headers(&auth)?;
         let url = self.adapter.batch_url(&format!("/{}", id.as_str()))?;
 
@@ -247,22 +246,20 @@ impl BatchSubmitter for AnthropicProvider {
     async fn results(
         &self,
         id: &BatchJobId,
+        ctx: &RequestContext,
     ) -> Result<Vec<BatchResultItem>, ProviderError> {
         // Anthropic's results endpoint 404s on non-terminal jobs; we
         // pre-check here so the error path is uniform across vendors
         // (see trait doc — `results()` on non-terminal is a caller bug,
         // not a backend error).
-        let st = self.status(id).await?;
+        let st = self.status(id, ctx).await?;
         if !st.is_terminal() {
             return Err(ProviderError::InvalidRequest(format!(
                 "batch results: job {id} is not yet terminal (status: {st:?})"
             )));
         }
 
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
+        let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let headers = self.adapter.build_headers(&auth)?;
         let url = self
             .adapter
@@ -296,11 +293,8 @@ impl BatchSubmitter for AnthropicProvider {
         parse_batch_results(&text)
     }
 
-    async fn cancel(&self, id: &BatchJobId) -> Result<(), ProviderError> {
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
+    async fn cancel(&self, id: &BatchJobId, ctx: &RequestContext) -> Result<(), ProviderError> {
+        let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let headers = self.adapter.build_headers(&auth)?;
         let url = self
             .adapter

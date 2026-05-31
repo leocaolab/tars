@@ -569,6 +569,22 @@ impl EventStorePair {
     /// Files: `{dir}/pipeline_events.db`, `{dir}/bodies.db`.
     fn open_in_dir(dir: &str) -> PyResult<Self> {
         let dir_path = std::path::PathBuf::from(dir);
+        // Validate the caller-supplied path before touching the filesystem:
+        // require an absolute path and reject `..` traversal components so a
+        // hostile/typo'd config can't create stores outside the intended root.
+        if !dir_path.is_absolute() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "event_store_dir must be an absolute path; got {dir:?}"
+            )));
+        }
+        if dir_path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "event_store_dir must not contain `..` components; got {dir:?}"
+            )));
+        }
         if !dir_path.exists() {
             std::fs::create_dir_all(&dir_path)
                 .map_err(|e| runtime_to_py("create event store dir", e))?;
@@ -1108,7 +1124,14 @@ impl CompatibilityReasonPy {
             None => Ok(None),
             Some(v) => {
                 let json_mod = py.import("json")?;
-                let s = serde_json::to_string(v).unwrap_or_else(|_| "{}".into());
+                // Propagate a serialization failure rather than silently
+                // handing Python an empty `{}` — a `{}` would masquerade as
+                // a valid (empty) detail and hide the real failure.
+                let s = serde_json::to_string(v).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "failed to serialize compatibility reason detail: {e}"
+                    ))
+                })?;
                 let obj = json_mod.call_method1("loads", (s,))?;
                 Ok(Some(obj.downcast_into::<PyDict>()?))
             }

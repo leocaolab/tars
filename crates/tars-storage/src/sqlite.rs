@@ -49,7 +49,7 @@ pub struct SqliteEventStore {
 impl SqliteEventStore {
     pub fn open(config: SqliteEventStoreConfig) -> Result<Arc<Self>, StorageError> {
         let conn = Connection::open(&config.path).map_err(|e| {
-            StorageError::Backend(format!("opening event store at {:?}: {e}", config.path))
+            StorageError::backend_source(format!("opening event store at {:?}", config.path), e)
         })?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
@@ -62,7 +62,7 @@ impl SqliteEventStore {
     /// store; the database disappears with the connection.
     pub fn in_memory() -> Result<Arc<Self>, StorageError> {
         let conn = Connection::open_in_memory()
-            .map_err(|e| StorageError::Backend(format!("opening in-memory event store: {e}")))?;
+            .map_err(|e| StorageError::backend_source("opening in-memory event store", e))?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
         Ok(Arc::new(Self {
@@ -72,23 +72,23 @@ impl SqliteEventStore {
 
     fn pragma_setup(conn: &Connection) -> Result<(), StorageError> {
         conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| StorageError::Backend(format!("pragma journal_mode: {e}")))?;
+            .map_err(|e| StorageError::backend_source("pragma journal_mode", e))?;
         conn.pragma_update(None, "synchronous", "NORMAL")
-            .map_err(|e| StorageError::Backend(format!("pragma synchronous: {e}")))?;
+            .map_err(|e| StorageError::backend_source("pragma synchronous", e))?;
         conn.pragma_update(None, "temp_store", "MEMORY")
-            .map_err(|e| StorageError::Backend(format!("pragma temp_store: {e}")))?;
+            .map_err(|e| StorageError::backend_source("pragma temp_store", e))?;
         // foreign_keys is off by default in SQLite; we don't have FKs in
         // the M3 schema but turning it on is the right hygiene for
         // future schema additions (trajectory parent links, etc.).
         conn.pragma_update(None, "foreign_keys", "ON")
-            .map_err(|e| StorageError::Backend(format!("pragma foreign_keys: {e}")))?;
+            .map_err(|e| StorageError::backend_source("pragma foreign_keys", e))?;
         Ok(())
     }
 
     fn migrate(conn: &Connection) -> Result<(), StorageError> {
         let current: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(|e| StorageError::Backend(format!("read user_version: {e}")))?;
+            .map_err(|e| StorageError::backend_source("read user_version", e))?;
         if current == SCHEMA_VERSION {
             return Ok(());
         }
@@ -96,7 +96,7 @@ impl SqliteEventStore {
             // Unknown prior schema — events are durable user data, so
             // unlike the cache we DO NOT wipe. Surface the version
             // mismatch and let the operator decide.
-            return Err(StorageError::Backend(format!(
+            return Err(StorageError::backend(format!(
                 "incompatible event store schema (file version {current}, code version {SCHEMA_VERSION}). \
                  Refusing to migrate automatically — back up the file and run a manual migration.",
             )));
@@ -119,9 +119,9 @@ impl SqliteEventStore {
                 ON events(trajectory_id);
             "#,
         )
-        .map_err(|e| StorageError::Backend(format!("create schema: {e}")))?;
+        .map_err(|e| StorageError::backend_source("create schema", e))?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(|e| StorageError::Backend(format!("set user_version: {e}")))?;
+            .map_err(|e| StorageError::backend_source("set user_version", e))?;
         Ok(())
     }
 }
@@ -145,13 +145,13 @@ impl EventStore for SqliteEventStore {
 
         let conn = self.conn.clone();
         let traj = trajectory_id.clone();
-        let now = now_ms();
+        let now = now_ms()?;
 
         let last_seq = tokio::task::spawn_blocking(move || -> Result<u64, StorageError> {
-            let mut conn = conn.lock().expect("event store mutex poisoned");
+            let mut conn = lock_conn(&conn);
             let tx = conn
                 .transaction()
-                .map_err(|e| StorageError::Backend(format!("begin transaction: {e}")))?;
+                .map_err(|e| StorageError::backend_source("begin transaction", e))?;
 
             // Compute the next sequence_no inside the transaction so a
             // concurrent writer to the same trajectory can't race us.
@@ -161,7 +161,7 @@ impl EventStore for SqliteEventStore {
                     params![traj.as_ref()],
                     |r| r.get(0),
                 )
-                .map_err(|e| StorageError::Backend(format!("query max seq: {e}")))?;
+                .map_err(|e| StorageError::backend_source("query max seq", e))?;
             let mut next_seq = (current_high as u64).saturating_add(1);
 
             {
@@ -170,21 +170,21 @@ impl EventStore for SqliteEventStore {
                         "INSERT INTO events (trajectory_id, sequence_no, timestamp_ms, payload_json) \
                          VALUES (?, ?, ?, ?)",
                     )
-                    .map_err(|e| StorageError::Backend(format!("prepare insert: {e}")))?;
+                    .map_err(|e| StorageError::backend_source("prepare insert", e))?;
                 for blob in &encoded {
                     stmt.execute(params![traj.as_ref(), next_seq as i64, now, blob])
-                        .map_err(|e| StorageError::Backend(format!("insert event: {e}")))?;
+                        .map_err(|e| StorageError::backend_source("insert event", e))?;
                     next_seq = next_seq.saturating_add(1);
                 }
             }
 
             tx.commit()
-                .map_err(|e| StorageError::Backend(format!("commit: {e}")))?;
+                .map_err(|e| StorageError::backend_source("commit", e))?;
             // `next_seq` is one past the last written.
             Ok(next_seq.saturating_sub(1))
         })
         .await
-        .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
 
         Ok(last_seq)
     }
@@ -205,7 +205,7 @@ impl EventStore for SqliteEventStore {
         let traj = trajectory_id.clone();
         let rows =
             tokio::task::spawn_blocking(move || -> Result<Vec<EventRecord>, StorageError> {
-                let conn = conn.lock().expect("event store mutex poisoned");
+                let conn = lock_conn(&conn);
                 let mut stmt = conn
                     .prepare(
                         "SELECT sequence_no, timestamp_ms, payload_json \
@@ -213,7 +213,7 @@ impl EventStore for SqliteEventStore {
                      WHERE trajectory_id = ? AND sequence_no > ? \
                      ORDER BY sequence_no ASC",
                     )
-                    .map_err(|e| StorageError::Backend(format!("prepare select: {e}")))?;
+                    .map_err(|e| StorageError::backend_source("prepare select", e))?;
                 let iter = stmt
                     .query_map(params![traj.as_ref(), since as i64], |r| {
                         let seq: i64 = r.get(0)?;
@@ -221,12 +221,12 @@ impl EventStore for SqliteEventStore {
                         let blob: Vec<u8> = r.get(2)?;
                         Ok((seq as u64, ts, blob))
                     })
-                    .map_err(|e| StorageError::Backend(format!("query select: {e}")))?;
+                    .map_err(|e| StorageError::backend_source("query select", e))?;
 
                 let mut out = Vec::new();
                 for row in iter {
                     let (seq, ts, blob) =
-                        row.map_err(|e| StorageError::Backend(format!("row: {e}")))?;
+                        row.map_err(|e| StorageError::backend_source("row", e))?;
                     let payload: serde_json::Value = serde_json::from_slice(&blob)?;
                     out.push(EventRecord {
                         trajectory_id: traj.clone(),
@@ -238,7 +238,7 @@ impl EventStore for SqliteEventStore {
                 Ok(out)
             })
             .await
-            .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+            .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
 
         Ok(rows)
     }
@@ -247,18 +247,18 @@ impl EventStore for SqliteEventStore {
         let conn = self.conn.clone();
         let traj = trajectory_id.clone();
         let high = tokio::task::spawn_blocking(move || -> Result<u64, StorageError> {
-            let conn = conn.lock().expect("event store mutex poisoned");
+            let conn = lock_conn(&conn);
             let max: i64 = conn
                 .query_row(
                     "SELECT COALESCE(MAX(sequence_no), 0) FROM events WHERE trajectory_id = ?",
                     params![traj.as_ref()],
                     |r| r.get(0),
                 )
-                .map_err(|e| StorageError::Backend(format!("query high water: {e}")))?;
+                .map_err(|e| StorageError::backend_source("query high water", e))?;
             Ok(max as u64)
         })
         .await
-        .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
         Ok(high)
     }
 
@@ -266,22 +266,22 @@ impl EventStore for SqliteEventStore {
         let conn = self.conn.clone();
         let ids =
             tokio::task::spawn_blocking(move || -> Result<Vec<TrajectoryId>, StorageError> {
-                let conn = conn.lock().expect("event store mutex poisoned");
+                let conn = lock_conn(&conn);
                 let mut stmt = conn
                     .prepare("SELECT DISTINCT trajectory_id FROM events")
-                    .map_err(|e| StorageError::Backend(format!("prepare list: {e}")))?;
+                    .map_err(|e| StorageError::backend_source("prepare list", e))?;
                 let iter = stmt
                     .query_map([], |r| r.get::<_, String>(0))
-                    .map_err(|e| StorageError::Backend(format!("query list: {e}")))?;
+                    .map_err(|e| StorageError::backend_source("query list", e))?;
                 let mut out = Vec::new();
                 for row in iter {
-                    let s = row.map_err(|e| StorageError::Backend(format!("row: {e}")))?;
+                    let s = row.map_err(|e| StorageError::backend_source("row", e))?;
                     out.push(TrajectoryId::new(s));
                 }
                 Ok(out)
             })
             .await
-            .map_err(|e| StorageError::Backend(format!("spawn_blocking: {e}")))??;
+            .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
         Ok(ids)
     }
 }
@@ -300,17 +300,37 @@ pub fn default_personal_event_store_path() -> Option<PathBuf> {
 pub fn open_event_store_at_path(path: &Path) -> Result<Arc<SqliteEventStore>, StorageError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            StorageError::Backend(format!("create event store dir {parent:?}: {e}"))
+            StorageError::backend_source(format!("create event store dir {parent:?}"), e)
         })?;
     }
     SqliteEventStore::open(SqliteEventStoreConfig::new(path))
 }
 
-fn now_ms() -> i64 {
+/// Lock the connection mutex, recovering rather than panicking if a
+/// previous `spawn_blocking` writer panicked and poisoned it. SQLite's
+/// own transaction rollback keeps on-disk state consistent across a
+/// panicking writer, so the recovered guard is safe to reuse; panicking
+/// here would instead collapse into an opaque `spawn_blocking` join
+/// error and take down the whole store.
+fn lock_conn(conn: &Mutex<Connection>) -> std::sync::MutexGuard<'_, Connection> {
+    conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Current wall-clock time as milliseconds since the Unix epoch.
+///
+/// Returns `Err` if the system clock is set before `UNIX_EPOCH`: every
+/// event would otherwise stamp `0`, silently corrupting the `timestamp_ms`
+/// column that read-back ordering and retention rely on. The far-future
+/// case is clamped to `i64::MAX` (year ~292 million — unreachable for a
+/// real `now()`), which keeps the `as i64` cast from wrapping into a
+/// negative timestamp; that clamp is documented and intentional.
+fn now_ms() -> Result<i64, StorageError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
+        .map_err(|e| {
+            StorageError::backend_source("system clock is before the Unix epoch", e)
+        })
 }
 
 #[cfg(test)]
@@ -505,10 +525,10 @@ mod tests {
         // Reopen should error.
         let result = open_event_store_at_path(&path);
         match result {
-            Err(StorageError::Backend(msg)) => {
+            Err(StorageError::Backend { context, .. }) => {
                 assert!(
-                    msg.contains("incompatible") && msg.contains("999"),
-                    "error must call out the version mismatch: {msg}",
+                    context.contains("incompatible") && context.contains("999"),
+                    "error must call out the version mismatch: {context}",
                 );
             }
             Err(other) => panic!("expected Backend error, got {other:?}"),

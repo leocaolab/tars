@@ -221,19 +221,22 @@ impl Invariant for ValidatorInvariant {
                     CheckResult::fail(format!("filtered {} item(s)", dropped.len()))
                 }
             }
-            // ValidationOutcome is #[non_exhaustive]; a future variant
-            // defaults to "holds" rather than guessing it's a violation
-            // (conservative — a new outcome shouldn't silently fail
-            // tests). But don't do it silently: warn so an unmodeled
-            // variant that *should* fail is visible to operators and
-            // prompts an explicit arm here instead of masking forever.
+            // ValidationOutcome is #[non_exhaustive]; an unmodeled
+            // future variant is fail-closed rather than fail-open. This
+            // is a *safety* invariant — silently passing an outcome we
+            // don't understand could let unvalidated content through.
+            // Failing forces the new variant to get an explicit arm
+            // here before it can be treated as a pass.
             _ => {
                 tracing::warn!(
                     invariant = self.inner.name(),
-                    "ValidatorInvariant: unhandled ValidationOutcome variant treated as pass \
-                     (conservative); add an explicit arm when new variants land",
+                    "ValidatorInvariant: unhandled ValidationOutcome variant treated as FAIL \
+                     (fail-closed); add an explicit arm when new variants land",
                 );
-                CheckResult::pass()
+                CheckResult::fail(
+                    "unhandled ValidationOutcome variant (fail-closed; add an explicit arm)"
+                        .to_string(),
+                )
             }
         }
     }

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("io reading {path:?}: {source}")]
     Io {
@@ -46,11 +47,13 @@ impl ConfigError {
     /// `pub(crate)`: this asserting helper is only ever called from
     /// `ConfigManager` inside this crate (both call sites feed it the
     /// output of `Config::validate`, which returns `Ok(())` rather than
-    /// an empty error list). Keeping it crate-private means no external
-    /// caller can trip the assertion — the panic stays a guard against
-    /// our own upstream bugs, not a fragile public API. The `assert!`
-    /// is retained so an in-crate regression fails loudly rather than
-    /// emitting the confusing "config validation failed (0)".
+    /// an empty error list). Combined with `#[non_exhaustive]` on the
+    /// enum — which forbids external crates from using the struct-variant
+    /// literal `ConfigError::ValidationFailed { .. }` — this constructor
+    /// is the only way for out-of-crate code to build the variant, so the
+    /// non-empty invariant genuinely holds across the public boundary.
+    /// The `assert!` is retained so an in-crate regression fails loudly
+    /// rather than emitting the confusing "config validation failed (0)".
     pub(crate) fn validation_failed(errors: Vec<ValidationError>) -> Self {
         assert!(
             !errors.is_empty(),

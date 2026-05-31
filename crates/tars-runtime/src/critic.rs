@@ -233,9 +233,9 @@ impl RawVerdict {
         match self.kind {
             RawVerdictKind::Approve => Ok(VerdictKind::Approve),
             RawVerdictKind::Reject => {
-                if self.reason.is_empty() {
+                if self.reason.trim().is_empty() {
                     return Err(CriticError::InvalidVerdict(
-                        "kind=reject but reason is empty".into(),
+                        "kind=reject but reason is empty / whitespace-only".into(),
                     ));
                 }
                 Ok(VerdictKind::Reject {
@@ -243,9 +243,11 @@ impl RawVerdict {
                 })
             }
             RawVerdictKind::Refine => {
-                if self.suggestions.is_empty() {
+                if self.suggestions.is_empty()
+                    || self.suggestions.iter().all(|s| s.trim().is_empty())
+                {
                     return Err(CriticError::InvalidVerdict(
-                        "kind=refine but suggestions list is empty".into(),
+                        "kind=refine but suggestions list is empty / all whitespace-only".into(),
                     ));
                 }
                 Ok(VerdictKind::Refine {

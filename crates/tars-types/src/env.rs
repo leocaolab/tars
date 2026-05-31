@@ -48,14 +48,24 @@ pub fn home_dir() -> Option<PathBuf> {
 /// `TARS_CLAUDE_CLI_STREAM`). The accepted truthy values are anything
 /// other than `""`, `"0"`, `"false"`, `"off"`, `"no"` (case-insensitive).
 ///
-/// Returns `None` when the var is unset entirely so callers can
+/// Returns `Ok(None)` when the var is unset entirely so callers can
 /// distinguish "operator didn't pick" from "operator picked false."
-/// Most call sites want the default-false semantics — `.unwrap_or(false)`.
-pub fn claude_cli_streaming() -> Option<bool> {
-    std::env::var("TARS_CLAUDE_CLI_STREAM").ok().map(|v| {
-        let v = v.trim().to_ascii_lowercase();
-        !matches!(v.as_str(), "" | "0" | "false" | "off" | "no")
-    })
+/// Most call sites want the default-false semantics —
+/// `.unwrap_or(None).unwrap_or(false)` or surfacing the `Err`.
+///
+/// Returns `Err` when the var is set but non-UTF-8: a `.ok()` here would
+/// make invalid UTF-8 indistinguishable from "unset", silently falling
+/// back to the default and masking operator misconfiguration. Mirrors
+/// [`log_format_raw`]'s NotPresent→None / NotUnicode→propagate contract.
+pub fn claude_cli_streaming() -> Result<Option<bool>, std::env::VarError> {
+    match std::env::var("TARS_CLAUDE_CLI_STREAM") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            Ok(Some(!matches!(v.as_str(), "" | "0" | "false" | "off" | "no")))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Raw value of `TARS_LOG_FORMAT` for tars-melt to parse into its

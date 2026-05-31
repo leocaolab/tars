@@ -27,6 +27,11 @@ pub struct RequestContext {
     pub cancel: CancellationToken,
     /// Free-form attributes used by middleware to pass values to inner
     /// layers without bloating the strongly-typed fields.
+    ///
+    /// Prefer the poison-recovering [`RequestContext::read_attributes`] /
+    /// [`RequestContext::write_attributes`] accessors over locking this
+    /// field directly, so a panic in one middleware doesn't cascade into
+    /// `unwrap()`-on-poison panics across the whole request path.
     pub attributes: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     /// Per-call telemetry accumulator written by middleware and read
     /// by the caller after the response stream completes. See
@@ -69,9 +74,11 @@ impl RequestContext {
         }
     }
 
-    /// Return a new context with `tags` set. Convenience for batch
-    /// runners: build one `ctx` then call `.with_tags(["batch_X"])`
-    /// before each request.
+    /// Consume `self` and return it with `tags` set (builder-style
+    /// move — the input binding is moved, not cloned; `RequestContext`
+    /// is `Clone`, so clone first if you need to keep the original).
+    /// Convenience for batch runners: build one `ctx` then call
+    /// `.with_tags(["batch_X"])` before each request.
     pub fn with_tags<S, I>(mut self, tags: I) -> Self
     where
         S: Into<String>,
@@ -81,6 +88,31 @@ impl RequestContext {
         self
     }
 
+    /// Read-lock the attribute map, recovering from a poisoned lock.
+    ///
+    /// The attribute map is plain data — a panic by a prior lock holder
+    /// does not leave it in an invariant-violating state — so we recover
+    /// the guard via `PoisonError::into_inner` rather than propagating
+    /// the poison and turning one middleware panic into a cascade of
+    /// `unwrap()`-on-poison panics across the request path.
+    pub fn read_attributes(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, HashMap<String, serde_json::Value>> {
+        self.attributes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Write-lock the attribute map, recovering from a poisoned lock.
+    /// See [`Self::read_attributes`] for why poison is recovered here.
+    pub fn write_attributes(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, HashMap<String, serde_json::Value>> {
+        self.attributes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled() || self.is_deadline_exceeded()
     }
@@ -88,6 +120,12 @@ impl RequestContext {
     /// True iff a deadline is set and `Instant::now()` has passed it.
     /// Kept separate from `is_cancelled()` for callers that want to
     /// distinguish a hard timeout from explicit caller cancellation.
+    ///
+    /// Re-samples the clock on every call by design: it is a live
+    /// predicate on the current time, not a latched flag. Two calls
+    /// straddling the deadline correctly return `false` then `true`;
+    /// callers must treat a `false` as "not expired *as of now*", which
+    /// is the only sound contract for a wall-clock deadline.
     pub fn is_deadline_exceeded(&self) -> bool {
         match self.deadline {
             Some(d) => Instant::now() >= d,

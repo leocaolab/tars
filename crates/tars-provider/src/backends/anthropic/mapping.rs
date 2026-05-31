@@ -81,8 +81,11 @@ pub(super) fn translate_batch_status(v: &Value) -> Result<BatchStatus, ProviderE
     let errored = get("errored");
     let canceled = get("canceled");
     let expired = get("expired");
-    let processed = succeeded + errored + canceled + expired;
-    let total = Some(processed + processing);
+    let processed = succeeded
+        .saturating_add(errored)
+        .saturating_add(canceled)
+        .saturating_add(expired);
+    let total = Some(processed.saturating_add(processing));
 
     match status {
         "in_progress" => Ok(BatchStatus::InProgress {
@@ -220,23 +223,23 @@ pub(super) fn message_to_chat_response(msg: &Value) -> Result<ChatResponse, Prov
         }
     }
 
-    let stop_reason = match msg.get("stop_reason").and_then(|s| s.as_str()) {
-        Some("end_turn") => StopReason::EndTurn,
-        Some("max_tokens") => StopReason::MaxTokens,
-        Some("stop_sequence") => StopReason::StopSequence,
-        Some("tool_use") => StopReason::ToolUse,
-        _ => StopReason::EndTurn,
-    };
+    // Reuse map_stop_reason so the unknown-reason fallback (Other) and
+    // the full reason set stay in lockstep with the streaming adapter —
+    // an inline copy here previously defaulted unknowns to EndTurn.
+    let stop_reason = msg
+        .get("stop_reason")
+        .and_then(|s| s.as_str())
+        .map(map_stop_reason)
+        .unwrap_or(StopReason::EndTurn);
 
-    let u = msg.get("usage").cloned().unwrap_or_else(|| json!({}));
-    let usage_u64 = |k: &str| u.get(k).and_then(|n| n.as_u64()).unwrap_or(0);
-    let usage = Usage {
-        input_tokens: usage_u64("input_tokens"),
-        output_tokens: usage_u64("output_tokens"),
-        cached_input_tokens: usage_u64("cache_read_input_tokens"),
-        cache_creation_tokens: usage_u64("cache_creation_input_tokens"),
-        thinking_tokens: 0,
-    };
+    // Reuse parse_usage so input-token normalization (input += cache_read
+    // + cache_creation) and thinking-token probing match the streaming
+    // path — cross-provider pricing depends on a uniform Usage shape.
+    let usage = msg
+        .get("usage")
+        .and_then(|u| u.as_object())
+        .map(parse_usage)
+        .unwrap_or_default();
     acc.apply(ChatEvent::Finished { stop_reason, usage });
     Ok(acc.finish())
 }

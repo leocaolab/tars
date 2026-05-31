@@ -211,7 +211,9 @@ impl CacheRegistry for SqliteCacheRegistry {
         let now = now_ms();
         let blob: Option<Vec<u8>> =
             tokio::task::spawn_blocking(move || -> Result<_, CacheError> {
-                let conn = l2.lock().expect("l2 mutex poisoned");
+                let conn = l2
+                    .lock()
+                    .map_err(|_| CacheError::Backend("l2 mutex poisoned".into()))?;
                 conn.query_row(
                     "SELECT value FROM cache_entries WHERE fingerprint = ? AND expires_at_ms > ?",
                     params![fp.as_slice(), now],
@@ -278,7 +280,9 @@ impl CacheRegistry for SqliteCacheRegistry {
             .write_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tokio::task::spawn_blocking(move || -> Result<(), CacheError> {
-            let conn = l2.lock().expect("l2 mutex poisoned");
+            let conn = l2
+                .lock()
+                .map_err(|_| CacheError::Backend("l2 mutex poisoned".into()))?;
             conn.execute(
                 "INSERT OR REPLACE INTO cache_entries
                    (fingerprint, value, created_at_ms, expires_at_ms)
@@ -289,11 +293,18 @@ impl CacheRegistry for SqliteCacheRegistry {
 
             // Cheap janitor: every Nth write, sweep expired rows.
             if writes_so_far % SWEEP_EVERY_N_WRITES == 0 {
-                let _ = conn.execute(
+                // [arc:intentional-handle] reason: the sweep is opportunistic
+                // GC, not part of the write's correctness contract — the row
+                // we just inserted is durable regardless. A failed sweep must
+                // not fail the caller's write, but it can be the first sign of
+                // disk-full / IO trouble, so surface it via a warn carrying the
+                // error object instead of dropping it silently.
+                if let Err(e) = conn.execute(
                     "DELETE FROM cache_entries WHERE expires_at_ms <= ?",
                     params![now],
-                );
-                // Errors here are non-fatal — best-effort cleanup.
+                ) {
+                    tracing::warn!(error = %e, "cache: l2 expired-row sweep failed (non-fatal)");
+                }
             }
             Ok(())
         })
@@ -309,7 +320,9 @@ impl CacheRegistry for SqliteCacheRegistry {
         let l2 = self.l2.clone();
         let fp = key.fingerprint;
         tokio::task::spawn_blocking(move || -> Result<(), CacheError> {
-            let conn = l2.lock().expect("l2 mutex poisoned");
+            let conn = l2
+                .lock()
+                .map_err(|_| CacheError::Backend("l2 mutex poisoned".into()))?;
             conn.execute(
                 "DELETE FROM cache_entries WHERE fingerprint = ?",
                 params![fp.as_slice()],
@@ -370,7 +383,10 @@ mod tests {
     impl SqliteCacheRegistry {
         pub(super) fn l2_entry_count(&self) -> Result<u64, CacheError> {
             let now = now_ms();
-            let conn = self.l2.lock().expect("l2 mutex poisoned");
+            let conn = self
+                .l2
+                .lock()
+                .map_err(|_| CacheError::Backend("l2 mutex poisoned".into()))?;
             let n: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM cache_entries WHERE expires_at_ms > ?",

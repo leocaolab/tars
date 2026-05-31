@@ -158,10 +158,13 @@ impl OutputValidator for AnnotatingValidator {
 }
 
 async fn drain(s: tars_provider::LlmEventStream) -> Vec<tars_types::ChatEvent> {
+    // Surface provider errors rather than silently dropping them with
+    // `filter_map(.ok())` — a swallowed Err would mask a regression where
+    // validation turns a clean stream into an errored one.
     s.collect::<Vec<_>>()
         .await
         .into_iter()
-        .filter_map(|r| r.ok())
+        .map(|r| r.expect("drain: stream yielded a provider error"))
         .collect()
 }
 
@@ -259,12 +262,16 @@ async fn validation_filter_modifies_response_subsequent_validators_see_filtered(
     let svc = mw.wrap(inner);
     let ctx = RequestContext::test_default();
     let outcome_handle = ctx.validation_outcome.clone();
-    let _ = svc
+    let collected: Vec<_> = svc
         .call(fake_req(), ctx)
         .await
         .expect("should succeed")
-        .collect::<Vec<_>>()
+        .collect()
         .await;
+    assert!(
+        collected.iter().all(Result::is_ok),
+        "stream must not yield any provider errors",
+    );
 
     let rec = outcome_handle.lock().unwrap();
     // Validators ran in order
@@ -298,7 +305,11 @@ async fn validation_annotate_stores_metrics_in_summary() {
         Ok(s) => s,
         Err(e) => panic!("expected Ok stream, got Err: {e:?}"),
     };
-    let _ = stream.collect::<Vec<_>>().await;
+    let collected: Vec<_> = stream.collect().await;
+    assert!(
+        collected.iter().all(Result::is_ok),
+        "stream must not yield any provider errors",
+    );
     let rec = outcome_handle.lock().unwrap();
     match rec.summary.outcomes.get("annot") {
         Some(OutcomeSummary::Annotate { metrics }) => {

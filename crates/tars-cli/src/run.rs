@@ -294,8 +294,12 @@ fn response_summary(o: &StreamOutcome) -> String {
     // Doc 04 says payloads are "small (<4KB), large goes to ContentStore".
     // For now we keep a 200-char head to stay well under the cap;
     // ContentStore (D-1 / future B-7 follow-up) replaces this.
-    let head: String = o.response_text.chars().take(200).collect::<String>();
-    if o.response_text.chars().count() > 200 {
+    // Single pass: take 201 chars, then check whether a 201st existed
+    // rather than re-walking the whole string with a second
+    // `chars().count()` (O(n) twice on a potentially large response).
+    let mut chars = o.response_text.chars();
+    let head: String = chars.by_ref().take(200).collect();
+    if chars.next().is_some() {
         format!("{head}…")
     } else {
         head
@@ -343,6 +347,16 @@ async fn build_trajectory_logger(
         "prompt({prompt_chars} chars), model={}",
         dispatch.model_label,
     );
+    // Note on partial writes: an ungraceful shutdown (SIGKILL, panic)
+    // between this StepStarted and the terminal event from
+    // record_outcome/record_open_failure leaves the trajectory in the
+    // `active` state with no terminal event. This is intentional and
+    // recoverable: the append log is the source of truth, `tars
+    // trajectory list` renders such a trajectory as `active`, and the
+    // StepStarted carries an idempotency key so a future
+    // resume/replay can pick up exactly where it left off. We do NOT
+    // try to fsync-fence each event — best-effort observability per the
+    // TrajectoryLogger doc above and Doc 03 §4.3.
     let key = StepIdempotencyKey::compute(&traj, 1, &input_summary);
     let agent = if dispatch.label.starts_with("tier") {
         "tars-cli/run/tier".to_string()
@@ -375,10 +389,21 @@ async fn build_trajectory_logger(
 fn resolve_prompt(args: &RunArgs) -> Result<String> {
     if args.prompt == "-" {
         use std::io::Read as _;
+        // Cap the stdin read so a `tars run --prompt - < /dev/zero` (or
+        // an accidental binary pipe) can't OOM the process. 8 MiB is far
+        // larger than any realistic prompt yet bounds worst case.
+        const STDIN_PROMPT_CAP: u64 = 8 * 1024 * 1024;
         let mut buf = String::new();
-        std::io::stdin()
+        let read = std::io::stdin()
+            .take(STDIN_PROMPT_CAP)
             .read_to_string(&mut buf)
             .context("reading prompt from stdin (`--prompt -`)")?;
+        if read as u64 == STDIN_PROMPT_CAP {
+            anyhow::bail!(
+                "stdin prompt exceeds {} byte cap (`--prompt -`); pass a smaller prompt",
+                STDIN_PROMPT_CAP
+            );
+        }
         Ok(buf)
     } else {
         Ok(args.prompt.clone())
@@ -414,6 +439,12 @@ pub struct StreamOutcome {
     pub response_text: String,
 }
 
+/// Soft cap on the in-memory copy of the response kept for the
+/// trajectory summary. The summary itself is only ~200 chars; 8 KiB
+/// is generous headroom while bounding worst-case memory for a runaway
+/// stream. The full response always reaches stdout regardless.
+const RESPONSE_TEXT_CAP: usize = 8 * 1024;
+
 async fn drain_stream_to_stdout(
     mut stream: tars_provider::LlmEventStream,
 ) -> Result<StreamOutcome> {
@@ -430,7 +461,13 @@ async fn drain_stream_to_stdout(
                 out.write_all(text.as_bytes()).context("stdout write")?;
                 out.flush().context("stdout flush")?;
                 outcome.wrote_anything = !text.is_empty() || outcome.wrote_anything;
-                outcome.response_text.push_str(&text);
+                // Full text always streams to stdout above; `response_text`
+                // is only the trajectory summary source (head-of-response).
+                // Cap accumulation so a huge/runaway stream can't OOM the
+                // CLI just to feed a 200-char summary.
+                if outcome.response_text.len() < RESPONSE_TEXT_CAP {
+                    outcome.response_text.push_str(&text);
+                }
             }
             ChatEvent::ThinkingDelta { .. } => {
                 // Hide thinking deltas from stdout by default — they're

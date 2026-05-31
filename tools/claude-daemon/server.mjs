@@ -62,14 +62,28 @@ async function handleChat({ prompt, system, model, max_turns = 7 }) {
   for await (const msg of q) {
     if (ttfb === null) ttfb = performance.now() - t0;
     messageCount += 1;
-    if (msg.type === 'assistant') {
-      actualModel = actualModel || msg.message?.model || null;
-      for (const block of msg.message?.content ?? []) {
-        if (block.type === 'text') text += block.text;
+    // Defend against unexpected message shapes from the SDK (e.g. content
+    // arriving as a string rather than a block array, or a non-string
+    // block.text). A single malformed message must not abort the stream.
+    try {
+      if (msg.type === 'assistant') {
+        actualModel = actualModel || msg.message?.model || null;
+        const content = msg.message?.content;
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block?.type === 'text' && typeof block.text === 'string') {
+              text += block.text;
+            }
+          }
+        }
+      } else if (msg.type === 'result') {
+        usage = msg.usage ?? null;
+        resultSubtype = msg.subtype ?? null;
       }
-    } else if (msg.type === 'result') {
-      usage = msg.usage ?? null;
-      resultSubtype = msg.subtype ?? null;
+    } catch (err) {
+      process.stderr.write(
+        `handleChat: skipping malformed SDK message: ${err?.message ?? err}\n`,
+      );
     }
   }
 
@@ -113,16 +127,39 @@ if (stdioMode) {
       return;
     }
     const { id } = req;
+    // Without a usable id we can't route a reply; an undefined/null id would
+    // produce an unaddressable response and leak a pending promise on the
+    // tars side. Reject early on stderr.
+    if (id == null || (typeof id !== 'string' && typeof id !== 'number')) {
+      process.stderr.write(
+        `stdio: dropping request with missing/invalid id (got ${typeof id})\n`,
+      );
+      return;
+    }
+
+    // Wrap stdout.write: if it throws (EPIPE on a dead reader, OOM), an
+    // uncaught throw inside this .then/.catch becomes an unhandledRejection
+    // and crashes the daemon. Degrade to a stderr log instead.
+    const writeLine = (obj) => {
+      try {
+        process.stdout.write(JSON.stringify(obj) + '\n');
+      } catch (werr) {
+        process.stderr.write(
+          `stdio: failed to write reply for id=${id}: ${werr?.message ?? werr}\n`,
+        );
+      }
+    };
+
     // Fire-and-forget so multiple in-flight requests overlap inside
     // the SDK — each call gets its own async chain.
     handleChat(req).then((reply) => {
-      process.stdout.write(JSON.stringify({ id, ...reply }) + '\n');
+      writeLine({ id, ...reply });
     }).catch((err) => {
-      process.stdout.write(JSON.stringify({
+      writeLine({
         id,
         error: String(err?.message ?? err),
         stack: err?.stack,
-      }) + '\n');
+      });
     });
   });
 
@@ -142,8 +179,13 @@ if (stdioMode) {
   app.get('/healthz', async () => ({ ok: true, pid: process.pid, uptime_s: process.uptime() }));
 
   app.post('/chat', async (req, reply) => {
+    const body = req.body ?? {};
+    // A missing/empty prompt is a client error, not a server fault → 400.
+    if (typeof body.prompt !== 'string' || !body.prompt.length) {
+      return reply.code(400).send({ error: 'prompt (string) is required' });
+    }
     try {
-      return await handleChat(req.body ?? {});
+      return await handleChat(body);
     } catch (err) {
       return reply.code(500).send({
         error: String(err?.message ?? err),

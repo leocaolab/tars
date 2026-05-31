@@ -32,7 +32,7 @@ impl CacheKey {
         let mut s = String::with_capacity(64);
         for b in &self.fingerprint {
             use fmt::Write;
-            let _ = write!(&mut s, "{b:02x}");
+            write!(&mut s, "{b:02x}").expect("writing to a String is infallible");
         }
         s
     }
@@ -185,8 +185,23 @@ fn thinking_tag(t: &tars_types::ThinkingMode) -> String {
 /// IAM = bug — this is documented in `tars-cache::lib` and will be
 /// hardened to fail-closed when `tars-security` lands (TODO D-2).
 fn read_iam_scopes(ctx: &RequestContext) -> Vec<String> {
-    let Ok(attrs) = ctx.attributes.read() else {
-        return Vec::new();
+    // [arc:intentional-handle] reason: a poisoned lock means *another*
+    // thread panicked while holding the write guard; the attribute map
+    // itself is plain data and isn't corrupted by a reader-side panic,
+    // so recovering the inner guard is sound. We must NOT silently fall
+    // through to `Vec::new()` here: an empty scope set means "no
+    // restriction", and treating a poison as unrestricted access would
+    // be fail-OPEN (Doc 03 §3 IDOR risk). Recover + read the real
+    // scopes, and warn so the upstream panic is visible.
+    let attrs = match ctx.attributes.read() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::warn!(
+                "cache: `RequestContext::attributes` lock poisoned by a prior panic; \
+                 recovering guard to read IAM scopes (fail-closed)"
+            );
+            poisoned.into_inner()
+        }
     };
     let Some(value) = attrs.get(IAM_SCOPES_ATTR) else {
         return Vec::new();
@@ -311,7 +326,7 @@ mod tests {
         let mut c = c;
         c.tenant_id = tars_types::TenantId::new(tenant);
         if !scopes.is_empty() {
-            let mut a = c.attributes.write().unwrap();
+            let mut a = c.attributes.write().expect("test attributes lock poisoned");
             a.insert(
                 IAM_SCOPES_ATTR.into(),
                 serde_json::Value::Array(

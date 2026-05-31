@@ -29,7 +29,10 @@ pub const DEFAULT_BASE_URL: &str = "http://localhost:8000/v1";
 /// request URL.
 fn normalize_base_url(base_url: Option<String>) -> String {
     base_url
-        .filter(|s| !s.is_empty())
+        // Mirror `normalize_auth`, which trims before the emptiness
+        // check: a whitespace-only URL is the same config oversight as
+        // an empty one and must fall back to the default.
+        .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
 }
 

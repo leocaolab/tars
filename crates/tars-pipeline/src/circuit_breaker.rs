@@ -39,7 +39,7 @@
 //! failure mode for HTTP backends.
 
 use std::sync::Arc;
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -147,7 +147,20 @@ impl Drop for ProbeGuard<'_> {
         if !self.armed {
             return;
         }
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        // Consistent with `check()`/`record_*`: don't write through a
+        // poisoned (suspect) state. If the lock is poisoned, `check()`
+        // already fail-safe-Rejects, so leaving probe_in_flight as-is
+        // can't brick the breaker any worse than the poison already has.
+        let mut state = match self.state.lock() {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::error!(
+                    "circuit_breaker: state mutex poisoned in ProbeGuard::drop; \
+                     leaving probe slot untouched (check() fail-safe Rejects on poison)."
+                );
+                return;
+            }
+        };
         // Only clear if we're still the in-flight probe. A normal
         // completion would have transitioned away from HalfOpen via
         // record_*; if we're still HalfOpen with the flag set, the
@@ -221,7 +234,21 @@ impl CircuitBreaker {
         match state.kind {
             BreakerStateKind::Closed => Decision::Allow { is_probe: false },
             BreakerStateKind::Open => {
-                let until = state.open_until.expect("open without expiry");
+                // `open_until` is always set when entering Open (see
+                // `BreakerState::open`); a `None` here would be a state
+                // invariant violation. Fail-safe Reject with a short
+                // cooldown instead of panicking — a breaker's job is to
+                // reject when it can't reason about provider health.
+                let Some(until) = state.open_until else {
+                    tracing::error!(
+                        provider_id = %self.id,
+                        "circuit_breaker: Open state without open_until expiry \
+                         (invariant violation); fail-safe Reject + 100ms cooldown.",
+                    );
+                    return Decision::Reject {
+                        until: now + Duration::from_millis(100),
+                    };
+                };
                 if now >= until {
                     // Cooldown expired — transition to HalfOpen and
                     // mark this caller as the probe.
@@ -250,7 +277,23 @@ impl CircuitBreaker {
     }
 
     fn record_success(&self) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        // Consistent with `check()`: a poisoned mutex means a prior task
+        // panicked while holding breaker state, so the state is suspect.
+        // Don't `into_inner()` and write through it — skip the update and
+        // log. `check()` already fail-safe-Rejects on the same poison, so
+        // declining to mutate here can't make the breaker *less* safe.
+        let mut state = match self.state.lock() {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::error!(
+                    provider_id = %self.id,
+                    "circuit_breaker: state mutex poisoned in record_success; \
+                     skipping state update (check() will fail-safe Reject). \
+                     Investigate the panicking task.",
+                );
+                return;
+            }
+        };
         match state.kind {
             BreakerStateKind::Closed => {
                 state.consecutive_failures = 0;
@@ -276,7 +319,20 @@ impl CircuitBreaker {
     }
 
     fn record_failure(&self, now: Instant) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        // Same poison policy as `record_success`/`check()`: skip the
+        // update and log rather than writing through a suspect state.
+        let mut state = match self.state.lock() {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::error!(
+                    provider_id = %self.id,
+                    "circuit_breaker: state mutex poisoned in record_failure; \
+                     skipping state update (check() will fail-safe Reject). \
+                     Investigate the panicking task.",
+                );
+                return;
+            }
+        };
         match state.kind {
             BreakerStateKind::Closed => {
                 state.consecutive_failures = state.consecutive_failures.saturating_add(1);

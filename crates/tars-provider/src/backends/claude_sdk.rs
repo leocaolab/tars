@@ -201,6 +201,13 @@ impl ClaudeSdkProvider {
             .or_else(|| self.default_model.clone());
 
         let session = self.ensure_session().await?;
+        // Monotonic per-session request id. `fetch_add` wraps on
+        // overflow, but at u64 that's 2^64 requests on a single warm
+        // child — at even a million calls/sec it would take ~580,000
+        // years to wrap, and the session is respawned (resetting the
+        // counter) long before that on any crash/restart. A collision is
+        // therefore unreachable in practice; u64 is already the widest
+        // sensible counter, so we document rather than widen.
         let id = session.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel::<Result<DaemonChatReply, ProviderError>>();
         session.pending.lock().await.insert(id, tx);
@@ -233,13 +240,18 @@ impl ClaudeSdkProvider {
             if let Err(e) = stdin.write_all(line.as_bytes()).await {
                 // Most likely the child died between session lookup and
                 // now; drop our pending entry and surface the cause.
+                // Also evict the dead session so the NEXT call respawns
+                // instead of reusing a broken pipe and hanging on a reply
+                // that will never arrive.
                 session.pending.lock().await.remove(&id);
+                self.clear_session(&session).await;
                 return Err(ProviderError::Internal(format!(
                     "claude_sdk: write to child stdin failed: {e}"
                 )));
             }
             if let Err(e) = stdin.flush().await {
                 session.pending.lock().await.remove(&id);
+                self.clear_session(&session).await;
                 return Err(ProviderError::Internal(format!(
                     "claude_sdk: flush child stdin failed: {e}"
                 )));
@@ -274,6 +286,18 @@ impl ClaudeSdkProvider {
         let s = Arc::new(self.spawn_session().await?);
         *guard = Some(s.clone());
         Ok(s)
+    }
+
+    /// Evict `dead` from the session cache so the next `ensure_session`
+    /// respawns. Only clears if the cached session is *still* the one
+    /// that died — under concurrency another caller may have already
+    /// noticed the crash and respawned a fresh child, and we must not
+    /// throw that healthy session away.
+    async fn clear_session(&self, dead: &Arc<Session>) {
+        let mut guard = self.session.lock().await;
+        if guard.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, dead)) {
+            *guard = None;
+        }
     }
 
     async fn spawn_session(&self) -> Result<Session, ProviderError> {
@@ -384,17 +408,21 @@ async fn dispatch_reply_line(line: &str, pending: PendingMap) -> Result<(), Prov
     let raw: ReplyLine = serde_json::from_str(line)
         .map_err(|e| ProviderError::Parse(format!("decode reply: {e}")))?;
     let id = raw.id;
-    let result: Result<DaemonChatReply, ProviderError> = if let Some(err) = raw.error {
-        Err(ProviderError::Internal(format!(
-            "claude_sdk daemon: {err}"
-        )))
-    } else {
-        Ok(DaemonChatReply {
-            text: raw.text.unwrap_or_default(),
+    // A well-formed reply carries exactly one of `error` / `text`. A
+    // reply with neither (both null/absent) is a malformed daemon
+    // envelope — treating it as success-with-empty-text would mask a
+    // protocol bug as a blank completion, so surface it as a parse error.
+    let result: Result<DaemonChatReply, ProviderError> = match (raw.error, raw.text) {
+        (Some(err), _) => Err(ProviderError::Internal(format!("claude_sdk daemon: {err}"))),
+        (None, Some(text)) => Ok(DaemonChatReply {
+            text,
             result_subtype: raw.result_subtype,
             usage: raw.usage,
             model: raw.model,
-        })
+        }),
+        (None, None) => Err(ProviderError::Parse(format!(
+            "claude_sdk daemon: reply id={id} has neither `error` nor `text`"
+        ))),
     };
     if let Some(tx) = pending.lock().await.remove(&id) {
         let _ = tx.send(result);

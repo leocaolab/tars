@@ -59,12 +59,23 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
     let store: Arc<dyn EventStore> = store_arc;
     let runtime = LocalRuntime::new(store);
 
+    // Render into an in-memory buffer FIRST, then take the stdout lock
+    // and flush it synchronously. Holding a non-Send `StdoutLock`
+    // across the `.await`s in list()/show() would make this future
+    // non-Send (and risks deadlock if another task touches stdout).
+    // Collect → drop awaits → lock → write keeps it Send and simple.
+    let mut buf: Vec<u8> = Vec::new();
+    match args.command {
+        TrajectoryCommand::List => list(&runtime, &mut buf).await?,
+        TrajectoryCommand::Show { id } => {
+            show(&runtime, &TrajectoryId::new(id), &mut buf).await?
+        }
+    }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    match args.command {
-        TrajectoryCommand::List => list(&runtime, &mut out).await,
-        TrajectoryCommand::Show { id } => show(&runtime, &TrajectoryId::new(id), &mut out).await,
-    }
+    out.write_all(&buf).context("stdout write")?;
+    out.flush().context("stdout flush")?;
+    Ok(())
 }
 
 async fn list(runtime: &LocalRuntime, out: &mut dyn Write) -> Result<()> {

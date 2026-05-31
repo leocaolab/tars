@@ -52,7 +52,12 @@ pub(super) async fn run_streaming(
     // pipe (claude prints rate limit / debug to stderr).
     let stderr_task = tokio::spawn(async move {
         let mut buf = Vec::new();
-        BufReader::new(stderr_pipe).read_to_end(&mut buf).await.ok();
+        if let Err(e) = BufReader::new(stderr_pipe).read_to_end(&mut buf).await {
+            // A failed/partial stderr read means the diagnostic we'd
+            // attach to a non-zero exit / timeout may be missing; log it
+            // rather than silently dropping the cause.
+            tracing::warn!(error = %e, "claude_cli stream: failed to read child stderr");
+        }
         buf
     });
 
@@ -80,12 +85,13 @@ pub(super) async fn run_streaming(
                                 final_result = Some(ev);
                             }
                         }
-                        Err(_) => {
+                        Err(e) => {
                             // Non-JSON line on stdout — claude shouldn't
                             // emit these in stream-json mode, but if it
-                            // does, surface them rather than swallowing.
+                            // does, surface them (with the parse error)
+                            // rather than swallowing.
                             eprintln!(
-                                "[claude_cli {session_short}] !! non-json stdout line: {}",
+                                "[claude_cli {session_short}] !! non-json stdout line ({e}): {}",
                                 truncate(&line, 200)
                             );
                         }
@@ -113,16 +119,25 @@ pub(super) async fn run_streaming(
     let status = match wait_res {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
+            let stderr_s = truncate(&String::from_utf8_lossy(&stderr_buf), 500);
             return Err(ProviderError::CliSubprocessDied {
                 exit_code: None,
-                stderr: format!("wait failed: {e}"),
+                stderr: format!("wait failed: {e} (stderr: {stderr_s})"),
             });
         }
         Err(_) => {
+            // The wait timed out — the child is still running. Kill it
+            // before returning so a wedged `claude` doesn't outlive the
+            // call (kill_on_drop covers the spawn helper's `Child`, but
+            // here we hold a `&mut` and return without dropping it).
+            if let Err(e) = child.start_kill() {
+                tracing::warn!(error = %e, "claude_cli stream: failed to kill child after timeout");
+            }
+            let stderr_s = truncate(&String::from_utf8_lossy(&stderr_buf), 500);
             return Err(ProviderError::CliSubprocessDied {
                 exit_code: None,
                 stderr: format!(
-                    "timed out after {}s (model={}, prompt_chars={})",
+                    "timed out after {}s (model={}, prompt_chars={}, stderr: {stderr_s})",
                     inv.timeout.as_secs(),
                     inv.model,
                     inv.prompt.len()

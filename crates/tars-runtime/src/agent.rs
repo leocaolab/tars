@@ -128,11 +128,15 @@ impl AgentOutput {
                 return format!("{} tool call(s)", calls.len());
             }
         };
-        if text_ref.chars().count() <= max_chars {
-            text_ref.to_string()
-        } else {
-            let head: String = text_ref.chars().take(max_chars).collect();
+        // Single pass: take one more than the cap, and only ellipsise
+        // if that extra char actually exists (i.e. the text was longer
+        // than `max_chars`). Avoids the O(2n) count()-then-take().
+        let mut head: String = text_ref.chars().take(max_chars + 1).collect();
+        if head.chars().count() > max_chars {
+            head.pop();
             format!("{head}…")
+        } else {
+            head
         }
     }
 }

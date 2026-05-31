@@ -139,9 +139,15 @@ impl LlmService for RetryService {
         // caps at `max_backoff`) — backoff should never decrease.
         let mut backoff = cfg.initial_backoff.min(cfg.max_backoff);
         let mut attempt: u32 = 0;
-        // Record this layer in the telemetry trace.
-        if let Ok(mut t) = ctx.telemetry.lock() {
-            t.layers.push("retry".into());
+        // Record this layer in the telemetry trace. Best-effort: a
+        // poisoned lock (another holder panicked) must not fail the call,
+        // but leave a breadcrumb rather than dropping silently.
+        match ctx.telemetry.lock() {
+            Ok(mut t) => t.layers.push("retry".into()),
+            Err(_) => tracing::trace!(
+                event = "retry.telemetry_poisoned",
+                "telemetry mutex poisoned; skipping layer trace"
+            ),
         }
         loop {
             attempt += 1;
@@ -178,10 +184,20 @@ impl LlmService for RetryService {
                 return Err(err);
             }
 
-            let wait = if cfg.respect_retry_after {
-                err.retry_after().unwrap_or(backoff)
+            // Track whether the provider's explicit Retry-After drove the
+            // wait this round. If it did, we must NOT escalate our own
+            // exponential `backoff` — the provider is dictating the
+            // cadence, and growing `backoff` underneath would over-inflate
+            // the delay the moment a later attempt comes back *without* a
+            // Retry-After. Exponential growth only applies to our own
+            // computed backoff.
+            let (wait, used_retry_after) = if cfg.respect_retry_after {
+                match err.retry_after() {
+                    Some(ra) => (ra, true),
+                    None => (backoff, false),
+                }
             } else {
-                backoff
+                (backoff, false)
             };
 
             // Don't sleep past the cap — bubble the error so an outer
@@ -213,12 +229,18 @@ impl LlmService for RetryService {
             // intuition (if the next attempt also fails terminally,
             // retry_count still reflects the count of *retries that
             // happened* before the final failure).
-            if let Ok(mut t) = ctx.telemetry.lock() {
-                t.retry_count = t.retry_count.saturating_add(1);
-                t.retry_attempts.push(tars_types::RetryAttempt {
-                    error_kind: provider_error_kind(&err),
-                    retry_after_ms: Some(millis_u64(wait)),
-                });
+            match ctx.telemetry.lock() {
+                Ok(mut t) => {
+                    t.retry_count = t.retry_count.saturating_add(1);
+                    t.retry_attempts.push(tars_types::RetryAttempt {
+                        error_kind: provider_error_kind(&err),
+                        retry_after_ms: Some(millis_u64(wait)),
+                    });
+                }
+                Err(_) => tracing::trace!(
+                    event = "retry.telemetry_poisoned",
+                    "telemetry mutex poisoned; skipping retry attempt record"
+                ),
             }
 
             // Cancel-aware sleep.
@@ -234,7 +256,11 @@ impl LlmService for RetryService {
 
             // Exponential backoff for the next attempt — never above max,
             // and panic-safe against a bad `multiplier` (see next_backoff).
-            backoff = next_backoff(backoff, cfg.multiplier, cfg.max_backoff);
+            // Only escalate when *we* chose the wait; an explicit
+            // Retry-After must not bump our computed backoff (see above).
+            if !used_retry_after {
+                backoff = next_backoff(backoff, cfg.multiplier, cfg.max_backoff);
+            }
         }
     }
 }
@@ -300,8 +326,16 @@ mod tests {
             ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             self.observed.fetch_add(1, Ordering::SeqCst);
-            if self.remaining.load(Ordering::SeqCst) > 0 {
-                self.remaining.fetch_sub(1, Ordering::SeqCst);
+            // Atomically decrement only while a failure budget remains —
+            // a `load`-then-`fetch_sub` would race under concurrent
+            // callers and could decrement past zero.
+            let decremented = self
+                .remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                    (n > 0).then(|| n - 1)
+                })
+                .is_ok();
+            if decremented {
                 return Err((self.error_factory)());
             }
             self.ok_inner.clone().call(req, ctx).await

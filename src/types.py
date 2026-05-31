@@ -1,5 +1,6 @@
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Dict, List, Any, Literal, Optional
 from pydantic import BaseModel, Field
 
@@ -66,10 +67,22 @@ class IBlackboardStore(ABC):
 
     @abstractmethod
     async def update_patch(self, session_id: str, patch: Patch) -> None:
+        """Apply a patch to an existing session.
+
+        Implementations MUST raise KeyError if ``session_id`` does not
+        exist; silently dropping the patch is a contract violation since
+        callers rely on the update having been persisted.
+        """
         pass
 
     @abstractmethod
     async def append_message(self, session_id: str, message: ChatMessage) -> None:
+        """Append a message to an existing session's history.
+
+        Implementations MUST raise KeyError if ``session_id`` does not
+        exist; a missing session is a programming error, not a silent
+        no-op, because callers assume the message was stored.
+        """
         pass
 
 
@@ -79,5 +92,5 @@ class IEventBus(ABC):
         pass
 
     @abstractmethod
-    def on(self, event: str, handler: callable) -> None:
+    def on(self, event: str, handler: Callable) -> None:
         pass

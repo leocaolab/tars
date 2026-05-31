@@ -176,7 +176,7 @@ impl ChatRequest {
         // catches them via wire-level 400 ContextTooLong); only flag
         // the obvious-overflow case to keep false-positive rate low.
         let prompt_chars = estimate_prompt_chars(self);
-        let estimated_tokens = (prompt_chars / 4) as u32;
+        let estimated_tokens = u32::try_from(prompt_chars / 4).unwrap_or(u32::MAX);
         if estimated_tokens > caps.max_context_tokens {
             reasons.push(CompatibilityReason::ContextWindowExceeded {
                 estimated_prompt_tokens: estimated_tokens,

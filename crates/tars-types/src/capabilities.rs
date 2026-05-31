@@ -39,6 +39,8 @@ pub enum CapabilityError {
     EmptyModalitiesOut,
     #[error("supports_structured_output = ToolUseEmulation requires supports_tool_use = true")]
     ToolUseEmulationNeedsToolUse,
+    #[error("supports_parallel_tool_calls = true requires supports_tool_use = true")]
+    ParallelToolCallsNeedsToolUse,
 }
 
 impl Capabilities {
@@ -58,6 +60,9 @@ impl Capabilities {
         ) && !self.supports_tool_use
         {
             return Err(CapabilityError::ToolUseEmulationNeedsToolUse);
+        }
+        if self.supports_parallel_tool_calls && !self.supports_tool_use {
+            return Err(CapabilityError::ParallelToolCallsNeedsToolUse);
         }
         Ok(())
     }

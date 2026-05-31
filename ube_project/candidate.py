@@ -1,6 +1,7 @@
 """AI 候选人 Agent：故意带破绽的系统设计候选人，用于 Self-Play 对抗"""
 
 from .llm import LLMClient
+from .llm.errors import LLMClientError
 from .models import Blackboard
 
 
@@ -11,7 +12,7 @@ class CandidateAgent:
 
     def answer(self, board: Blackboard) -> str:
         # 拿到面试官刚刚提的问题
-        interviewer_question = board.history[-1]["content"] if board.history else ""
+        interviewer_question = board.history[-1].get("content", "") if board.history else ""
 
         system_prompt = (
             f"你现在是一个正在参加大厂 {board.interview_level} 级别系统设计面试的候选人。\n"
@@ -27,7 +28,10 @@ class CandidateAgent:
             "- 直接回答，不要说「好的」「这个问题很好」之类的废话"
         )
 
-        return self._client.chat(
-            system=system_prompt,
-            user=f"面试官的提问：{interviewer_question}",
-        )
+        try:
+            return self._client.chat(
+                system=system_prompt,
+                user=f"面试官的提问：{interviewer_question}",
+            )
+        except Exception as e:
+            raise LLMClientError(f"候选人生成回答失败: {e}") from e

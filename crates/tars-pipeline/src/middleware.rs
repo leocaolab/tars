@@ -272,7 +272,7 @@ mod tests {
         ) -> Result<LlmEventStream, ProviderError> {
             // Append our tag to the attributes so tests can read order.
             {
-                let mut attrs = ctx.attributes.write().unwrap();
+                let mut attrs = ctx.attributes.write().expect("attributes lock poisoned");
                 let entry = attrs
                     .entry("trace".into())
                     .or_insert_with(|| serde_json::Value::String(String::new()));

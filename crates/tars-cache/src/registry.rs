@@ -108,6 +108,14 @@ impl MemoryCacheRegistry {
         // passing `policy.l1_ttl` get a debug log in `write` and the
         // entry still uses `default_ttl`. L2 (Sqlite) honours
         // `l1_ttl` on its own builder.
+        // A zero capacity would make moka evict every entry immediately,
+        // turning the "cache" into a silent no-op that's painful to
+        // diagnose. Reject it loudly at construction — this is a
+        // programming/config error, not a runtime condition.
+        assert!(
+            config.max_entries > 0,
+            "MemoryCacheRegistry: max_entries must be > 0 (got 0)",
+        );
         let inner: MokaCache<[u8; 32], Arc<CachedResponse>> = MokaCache::builder()
             .max_capacity(config.max_entries)
             .time_to_live(config.default_ttl)

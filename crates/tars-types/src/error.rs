@@ -93,7 +93,7 @@ pub enum ProviderError {
     /// log aggregators) can branch / facet on the structured detail
     /// rather than parse the message string.
     #[error(
-        "no candidate could honour request capabilities; tried {} providers",
+        "no candidate could honour request capabilities; skipped {} providers",
         skipped.len()
     )]
     NoCompatibleCandidate {
@@ -254,8 +254,28 @@ impl AsRef<str> for ProviderErrorKind {
 
 impl From<reqwest::Error> for ProviderError {
     fn from(err: reqwest::Error) -> Self {
-        // Defer status-code classification to the adapter — this catch
-        // is for genuine network / timeout / decode failures.
+        // A blanket map to `Network` (Retriable) is wrong for HTTP
+        // *status* errors: a 4xx (e.g. 400/401) is permanent, and
+        // 429/503 carry their own retry semantics. Misclassifying a
+        // 400 as a retriable network blip would make `RetryMiddleware`
+        // pointlessly re-send a request that can never succeed.
+        if let Some(status) = err.status() {
+            return match status.as_u16() {
+                429 => ProviderError::RateLimited { retry_after: None },
+                503 => ProviderError::ModelOverloaded,
+                401 | 403 => ProviderError::Auth(err.to_string()),
+                400 | 404 | 405 | 409 | 422 => ProviderError::InvalidRequest(err.to_string()),
+                // Other 5xx: treat as overloaded/transient server-side.
+                s if s >= 500 => ProviderError::ModelOverloaded,
+                // Remaining 4xx are client errors — permanent.
+                s if s >= 400 => ProviderError::InvalidRequest(err.to_string()),
+                // Shouldn't happen (status() implies an error response),
+                // but fall back to network rather than panicking.
+                _ => ProviderError::Network(Box::new(err)),
+            };
+        }
+        // No status → genuine transport failure (connect / timeout /
+        // decode). Retriable network class is correct here.
         ProviderError::Network(Box::new(err))
     }
 }

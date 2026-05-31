@@ -27,7 +27,9 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 # Async
-tokio.workspace = true
+# `signal` adds tokio::signal::ctrl_c, used by `tars plan` to wire its
+# CancellationToken to interrupt (cancels the in-flight planner call).
+tokio = { workspace = true, features = ["signal"] }
 tokio-util.workspace = true
 futures.workspace = true
 

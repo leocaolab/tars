@@ -73,13 +73,22 @@ pub fn complete_sync(
             builder.apply(ev?);
         }
         let mut response = builder.finish();
-        if let Ok(rec) = outcome_handle.lock() {
-            if let Some(filtered) = rec.filtered_response.as_ref() {
-                response = filtered.clone();
-            } else {
-                response.validation_summary = rec.summary.clone();
-            }
+        // The validation-outcome side channel is security-critical: it
+        // carries the post-Filter response that must REPLACE the raw
+        // stream. A poisoned lock means a panic happened while a writer
+        // held it — we can't prove filtering ran, so fail closed rather
+        // than silently return an unvalidated response.
+        let rec = outcome_handle.lock().map_err(|_| {
+            ProviderError::Internal(
+                "validation_outcome lock poisoned; cannot confirm output filtering ran".into(),
+            )
+        })?;
+        if let Some(filtered) = rec.filtered_response.as_ref() {
+            response = filtered.clone();
+        } else {
+            response.validation_summary = rec.summary.clone();
         }
+        drop(rec);
         Ok(response)
     })
 }

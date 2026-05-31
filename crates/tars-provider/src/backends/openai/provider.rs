@@ -15,7 +15,10 @@ use tars_types::{
 
 use crate::auth::{Auth, AuthResolver};
 use crate::batch::BatchSubmitter;
-use crate::http_base::{HttpAdapter, HttpProviderBase, HttpProviderExtras, stream_via_adapter};
+use crate::http_base::{
+    ERROR_BODY_CAP_BYTES, HttpAdapter, HttpProviderBase, HttpProviderExtras, read_bounded_body,
+    stream_via_adapter, truncate_utf8,
+};
 use crate::provider::{LlmEventStream, LlmProvider};
 
 use super::adapter::OpenAiAdapter;
@@ -165,6 +168,7 @@ impl BatchSubmitter for OpenAiProvider {
     async fn submit(
         &self,
         items: Vec<(BatchItemId, ChatRequest)>,
+        ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError> {
         if items.is_empty() {
             return Err(ProviderError::InvalidRequest(
@@ -188,10 +192,7 @@ impl BatchSubmitter for OpenAiProvider {
         }
 
         // 2) Upload the JSONL as a "batch" purpose file via multipart.
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
+        let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let auth_only = openai_auth_only_headers(&auth)?;
 
         let file_part = reqwest::multipart::Part::bytes(jsonl.into_bytes())
@@ -215,8 +216,11 @@ impl BatchSubmitter for OpenAiProvider {
         if !upload_resp.status().is_success() {
             let status = upload_resp.status();
             let h = upload_resp.headers().clone();
-            let text = upload_resp.text().await.unwrap_or_default();
-            return Err(self.adapter.classify_error(status, &h, &text));
+            // Bounded read: a hostile / partial error body must not let
+            // `.text()` buffer unboundedly. Mirrors the streaming path.
+            let body = read_bounded_body(upload_resp, ERROR_BODY_CAP_BYTES).await;
+            let text = truncate_utf8(&body, ERROR_BODY_CAP_BYTES);
+            return Err(self.adapter.classify_error(status, &h, text));
         }
         let file_v: Value = upload_resp
             .json()
@@ -231,6 +235,15 @@ impl BatchSubmitter for OpenAiProvider {
             .to_string();
 
         // 3) Create the batch referencing that file.
+        //
+        // KNOWN LEAK (info): if the batch-create POST below fails (bad
+        // `batches_url`, network error, non-2xx), the file we just
+        // uploaded stays on OpenAI as an orphaned `purpose=batch` file
+        // and counts against the account's storage quota until manually
+        // deleted. We deliberately do *not* fire a best-effort
+        // DELETE /files/{id} here: it would need its own error handling,
+        // could itself fail/hang, and the leaked artifact is small and
+        // GC-able by the user. Revisit if quota pressure shows up.
         let create_url = self.adapter.batches_url("")?;
         let headers = self.adapter.build_headers(&auth)?; // JSON content-type
         let body = json!({
@@ -250,8 +263,9 @@ impl BatchSubmitter for OpenAiProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(self.adapter.classify_error(status, &h, &text));
+            let body = read_bounded_body(resp, ERROR_BODY_CAP_BYTES).await;
+            let text = truncate_utf8(&body, ERROR_BODY_CAP_BYTES);
+            return Err(self.adapter.classify_error(status, &h, text));
         }
         let v: Value = resp
             .json()
@@ -264,16 +278,21 @@ impl BatchSubmitter for OpenAiProvider {
         Ok(BatchJobId::new(id))
     }
 
-    async fn status(&self, id: &BatchJobId) -> Result<BatchStatus, ProviderError> {
-        let v = self.fetch_batch_object(id).await?;
+    async fn status(
+        &self,
+        id: &BatchJobId,
+        ctx: &RequestContext,
+    ) -> Result<BatchStatus, ProviderError> {
+        let v = self.fetch_batch_object(id, ctx).await?;
         translate_openai_batch_status(&v)
     }
 
     async fn results(
         &self,
         id: &BatchJobId,
+        ctx: &RequestContext,
     ) -> Result<Vec<BatchResultItem>, ProviderError> {
-        let v = self.fetch_batch_object(id).await?;
+        let v = self.fetch_batch_object(id, ctx).await?;
         let status = translate_openai_batch_status(&v)?;
         if !status.is_terminal() {
             return Err(ProviderError::InvalidRequest(format!(
@@ -290,10 +309,7 @@ impl BatchSubmitter for OpenAiProvider {
             return Ok(Vec::new());
         };
 
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
+        let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let headers = openai_auth_only_headers(&auth)?;
         let url = self
             .adapter
@@ -309,18 +325,16 @@ impl BatchSubmitter for OpenAiProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(self.adapter.classify_error(status, &h, &text));
+            let body = read_bounded_body(resp, ERROR_BODY_CAP_BYTES).await;
+            let text = truncate_utf8(&body, ERROR_BODY_CAP_BYTES);
+            return Err(self.adapter.classify_error(status, &h, text));
         }
         let text = resp.text().await.map_err(ProviderError::from)?;
         parse_openai_batch_results(&text)
     }
 
-    async fn cancel(&self, id: &BatchJobId) -> Result<(), ProviderError> {
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
+    async fn cancel(&self, id: &BatchJobId, ctx: &RequestContext) -> Result<(), ProviderError> {
+        let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let headers = self.adapter.build_headers(&auth)?;
         let url = self
             .adapter
@@ -336,8 +350,9 @@ impl BatchSubmitter for OpenAiProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(self.adapter.classify_error(status, &h, &text));
+            let body = read_bounded_body(resp, ERROR_BODY_CAP_BYTES).await;
+            let text = truncate_utf8(&body, ERROR_BODY_CAP_BYTES);
+            return Err(self.adapter.classify_error(status, &h, text));
         }
         Ok(())
     }
@@ -345,11 +360,12 @@ impl BatchSubmitter for OpenAiProvider {
 
 impl OpenAiProvider {
     /// Shared GET that pulls the batch object JSON for status / results.
-    async fn fetch_batch_object(&self, id: &BatchJobId) -> Result<Value, ProviderError> {
-        let auth = self
-            .auth_resolver
-            .resolve(&self.auth, &RequestContext::test_default())
-            .await?;
+    async fn fetch_batch_object(
+        &self,
+        id: &BatchJobId,
+        ctx: &RequestContext,
+    ) -> Result<Value, ProviderError> {
+        let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let headers = self.adapter.build_headers(&auth)?;
         let url = self.adapter.batches_url(&format!("/{}", id.as_str()))?;
         let resp = self
@@ -363,8 +379,9 @@ impl OpenAiProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let h = resp.headers().clone();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(self.adapter.classify_error(status, &h, &text));
+            let body = read_bounded_body(resp, ERROR_BODY_CAP_BYTES).await;
+            let text = truncate_utf8(&body, ERROR_BODY_CAP_BYTES);
+            return Err(self.adapter.classify_error(status, &h, text));
         }
         resp.json::<Value>()
             .await

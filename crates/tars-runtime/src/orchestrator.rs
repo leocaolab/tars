@@ -85,8 +85,29 @@ impl Plan {
     /// would be a separate check; we keep it simple).
     pub fn validate(&self) -> Result<(), OrchestratorError> {
         use std::collections::HashSet;
+        if self.plan_id.trim().is_empty() {
+            return Err(OrchestratorError::InvalidPlan("plan_id is empty".into()));
+        }
+        if self.goal.trim().is_empty() {
+            return Err(OrchestratorError::InvalidPlan("goal is empty".into()));
+        }
         let mut seen: HashSet<&str> = HashSet::with_capacity(self.steps.len());
         for step in &self.steps {
+            if step.id.trim().is_empty() {
+                return Err(OrchestratorError::InvalidPlan("step id is empty".into()));
+            }
+            if step.worker_role.trim().is_empty() {
+                return Err(OrchestratorError::InvalidPlan(format!(
+                    "step `{}` has empty worker_role",
+                    step.id,
+                )));
+            }
+            if step.instruction.trim().is_empty() {
+                return Err(OrchestratorError::InvalidPlan(format!(
+                    "step `{}` has empty instruction",
+                    step.id,
+                )));
+            }
             if !seen.insert(step.id.as_str()) {
                 return Err(OrchestratorError::InvalidPlan(format!(
                     "duplicate step id: `{}`",
@@ -145,7 +166,7 @@ impl OrchestratorAgent {
         goal: &str,
     ) -> Result<Plan, OrchestratorError> {
         let req = self.build_planner_request(goal);
-        let result = self.clone().execute(ctx, req).await?;
+        let result = Arc::clone(&self).execute(ctx, req).await?;
         let json_text = match result.output {
             AgentOutput::Text { text } => text,
             other => {
@@ -254,17 +275,18 @@ fn plan_json_schema() -> serde_json::Value {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "plan_id": { "type": "string" },
-            "goal":    { "type": "string" },
+            "plan_id": { "type": "string", "minLength": 1 },
+            "goal":    { "type": "string", "minLength": 1 },
             "steps": {
                 "type": "array",
+                "minItems": 1,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                        "id":          { "type": "string" },
-                        "worker_role": { "type": "string" },
-                        "instruction": { "type": "string" },
+                        "id":          { "type": "string", "minLength": 1 },
+                        "worker_role": { "type": "string", "minLength": 1 },
+                        "instruction": { "type": "string", "minLength": 1 },
                         "depends_on": {
                             "type": "array",
                             "items": { "type": "string" }

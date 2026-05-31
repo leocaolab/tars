@@ -42,7 +42,7 @@ use tars_types::{ProviderId, TrajectoryId, Usage};
 /// metadata when they hit external systems.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct StepIdempotencyKey(pub String);
+pub struct StepIdempotencyKey(String);
 
 impl StepIdempotencyKey {
     /// Compute from the standard inputs. The hash function is
@@ -64,6 +64,15 @@ impl StepIdempotencyKey {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Test-only escape hatch to build a key from an arbitrary string
+    /// without going through [`Self::compute`]. Production code must
+    /// use `compute` so the 64-char lowercase-hex invariant holds;
+    /// tests sometimes want a short fixed sentinel.
+    #[cfg(test)]
+    pub(crate) fn from_raw(s: impl Into<String>) -> Self {
+        Self(s.into())
     }
 }
 
@@ -425,7 +434,7 @@ mod tests {
                 traj: t(),
                 step_seq: 1,
                 agent: "a".into(),
-                idempotency_key: StepIdempotencyKey("k".into()),
+                idempotency_key: StepIdempotencyKey::from_raw("k"),
                 input_summary: "x".into(),
             },
             AgentEvent::StepCompleted {

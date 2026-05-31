@@ -154,7 +154,14 @@ impl PyAnnotate {
                 let py = d.py();
                 let json_mod = py.import("json")?;
                 let s: String = json_mod.call_method1("dumps", (d,))?.extract()?;
-                serde_json::from_str(&s).unwrap_or(JsonValue::Object(serde_json::Map::new()))
+                // Propagate parse failures rather than silently substituting
+                // an empty object — that would mask malformed metrics (e.g.
+                // NaN/Inf, which `json.dumps` emits but serde rejects).
+                serde_json::from_str(&s).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "failed to parse annotate metrics as JSON: {e}"
+                    ))
+                })?
             }
         };
         Ok(Self { metrics_json })
@@ -260,7 +267,7 @@ fn reject_internal(validator: &str, reason: &str) -> ValidationOutcome {
 /// on demand.
 fn build_req_dict<'py>(py: Python<'py>, req: &ChatRequest) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("model", req.model.label())?;
+    d.set_item("model", req.model.label().as_ref())?;
     if let Some(s) = &req.system {
         d.set_item("system", s)?;
     } else {
@@ -311,10 +318,15 @@ fn build_resp_dict<'py>(py: Python<'py>, resp: &ChatResponse) -> PyResult<Bound<
         let td = PyDict::new(py);
         td.set_item("id", &tc.id)?;
         td.set_item("name", &tc.name)?;
-        td.set_item(
-            "arguments_json",
-            serde_json::to_string(&tc.arguments).unwrap_or_default(),
-        )?;
+        // Propagate a serialization failure rather than handing the
+        // validator an empty string — `json.loads("")` would otherwise blow
+        // up cryptically inside user code far from the real cause.
+        let arguments_json = serde_json::to_string(&tc.arguments).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to serialize tool call arguments: {e}"
+            ))
+        })?;
+        td.set_item("arguments_json", arguments_json)?;
         tcs.append(td)?;
     }
     d.set_item("tool_calls", tcs)?;
@@ -392,8 +404,15 @@ pub(crate) fn build_validator_list(
             )));
         }
         let name: String = tuple.get_item(0)?.extract()?;
-        let callback = tuple.get_item(1)?.unbind();
-        out.push(Arc::new(PyValidatorAdapter::new(name, callback)));
+        let callback = tuple.get_item(1)?;
+        // Reject non-callables up front with a pinpointed error, rather than
+        // failing cryptically at `call1` time deep inside the pipeline.
+        if !callback.is_callable() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "validators[{i}] callback (name={name:?}) must be callable"
+            )));
+        }
+        out.push(Arc::new(PyValidatorAdapter::new(name, callback.unbind())));
     }
     Ok(out)
 }

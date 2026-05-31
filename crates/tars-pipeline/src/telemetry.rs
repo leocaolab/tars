@@ -133,9 +133,11 @@ fn wrap_stream(
 ) -> impl futures::Stream<Item = Result<ChatEvent, ProviderError>> + Send + 'static {
     async_stream::stream! {
         let mut s = inner;
+        let mut saw_terminal = false;
         while let Some(ev) = s.next().await {
             match &ev {
                 Ok(ChatEvent::Finished { stop_reason, usage }) => {
+                    saw_terminal = true;
                     let total_ms = started.elapsed().as_millis() as u64;
                     tracing::info!(
                         event = "llm.call.finished",
@@ -158,6 +160,7 @@ fn wrap_stream(
                     }
                 }
                 Err(e) => {
+                    saw_terminal = true;
                     let total_ms = started.elapsed().as_millis() as u64;
                     tracing::warn!(
                         event = "llm.call.stream_error",
@@ -179,6 +182,31 @@ fn wrap_stream(
                 _ => {}
             }
             yield ev;
+        }
+
+        // Stream drained without a terminal Finished/Err event (a
+        // provider that closes the stream cleanly after deltas, or a
+        // truncated upstream). Without this we'd never record
+        // pipeline_total_ms or emit a completion event, leaving a gap in
+        // the telemetry timeline. Finalise with a distinct event so the
+        // "no terminal" case is observable rather than silently missing.
+        if !saw_terminal {
+            let total_ms = started.elapsed().as_millis() as u64;
+            tracing::info!(
+                event = "llm.call.stream_ended_without_terminal",
+                trace_id = %trace_id,
+                tenant_id = %tenant_id,
+                model = %model,
+                elapsed_ms = total_ms,
+                "stream closed without a Finished or error event",
+            );
+            match telemetry.lock() {
+                Ok(mut t) => t.pipeline_total_ms = Some(total_ms),
+                Err(_) => tracing::debug!(
+                    event = "telemetry.mutex_poisoned",
+                    "telemetry mutex poisoned; skipping pipeline_total_ms"
+                ),
+            }
         }
     }
 }
@@ -207,7 +235,7 @@ mod tests {
 
     impl CapturedEvents {
         fn snapshot(&self) -> Vec<EventFields> {
-            self.0.lock().unwrap().clone()
+            self.0.lock().expect("captured events lock poisoned").clone()
         }
         /// Returns the first event whose `event` field matches `name`.
         fn find(&self, name: &str) -> Option<EventFields> {
@@ -225,7 +253,7 @@ mod tests {
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
             let mut visitor = FieldCollector::default();
             event.record(&mut visitor);
-            self.sink.0.lock().unwrap().push(visitor.0);
+            self.sink.0.lock().expect("captured events lock poisoned").push(visitor.0);
         }
     }
 
@@ -423,7 +451,7 @@ mod tests {
             let events = self
                 .events
                 .lock()
-                .unwrap()
+                .expect("scripted service events lock poisoned")
                 .take()
                 .expect("ScriptedService called more than once");
             Ok(Box::pin(futures::stream::iter(events)))

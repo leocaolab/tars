@@ -290,7 +290,16 @@ fn wrap_stream_for_write(
                     }
                     builder.apply(ev.clone());
                 }
-                Err(_) => {
+                Err(e) => {
+                    // Capture the actual error so the skip below is
+                    // diagnosable — a bare `had_error` flag dropped the
+                    // ProviderError on the floor.
+                    tracing::debug!(
+                        error = %e,
+                        key = %key.hex(),
+                        label = %key.debug_label,
+                        "cache: stream yielded a provider error; will skip cache write",
+                    );
                     had_error = true;
                 }
             }
@@ -463,7 +472,7 @@ mod tests {
         let mut s = stream;
         let mut out = Vec::new();
         while let Some(ev) = s.next().await {
-            out.push(ev.unwrap());
+            out.push(ev.expect("drain: stream yielded a provider error"));
         }
         out
     }

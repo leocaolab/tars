@@ -60,6 +60,14 @@ pub struct RunReport {
     pub ended_at_ms: Option<i64>,
     /// `ended_at_ms - started_at_ms` when both known; otherwise the
     /// time from `started_at` to the last observed event.
+    ///
+    /// **Invariant:** producers MUST clamp the (signed) timestamp
+    /// difference at zero before casting to `u64` — event timestamps
+    /// can arrive out of order (clock skew, crash-mid-run), so a naive
+    /// `(ended - started) as u64` would wrap to a huge bogus duration.
+    /// The canonical builder in `tars-runtime::run_report` uses
+    /// `(ended - started).max(0) as u64`; any other producer must do
+    /// the same.
     pub wall_clock_ms: u64,
 
     // ── step accounting ────────────────────────────────────────────
@@ -82,6 +90,66 @@ pub struct RunReport {
 
     // ── errors ─────────────────────────────────────────────────────
     pub errors: Vec<RunErrorSummary>,
+}
+
+/// Reason a [`RunReport`] failed its internal-consistency check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunReportError {
+    /// `failed_step_count > step_count` at the report level.
+    FailedExceedsTotal { failed: u32, total: u32 },
+    /// `failed_step_count > step_count` inside a per-agent breakdown.
+    AgentFailedExceedsTotal {
+        agent: String,
+        failed: u32,
+        total: u32,
+    },
+}
+
+impl std::fmt::Display for RunReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FailedExceedsTotal { failed, total } => write!(
+                f,
+                "failed_step_count ({failed}) exceeds step_count ({total})"
+            ),
+            Self::AgentFailedExceedsTotal {
+                agent,
+                failed,
+                total,
+            } => write!(
+                f,
+                "agent {agent:?}: failed_step_count ({failed}) exceeds step_count ({total})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RunReportError {}
+
+impl RunReport {
+    /// Reject internally inconsistent reports: `failed_step_count` must
+    /// never exceed `step_count`, at the top level or in any per-agent
+    /// breakdown. Public fields make a malformed report constructible,
+    /// so consumers that care (eval comparison, dashboards) can call
+    /// this defensively before trusting the ratios.
+    pub fn validate(&self) -> Result<(), RunReportError> {
+        if self.failed_step_count > self.step_count {
+            return Err(RunReportError::FailedExceedsTotal {
+                failed: self.failed_step_count,
+                total: self.step_count,
+            });
+        }
+        for (agent, b) in &self.by_agent {
+            if b.failed_step_count > b.step_count {
+                return Err(RunReportError::AgentFailedExceedsTotal {
+                    agent: agent.clone(),
+                    failed: b.failed_step_count,
+                    total: b.step_count,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -78,14 +78,31 @@ impl CostUsd {
 
 impl std::ops::Add for CostUsd {
     type Output = Self;
+    /// Sum two costs. Both operands are expected to be finite and
+    /// non-negative (the only way to *build* a `CostUsd` in-crate is
+    /// [`Pricing::cost_for`], which guarantees that). A `debug_assert`
+    /// catches a NaN/Inf that slipped in via the public tuple field in
+    /// CI; release builds add as-is (no silent clamp on a pure operator).
     fn add(self, rhs: Self) -> Self {
+        debug_assert!(
+            self.0.is_finite() && rhs.0.is_finite(),
+            "CostUsd::add on non-finite operand(s): {} + {}",
+            self.0,
+            rhs.0
+        );
         Self(self.0 + rhs.0)
     }
 }
 
 impl std::iter::Sum for CostUsd {
+    /// See [`Add`](CostUsd::add) for the finiteness expectation.
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        Self(iter.map(|c| c.0).sum())
+        let total: f64 = iter.map(|c| c.0).sum();
+        debug_assert!(
+            total.is_finite(),
+            "CostUsd::sum produced a non-finite total: {total}"
+        );
+        Self(total)
     }
 }
 
@@ -117,7 +134,15 @@ impl Pricing {
     /// rule used by both `PerCallBudgetService` and
     /// `TenantBudgetService` (formerly two copies of this check).
     pub fn is_zero(&self) -> bool {
-        self.input_per_million == 0.0 && self.output_per_million == 0.0
+        // Must check ALL five rates: a provider that bills $0 on
+        // input/output but charges for cached / cache-creation /
+        // thinking tokens is NOT free, and short-circuiting budget on
+        // input+output alone would let real spend through uncapped.
+        self.input_per_million == 0.0
+            && self.output_per_million == 0.0
+            && self.cached_input_per_million == 0.0
+            && self.cache_creation_per_million == 0.0
+            && self.thinking_per_million == 0.0
     }
 
     /// Best-effort *pre-call* USD estimate for `req`: chars/4 input
@@ -151,8 +176,20 @@ impl Pricing {
             .map(|t| t as f64)
             .unwrap_or(default_max_output as f64);
 
-        estimated_input_tokens * self.input_per_million / 1_000_000.0
-            + max_output_tokens * self.output_per_million / 1_000_000.0
+        let estimate = estimated_input_tokens * self.input_per_million / 1_000_000.0
+            + max_output_tokens * self.output_per_million / 1_000_000.0;
+        // Same finiteness/non-negativity guard as `cost_for`: a budget
+        // soft-cap that compares against a NaN/negative estimate would
+        // misbehave. Loud in CI, clamped to 0 in release.
+        debug_assert!(
+            estimate.is_finite() && estimate >= 0.0,
+            "estimate_chat_cost produced non-finite/negative cost: {estimate}"
+        );
+        if estimate.is_finite() && estimate >= 0.0 {
+            estimate
+        } else {
+            0.0
+        }
     }
 
     pub fn cost_for(&self, usage: &Usage) -> CostUsd {
@@ -190,7 +227,19 @@ impl Pricing {
             + (usage.cached_input_tokens as f64) * self.cached_input_per_million / 1_000_000.0
             + (usage.cache_creation_tokens as f64) * self.cache_creation_per_million / 1_000_000.0
             + (usage.thinking_tokens as f64) * self.thinking_per_million / 1_000_000.0;
-        CostUsd(total)
+        // Cost must be a finite, non-negative dollar amount. A NaN /
+        // negative here means a corrupt pricing table (e.g. a negative
+        // per-million rate) — loud in CI, and clamped to 0 in release
+        // so a budget gate never under-counts into the negatives.
+        debug_assert!(
+            total.is_finite() && total >= 0.0,
+            "cost_for produced non-finite/negative cost: {total} (check pricing table)"
+        );
+        CostUsd(if total.is_finite() && total >= 0.0 {
+            total
+        } else {
+            0.0
+        })
     }
 }
 

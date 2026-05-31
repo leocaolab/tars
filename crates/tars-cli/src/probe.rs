@@ -95,8 +95,12 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
         )
     })?;
 
+    // Trim before the emptiness check so a whitespace-only `--model "  "`
+    // doesn't slip through as a "non-empty" override and get sent to the
+    // provider verbatim; fall back to the configured default instead.
     let model = args
         .model
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| provider_cfg.default_model().to_string());
     let prompt = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
@@ -122,6 +126,7 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
     let mut text_chunks: Vec<String> = Vec::new();
     let mut thinking_chunks: Vec<String> = Vec::new();
     let mut saw_finished = false;
+    let mut saw_tool_use = false;
     while let Some(ev) = stream.next().await {
         event_count += 1;
         match ev {
@@ -138,6 +143,7 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
             }
             Ok(ChatEvent::ToolCallStart { id, name, .. }) => {
                 eprintln!("[evt {event_count:>2}] ToolStart   id={id} name={name}");
+                saw_tool_use = true;
             }
             Ok(ChatEvent::ToolCallArgsDelta { index, args_delta }) => {
                 eprintln!("[evt {event_count:>2}] ToolArgs    idx={index} delta={args_delta:?}");
@@ -182,10 +188,13 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
     if !saw_finished {
         bail!("stream ended without a Finished event ({event_count} events received)");
     }
-    if full_text.is_empty() {
+    // Empty text is only an error when the model produced nothing at
+    // all. A tool-use response legitimately carries no text (the model
+    // answered with tool calls), so don't treat that as a failure.
+    if full_text.is_empty() && !saw_tool_use {
         bail!(
             "provider returned no text for prompt {:?} using model {} \
-             (saw {event_count} events but no Delta)",
+             (saw {event_count} events but no Delta or tool call)",
             prompt,
             model,
         );

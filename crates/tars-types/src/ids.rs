@@ -13,9 +13,36 @@ use std::fmt;
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+        // `Serialize` stays transparent (emit the bare string). For
+        // `Deserialize` we hand-roll via `TryFrom<String>` so the same
+        // empty-string rejection that `new()` enforces also fires on
+        // the wire — a plain `#[serde(transparent)]` Deserialize would
+        // let `from_str("\"\"")` mint an empty ID, bypassing the hard
+        // isolation boundary (audit `tars-types-src-ids-1`).
+        //
+        // We don't combine `transparent` + `try_from` on one derive:
+        // serde rejects that pairing. Serialize keeps transparent;
+        // Deserialize is a separate manual impl that reuses the inner
+        // `String` deserializer then validates.
+        #[derive(Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let s = String::deserialize(deserializer)?;
+                if s.is_empty() {
+                    return Err(serde::de::Error::custom(concat!(
+                        stringify!($name),
+                        " cannot be empty"
+                    )));
+                }
+                Ok(Self(s))
+            }
+        }
 
         impl $name {
             /// Construct from any string-like value.
@@ -141,6 +168,14 @@ mod tests {
     #[should_panic(expected = "TenantId cannot be empty")]
     fn empty_id_panics_at_construction() {
         let _ = TenantId::new("");
+    }
+
+    #[test]
+    fn empty_id_via_serde_is_rejected_not_minted() {
+        // `#[serde(transparent)]` Deserialize would have happily minted
+        // an empty TenantId here, bypassing the hard isolation boundary.
+        let r: Result<TenantId, _> = serde_json::from_str("\"\"");
+        assert!(r.is_err(), "empty string must not deserialize into an ID");
     }
 
     #[test]

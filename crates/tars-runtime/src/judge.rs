@@ -118,7 +118,7 @@ pub async fn run_judge_pass(
     }
     Ok(JudgeReport {
         judge_id: judge.id().to_string(),
-        item_count: items.len() as u32,
+        item_count: items.len().try_into().unwrap_or(u32::MAX),
         true_positives: tp,
         false_positives: fp,
         unsure: un,
@@ -169,6 +169,13 @@ pub struct LlmJudge {
     id: String,
     model: ModelHint,
     prompt_template: String,
+    /// Request context threaded into every `service.call`. The
+    /// `Judge::judge` trait method takes no context (it's
+    /// provider-agnostic), so the LLM-backed impl carries its own —
+    /// set it via [`Self::with_request_context`] in production to
+    /// supply real IAM / trace / deadline. Defaults to
+    /// `RequestContext::test_default()` for tests / dev.
+    ctx: RequestContext,
 }
 
 impl LlmJudge {
@@ -180,11 +187,20 @@ impl LlmJudge {
             id: id.into(),
             model,
             prompt_template: DEFAULT_JUDGE_PROMPT.to_string(),
+            ctx: RequestContext::test_default(),
         }
     }
 
     pub fn with_prompt_template(mut self, t: impl Into<String>) -> Self {
         self.prompt_template = t.into();
+        self
+    }
+
+    /// Supply the production [`RequestContext`] (trace / tenant /
+    /// principal / deadline / cancel) used for every judge LLM call.
+    /// Without this, the judge runs with `RequestContext::test_default()`.
+    pub fn with_request_context(mut self, ctx: RequestContext) -> Self {
+        self.ctx = ctx;
         self
     }
 }
@@ -207,12 +223,27 @@ impl Judge for LlmJudge {
         let stream = self
             .service
             .clone()
-            .call(req, RequestContext::test_default())
+            .call(req, self.ctx.clone())
             .await?;
         let mut s = stream;
         let mut acc = ChatResponseBuilder::new();
+        // Bound the stream so a runaway / malicious model can't OOM the
+        // judge: the verdict only needs the first line (TP/FP/UNSURE),
+        // so a few thousand events is already pathological. The
+        // deadline/cancel side of DoS is handled upstream via
+        // `self.ctx` (deadline + cancel threaded into the pipeline);
+        // this cap covers the unbounded-size axis.
+        const MAX_STREAM_EVENTS: usize = 10_000;
+        let mut seen = 0usize;
         while let Some(event) = s.next().await {
             acc.apply(event?);
+            seen += 1;
+            if seen > MAX_STREAM_EVENTS {
+                return Err(JudgeError::Parse(format!(
+                    "judge stream exceeded {MAX_STREAM_EVENTS} events without completing; \
+                     aborting to bound memory"
+                )));
+            }
         }
         let resp = acc.finish();
         parse_verdict(&resp.text)

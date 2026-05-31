@@ -34,9 +34,12 @@ pub enum BatchStatus {
     /// vendor reports it (Anthropic does, OpenAI does in some states);
     /// `None` for `total` means "unknown / not reported."
     InProgress {
+        #[serde(default)]
         processed: u32,
+        #[serde(default)]
         total: Option<u32>,
         /// When the vendor estimates completion. `None` if not reported.
+        #[serde(default)]
         eta: Option<SystemTime>,
     },
     /// Terminal — all items completed (each item may itself have failed;
