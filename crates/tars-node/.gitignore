@@ -1,0 +1,7 @@
+# napi-rs build outputs
+# - the per-platform compiled native addon (5MB+ binary, regenerated
+#   by `napi build`); platform-specific tarballs ship via the npm
+#   publish flow, not the repo.
+# - `node_modules` is the standard JS dependency dir.
+*.node
+node_modules/
