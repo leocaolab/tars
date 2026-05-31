@@ -12,7 +12,7 @@ use tars_pipeline::{LlmService, Pipeline, ProviderService};
 use tars_provider::backends::mock::{CannedResponse, MockProvider};
 use tars_runtime::{
     AgentContext, AgentMessage, CriticAgent, CriticError, PartialResultRef, Plan, PlanStep,
-    VerdictKind,
+    StepCondition, VerdictKind,
 };
 use tars_types::{AgentId, TrajectoryId};
 use tokio_util::sync::CancellationToken;
@@ -41,6 +41,7 @@ fn sample_plan() -> Plan {
             worker_role: "summarise".into(),
             instruction: "do it".into(),
             depends_on: vec![],
+            condition: StepCondition::Always,
         }],
     }
 }

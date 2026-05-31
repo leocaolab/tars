@@ -281,6 +281,7 @@ mod tests {
                 worker_role: "summarise".into(),
                 instruction: "do it".into(),
                 depends_on: vec![],
+                condition: crate::orchestrator::StepCondition::Always,
             }],
         }
     }

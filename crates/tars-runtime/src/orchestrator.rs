@@ -76,6 +76,122 @@ pub struct PlanStep {
     /// immediately. The orchestration loop interprets this; the
     /// Orchestrator just records what the LLM said.
     pub depends_on: Vec<String>,
+    /// Optional gating predicate: skip this step at runtime when the
+    /// predicate evaluates false against the deps' results. The
+    /// default ([`StepCondition::Always`]) reproduces the historical
+    /// "every step runs" behaviour, so existing plan JSON that
+    /// doesn't carry a `condition` field deserialises identically.
+    /// See [`StepCondition`] for the predicate surface; the executor
+    /// in [`crate::task::run_task`] checks this before scheduling the
+    /// step into a level batch.
+    #[serde(default)]
+    pub condition: StepCondition,
+}
+
+/// Conditional gate on a [`PlanStep`]. When the predicate evaluates
+/// false against this step's deps' results, the executor skips the
+/// step (no Worker / Critic LLM calls) and emits an
+/// [`crate::event::AgentEvent::StepSkipped`] for forensics. Skipping
+/// cascades: any step depending on a skipped step is itself skipped
+/// with reason "dep `X` was skipped".
+///
+/// ## Predicate surface — kept narrow on purpose
+///
+/// `IfDepSummaryContains` only — substring match on a single dep's
+/// [`crate::message::AgentMessage::PartialResult::summary`]. The shape
+/// is one tag + two strings, which is the smallest schema an LLM
+/// reliably emits without escaping mishaps. Future variants (regex,
+/// numeric thresholds on `confidence`, JSON pointer into the result
+/// body) extend the enum without breaking the JSON shape — clients
+/// match on `kind` and ignore variants they don't recognise via
+/// `#[serde(other)]` on a future fallback (not present yet because
+/// only one variant has a payload today).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StepCondition {
+    /// Always run. Default — omit `condition` from the plan JSON to
+    /// get this behaviour.
+    #[default]
+    Always,
+    /// Run iff `if_dep`'s `PartialResult.summary` contains the
+    /// `contains` substring (case-sensitive). Use this to gate a
+    /// step on a previous step's textual outcome — e.g. an "auto-fix"
+    /// step that only runs when the upstream check reports failure.
+    ///
+    /// `if_dep` MUST appear in this step's `depends_on` list;
+    /// `Plan::validate` rejects plans that violate this so a missing
+    /// dep can't silently flip the gate. Missing-dep semantics at
+    /// evaluation time would be ambiguous (skip? force-run?
+    /// error?), so we lock it down at the plan-validation boundary.
+    IfDepSummaryContains {
+        /// Dep step id whose result drives the decision. Must be in
+        /// `depends_on`.
+        if_dep: String,
+        /// Case-sensitive substring matched against the dep's
+        /// `PartialResult.summary`. Empty string matches every
+        /// completed dep (degenerate but valid — same effect as
+        /// `Always` when the dep ran).
+        contains: String,
+    },
+}
+
+impl StepCondition {
+    /// Evaluate the predicate against the completed steps' results.
+    /// Returns `true` ⇒ step should run, `false` ⇒ step is skipped.
+    /// Pre-condition: `Plan::validate` already established that
+    /// `if_dep` is in this step's `depends_on`, so the lookup either
+    /// finds a `PartialResult` or the dep itself was skipped — and a
+    /// skipped dep is detected by the caller (the executor) BEFORE
+    /// this method is invoked (skip-cascade), so a missing key here
+    /// is genuinely an executor bug, not a plan-shape issue. Return
+    /// `false` defensively in that case rather than panicking, so a
+    /// future refactor can't accidentally execute work with stale
+    /// dep state.
+    pub fn matches(&self, completed: &std::collections::HashMap<String, crate::message::AgentMessage>) -> bool {
+        match self {
+            Self::Always => true,
+            Self::IfDepSummaryContains { if_dep, contains } => {
+                let Some(msg) = completed.get(if_dep) else {
+                    tracing::warn!(
+                        if_dep = %if_dep,
+                        "StepCondition::matches: dep not in completed map — \
+                         executor should have detected skip-cascade first; \
+                         falling through to `false` (skip).",
+                    );
+                    return false;
+                };
+                match msg {
+                    crate::message::AgentMessage::PartialResult { summary, .. } => {
+                        summary.contains(contains)
+                    }
+                    // Non-PartialResult shapes shouldn't reach here in
+                    // normal flow (workers always emit PartialResult);
+                    // treat as "no signal", skip.
+                    other => {
+                        tracing::warn!(
+                            if_dep = %if_dep,
+                            shape = ?std::mem::discriminant(other),
+                            "StepCondition::matches: dep produced a non-PartialResult \
+                             message; treating predicate as false (skip).",
+                        );
+                        false
+                    }
+                }
+            }
+        }
+    }
+
+    /// Short human-readable description for the
+    /// [`crate::event::AgentEvent::StepSkipped::reason`] field.
+    /// Format: `"condition not met (if_dep=`X`, contains=`Y`)"`.
+    pub fn skip_reason(&self) -> String {
+        match self {
+            Self::Always => "always (unreachable: Always never produces a skip)".into(),
+            Self::IfDepSummaryContains { if_dep, contains } => {
+                format!("condition not met (if_dep=`{if_dep}`, contains=`{contains}`)")
+            }
+        }
+    }
 }
 
 impl Plan {
@@ -175,6 +291,21 @@ impl Plan {
                         step.id, dep,
                     )));
                 }
+            }
+            // Condition's `if_dep` must be a declared dep — otherwise
+            // the predicate would read from a step that hasn't
+            // necessarily completed (or might not even be in the plan)
+            // by the time we evaluate it. Catching this at the plan
+            // boundary turns a runtime ambiguity ("skip? force-run?
+            // error?") into a parse-time refusal.
+            if let StepCondition::IfDepSummaryContains { if_dep, .. } = &step.condition
+                && !step.depends_on.iter().any(|d| d == if_dep)
+            {
+                return Err(OrchestratorError::InvalidPlan(format!(
+                    "step `{}`: condition.if_dep = `{}` is not in depends_on (= {:?}); \
+                     the predicate would read from a step that may not have completed",
+                    step.id, if_dep, step.depends_on,
+                )));
             }
         }
         Ok(())
@@ -377,6 +508,14 @@ Each step has:
   - `depends_on`: list of step ids that must complete before this one can start.
     Empty = can run immediately. Don't reference future steps; declarations are
     in execution-allowed order.
+  - `condition` (OPTIONAL — omit for the common 'always run' case): a gating
+    predicate evaluated against a dep's result at runtime. If the predicate
+    is false, this step is SKIPPED (no LLM calls) and any step that depends
+    on it is also skipped (cascade). Only one shape today:
+    `{ \"kind\": \"if_dep_summary_contains\", \"if_dep\": \"<dep id>\", \"contains\": \"<substring>\" }`
+    Use this for branching: e.g. an 'auto-fix' step that should only run
+    when an upstream 'check' step's summary contains the word 'failed'.
+    Constraint: `if_dep` MUST be in this step's `depends_on`.
 
 Constraints:
   - Keep plans small (1–5 steps).
@@ -405,6 +544,33 @@ fn plan_json_schema() -> serde_json::Value {
                         "depends_on": {
                             "type": "array",
                             "items": { "type": "string" }
+                        },
+                        "condition": {
+                            // oneOf so the LLM sees the discriminated-union
+                            // shape directly — `kind` picks the variant,
+                            // each variant's payload is rigid. Optional at
+                            // the top level (not in `required`) because
+                            // omitting it is the dominant case.
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "kind": { "const": "always" }
+                                    },
+                                    "required": ["kind"]
+                                },
+                                {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "kind":     { "const": "if_dep_summary_contains" },
+                                        "if_dep":   { "type": "string", "minLength": 1 },
+                                        "contains": { "type": "string" }
+                                    },
+                                    "required": ["kind", "if_dep", "contains"]
+                                }
+                            ]
                         }
                     },
                     "required": ["id", "worker_role", "instruction", "depends_on"]
@@ -430,12 +596,14 @@ mod tests {
                     worker_role: "search".into(),
                     instruction: "fetch the PR diff".into(),
                     depends_on: vec![],
+                    condition: StepCondition::Always,
                 },
                 PlanStep {
                     id: "s2".into(),
                     worker_role: "summarise".into(),
                     instruction: "summarise the diff for a non-engineer".into(),
                     depends_on: vec!["s1".into()],
+                    condition: StepCondition::Always,
                 },
             ],
         }
@@ -523,6 +691,7 @@ mod tests {
             worker_role: role.into(),
             instruction: format!("do {id}"),
             depends_on: deps.into_iter().map(String::from).collect(),
+            condition: StepCondition::Always,
         }
     }
 
@@ -587,6 +756,136 @@ mod tests {
         // "later step" is bucketed under the "unknown" check (we
         // build the seen set in declaration order).
         assert!(result.is_err());
+    }
+
+    // ── StepCondition ────────────────────────────────────────────────
+
+    #[test]
+    fn step_condition_default_is_always() {
+        // Defaulting to Always is the "no gating" contract that keeps
+        // existing plan JSON (no `condition` field) deserializing
+        // unchanged. If a future refactor flips the default, every
+        // plan without an explicit `condition` would silently start
+        // skipping — this test is the canary.
+        let c: StepCondition = Default::default();
+        assert_eq!(c, StepCondition::Always);
+    }
+
+    #[test]
+    fn step_condition_omitted_field_deserialises_as_always() {
+        // The wire-level contract: a plan-step JSON that doesn't
+        // mention `condition` at all still parses. Without
+        // `#[serde(default)]` on the field this would error out.
+        let step_json = serde_json::json!({
+            "id": "s1",
+            "worker_role": "summarise",
+            "instruction": "do it",
+            "depends_on": [],
+        });
+        let step: PlanStep = serde_json::from_value(step_json).unwrap();
+        assert_eq!(step.condition, StepCondition::Always);
+    }
+
+    #[test]
+    fn step_condition_substring_predicate_matches_when_summary_contains() {
+        use crate::message::AgentMessage;
+        let mut completed = std::collections::HashMap::new();
+        completed.insert(
+            "s1".to_string(),
+            AgentMessage::PartialResult {
+                from_agent: AgentId::new("w"),
+                step_id: Some("s1".into()),
+                summary: "lint reported: failed".into(),
+                confidence: 0.9,
+            },
+        );
+        let c = StepCondition::IfDepSummaryContains {
+            if_dep: "s1".into(),
+            contains: "failed".into(),
+        };
+        assert!(c.matches(&completed));
+    }
+
+    #[test]
+    fn step_condition_substring_predicate_does_not_match_when_summary_lacks_substring() {
+        use crate::message::AgentMessage;
+        let mut completed = std::collections::HashMap::new();
+        completed.insert(
+            "s1".to_string(),
+            AgentMessage::PartialResult {
+                from_agent: AgentId::new("w"),
+                step_id: Some("s1".into()),
+                summary: "lint reported: clean".into(),
+                confidence: 0.9,
+            },
+        );
+        let c = StepCondition::IfDepSummaryContains {
+            if_dep: "s1".into(),
+            contains: "failed".into(),
+        };
+        assert!(!c.matches(&completed));
+    }
+
+    #[test]
+    fn step_condition_substring_predicate_skips_when_dep_missing() {
+        // Missing dep ⇒ matches() returns false (defensive: skip
+        // rather than panic). The executor's skip-cascade pass
+        // should normally prevent this state by detecting a skipped
+        // dep first, but matches() shouldn't crash on it.
+        let completed: std::collections::HashMap<String, crate::message::AgentMessage> =
+            std::collections::HashMap::new();
+        let c = StepCondition::IfDepSummaryContains {
+            if_dep: "s1".into(),
+            contains: "failed".into(),
+        };
+        assert!(!c.matches(&completed));
+    }
+
+    #[test]
+    fn validate_rejects_condition_with_unknown_dep() {
+        // Plan-validation refuses a step whose `condition.if_dep`
+        // isn't in `depends_on` — runtime ambiguity ("read from a
+        // step that may not have completed") becomes a parse-time
+        // error.
+        let mut p = sample_plan();
+        p.steps[1].condition = StepCondition::IfDepSummaryContains {
+            if_dep: "not_a_dep".into(),
+            contains: "x".into(),
+        };
+        match p.validate() {
+            Err(OrchestratorError::InvalidPlan(msg)) => {
+                assert!(msg.contains("not_a_dep"));
+                assert!(msg.contains("depends_on"));
+            }
+            other => panic!("expected InvalidPlan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_condition_with_dep_in_depends_on() {
+        let mut p = sample_plan();
+        p.steps[1].condition = StepCondition::IfDepSummaryContains {
+            if_dep: "s1".into(), // s1 IS in s2's depends_on
+            contains: "x".into(),
+        };
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn plan_with_condition_round_trips_through_json() {
+        let mut p = sample_plan();
+        p.steps[1].condition = StepCondition::IfDepSummaryContains {
+            if_dep: "s1".into(),
+            contains: "failed".into(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        // Wire shape: condition.kind = "if_dep_summary_contains".
+        assert_eq!(
+            v["steps"][1]["condition"]["kind"],
+            json!("if_dep_summary_contains"),
+        );
+        let back: Plan = serde_json::from_value(v).unwrap();
+        assert_eq!(back.steps[1].condition, p.steps[1].condition);
     }
 
     #[test]

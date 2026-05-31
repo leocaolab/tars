@@ -83,17 +83,77 @@ impl Default for RunTaskConfig {
 }
 
 /// Per-step record in the [`TaskOutcome`].
+///
+/// A step is either [`Completed`](Self::Completed) (Worker ran +
+/// Critic approved) or [`Skipped`](Self::Skipped) (the step's
+/// `StepCondition` evaluated false, or one of its deps was itself
+/// skipped — cascade). The enum lets the per-step Vec in
+/// [`TaskOutcome::steps`] preserve plan order even when some steps
+/// don't run: skipped entries appear in declaration order
+/// alongside completed ones, so `outcome.steps[i].step_id() ==
+/// plan.steps[i].id` still holds.
+///
+/// Accessors:
+/// - [`step_id`](Self::step_id) — always available.
+/// - [`as_completed`](Self::as_completed) — `Some` only for the
+///   `Completed` variant, lets call sites pattern-match without
+///   re-deriving the discriminant.
 #[derive(Clone, Debug)]
-pub struct StepOutcome {
-    pub step_id: String,
-    /// The Worker's final accepted output for this step.
-    pub result: AgentMessage,
-    /// The Critic's accepting verdict (always `VerdictKind::Approve`
-    /// on success).
-    pub verdict: AgentMessage,
-    /// How many refinement loops were needed before approval.
-    /// `0` = approved on first attempt.
-    pub refinement_attempts: u32,
+pub enum StepOutcome {
+    /// Step ran: Worker produced a [`AgentMessage::PartialResult`],
+    /// Critic returned [`VerdictKind::Approve`].
+    Completed {
+        step_id: String,
+        /// The Worker's final accepted output for this step.
+        result: AgentMessage,
+        /// The Critic's accepting verdict (always
+        /// `VerdictKind::Approve` for a completed step).
+        verdict: AgentMessage,
+        /// How many refinement loops were needed before approval.
+        /// `0` = approved on first attempt.
+        refinement_attempts: u32,
+    },
+    /// Step was gated out: either its `StepCondition` evaluated false,
+    /// or a transitively-depended-on step was itself skipped.
+    /// No Worker / Critic LLM calls were issued for this step; the
+    /// trajectory log carries a matching `AgentEvent::StepSkipped`
+    /// with the same `reason` for forensics.
+    Skipped {
+        step_id: String,
+        /// Human-readable cause — same string written into the
+        /// trajectory's `StepSkipped::reason` field.
+        reason: String,
+    },
+}
+
+impl StepOutcome {
+    /// Plan step id — always available regardless of variant.
+    pub fn step_id(&self) -> &str {
+        match self {
+            Self::Completed { step_id, .. } | Self::Skipped { step_id, .. } => step_id,
+        }
+    }
+
+    /// `Some((result, verdict, refinement_attempts))` for completed
+    /// steps; `None` for skipped. Use this from caller code that
+    /// wants the worker output without re-matching the enum:
+    /// `for s in &outcome.steps { if let Some((r, _, _)) = s.as_completed() { ... } }`.
+    pub fn as_completed(&self) -> Option<(&AgentMessage, &AgentMessage, u32)> {
+        match self {
+            Self::Completed {
+                result,
+                verdict,
+                refinement_attempts,
+                ..
+            } => Some((result, verdict, *refinement_attempts)),
+            Self::Skipped { .. } => None,
+        }
+    }
+
+    /// `true` iff this outcome is a [`Skipped`](Self::Skipped) variant.
+    pub fn is_skipped(&self) -> bool {
+        matches!(self, Self::Skipped { .. })
+    }
 }
 
 /// What [`run_task`] returns on success.
@@ -302,9 +362,77 @@ pub async fn run_task(
         step_outcomes_by_id = HashMap::with_capacity(plan.steps.len());
         let mut completed: HashMap<String, AgentMessage> =
             HashMap::with_capacity(plan.steps.len());
+        // Steps whose `StepCondition` evaluated false OR whose dep
+        // chain hit a skipped step. Used for skip-cascade across
+        // levels: a step at level N is skipped iff any of its deps
+        // (which sit at level < N) is in this set.
+        let mut skipped_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut hit_reject: Option<(String, String)> = None;
 
         'level_loop: for level in plan.execution_levels() {
+            // ── Pre-pass: classify every step in this level as RUN
+            // or SKIP before we build the FuturesUnordered batch.
+            // Two skip reasons, in priority order:
+            //   1. cascade — any dep is in `skipped_ids`.
+            //   2. condition — predicate evaluates false against
+            //      `completed`.
+            // Skipped steps emit a single `AgentEvent::StepSkipped`
+            // (allocated a step_seq via runtime.next_step_seq) and
+            // are recorded in `step_outcomes_by_id` as
+            // `StepOutcome::Skipped`. Their ids land in
+            // `skipped_ids` so descendants at the NEXT level cascade
+            // correctly.
+            //
+            // Pre-pass — not interleaved with the parallel batch —
+            // because the skip decision is purely a function of
+            // already-completed levels: there's no upside to deferring
+            // it, and doing it up front keeps the FuturesUnordered
+            // body (the only point where ctx is mutably borrowed via
+            // its loop body) lean.
+            let mut to_run: Vec<&PlanStep> = Vec::with_capacity(level.len());
+            for step in &level {
+                // Cascade check: a dep that was skipped means we
+                // can't run this step (we'd have no input).
+                let cascade_dep = step
+                    .depends_on
+                    .iter()
+                    .find(|d| skipped_ids.contains(d.as_str()));
+                if let Some(dep) = cascade_dep {
+                    let reason = format!("dep `{dep}` was skipped");
+                    log_skip(&ctx, &traj, step, &reason).await?;
+                    skipped_ids.insert(step.id.clone());
+                    step_outcomes_by_id.insert(
+                        step.id.clone(),
+                        StepOutcome::Skipped {
+                            step_id: step.id.clone(),
+                            reason,
+                        },
+                    );
+                    continue;
+                }
+                // Condition check: predicate against the already-
+                // completed deps' PartialResults.
+                if !step.condition.matches(&completed) {
+                    let reason = step.condition.skip_reason();
+                    log_skip(&ctx, &traj, step, &reason).await?;
+                    skipped_ids.insert(step.id.clone());
+                    step_outcomes_by_id.insert(
+                        step.id.clone(),
+                        StepOutcome::Skipped {
+                            step_id: step.id.clone(),
+                            reason,
+                        },
+                    );
+                    continue;
+                }
+                to_run.push(step);
+            }
+            // If every step in this level was skipped, there's
+            // nothing to schedule — advance to the next level.
+            if to_run.is_empty() {
+                continue 'level_loop;
+            }
             // Per-level cancel token, forked from the task-level
             // `ctx.cancel`. When the first Critic Reject in this
             // batch lands we fire `level_cancel.cancel()` to bail
@@ -334,7 +462,7 @@ pub async fn run_task(
             // step's clone of the token is its own observer; step_id
             // because we return it as part of the result tuple after
             // the borrow on `step` has ended).
-            let mut tasks: FuturesUnordered<_> = level
+            let mut tasks: FuturesUnordered<_> = to_run
                 .iter()
                 .map(|step| {
                     let cancel = level_cancel.clone();
@@ -429,10 +557,16 @@ pub async fn run_task(
 
             // Apply this level's approved outcomes. Skip if we hit a
             // reject (those outcomes are about to be discarded by the
-            // replan path anyway).
+            // replan path anyway). `level_approved` only ever holds
+            // `Completed` variants — `Skipped` is recorded directly
+            // in the pre-pass above, and `run_one_step` returns
+            // `StepResult::Approved` only on critic-Approve, so the
+            // unreachable arm here exists for total-pattern hygiene.
             if hit_reject.is_none() {
                 for (step_id, outcome) in level_approved {
-                    completed.insert(step_id.clone(), outcome.result.clone());
+                    if let StepOutcome::Completed { result, .. } = &outcome {
+                        completed.insert(step_id.clone(), result.clone());
+                    }
                     step_outcomes_by_id.insert(step_id, outcome);
                 }
             }
@@ -471,15 +605,18 @@ pub async fn run_task(
     // executor produces outcomes in completion order (parallel batches
     // arrive together); the public TaskOutcome.steps shape is documented
     // (and tested) to follow `plan.steps` declaration order so callers
-    // can index by `outcome.steps[i].step_id == plan.steps[i].id` for
+    // can index by `outcome.steps[i].step_id() == plan.steps[i].id` for
     // both the serial-trivial case and the parallel fan-out case.
+    // Includes BOTH `Completed` and `Skipped` variants — skipped steps
+    // appear at their declaration position so the index correspondence
+    // holds when conditional execution is in play.
     let step_outcomes: Vec<StepOutcome> = plan
         .steps
         .iter()
         .map(|s| {
-            step_outcomes_by_id
-                .remove(&s.id)
-                .expect("every plan step was either completed or surfaced as Reject above")
+            step_outcomes_by_id.remove(&s.id).expect(
+                "every plan step was either completed, skipped, or surfaced as Reject above",
+            )
         })
         .collect();
 
@@ -667,7 +804,7 @@ async fn run_one_step(
 
         match verdict_kind {
             VerdictKind::Approve => {
-                return Ok(StepResult::Approved(StepOutcome {
+                return Ok(StepResult::Approved(StepOutcome::Completed {
                     step_id: step.id.clone(),
                     result: worker_result,
                     verdict: verdict_msg,
@@ -812,6 +949,50 @@ async fn run_critic(
             step_id: target_step_id.unwrap_or_else(|| "<critic>".into()),
             source,
         })
+}
+
+/// Allocate a step_seq + append a single `AgentEvent::StepSkipped`
+/// for a step the level loop is gating out. Mirrors the
+/// step_seq-allocation contract in [`execute_agent_step`] (uses
+/// `runtime.next_step_seq` so concurrent levels stay race-safe),
+/// but emits the standalone Skipped event rather than the
+/// Started/Completed pair — skipped steps have no LLM work to log.
+///
+/// `agent` label format matches `WorkerAgent::id()` —
+/// `"worker:<role>"` — so per-agent breakdown rollups bucket the
+/// skip against the agent that WOULD have executed.
+async fn log_skip(
+    ctx: &LoopCtx,
+    traj: &TrajectoryId,
+    step: &PlanStep,
+    reason: &str,
+) -> Result<(), RunTaskError> {
+    let step_seq =
+        ctx.runtime
+            .next_step_seq(traj)
+            .await
+            .map_err(|e| RunTaskError::Runtime {
+                trajectory_id: traj.clone(),
+                source: e,
+            })?;
+    let agent_label = format!("worker:{}", step.worker_role);
+    ctx.runtime
+        .append(
+            traj,
+            AgentEvent::StepSkipped {
+                traj: traj.clone(),
+                step_seq,
+                agent: agent_label,
+                plan_step_id: step.id.clone(),
+                reason: reason.to_string(),
+            },
+        )
+        .await
+        .map_err(|e| RunTaskError::Runtime {
+            trajectory_id: traj.clone(),
+            source: e,
+        })?;
+    Ok(())
 }
 
 /// Best-effort: append `TrajectoryAbandoned` so a recovery scan sees

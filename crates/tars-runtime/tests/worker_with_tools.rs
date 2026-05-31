@@ -99,6 +99,7 @@ fn sample_plan() -> tars_runtime::Plan {
             worker_role: "summarise".into(),
             instruction: "read hello.txt and summarise it".into(),
             depends_on: vec![],
+            condition: tars_runtime::StepCondition::Always,
         }],
     }
 }

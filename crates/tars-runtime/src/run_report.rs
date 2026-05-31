@@ -59,6 +59,7 @@ pub async fn build_run_report(
 
     let mut step_count: u32 = 0;
     let mut failed_step_count: u32 = 0;
+    let mut skipped_step_count: u32 = 0;
     let mut llm_call_count: u32 = 0;
     let mut tokens = Usage::default();
 
@@ -128,6 +129,21 @@ pub async fn build_run_report(
                     error,
                 });
             }
+            AgentEvent::StepSkipped {
+                step_seq, agent, ..
+            } => {
+                // Skipped steps allocate a `step_seq` (so the
+                // trajectory's monotonic counter stays gap-free) and
+                // emit a single self-contained event — no matching
+                // `StepStarted` is appended. Reflect that in the
+                // accounting: bump the SKIPPED counter (both global
+                // and per-agent), do NOT touch step_count /
+                // failed_step_count. Cost-attribution code that
+                // reads step_count + tokens stays correct.
+                step_agent.insert(step_seq, agent.clone());
+                skipped_step_count = skipped_step_count.saturating_add(1);
+                bump!(by_agent, agent, skipped_step_count);
+            }
             AgentEvent::LlmCallCaptured {
                 step_seq,
                 provider,
@@ -172,6 +188,7 @@ pub async fn build_run_report(
         wall_clock_ms,
         step_count,
         failed_step_count,
+        skipped_step_count,
         llm_call_count,
         tokens,
         by_provider,

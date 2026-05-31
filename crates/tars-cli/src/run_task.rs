@@ -36,7 +36,7 @@ use tars_pipeline::{
 };
 use tars_runtime::{
     AgentMessage, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, RunTaskError,
-    Runtime, TaskOutcome, VerdictKind, WorkerAgent, run_task,
+    Runtime, StepOutcome, TaskOutcome, VerdictKind, WorkerAgent, run_task,
 };
 use tars_storage::{EventStore, SqliteEventStore};
 use tars_tools::{
@@ -266,31 +266,49 @@ fn print_outcome_human(o: &TaskOutcome) {
     println!("goal: {}", o.plan.goal);
     println!();
     for (i, step) in o.steps.iter().enumerate() {
-        let plan_step = o.plan.steps.iter().find(|s| s.id == step.step_id);
+        let plan_step = o.plan.steps.iter().find(|s| s.id == step.step_id());
         let role = plan_step.map(|s| s.worker_role.as_str()).unwrap_or("?");
-        println!(
-            "[{}/{}] step `{}` (worker_role={role}, attempts={}+1)",
-            i + 1,
-            o.steps.len(),
-            step.step_id,
-            step.refinement_attempts,
-        );
-        if let AgentMessage::PartialResult {
-            summary,
-            confidence,
-            ..
-        } = &step.result
-        {
-            println!("    summary    : {summary}");
-            println!("    confidence : {confidence:.2}");
-        }
-        if let AgentMessage::Verdict { verdict, .. } = &step.verdict {
-            let kind = match verdict {
-                VerdictKind::Approve => "approve",
-                VerdictKind::Reject { .. } => "reject",
-                VerdictKind::Refine { .. } => "refine",
-            };
-            println!("    verdict    : {kind}");
+        match step {
+            StepOutcome::Completed {
+                step_id,
+                result,
+                verdict,
+                refinement_attempts,
+            } => {
+                println!(
+                    "[{}/{}] step `{}` (worker_role={role}, attempts={}+1)",
+                    i + 1,
+                    o.steps.len(),
+                    step_id,
+                    refinement_attempts,
+                );
+                if let AgentMessage::PartialResult {
+                    summary,
+                    confidence,
+                    ..
+                } = result
+                {
+                    println!("    summary    : {summary}");
+                    println!("    confidence : {confidence:.2}");
+                }
+                if let AgentMessage::Verdict { verdict, .. } = verdict {
+                    let kind = match verdict {
+                        VerdictKind::Approve => "approve",
+                        VerdictKind::Reject { .. } => "reject",
+                        VerdictKind::Refine { .. } => "refine",
+                    };
+                    println!("    verdict    : {kind}");
+                }
+            }
+            StepOutcome::Skipped { step_id, reason } => {
+                println!(
+                    "[{}/{}] step `{}` (worker_role={role}, SKIPPED)",
+                    i + 1,
+                    o.steps.len(),
+                    step_id,
+                );
+                println!("    reason     : {reason}");
+            }
         }
         println!();
     }
@@ -303,12 +321,25 @@ fn print_outcome_json(o: &TaskOutcome) -> Result<()> {
     let json = serde_json::json!({
         "trajectory_id": o.trajectory_id.as_ref(),
         "plan": &o.plan,
-        "steps": o.steps.iter().map(|s| serde_json::json!({
-            "step_id": s.step_id,
-            "refinement_attempts": s.refinement_attempts,
-            "result": &s.result,
-            "verdict": &s.verdict,
-        })).collect::<Vec<_>>(),
+        "steps": o.steps.iter().map(|s| match s {
+            StepOutcome::Completed {
+                step_id,
+                result,
+                verdict,
+                refinement_attempts,
+            } => serde_json::json!({
+                "kind": "completed",
+                "step_id": step_id,
+                "refinement_attempts": refinement_attempts,
+                "result": result,
+                "verdict": verdict,
+            }),
+            StepOutcome::Skipped { step_id, reason } => serde_json::json!({
+                "kind": "skipped",
+                "step_id": step_id,
+                "reason": reason,
+            }),
+        }).collect::<Vec<_>>(),
     });
     let s = serde_json::to_string_pretty(&json).context("encode TaskOutcome as JSON")?;
     println!("{s}");

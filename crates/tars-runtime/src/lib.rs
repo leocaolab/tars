@@ -65,7 +65,7 @@ pub use metamorphic::{
     DeleteSubstringMutation, DirectionalRelation, GoldenMatch, InvarianceRelation,
     MetamorphicRelation, Mutation, MutationVerdict, mutation_caught,
 };
-pub use orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep};
+pub use orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep, StepCondition};
 pub use prompt::PromptBuilder;
 pub use run_report::build_run_report;
 pub use runtime::{AgentExecutionError, LocalRuntime, Runtime, execute_agent_step};

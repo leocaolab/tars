@@ -300,13 +300,21 @@ async fn main() -> anyhow::Result<()> {
             .plan
             .steps
             .iter()
-            .find(|ps| ps.id == s.step_id)
+            .find(|ps| ps.id == s.step_id())
             .map(|ps| ps.worker_role.as_str())
             .unwrap_or("?");
-        println!(
-            "│   - {} (worker_role={}, refine_attempts={})",
-            s.step_id, role, s.refinement_attempts,
-        );
+        match s {
+            tars_runtime::StepOutcome::Completed {
+                step_id,
+                refinement_attempts,
+                ..
+            } => println!(
+                "│   - {step_id} (worker_role={role}, refine_attempts={refinement_attempts})",
+            ),
+            tars_runtime::StepOutcome::Skipped { step_id, reason } => println!(
+                "│   - {step_id} (worker_role={role}, SKIPPED: {reason})",
+            ),
+        }
     }
     println!("╰───────────────────────────────────────────────────────────");
     println!();
@@ -356,6 +364,15 @@ async fn main() -> anyhow::Result<()> {
                 classification,
                 ..
             } => format!("StepFailed   #{step_seq} cls={classification:?} err={error}",),
+            AgentEvent::StepSkipped {
+                step_seq,
+                agent,
+                plan_step_id,
+                reason,
+                ..
+            } => format!(
+                "StepSkipped  #{step_seq} agent={agent} plan_step={plan_step_id} reason={reason}",
+            ),
             AgentEvent::TrajectorySuspended { reason, .. } => {
                 format!("TrajectorySuspended reason={reason}")
             }

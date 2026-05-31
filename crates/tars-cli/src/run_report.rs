@@ -190,6 +190,7 @@ mod tests {
             AgentBreakdown {
                 step_count: 1,
                 failed_step_count: 0,
+                skipped_step_count: 0,
                 llm_calls: 1,
                 tokens: Usage::default(),
             },
@@ -203,6 +204,7 @@ mod tests {
             wall_clock_ms: 500,
             step_count: 1,
             failed_step_count: 0,
+            skipped_step_count: 0,
             llm_call_count: 2,
             tokens: Usage {
                 input_tokens: 100,

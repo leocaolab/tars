@@ -164,6 +164,32 @@ pub enum AgentEvent {
         classification: String,
     },
 
+    /// Step was skipped — its conditional gate evaluated false, or
+    /// a transitively-depended-on step was itself skipped (cascade).
+    /// Standalone (no preceding `StepStarted` for skipped steps): the
+    /// event carries both the allocated `step_seq` and the reason in
+    /// one record, so the trajectory log reads "step N: skipped
+    /// because <reason>" without needing to pair start ↔ end.
+    ///
+    /// `agent` is the role that WOULD have executed
+    /// (`"worker:<role>"`) — surfaced so cost-attribution code can
+    /// distinguish "this worker role was scheduled but skipped" from
+    /// "this worker role never appeared".
+    StepSkipped {
+        traj: TrajectoryId,
+        step_seq: u32,
+        agent: String,
+        /// The plan step id that was skipped (e.g. `"s2"`). Distinct
+        /// from `step_seq` (the trajectory-local monotonic counter)
+        /// because the plan-level id is what callers reason about
+        /// when reading the plan + outcomes together.
+        plan_step_id: String,
+        /// Human-readable cause:
+        ///   - `"condition not met (if_dep=...)"` — predicate false.
+        ///   - `"dep `X` was skipped"` — cascade.
+        reason: String,
+    },
+
     // ── External-call captures (replay primitives) ──────────────────
     /// One LLM call within a step. Records what we asked + what we
     /// got back at a summary level. Doc 04 §3.2 envisages a separate
@@ -220,6 +246,7 @@ impl AgentEvent {
             | Self::StepStarted { traj, .. }
             | Self::StepCompleted { traj, .. }
             | Self::StepFailed { traj, .. }
+            | Self::StepSkipped { traj, .. }
             | Self::LlmCallCaptured { traj, .. } => traj,
         }
     }
@@ -451,6 +478,13 @@ mod tests {
                 step_seq: 1,
                 error: "x".into(),
                 classification: "permanent".into(),
+            },
+            AgentEvent::StepSkipped {
+                traj: t(),
+                step_seq: 1,
+                agent: "worker:x".into(),
+                plan_step_id: "s1".into(),
+                reason: "condition not met".into(),
             },
             AgentEvent::LlmCallCaptured {
                 traj: t(),

@@ -73,6 +73,19 @@ pub struct RunReport {
     // ── step accounting ────────────────────────────────────────────
     pub step_count: u32,
     pub failed_step_count: u32,
+    /// Steps that were skipped at runtime — either their
+    /// `StepCondition` evaluated false, or a transitively-depended-on
+    /// step was itself skipped (cascade). Tracked separately from
+    /// `step_count` so consumers can distinguish "this plan had 5
+    /// steps, 3 ran and 2 were skipped" from "this plan had 5 steps,
+    /// all ran". Skipped steps don't burn LLM budget — they appear
+    /// only as [`AgentEvent::StepSkipped`] (no `StepStarted` /
+    /// `StepCompleted` pair).
+    ///
+    /// Defaulted on deserialise so reports persisted before this
+    /// field existed continue to read.
+    #[serde(default)]
+    pub skipped_step_count: u32,
 
     // ── LLM call accounting (from LlmCallCaptured.usage) ───────────
     pub llm_call_count: u32,
@@ -162,6 +175,10 @@ pub struct ProviderBreakdown {
 pub struct AgentBreakdown {
     pub step_count: u32,
     pub failed_step_count: u32,
+    /// See [`RunReport::skipped_step_count`] — same semantics, scoped
+    /// to this agent. Defaulted on deserialise for backward compat.
+    #[serde(default)]
+    pub skipped_step_count: u32,
     pub llm_calls: u32,
     pub tokens: Usage,
 }
@@ -206,6 +223,7 @@ mod tests {
             wall_clock_ms: 0,
             step_count: 0,
             failed_step_count: 0,
+            skipped_step_count: 0,
             llm_call_count: 0,
             tokens: Usage::default(),
             by_provider: BTreeMap::new(),

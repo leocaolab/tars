@@ -16,7 +16,7 @@ use tars_pipeline::{LlmService, Pipeline, ProviderService};
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{
     AgentEvent, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, RunTaskError, Runtime,
-    VerdictKind, WorkerAgent, run_task,
+    StepOutcome, VerdictKind, WorkerAgent, run_task,
 };
 use tars_storage::{EventStore, SqliteEventStore};
 use tars_types::{
@@ -24,6 +24,38 @@ use tars_types::{
     RequestContext, StopReason, Usage,
 };
 use tokio_util::sync::CancellationToken;
+
+/// Borrowed view of a `StepOutcome::Completed` for the asserts below
+/// — saves every test from rewriting the same `if let StepOutcome::
+/// Completed { .. } = outcome else { panic! }` pattern. Field names
+/// mirror the variant so existing assertions like `.refinement_attempts`
+/// keep working with a one-character call-site change (insert
+/// `expect_completed(...)` before the field access).
+struct CompletedView<'a> {
+    step_id: &'a str,
+    result: &'a tars_runtime::AgentMessage,
+    verdict: &'a tars_runtime::AgentMessage,
+    refinement_attempts: u32,
+}
+
+fn expect_completed(outcome: &StepOutcome) -> CompletedView<'_> {
+    match outcome {
+        StepOutcome::Completed {
+            step_id,
+            result,
+            verdict,
+            refinement_attempts,
+        } => CompletedView {
+            step_id: step_id.as_str(),
+            result,
+            verdict,
+            refinement_attempts: *refinement_attempts,
+        },
+        StepOutcome::Skipped { step_id, reason } => panic!(
+            "expected Completed outcome for step {step_id}; got Skipped (reason: {reason})",
+        ),
+    }
+}
 
 // ── Queueing test provider ─────────────────────────────────────────────
 //
@@ -194,10 +226,11 @@ async fn happy_path_one_step_approves_first_attempt() {
 
     assert_eq!(outcome.plan.steps.len(), 1);
     assert_eq!(outcome.steps.len(), 1);
-    assert_eq!(outcome.steps[0].step_id, "s1");
-    assert_eq!(outcome.steps[0].refinement_attempts, 0);
+    let s0 = expect_completed(&outcome.steps[0]);
+    assert_eq!(s0.step_id, "s1");
+    assert_eq!(s0.refinement_attempts, 0);
     assert!(matches!(
-        &outcome.steps[0].verdict,
+        s0.verdict,
         tars_runtime::AgentMessage::Verdict {
             verdict: VerdictKind::Approve,
             ..
@@ -257,8 +290,9 @@ async fn refine_then_approve_records_attempt_count_and_threads_suggestions() {
 
     assert_eq!(outcome.steps.len(), 1);
     assert_eq!(
-        outcome.steps[0].refinement_attempts, 1,
-        "one refine before approve"
+        expect_completed(&outcome.steps[0]).refinement_attempts,
+        1,
+        "one refine before approve",
     );
 
     // The second worker call should have received the Critic's
@@ -402,10 +436,10 @@ async fn multi_step_plan_runs_each_step_in_order() {
     .unwrap();
 
     assert_eq!(outcome.steps.len(), 2);
-    assert_eq!(outcome.steps[0].step_id, "s1");
-    assert_eq!(outcome.steps[1].step_id, "s2");
+    assert_eq!(outcome.steps[0].step_id(), "s1");
+    assert_eq!(outcome.steps[1].step_id(), "s2");
     for s in &outcome.steps {
-        assert_eq!(s.refinement_attempts, 0);
+        assert_eq!(expect_completed(s).refinement_attempts, 0);
     }
 
     // 1 orch + 2 * (worker + critic) = 5 LLM calls.
@@ -579,9 +613,9 @@ async fn dag_fanout_plan_threads_dep_results_into_merge_step() {
     // (2) Output preserves plan-declaration order even though level-0
     // steps may have completed in either order.
     assert_eq!(outcome.steps.len(), 3);
-    assert_eq!(outcome.steps[0].step_id, "s1");
-    assert_eq!(outcome.steps[1].step_id, "s2");
-    assert_eq!(outcome.steps[2].step_id, "s3");
+    assert_eq!(outcome.steps[0].step_id(), "s1");
+    assert_eq!(outcome.steps[1].step_id(), "s2");
+    assert_eq!(outcome.steps[2].step_id(), "s3");
 
     // (1) Level ordering: the merge step must START after both leaves
     // are DONE. `StepCompleted` doesn't carry the `agent` field, so
@@ -738,7 +772,7 @@ async fn replan_on_reject_recovers_with_second_plan() {
     assert_eq!(outcome.plan.plan_id, "p1-v2");
     assert_eq!(outcome.steps.len(), 1);
     // Pull the summary out of the typed PartialResult.
-    let summary = match &outcome.steps[0].result {
+    let summary = match expect_completed(&outcome.steps[0]).result {
         tars_runtime::AgentMessage::PartialResult { summary, .. } => summary.clone(),
         other => panic!("expected PartialResult, got {other:?}"),
     };
@@ -1036,4 +1070,230 @@ fn fanout_three_roots_plan() -> String {
         ]
     }"#
     .to_string()
+}
+
+// ── Conditional steps ──────────────────────────────────────────────────
+
+/// Two-step plan where s2 has a condition gating it on s1's summary
+/// CONTAINING "failed". The canned worker output for s1 is "lint
+/// reported: failed", so the predicate matches → s2 runs.
+///
+/// Counterpart to [`condition_false_skips_step_and_logs_step_skipped`]
+/// below; together they pin both directions of the gate.
+#[tokio::test]
+async fn condition_true_runs_step_normally() {
+    let plan = r#"{
+        "plan_id": "p-cond-t",
+        "goal": "lint then fix if needed",
+        "steps": [
+            {"id":"s1","worker_role":"summarise","instruction":"run lint","depends_on":[]},
+            {
+                "id":"s2","worker_role":"summarise","instruction":"apply fixes",
+                "depends_on":["s1"],
+                "condition": {"kind":"if_dep_summary_contains","if_dep":"s1","contains":"failed"}
+            }
+        ]
+    }"#;
+    let provider = QueuedProvider::new(vec![
+        plan.to_string(),
+        worker_ok("lint reported: failed"),
+        approve(),
+        worker_ok("applied 3 fixes"),
+        approve(),
+    ]);
+    let llm = build_llm(provider.clone());
+    let (rt, _dir) = fresh_runtime().await;
+    let (orch, worker, critic) = agents();
+
+    let outcome = run_task(
+        rt.clone() as Arc<dyn Runtime>,
+        llm,
+        orch,
+        worker,
+        critic,
+        "lint then fix if needed",
+        RunTaskConfig::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("both steps should run");
+
+    assert_eq!(outcome.steps.len(), 2);
+    let s2 = &outcome.steps[1];
+    assert!(
+        !s2.is_skipped(),
+        "s2 should have RUN — its condition matched (`failed` ∈ s1.summary)",
+    );
+    // Both steps appear as Completed at their declaration index.
+    assert_eq!(expect_completed(&outcome.steps[0]).step_id, "s1");
+    assert_eq!(expect_completed(&outcome.steps[1]).step_id, "s2");
+
+    // Five LLM calls (orch + 2 × (worker + critic)) — no calls were
+    // saved, since both workers ran.
+    assert_eq!(provider.history().len(), 5);
+}
+
+/// Same plan shape as above but s1's worker reports "lint reported:
+/// clean" — predicate false → s2 should SKIP. The outcome should
+/// carry s2 as `StepOutcome::Skipped`, the trajectory should hold
+/// exactly one `AgentEvent::StepSkipped` for s2, and the LLM history
+/// should be 3 calls (orch + s1's worker + s1's critic) — s2's
+/// worker + critic both saved.
+#[tokio::test]
+async fn condition_false_skips_step_and_logs_step_skipped() {
+    let plan = r#"{
+        "plan_id": "p-cond-f",
+        "goal": "lint then fix if needed",
+        "steps": [
+            {"id":"s1","worker_role":"summarise","instruction":"run lint","depends_on":[]},
+            {
+                "id":"s2","worker_role":"lint_fix","instruction":"apply fixes",
+                "depends_on":["s1"],
+                "condition": {"kind":"if_dep_summary_contains","if_dep":"s1","contains":"failed"}
+            }
+        ]
+    }"#;
+    let provider = QueuedProvider::new(vec![
+        plan.to_string(),
+        worker_ok("lint reported: clean"),
+        approve(),
+        // NO entries for s2's worker / critic — the gate should
+        // skip s2 entirely, so the queue should land with leftover
+        // entries iff we accidentally invoke s2's worker.
+    ]);
+    let llm = build_llm(provider.clone());
+    let (rt, _dir) = fresh_runtime().await;
+    let (orch, worker, critic) = agents();
+
+    let outcome = run_task(
+        rt.clone() as Arc<dyn Runtime>,
+        llm,
+        orch,
+        worker,
+        critic,
+        "lint then fix if needed",
+        RunTaskConfig::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("task should succeed (s2 is gated out, not failed)");
+
+    assert_eq!(outcome.steps.len(), 2, "both steps appear in the outcome");
+    // s1 ran.
+    assert_eq!(expect_completed(&outcome.steps[0]).step_id, "s1");
+    // s2 was skipped, with the canonical reason.
+    match &outcome.steps[1] {
+        StepOutcome::Skipped { step_id, reason } => {
+            assert_eq!(step_id, "s2");
+            assert!(
+                reason.contains("if_dep") && reason.contains("contains"),
+                "skip reason should name the predicate fields: {reason:?}",
+            );
+        }
+        other => panic!("expected s2 to be Skipped, got {other:?}"),
+    }
+
+    // Only 3 LLM calls — s2's worker + critic were saved.
+    assert_eq!(
+        provider.history().len(),
+        3,
+        "expected 3 LLM calls (orch + s1 worker + s1 critic); s2's pair should be saved",
+    );
+
+    // Trajectory event log carries the StepSkipped event with the
+    // canonical fields.
+    let events = rt.replay(&outcome.trajectory_id).await.unwrap();
+    let skip = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::StepSkipped {
+                plan_step_id,
+                agent,
+                reason,
+                ..
+            } if plan_step_id == "s2" => Some((agent.clone(), reason.clone())),
+            _ => None,
+        })
+        .expect("expected an AgentEvent::StepSkipped for s2");
+    assert_eq!(skip.0, "worker:lint_fix", "agent label format");
+    assert!(skip.1.contains("if_dep"));
+}
+
+/// Three-step linear plan with a condition on s2 that evaluates
+/// false. s3 depends on s2, so it should cascade-skip even though
+/// it has no condition of its own. Both s2 and s3 land as
+/// `StepOutcome::Skipped`; only s1's worker+critic LLM calls fire.
+#[tokio::test]
+async fn skip_cascade_propagates_through_dependent_step() {
+    let plan = r#"{
+        "plan_id": "p-cascade",
+        "goal": "check then fix then report",
+        "steps": [
+            {"id":"s1","worker_role":"summarise","instruction":"check","depends_on":[]},
+            {
+                "id":"s2","worker_role":"summarise","instruction":"fix",
+                "depends_on":["s1"],
+                "condition": {"kind":"if_dep_summary_contains","if_dep":"s1","contains":"failed"}
+            },
+            {"id":"s3","worker_role":"summarise","instruction":"report","depends_on":["s2"]}
+        ]
+    }"#;
+    let provider = QueuedProvider::new(vec![
+        plan.to_string(),
+        worker_ok("check: clean"),
+        approve(),
+        // No further entries — s2 + s3 should both skip.
+    ]);
+    let llm = build_llm(provider.clone());
+    let (rt, _dir) = fresh_runtime().await;
+    let (orch, worker, critic) = agents();
+
+    let outcome = run_task(
+        rt.clone() as Arc<dyn Runtime>,
+        llm,
+        orch,
+        worker,
+        critic,
+        "check then fix then report",
+        RunTaskConfig::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("task should succeed");
+
+    assert_eq!(outcome.steps.len(), 3);
+    assert_eq!(expect_completed(&outcome.steps[0]).step_id, "s1");
+    // s2 — skipped due to condition.
+    match &outcome.steps[1] {
+        StepOutcome::Skipped { step_id, reason } => {
+            assert_eq!(step_id, "s2");
+            assert!(reason.contains("if_dep"));
+        }
+        other => panic!("expected s2 Skipped, got {other:?}"),
+    }
+    // s3 — skipped via cascade. Reason must NAME the upstream skipped dep.
+    match &outcome.steps[2] {
+        StepOutcome::Skipped { step_id, reason } => {
+            assert_eq!(step_id, "s3");
+            assert!(
+                reason.contains("dep `s2` was skipped"),
+                "cascade reason should name the upstream skipped dep `s2`: {reason:?}",
+            );
+        }
+        other => panic!("expected s3 Skipped, got {other:?}"),
+    }
+
+    // Only s1's three LLM calls fired (orch plan, s1 worker, s1 critic).
+    assert_eq!(provider.history().len(), 3);
+
+    // Two StepSkipped events in the trajectory — one per skipped step.
+    let events = rt.replay(&outcome.trajectory_id).await.unwrap();
+    let skipped_ids: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::StepSkipped { plan_step_id, .. } => Some(plan_step_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(skipped_ids, vec!["s2", "s3"]);
 }

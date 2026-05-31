@@ -576,6 +576,7 @@ mod tests {
                 worker_role: "summarise".into(),
                 instruction: "produce a 2-sentence summary".into(),
                 depends_on: vec![],
+                condition: crate::orchestrator::StepCondition::Always,
             }],
         }
     }
@@ -634,12 +635,14 @@ mod tests {
                     worker_role: "summarise".into(),
                     instruction: "Leaf A".into(),
                     depends_on: vec![],
+                    condition: crate::orchestrator::StepCondition::Always,
                 },
                 PlanStep {
                     id: "s2".into(),
                     worker_role: "summarise".into(),
                     instruction: "Consume A".into(),
                     depends_on: vec!["s1".into()],
+                    condition: crate::orchestrator::StepCondition::Always,
                 },
             ],
         };
