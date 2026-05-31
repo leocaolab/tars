@@ -137,6 +137,11 @@ pub async fn execute(args: RunTaskArgs, config_path: Option<PathBuf>) -> Result<
 
     let config = RunTaskConfig {
         max_refinements_per_step: args.max_refinements,
+        // CLI-driven runs default to replan-disabled until a `--max-replans`
+        // flag is wired through args. Preserves pre-replan CLI behaviour:
+        // first Critic Reject = task fail. Programmatic callers (and the
+        // new run_task integration tests) opt in via the field directly.
+        max_replans: 0,
     };
     let cancel = CancellationToken::new();
 

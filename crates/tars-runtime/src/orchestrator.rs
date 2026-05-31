@@ -248,6 +248,73 @@ impl OrchestratorAgent {
             .deterministic()
             .build()
     }
+
+    /// Construct a *replan* ChatRequest: the Critic rejected a step of
+    /// the prior plan, so the orchestrator gets another shot with all
+    /// the context from the failed attempt in hand.
+    ///
+    /// The payload is structured (not free-form prose) so the
+    /// orchestrator's training can pattern-match on it:
+    ///
+    ///   - `goal` — the original user goal, unchanged across replans.
+    ///   - `previous_plan` — the plan that just failed, in full.
+    ///   - `previous_results` — which steps had already produced
+    ///     accepted PartialResults before the rejection; the new plan
+    ///     can incorporate (or redo) the work they represent.
+    ///   - `rejected_step` + `reject_reason` — exact failure site and
+    ///     the Critic's verbatim reason, so the planner doesn't
+    ///     re-propose the same shape.
+    ///   - `replan_attempt` — N-th replan (1-based), so the planner
+    ///     can escalate strategy under repeated failure (e.g. fall
+    ///     back to a simpler / more conservative shape on attempt 3+).
+    ///
+    /// The system prompt for replanning is the same as for a fresh
+    /// plan (`PLANNER_SYSTEM_PROMPT`); we don't want the planner
+    /// behaving differently in replan vs fresh — the context block
+    /// is what carries the difference.
+    pub fn build_replanner_request(
+        &self,
+        goal: &str,
+        previous_plan: &Plan,
+        previous_results: &std::collections::HashMap<String, crate::message::AgentMessage>,
+        rejected_step: &str,
+        reject_reason: &str,
+        replan_attempt: u32,
+    ) -> ChatRequest {
+        let prior_results_json: serde_json::Map<String, serde_json::Value> = previous_results
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    serde_json::to_value(v).unwrap_or_else(|e| {
+                        serde_json::json!({"error": format!("encode prior result: {e}")})
+                    }),
+                )
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "goal": goal,
+            "previous_plan": previous_plan,
+            "previous_results": prior_results_json,
+            "rejected_step": rejected_step,
+            "reject_reason": reject_reason,
+            "replan_attempt": replan_attempt,
+            "instruction": format!(
+                "The previous plan's step `{rejected_step}` was rejected by the Critic. \
+                 Produce a NEW plan that addresses the rejection. You may reuse step ids \
+                 from the previous plan ONLY if their work is unchanged (downstream \
+                 callers will re-execute them — there is no checkpoint reuse). Prefer \
+                 a different decomposition over re-trying the same step shape verbatim."
+            ),
+        });
+        let user_text = serde_json::to_string_pretty(&payload)
+            .expect("JSON encoding of replan context is infallible");
+        PromptBuilder::new(self.model.clone(), user_text)
+            .system(PLANNER_SYSTEM_PROMPT)
+            .structured_output("Plan", plan_json_schema())
+            .deterministic()
+            .build()
+    }
 }
 
 #[async_trait]

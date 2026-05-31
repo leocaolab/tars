@@ -63,12 +63,20 @@ pub struct RunTaskConfig {
     /// initial attempt). `0` means "Worker gets exactly one chance,
     /// any Refine verdict fails the task".
     pub max_refinements_per_step: u32,
+    /// Maximum number of times the Orchestrator may replan after a
+    /// Critic `Reject` verdict. `0` means "the first Reject is
+    /// terminal" — the historical behaviour before replan landed.
+    /// Counts each replan separately: with `max_replans = 2` the
+    /// orchestrator gets the initial plan + up to 2 replans = 3
+    /// total plan attempts before `ReplanExhausted` fires.
+    pub max_replans: u32,
 }
 
 impl Default for RunTaskConfig {
     fn default() -> Self {
         Self {
             max_refinements_per_step: 2,
+            max_replans: 2,
         }
     }
 }
@@ -122,13 +130,23 @@ pub enum RunTaskError {
         #[source]
         source: CriticError,
     },
-    /// Critic returned `Reject{reason}` for a step. We treat reject as
-    /// terminal for the task (replan is future work).
-    #[error("rejected (step `{step_id}`): {reason}")]
-    Rejected {
+    /// Critic returned `Reject{reason}` for a step **and** the
+    /// orchestrator exhausted its `max_replans` budget — i.e. the
+    /// original plan failed, every replan attempt also produced a
+    /// rejected step, so the task is unsalvageable. The `step_id`
+    /// is the step that triggered the LAST rejection; the trajectory
+    /// log carries every intermediate plan + reject for forensics.
+    /// (Pre-replan, this variant fired on the FIRST reject — kept
+    /// the name to avoid breaking match-arms in downstream code that
+    /// only ever cared about "task rejected, give up".)
+    #[error("rejected after {replans} replan(s); last failure on step `{step_id}`: {reason}")]
+    ReplanExhausted {
         trajectory_id: TrajectoryId,
+        /// Step id of the LAST replan's rejection (the most recent).
         step_id: String,
         reason: String,
+        /// Total replan attempts made before giving up (= max_replans).
+        replans: u32,
     },
     /// Critic kept asking for Refine and we hit the per-step retry cap.
     #[error("refine exhausted (step `{step_id}`) after {attempts} attempts")]
@@ -162,7 +180,7 @@ impl RunTaskError {
             Self::Orchestrator { trajectory_id, .. }
             | Self::Worker { trajectory_id, .. }
             | Self::Critic { trajectory_id, .. }
-            | Self::Rejected { trajectory_id, .. }
+            | Self::ReplanExhausted { trajectory_id, .. }
             | Self::RefineExhausted { trajectory_id, .. }
             | Self::Runtime { trajectory_id, .. }
             | Self::AgentStep { trajectory_id, .. } => trajectory_id,
@@ -225,69 +243,131 @@ pub async fn run_task(
             source: e,
         })?;
 
-    // ── 1. Plan ────────────────────────────────────────────────────────
-    let plan = match plan_step(&ctx, &traj, goal).await {
-        Ok(p) => p,
-        Err(e) => {
-            abandon(&ctx.runtime, &traj, &format!("orchestrator failed: {e}")).await;
-            return Err(e);
-        }
-    };
-
-    // ── 2. Execute the plan as a DAG — depth-batched parallel ──────────
+    // ── 1+2. Plan → Execute (DAG, depth-batched) → on Critic Reject, ──
+    // ── replan from current state and retry the whole task ──
     //
-    // Steps grouped by dependency depth (`Plan::execution_levels`).
-    // Level 0 = roots (no deps); level N = steps whose deepest dep is
-    // at N-1. Within a level the steps are independent, so we fan them
-    // out via `join_all`; across levels we wait for the previous batch
-    // before starting the next. Earlier the loop was serial-by-
-    // declaration; identical behaviour falls out for any plan where
-    // every step depends on the previous one, but a fan-out plan
-    // (two leaves into one merge) now actually runs the leaves in
-    // parallel instead of single-file.
+    // Plan ↔ execute is wrapped in a replan loop. On the first
+    // iteration we call `plan_step` (fresh plan from the goal alone).
+    // On subsequent iterations we call `replan_step` with the prior
+    // plan + partial results + reject reason, so the orchestrator can
+    // propose a different decomposition rather than re-trying the
+    // same shape and rejecting again.
     //
-    // Prior step results thread into dependent steps' worker prompts:
-    // `completed` carries the parsed `AgentMessage::PartialResult` of
-    // every step a downstream worker depends on, so the worker can see
-    // what its inputs actually said. Without this, a step would only
-    // know its deps by id, not by their content — defeating most of
-    // the point of a multi-step plan.
-    //
-    // Failure semantics: if any step in a level fails, we still await
-    // every concurrent sibling (so their event-log writes finish and
-    // the trajectory state is consistent) and then bail out with the
-    // first failure. Future work: cancel siblings via the
-    // CancellationToken to stop wasting LLM calls — left as
-    // a follow-up to keep this commit focused on the DAG topology.
+    // Execute phase is unchanged from the DAG commit: depth-batched
+    // join_all per level, dep results threaded into dependent
+    // workers' prompts. A Critic Reject in any step BREAKS out of
+    // the level loop (but doesn't abandon — we wait for in-flight
+    // siblings to finish so the event log stays consistent) and the
+    // outer replan loop kicks in. Refine and other errors keep their
+    // pre-replan semantics (refine retries in place, hard errors
+    // abandon the trajectory).
     use std::collections::HashMap;
-    let mut step_outcomes_by_id: HashMap<String, StepOutcome> =
-        HashMap::with_capacity(plan.steps.len());
-    let mut completed: HashMap<String, AgentMessage> = HashMap::with_capacity(plan.steps.len());
+    let mut replan_attempt: u32 = 0;
+    let mut plan: Plan;
+    let mut step_outcomes_by_id: HashMap<String, StepOutcome>;
+    let mut prior_plan: Option<Plan> = None;
+    let mut prior_completed: HashMap<String, AgentMessage> = HashMap::new();
+    let mut last_reject: Option<(String, String)> = None;
+    loop {
+        // ── Plan or replan ───────────────────────────────────────────
+        plan = match if replan_attempt == 0 {
+            plan_step(&ctx, &traj, goal).await
+        } else {
+            let (rejected_step, reject_reason) = last_reject
+                .as_ref()
+                .expect("replan path entered only via Reject, which sets last_reject");
+            replan_step(
+                &ctx,
+                &traj,
+                goal,
+                prior_plan
+                    .as_ref()
+                    .expect("replan path always has a prior_plan from the previous iteration"),
+                &prior_completed,
+                rejected_step,
+                reject_reason,
+                replan_attempt,
+            )
+            .await
+        } {
+            Ok(p) => p,
+            Err(e) => {
+                abandon(&ctx.runtime, &traj, &format!("orchestrator failed: {e}")).await;
+                return Err(e);
+            }
+        };
 
-    for level in plan.execution_levels() {
-        // Run every step in this level concurrently. `try_join_all` would
-        // short-circuit on first error but also cancel pending futures,
-        // which would leave half-written trajectory steps; the explicit
-        // `join_all` + post-pass loop preserves event-log integrity.
-        let results = futures::future::join_all(
-            level
-                .iter()
-                .map(|step| run_one_step(&ctx, &traj, &plan, step, goal, &completed)),
-        )
-        .await;
+        // ── Execute (DAG depth-batched parallel) ─────────────────────
+        step_outcomes_by_id = HashMap::with_capacity(plan.steps.len());
+        let mut completed: HashMap<String, AgentMessage> =
+            HashMap::with_capacity(plan.steps.len());
+        let mut hit_reject: Option<(String, String)> = None;
 
-        for (step, outcome_res) in level.iter().zip(results) {
-            match outcome_res {
-                Ok(outcome) => {
-                    completed.insert(step.id.clone(), outcome.result.clone());
-                    step_outcomes_by_id.insert(step.id.clone(), outcome);
-                }
-                Err(e) => {
-                    abandon(&ctx.runtime, &traj, &format!("{e}")).await;
-                    return Err(e);
+        'level_loop: for level in plan.execution_levels() {
+            // Run every step in this level concurrently. `try_join_all`
+            // would short-circuit on first error but also cancel pending
+            // futures, which would leave half-written trajectory steps;
+            // the explicit `join_all` + post-pass loop preserves
+            // event-log integrity.
+            let results = futures::future::join_all(
+                level
+                    .iter()
+                    .map(|step| run_one_step(&ctx, &traj, &plan, step, goal, &completed)),
+            )
+            .await;
+
+            for (step, step_res) in level.iter().zip(results) {
+                match step_res {
+                    Ok(StepResult::Approved(outcome)) => {
+                        completed.insert(step.id.clone(), outcome.result.clone());
+                        step_outcomes_by_id.insert(step.id.clone(), outcome);
+                    }
+                    Ok(StepResult::Rejected { step_id, reason }) => {
+                        // First reject signal in this iteration wins —
+                        // we still drain the rest of the batch's results
+                        // (siblings already completed, this is just the
+                        // post-pass loop) so event-log writes don't get
+                        // orphaned, then break out of the level loop to
+                        // skip remaining levels.
+                        if hit_reject.is_none() {
+                            hit_reject = Some((step_id, reason));
+                        }
+                    }
+                    Err(e) => {
+                        abandon(&ctx.runtime, &traj, &format!("{e}")).await;
+                        return Err(e);
+                    }
                 }
             }
+            if hit_reject.is_some() {
+                break 'level_loop;
+            }
         }
+
+        // ── Decide: success / replan / replan-exhausted ─────────────
+        if let Some((rejected_step, reason)) = hit_reject {
+            if replan_attempt >= ctx.config.max_replans {
+                let err = RunTaskError::ReplanExhausted {
+                    trajectory_id: traj.clone(),
+                    step_id: rejected_step,
+                    reason,
+                    replans: replan_attempt,
+                };
+                abandon(&ctx.runtime, &traj, &format!("{err}")).await;
+                return Err(err);
+            }
+            // Stash context for the next iteration's replan prompt
+            // (orchestrator sees prior plan + completed steps' results
+            // + reject reason) and loop.
+            prior_completed = completed;
+            prior_plan = Some(plan);
+            last_reject = Some((rejected_step, reason));
+            replan_attempt += 1;
+            continue;
+        }
+
+        // No reject anywhere — task succeeded. Break out of replan loop.
+        break;
     }
 
     // Reassemble the per-step Vec in plan-declaration order. The DAG
@@ -302,7 +382,7 @@ pub async fn run_task(
         .map(|s| {
             step_outcomes_by_id
                 .remove(&s.id)
-                .expect("every plan step was either completed or surfaced as Err above")
+                .expect("every plan step was either completed or surfaced as Reject above")
         })
         .collect();
 
@@ -346,6 +426,50 @@ pub async fn run_task(
 /// Run the Orchestrator: one trajectory step, parse JSON → typed Plan.
 async fn plan_step(ctx: &LoopCtx, traj: &TrajectoryId, goal: &str) -> Result<Plan, RunTaskError> {
     let req = ctx.orchestrator.build_planner_request(goal);
+    drive_orchestrator_call(ctx, traj, req, "<planner>").await
+}
+
+/// Same as [`plan_step`] but uses `build_replanner_request` — the
+/// orchestrator sees the failed plan + its partial results + the
+/// Critic's reject reason so it can propose a different decomposition.
+/// `replan_attempt` is the 1-based count (caller increments before
+/// calling).
+#[allow(clippy::too_many_arguments)]
+async fn replan_step(
+    ctx: &LoopCtx,
+    traj: &TrajectoryId,
+    goal: &str,
+    previous_plan: &Plan,
+    previous_results: &std::collections::HashMap<String, AgentMessage>,
+    rejected_step: &str,
+    reject_reason: &str,
+    replan_attempt: u32,
+) -> Result<Plan, RunTaskError> {
+    let req = ctx.orchestrator.build_replanner_request(
+        goal,
+        previous_plan,
+        previous_results,
+        rejected_step,
+        reject_reason,
+        replan_attempt,
+    );
+    drive_orchestrator_call(
+        ctx,
+        traj,
+        req,
+        &format!("<replanner attempt={replan_attempt}>"),
+    )
+    .await
+}
+
+/// Shared body of `plan_step` + `replan_step`: drive one orchestrator
+/// LLM call via `execute_agent_step`, parse the JSON into a `Plan`.
+async fn drive_orchestrator_call(
+    ctx: &LoopCtx,
+    traj: &TrajectoryId,
+    req: tars_types::ChatRequest,
+    step_label: &str,
+) -> Result<Plan, RunTaskError> {
     let agent: Arc<dyn Agent> = ctx.orchestrator.clone();
     let result = execute_agent_step(
         ctx.runtime.as_ref(),
@@ -358,7 +482,7 @@ async fn plan_step(ctx: &LoopCtx, traj: &TrajectoryId, goal: &str) -> Result<Pla
     .await
     .map_err(|e| RunTaskError::AgentStep {
         trajectory_id: traj.clone(),
-        step_id: "<planner>".into(),
+        step_id: step_label.to_string(),
         source: e,
     })?;
 
@@ -381,12 +505,27 @@ async fn plan_step(ctx: &LoopCtx, traj: &TrajectoryId, goal: &str) -> Result<Pla
     })
 }
 
+/// Internal step result discriminating Approved-with-outcome from the
+/// Reject signal that the outer replan loop catches. We avoid using
+/// `RunTaskError::ReplanExhausted` here because that's a TERMINAL
+/// error (used after replan budget is exhausted) — a single-step
+/// reject is recoverable via replan and shouldn't propagate as an
+/// `Err` until the loop decides to give up.
+enum StepResult {
+    Approved(StepOutcome),
+    Rejected { step_id: String, reason: String },
+}
+
 /// Run one plan step's Worker → Critic loop with Refine retries.
 ///
 /// `completed` carries the parsed `AgentMessage::PartialResult` of
 /// every step earlier in the dependency graph — the worker prompt
 /// surfaces this step's deps' actual outputs (not just their ids) so
 /// the worker can use upstream work instead of re-deriving it.
+///
+/// Returns `Ok(StepResult::Rejected{..})` rather than
+/// `Err(ReplanExhausted{..})` when the Critic rejects — the outer
+/// replan loop decides whether to keep trying (replan) or give up.
 async fn run_one_step(
     ctx: &LoopCtx,
     traj: &TrajectoryId,
@@ -394,7 +533,7 @@ async fn run_one_step(
     step: &PlanStep,
     goal: &str,
     completed: &std::collections::HashMap<String, AgentMessage>,
-) -> Result<StepOutcome, RunTaskError> {
+) -> Result<StepResult, RunTaskError> {
     let mut refinements: Vec<String> = Vec::new();
     let mut attempts: u32 = 0;
     loop {
@@ -422,16 +561,22 @@ async fn run_one_step(
 
         match verdict_kind {
             VerdictKind::Approve => {
-                return Ok(StepOutcome {
+                return Ok(StepResult::Approved(StepOutcome {
                     step_id: step.id.clone(),
                     result: worker_result,
                     verdict: verdict_msg,
                     refinement_attempts: attempts,
-                });
+                }));
             }
             VerdictKind::Reject { reason } => {
-                return Err(RunTaskError::Rejected {
-                    trajectory_id: traj.clone(),
+                // Don't propagate as `Err` — the outer replan loop in
+                // `run_task` discriminates `StepResult::Rejected` to
+                // decide whether to try a fresh plan or give up. This
+                // keeps run_one_step's contract "I either produced a
+                // step outcome, observed a critic-reject signal, or
+                // hit a real error" — three independent failure
+                // modes, three return shapes.
+                return Ok(StepResult::Rejected {
                     step_id: step.id.clone(),
                     reason,
                 });
@@ -592,10 +737,11 @@ mod tests {
     fn error_trajectory_id_extraction_works_for_every_variant() {
         let t = TrajectoryId::new("t");
         let cases: Vec<RunTaskError> = vec![
-            RunTaskError::Rejected {
+            RunTaskError::ReplanExhausted {
                 trajectory_id: t.clone(),
                 step_id: "s".into(),
                 reason: "x".into(),
+                replans: 2,
             },
             RunTaskError::RefineExhausted {
                 trajectory_id: t.clone(),

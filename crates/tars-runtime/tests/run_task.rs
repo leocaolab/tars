@@ -274,7 +274,12 @@ async fn refine_then_approve_records_attempt_count_and_threads_suggestions() {
 }
 
 #[tokio::test]
-async fn reject_verdict_aborts_task_and_marks_trajectory_abandoned() {
+async fn reject_verdict_aborts_task_when_max_replans_is_zero() {
+    // Pre-replan semantics: with max_replans = 0, the first reject is
+    // terminal and the task fails. This used to fire as
+    // `RunTaskError::Rejected`; after the replan loop landed, the
+    // variant is `ReplanExhausted { replans: 0 }` — same meaning
+    // ("rejected; we gave up immediately"), new name.
     let provider = QueuedProvider::new(vec![
         one_step_plan(),
         worker_ok("Off-base summary."),
@@ -291,7 +296,10 @@ async fn reject_verdict_aborts_task_and_marks_trajectory_abandoned() {
         worker,
         critic,
         "summarise PR #42",
-        RunTaskConfig::default(),
+        RunTaskConfig {
+            max_refinements_per_step: 2,
+            max_replans: 0,
+        },
         CancellationToken::new(),
     )
     .await
@@ -299,13 +307,14 @@ async fn reject_verdict_aborts_task_and_marks_trajectory_abandoned() {
 
     let traj = err.trajectory_id().clone();
     match err {
-        RunTaskError::Rejected {
-            step_id, reason, ..
+        RunTaskError::ReplanExhausted {
+            step_id, reason, replans, ..
         } => {
             assert_eq!(step_id, "s1");
             assert!(reason.contains("missed the entire point"));
+            assert_eq!(replans, 0, "max_replans=0 → no replan attempts before giving up");
         }
-        other => panic!("expected Rejected, got {other:?}"),
+        other => panic!("expected ReplanExhausted, got {other:?}"),
     }
 
     let events = rt.replay(&traj).await.unwrap();
@@ -339,6 +348,7 @@ async fn refine_exhausted_aborts_with_attempt_count() {
         "summarise PR #42",
         RunTaskConfig {
             max_refinements_per_step: 1,
+            max_replans: 0,
         },
         CancellationToken::new(),
     )
@@ -657,4 +667,164 @@ fn fanout_merge_plan() -> String {
         ]
     }"#
     .to_string()
+}
+
+/// First plan rejected → orchestrator replans → second plan approves.
+/// Pins the replan loop's happy path: a Critic Reject on the first
+/// attempt no longer terminates the task; the orchestrator gets a
+/// second shot with the prior plan + reject reason in its context.
+#[tokio::test]
+async fn replan_on_reject_recovers_with_second_plan() {
+    use std::collections::HashMap;
+    // SchemaDispatchProvider so the replan re-uses the same Plan
+    // schema slot (it pops fresh Plan responses on each
+    // orchestrator call; the FIFO order between worker / critic
+    // doesn't matter).
+    let mut by_schema: HashMap<String, Vec<String>> = HashMap::new();
+    by_schema.insert(
+        "Plan".into(),
+        vec![
+            // Plan attempt 1: the orchestrator's first try.
+            one_step_plan(),
+            // Plan attempt 2 (replan): a "different" plan.
+            // Concrete content doesn't matter for the test; what
+            // matters is that the orchestrator got a fresh Plan
+            // request and produced this in response.
+            r#"{
+                "plan_id":"p1-v2",
+                "goal":"summarise PR #42",
+                "steps":[{"id":"s1","worker_role":"summarise","instruction":"Try again differently","depends_on":[]}]
+            }"#.to_string(),
+        ],
+    );
+    by_schema.insert(
+        "WorkerResult".into(),
+        vec![
+            worker_ok("Off-base summary."),     // plan 1's s1 worker
+            worker_ok("Tighter take this time"), // plan 2's s1 worker
+        ],
+    );
+    by_schema.insert(
+        "Verdict".into(),
+        vec![
+            reject("the summary missed the entire point"), // rejects plan 1's s1
+            approve(),                                      // approves plan 2's s1
+        ],
+    );
+    let provider = SchemaDispatchProvider::new(by_schema);
+    let inner: Arc<dyn LlmService> = ProviderService::new(provider);
+    let llm: Arc<dyn LlmService> = Arc::new(Pipeline::builder_with_inner(inner).build());
+    let (rt, _dir) = fresh_runtime().await;
+    let (orch, worker, critic) = agents();
+
+    let outcome = run_task(
+        rt.clone() as Arc<dyn Runtime>,
+        llm,
+        orch,
+        worker,
+        critic,
+        "summarise PR #42",
+        RunTaskConfig {
+            max_refinements_per_step: 2,
+            max_replans: 2,
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .expect("replan should recover");
+
+    // Second plan's id surfaces on the outcome — proof the
+    // orchestrator was reinvoked and a NEW Plan was used.
+    assert_eq!(outcome.plan.plan_id, "p1-v2");
+    assert_eq!(outcome.steps.len(), 1);
+    // Pull the summary out of the typed PartialResult.
+    let summary = match &outcome.steps[0].result {
+        tars_runtime::AgentMessage::PartialResult { summary, .. } => summary.clone(),
+        other => panic!("expected PartialResult, got {other:?}"),
+    };
+    assert!(
+        summary.contains("Tighter take"),
+        "outcome should carry plan-2's worker output, not plan-1's: {summary:?}",
+    );
+
+    // Trajectory should have TWO orchestrator StepStarteds (planner +
+    // replanner) before any TrajectoryCompleted.
+    let events = rt.replay(&outcome.trajectory_id).await.unwrap();
+    use tars_runtime::AgentEvent::*;
+    let orch_starts = events
+        .iter()
+        .filter(|ev| matches!(ev, StepStarted { agent, .. } if agent == "orch"))
+        .count();
+    assert_eq!(
+        orch_starts, 2,
+        "orchestrator called twice (initial plan + replan); trajectory: {events:?}"
+    );
+    assert!(matches!(events.last().unwrap(), TrajectoryCompleted { .. }));
+}
+
+/// Repeated rejects → orchestrator hits `max_replans` → terminal
+/// `ReplanExhausted` error. Pins the upper bound.
+#[tokio::test]
+async fn replan_exhausted_after_max_replans_consecutive_rejects() {
+    use std::collections::HashMap;
+    let mut by_schema: HashMap<String, Vec<String>> = HashMap::new();
+    // 1 initial plan + max_replans=2 replans = 3 Plan responses.
+    by_schema.insert(
+        "Plan".into(),
+        vec![one_step_plan(), one_step_plan(), one_step_plan()],
+    );
+    by_schema.insert(
+        "WorkerResult".into(),
+        vec![
+            worker_ok("attempt 1"),
+            worker_ok("attempt 2"),
+            worker_ok("attempt 3"),
+        ],
+    );
+    by_schema.insert(
+        "Verdict".into(),
+        vec![
+            reject("nope #1"),
+            reject("nope #2"),
+            reject("nope #3"), // 3rd reject = budget exhausted (1 initial + 2 replans)
+        ],
+    );
+    let provider = SchemaDispatchProvider::new(by_schema);
+    let inner: Arc<dyn LlmService> = ProviderService::new(provider);
+    let llm: Arc<dyn LlmService> = Arc::new(Pipeline::builder_with_inner(inner).build());
+    let (rt, _dir) = fresh_runtime().await;
+    let (orch, worker, critic) = agents();
+
+    let err = run_task(
+        rt.clone() as Arc<dyn Runtime>,
+        llm,
+        orch,
+        worker,
+        critic,
+        "summarise PR #42",
+        RunTaskConfig {
+            max_refinements_per_step: 2,
+            max_replans: 2,
+        },
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("should exhaust replans");
+
+    match err {
+        RunTaskError::ReplanExhausted {
+            step_id,
+            reason,
+            replans,
+            ..
+        } => {
+            assert_eq!(step_id, "s1");
+            assert!(
+                reason.contains("nope #3"),
+                "last reject's reason should surface: {reason}"
+            );
+            assert_eq!(replans, 2, "tried 2 replans before giving up");
+        }
+        other => panic!("expected ReplanExhausted, got {other:?}"),
+    }
 }
