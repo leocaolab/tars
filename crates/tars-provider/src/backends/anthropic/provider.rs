@@ -114,6 +114,16 @@ impl LlmProvider for AnthropicProvider {
     fn capabilities(&self) -> &Capabilities {
         &self.capabilities
     }
+    // `#[instrument(err(Display))]` is the boundary log: any Err
+    // returning from `stream()` automatically emits a tracing event
+    // with the error's Display form + the provider/model span fields.
+    // No per-Err-site logging needed.
+    #[tracing::instrument(
+        name = "anthropic.stream",
+        skip_all,
+        fields(provider = %self.id, model = %req.model.label()),
+        err(Display),
+    )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,

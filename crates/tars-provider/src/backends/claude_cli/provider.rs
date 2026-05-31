@@ -164,6 +164,14 @@ impl LlmProvider for ClaudeCliProvider {
         &self.capabilities
     }
 
+    // Boundary log — Err exits auto-emit with provider/model context
+    // (see anthropic.stream for the rationale).
+    #[tracing::instrument(
+        name = "claude_cli.stream",
+        skip_all,
+        fields(provider = %self.id, model = %req.model.label()),
+        err(Display),
+    )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,

@@ -102,6 +102,14 @@ impl LlmProvider for GeminiProvider {
     fn capabilities(&self) -> &Capabilities {
         &self.capabilities
     }
+    // Boundary log — any Err exit auto-emits with provider/model
+    // context (see anthropic.stream for the rationale).
+    #[tracing::instrument(
+        name = "gemini.stream",
+        skip_all,
+        fields(provider = %self.id, model = %req.model.label()),
+        err(Display),
+    )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,

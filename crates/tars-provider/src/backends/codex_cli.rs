@@ -191,6 +191,13 @@ impl LlmProvider for CodexCliProvider {
         &self.capabilities
     }
 
+    // Boundary log — Err exits auto-emit (see anthropic.stream).
+    #[tracing::instrument(
+        name = "codex_cli.stream",
+        skip_all,
+        fields(provider = %self.id, model = %req.model.label()),
+        err(Display),
+    )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,

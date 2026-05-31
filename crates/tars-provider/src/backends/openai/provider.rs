@@ -129,6 +129,14 @@ impl LlmProvider for OpenAiProvider {
         &self.capabilities
     }
 
+    // Boundary log — any Err exit auto-emits a tracing event with
+    // provider/model context (see anthropic.stream for the rationale).
+    #[tracing::instrument(
+        name = "openai.stream",
+        skip_all,
+        fields(provider = %self.id, model = %req.model.label()),
+        err(Display),
+    )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,

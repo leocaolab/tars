@@ -174,6 +174,23 @@ impl LlmProvider for ClaudeSdkProvider {
         &self.capabilities
     }
 
+    // `#[instrument(err(Display))]` is the Pythonic "uncaught exception
+    // prints to stderr" boundary: when this fn returns Err, tracing
+    // automatically emits an error-level event with the error's
+    // Display form *plus* the function's span context (provider id,
+    // model). Zero per-Err-site code, one log line per failed call.
+    // Without it, an `Err(ProviderError::Internal(...))` walks the
+    // stack silently — the operator only learns "something failed" if
+    // some outer caller happens to log it, which today they don't.
+    #[tracing::instrument(
+        name = "claude_sdk.stream",
+        skip_all,
+        fields(
+            provider = %self.id,
+            model = %req.model.label(),
+        ),
+        err(Display),
+    )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
