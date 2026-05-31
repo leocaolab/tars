@@ -23,6 +23,7 @@ pub mod batch;
 pub mod http_base;
 pub mod provider;
 pub mod registry;
+pub mod subprocess_diagnostics;
 pub mod tool_buffer;
 // Audit `tars-provider-src-transport-1` + TODO O-1: the `transport`
 // module was a speculative `HttpTransport` trait with no
@@ -36,6 +37,10 @@ pub use batch::{BatchSubmitter, MockBatchSubmitter};
 pub use http_base::{HttpAdapter, HttpProviderBase, HttpProviderConfig};
 pub use provider::{LlmEventStream, LlmProvider};
 pub use registry::{ProviderRegistry, RegistryError};
+pub use subprocess_diagnostics::{
+    SubprocessDiagnostics, diagnose_child_exit, find_claude_session_log,
+    summarise_claude_session_log, worktree_diff_summary,
+};
 pub use tool_buffer::ToolCallBuffer;
 
 // Re-export concrete backends at the crate root for ergonomic use.
