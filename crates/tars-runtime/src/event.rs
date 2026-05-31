@@ -179,8 +179,11 @@ pub enum AgentEvent {
     /// the relevant git revision). Plain SHA256 of the raw bytes —
     /// no version prefix — so independent verification is trivial.
     /// `None` means no system prompt was sent (distinct from an
-    /// empty-string prompt, which would still hash). TODO L-1
-    /// enterprise follow-on.
+    /// empty-string prompt, which would still hash). The broader
+    /// SOC2 / ISO enterprise audit surface this hash is meant to
+    /// satisfy is future work, no current roadmap tracking id —
+    /// (was tagged "TODO L-1" against an entry that's since been
+    /// retired; the field itself ships).
     ///
     /// **Scope** — this hashes ONLY the system prompt, not the full
     /// request fingerprint (tools / structured_output schema / user

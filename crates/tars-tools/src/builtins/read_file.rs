@@ -42,8 +42,8 @@ use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 /// Default max bytes read by `fs.read_file`. ~256 KiB.
 pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024;
 
-/// Description prompt — externalized to `read_file.txt` (TODO L-1)
-/// so prompt diffs review cleanly separately from Rust changes.
+/// Description prompt — externalized to `read_file.txt` so prompt
+/// diffs review cleanly separately from Rust changes.
 /// `include_str!` is **compile-time**: editing the .txt still needs
 /// `cargo build`. This is deliberate — the compile-time embed is the
 /// correct enterprise security posture (prompts baked into the
@@ -151,10 +151,10 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        // Externalized to a sibling .txt file (TODO L-1) so prompt
-        // iteration doesn't need a Rust recompile + commit. The
-        // trailing newline from the .txt is harmless to the LLM but
-        // would clutter equality assertions; trim it once.
+        // Externalized to a sibling .txt file (see DESCRIPTION_TRIMMED
+        // above) so prompt diffs review cleanly. The trailing newline
+        // from the .txt is harmless to the LLM but would clutter
+        // equality assertions; trim it once.
         DESCRIPTION_TRIMMED.as_str()
     }
 

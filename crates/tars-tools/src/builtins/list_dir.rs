@@ -32,7 +32,7 @@ use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 /// Default cap on entries returned per call.
 pub const DEFAULT_MAX_ENTRIES: usize = 256;
 
-/// Description prompt — externalized to `list_dir.txt` (TODO L-1).
+/// Description prompt — externalized to `list_dir.txt`.
 /// See `read_file.rs::DESCRIPTION_TRIMMED` for the security rationale
 /// (compile-time embed, NOT runtime file load).
 static DESCRIPTION_TRIMMED: LazyLock<String> =
@@ -118,7 +118,7 @@ impl Tool for ListDirTool {
     }
 
     fn description(&self) -> &str {
-        // Externalized to a sibling .txt file (TODO L-1).
+        // Externalized to a sibling .txt file (see DESCRIPTION_TRIMMED above).
         DESCRIPTION_TRIMMED.as_str()
     }
 

@@ -264,7 +264,10 @@ pub async fn execute_agent_step(
 
     // 3. agent.execute()
     // Snapshot the system-prompt hash BEFORE moving `input` into the
-    // agent — Doc 04 §3.2's audit pin (TODO L-1 enterprise follow-on).
+    // agent — Doc 04 §3.2's audit pin. (Was tagged "TODO L-1
+    // enterprise follow-on" against a roadmap entry that's since
+    // been retired; the hash itself ships here, the broader SOC2 /
+    // ISO surface around it remains future work without a tracking id.)
     // Plain SHA256 of the bytes so an external auditor can verify with
     // `sha256sum read_file.txt`.
     //
