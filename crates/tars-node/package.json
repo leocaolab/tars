@@ -1,0 +1,48 @@
+{
+  "name": "@leocaolab/tars-node",
+  "version": "0.1.0-alpha.0",
+  "description": "Node.js bindings for tars — call Pipeline.complete() from TypeScript.",
+  "license": "MIT",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leocaolab/tars.git",
+    "directory": "crates/tars-node"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "scripts": {
+    "_comment": "napi build = compile crate + emit binding artifacts. --platform writes index.js + index.d.ts that pick the right native binary per OS/arch.",
+    "build": "napi build --platform --release --strip",
+    "build:debug": "napi build --platform",
+    "test": "node --test __test__/"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  },
+  "napi": {
+    "name": "tars-node",
+    "triples": {
+      "defaults": false,
+      "additional": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ]
+    }
+  },
+  "files": [
+    "index.d.ts",
+    "index.js",
+    "*.node",
+    "README.md",
+    "LICENSE"
+  ]
+}

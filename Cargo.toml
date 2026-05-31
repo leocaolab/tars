@@ -12,12 +12,21 @@ members = [
     "crates/tars-tools",
     "crates/tars-cli",
     "crates/tars-py",
+    "crates/tars-node",
 ]
 # tars-py is a PyO3 cdylib — `cargo build` can't link it without a
 # Python interpreter on the link line. Exclude from default builds so
 # `cargo build --workspace` / `cargo test --workspace` keep working;
 # build it explicitly via `maturin develop` / `maturin build` from
 # inside the crate dir.
+#
+# tars-node is also a cdylib (.node native addon for Node.js) but is
+# linkable by plain cargo — napi-build's `setup()` writes the symbol
+# shims via build.rs without needing an external SDK on the link
+# line. So it stays IN default-members; `cargo build --workspace`
+# produces a `libtars_node.{dylib,so}` you can rename → `.node` and
+# import. The `napi build` script in package.json wraps that into
+# the platform-tagged artifact + index.js / index.d.ts for npm.
 default-members = [
     "crates/tars-types",
     "crates/tars-config",
@@ -29,6 +38,7 @@ default-members = [
     "crates/tars-runtime",
     "crates/tars-tools",
     "crates/tars-cli",
+    "crates/tars-node",
 ]
 
 [workspace.package]

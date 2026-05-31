@@ -1,0 +1,52 @@
+[package]
+name = "tars-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Node.js (napi-rs) bindings for tars — TypeScript-callable Pipeline.complete()."
+
+# `cdylib` produces the .node native addon that Node loads.
+# `rlib` so workspace tests / future Rust callers can link in directly.
+[lib]
+# `tars_node` here, but the published npm package name is
+# `@leocaolab/tars-node` (set in package.json). Filename = `<name>.node`.
+name = "tars_node"
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+tars-types = { path = "../tars-types" }
+tars-config = { path = "../tars-config" }
+tars-provider = { path = "../tars-provider" }
+tars-pipeline = { path = "../tars-pipeline" }
+tars-cache = { path = "../tars-cache" }
+tars-storage = { path = "../tars-storage" }
+tars-runtime = { path = "../tars-runtime" }
+serde.workspace = true
+serde_json.workspace = true
+
+# Async — tars's LlmService is async; napi-rs has first-class tokio
+# support, and we use the same process-wide multi-thread runtime
+# pattern tars-py uses (one runtime owned by the binding, shared
+# across all `complete()` calls, never spawning per-request).
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+futures.workspace = true
+
+# napi-rs: Rust ↔ Node.js bridge. v2.16 is the current stable line
+# (Aug 2024+); `napi-derive` provides the `#[napi]` proc macros, and
+# `napi-build` runs in build.rs to emit symbol-export shims. The
+# `serde-json` feature lets us pass `serde_json::Value` through
+# `#[napi]` boundaries — handy for opaque JSON schemas that don't
+# warrant per-shape TS types.
+napi = { version = "2.16", features = ["async", "serde-json", "tokio_rt"] }
+napi-derive = "2.16"
+
+# Errors / tracing
+thiserror.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+napi-build = "2.1"
