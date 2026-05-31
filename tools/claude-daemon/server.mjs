@@ -59,31 +59,65 @@ async function handleChat({ prompt, system, model, max_turns = 7 }) {
 
   const q = query({ prompt, options: opts });
 
-  for await (const msg of q) {
-    if (ttfb === null) ttfb = performance.now() - t0;
-    messageCount += 1;
-    // Defend against unexpected message shapes from the SDK (e.g. content
-    // arriving as a string rather than a block array, or a non-string
-    // block.text). A single malformed message must not abort the stream.
-    try {
-      if (msg.type === 'assistant') {
-        actualModel = actualModel || msg.message?.model || null;
-        const content = msg.message?.content;
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block?.type === 'text' && typeof block.text === 'string') {
-              text += block.text;
+  try {
+    for await (const msg of q) {
+      if (ttfb === null) ttfb = performance.now() - t0;
+      messageCount += 1;
+      // Defend against unexpected message shapes from the SDK (e.g. content
+      // arriving as a string rather than a block array, or a non-string
+      // block.text). A single malformed message must not abort the stream.
+      try {
+        if (msg.type === 'assistant') {
+          actualModel = actualModel || msg.message?.model || null;
+          const content = msg.message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block?.type === 'text' && typeof block.text === 'string') {
+                text += block.text;
+              }
             }
           }
+        } else if (msg.type === 'result') {
+          usage = msg.usage ?? null;
+          resultSubtype = msg.subtype ?? null;
         }
-      } else if (msg.type === 'result') {
-        usage = msg.usage ?? null;
-        resultSubtype = msg.subtype ?? null;
+      } catch (err) {
+        process.stderr.write(
+          `handleChat: skipping malformed SDK message: ${err?.message ?? err}\n`,
+        );
       }
-    } catch (err) {
+    }
+  } catch (err) {
+    // The SDK throws — not emits a result message — when it hits its
+    // own internal walls. The most common one in arc-auto-shaped runs
+    // is "Reached maximum number of turns (N)": the model's still
+    // thinking when the turn counter overflows. Before this catch, that
+    // throw became a hard daemon error and every accumulated `text`
+    // chunk was discarded — even when the model had already emitted
+    // 90% of its verdict. Worker crash, file gets zero review.
+    //
+    // Instead: return the partial output with `result_subtype:
+    // "error_max_turns"`. The Rust client already maps that subtype to
+    // `StopReason::Other` (claude_sdk.rs:543), so the consumer sees a
+    // legitimate (truncated) response and can decide what to do —
+    // arc's Critic parser may still extract enough verdicts to be
+    // useful, and even when it can't, the call counts as a soft
+    // failure (graceful) rather than a worker crash (hard).
+    //
+    // Only recover from max_turns specifically; everything else
+    // (network errors, auth failures, SDK protocol bugs) still
+    // propagates so the operator sees what's wrong.
+    const errMsg = String(err?.message ?? err);
+    if (errMsg.includes('Reached maximum number of turns')) {
       process.stderr.write(
-        `handleChat: skipping malformed SDK message: ${err?.message ?? err}\n`,
+        `handleChat: max_turns hit after ${messageCount} msg(s), ${text.length} text chars — returning partial result\n`,
       );
+      resultSubtype = 'error_max_turns';
+      // Fall through to the normal return path with whatever we
+      // accumulated (text / usage / actualModel can all be partial
+      // or null; the consumer handles each independently).
+    } else {
+      throw err;
     }
   }
 

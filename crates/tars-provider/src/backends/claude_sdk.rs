@@ -57,7 +57,20 @@ use tars_types::{
 
 use crate::provider::{LlmEventStream, LlmProvider};
 
-const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// Per-call timeout to the daemon. History: defaulted at 300s (5 min)
+/// which was fine for per-file L4 critic calls (~10-60s typical).
+///
+/// Bumped to 900s (15 min) after the first end-to-end `arc auto` run
+/// on tars (154 files, 264 findings): the Critic re-review pass after
+/// Round 1 fix is a single batched call that examines every applied
+/// fix at once, and it tripped the 300s ceiling. Without the verify
+/// pass, arc commits Round 1 fixes blind (the [Critic] Verifying
+/// fixes... step is what catches Agent regressions before they land).
+///
+/// 900s is the headroom verify needs at the 200-300 finding scale.
+/// Per-file critic and per-file fix calls still finish well under 300s
+/// in practice, so the bump is a ceiling, not a typical wait.
+const DEFAULT_TIMEOUT_SECS: u64 = 900;
 
 /// In-flight requests keyed by their wire `id`. The reader task removes
 /// the entry on the matching reply line; the `call()` path removes it
