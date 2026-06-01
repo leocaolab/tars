@@ -47,12 +47,15 @@
 //! (no double-emission), while non-LLM workers get a single helper
 //! to wrap their work without re-implementing the event shape.
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -235,6 +238,22 @@ pub struct RunPlanConfig {
     /// transport failed, not the work. Default = no retry (so
     /// pre-existing callers see byte-identical behaviour).
     pub infra_retry: InfraRetryPolicy,
+    /// Per-step wall-clock backstop. `None` = no cap (default). When
+    /// `Some(d)`, each worker invocation that runs longer than `d` is
+    /// aborted and surfaced as [`WorkerError::TimedOut`] — which the
+    /// infra-retry classifier treats as transient, so the step retries
+    /// under `infra_retry` if budget remains. This is a BACKSTOP for a
+    /// hung provider call whose own transport timeout failed to fire;
+    /// set it generously (longer than any legitimate step) so it never
+    /// trips on healthy work. Applies per-attempt: each infra retry
+    /// gets a fresh budget.
+    ///
+    /// (The v0.7 handoff sketched this as a per-`PlanStep` field; it
+    /// landed as one global config knob instead — a uniform backstop
+    /// needs no per-step granularity and avoids breaking every
+    /// `PlanStep` literal across callers. Per-step budgets can be added
+    /// later if a real need appears.)
+    pub step_time_budget: Option<Duration>,
 }
 
 impl Default for RunPlanConfig {
@@ -243,6 +262,7 @@ impl Default for RunPlanConfig {
             max_refinements_per_step: 2,
             max_concurrent: None,
             infra_retry: InfraRetryPolicy::default(),
+            step_time_budget: None,
         }
     }
 }
@@ -310,6 +330,18 @@ impl fmt::Debug for InfraRetryPolicy {
 /// anything it doesn't recognise is [`InfraClass::NotInfra`] (no
 /// retry), so a worker bug never spins the budget.
 pub fn default_infra_classifier(e: &WorkerError) -> InfraClass {
+    // Variant-matched cases first — more precise than string-sniffing.
+    match e {
+        // A worker panic is surfaced as Crashed. Treat as transient:
+        // retrying isolates flaky panics (a race / OOM / transient FFI
+        // hiccup) while a deterministic panic just exhausts the budget
+        // and then surfaces — never silently. The win is that the panic
+        // became a normal Err instead of unwinding the run_plan task.
+        WorkerError::Crashed(_) => return InfraClass::Transient,
+        // A step-budget timeout is by definition a transport-ish hang.
+        WorkerError::TimedOut(_) => return InfraClass::Transient,
+        _ => {}
+    }
     let m = e.to_string().to_lowercase();
     if m.contains("rate limit")
         || m.contains("rate_limit")
@@ -338,6 +370,19 @@ pub fn default_infra_classifier(e: &WorkerError) -> InfraClass {
         return InfraClass::Transient;
     }
     InfraClass::NotInfra
+}
+
+/// Extract a human-readable message from a caught panic payload.
+/// `panic!("x")` / `panic!("{}", s)` land as `&str` / `String`; other
+/// payloads (rare) fall back to a placeholder.
+fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
 }
 
 /// Pick the backoff for the given 0-based retry attempt, clamping to
@@ -890,7 +935,31 @@ async fn run_one_step(
                     cancel: cancel.clone(),
                     refinements: refinements.clone(),
                 };
-                match worker.run(plan, step, completed, wctx).await {
+                // Run the worker under two backstops, both per-attempt:
+                //  - catch_unwind (P2): a panic in one worker becomes a
+                //    `WorkerError::Crashed` instead of unwinding the whole
+                //    run_plan task — crash isolation for a 200-step plan.
+                //  - step_time_budget (P3): a hung call is aborted as
+                //    `WorkerError::TimedOut`. Both classify Transient, so
+                //    infra_retry can retry them.
+                let invoke = AssertUnwindSafe(worker.run(plan, step, completed, wctx))
+                    .catch_unwind();
+                let run_result: Result<WorkerOutput, WorkerError> =
+                    match config.step_time_budget {
+                        Some(budget) => match tokio::time::timeout(budget, invoke).await {
+                            Ok(caught) => caught.unwrap_or_else(|p| {
+                                Err(WorkerError::Crashed(panic_message(p)))
+                            }),
+                            Err(_elapsed) => Err(WorkerError::TimedOut(format!(
+                                "step `{}` exceeded {:?}",
+                                step.id, budget,
+                            ))),
+                        },
+                        None => invoke.await.unwrap_or_else(|p| {
+                            Err(WorkerError::Crashed(panic_message(p)))
+                        }),
+                    };
+                match run_result {
                     Ok(out) => {
                         if !matches!(out.message, AgentMessage::PartialResult { .. }) {
                             return Err(RunPlanError::Worker {

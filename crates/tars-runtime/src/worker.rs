@@ -490,6 +490,20 @@ pub enum WorkerError {
     /// (e.g. empty summary).
     #[error("invalid result: {0}")]
     InvalidResult(String),
+    /// The worker's `run` future PANICKED. The executor catches the
+    /// unwind ([`std::panic::catch_unwind`]) and surfaces it here
+    /// instead of letting the panic abort the whole `run_plan` task —
+    /// one bad step can't take down a 200-file plan. Carries the panic
+    /// payload message.
+    #[error("worker panicked: {0}")]
+    Crashed(String),
+    /// The worker's `run` future exceeded
+    /// [`crate::RunPlanConfig::step_time_budget`]. The executor aborts
+    /// the in-flight call and surfaces this; the infra-retry policy
+    /// treats it as transient (a hung provider call that the provider's
+    /// own timeout failed to fire on).
+    #[error("step timed out: {0}")]
+    TimedOut(String),
 }
 
 // ── Prompt + schema ────────────────────────────────────────────────────
