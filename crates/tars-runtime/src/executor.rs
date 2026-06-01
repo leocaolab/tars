@@ -527,20 +527,33 @@ enum StepDecision {
 /// (e.g. [`Runtime::create_trajectory`] before, `TrajectoryCompleted`
 /// / `TrajectoryAbandoned` after).
 ///
-/// ## Behaviour preserved from the historical `run_task` level loop
+/// ## Scheduling
 ///
-/// - **Depth-batched parallel execution**: each [`Plan::execution_levels`]
-///   tier runs concurrently via [`FuturesUnordered`].
-/// - **Cancel-on-reject**: the first `Reject` (or hard error) in a
-///   level fires a per-level cancel token; in-flight siblings
-///   observe `cancel.cancelled()` and bail with
-///   [`AgentError::Cancelled`], which the level loop discards.
-/// - **Skip-cascade + conditional**: pre-pass classifies each
-///   level's steps before scheduling. A step is skipped if any dep
-///   is skipped (cascade) or its [`StepCondition`](crate::StepCondition)
-///   evaluates false. Skipped steps emit
+/// - **Dependency-driven, not depth-batched**: a step starts the
+///   instant ALL its deps are resolved (completed or skipped), NOT
+///   when its whole graph-depth tier finishes. A tier-2 step whose
+///   single dep is done runs while unrelated tier-1 steps are still
+///   in flight — wall-time collapses from `Σ tiers` toward the
+///   longest dependency chain. (The legacy depth-batched grouping
+///   still lives on [`Plan::execution_levels`] for callers that want
+///   it, but `run_plan` no longer uses it.)
+/// - **Concurrency cap**: [`RunPlanConfig::max_concurrent`] bounds the
+///   number of simultaneously-running workers (owned-permit
+///   semaphore). `None` = unbounded, matching the old per-tier peak.
+/// - **Cancel-on-reject**: the first `Reject` (or hard error) fires
+///   the run-wide cancel token; in-flight siblings observe
+///   `cancel.cancelled()` and bail with [`AgentError::Cancelled`],
+///   which the scheduler drains + discards.
+/// - **Skip-cascade + conditional**: when a step's deps all resolve it
+///   is classified before dispatch. A step is skipped if any dep was
+///   skipped (cascade, priority) or its
+///   [`StepCondition`](crate::StepCondition) evaluates false against
+///   the completed results. Skipped steps emit
 ///   [`AgentEvent::StepSkipped`] and land as
 ///   [`StepOutcome::Skipped`].
+/// - **Infra retry**: [`RunPlanConfig::infra_retry`] re-runs a step
+///   whose worker hit a rate-limit / circuit-open / timeout, up to
+///   the configured budget (orthogonal to the refinement loop below).
 /// - **Per-step refinement loop**: critic returns `Refine` → worker
 ///   re-runs with suggestions threaded; up to
 ///   `config.max_refinements_per_step` attempts. `Approve` ends the
@@ -576,7 +589,8 @@ pub async fn run_plan(
     // Both checks happen up front so a bad plan fails before we
     // start emitting events. validate() also rules out cycles
     // (transitively, via the "deps point at earlier-declared steps"
-    // rule), so `execution_levels()` below can't loop.
+    // rule), so the dependency-driven scheduler below always makes
+    // progress — every non-skipped step's deps eventually resolve.
     plan.validate()
         .map_err(|e| RunPlanError::InvalidPlan(e.to_string()))?;
     for step in &plan.steps {
@@ -591,143 +605,219 @@ pub async fn run_plan(
 
     let mut step_outcomes_by_id: HashMap<String, StepOutcome> =
         HashMap::with_capacity(plan.steps.len());
-    let mut completed: HashMap<String, AgentMessage> =
-        HashMap::with_capacity(plan.steps.len());
     let mut skipped_ids: HashSet<String> = HashSet::new();
     let mut hit_reject: Option<(String, String)> = None;
 
-    'level_loop: for level in plan.execution_levels() {
-        // ── Pre-pass: classify each step as RUN or SKIP. ─────────────
-        // Two skip reasons, in priority order:
-        //  1. cascade — any dep is in `skipped_ids`.
-        //  2. condition — predicate evaluates false against `completed`.
-        // Skipped steps emit a single `AgentEvent::StepSkipped` and
-        // are recorded immediately so this level's RUN steps can be
-        // dispatched into FuturesUnordered without further bookkeeping.
-        let mut to_run: Vec<&PlanStep> = Vec::with_capacity(level.len());
-        for step in &level {
-            let cascade_dep = step
-                .depends_on
-                .iter()
-                .find(|d| skipped_ids.contains(d.as_str()));
-            if let Some(dep) = cascade_dep {
-                let reason = format!("dep `{dep}` was skipped");
-                log_skip(&runtime, &trajectory_id, step, &reason).await?;
-                skipped_ids.insert(step.id.clone());
-                step_outcomes_by_id.insert(
-                    step.id.clone(),
-                    StepOutcome::Skipped {
-                        step_id: step.id.clone(),
-                        reason,
-                    },
-                );
-                continue;
-            }
-            if !step.condition.matches(&completed) {
-                let reason = step.condition.skip_reason();
-                log_skip(&runtime, &trajectory_id, step, &reason).await?;
-                skipped_ids.insert(step.id.clone());
-                step_outcomes_by_id.insert(
-                    step.id.clone(),
-                    StepOutcome::Skipped {
-                        step_id: step.id.clone(),
-                        reason,
-                    },
-                );
-                continue;
-            }
-            to_run.push(step);
-        }
-        if to_run.is_empty() {
-            continue 'level_loop;
-        }
+    // ── Dependency-driven scheduler ──────────────────────────────────
+    // Replaces the historical depth-batched level loop. A step starts
+    // the instant ALL its deps are resolved (completed or skipped) —
+    // NOT when its whole graph-depth tier finishes. So in arc's
+    // scan→fix→merge plan, `fix-50` starts as soon as `scan-50` lands
+    // while `scan-99` is still in flight; wall-time collapses from
+    // `Σ tiers` toward `longest dependency chain`.
+    //
+    // Preserved exactly from the level loop: skip-cascade + condition
+    // semantics (cascade has priority over condition), cancel-on-reject,
+    // first-error abort + drain, and plan-declaration-order reassembly.
+    //
+    // Concurrency: `completed` lives behind an Arc<Mutex> so the
+    // scheduler can record a finished step's result while sibling
+    // futures are still in flight (the level loop dodged this by only
+    // mutating `completed` at each tier barrier). Each dispatched future
+    // snapshots `completed` once before calling its worker — workers see
+    // an immutable map, same as before. `max_concurrent` (if set) caps
+    // simultaneously-running workers via an owned-permit semaphore, which
+    // matters now that a wide root tier could otherwise fire every step
+    // at once.
+    let run_cancel = cancel.child_token();
+    let sem = config
+        .max_concurrent
+        .map(|n| Arc::new(tokio::sync::Semaphore::new(n.max(1))));
+    let completed_shared: Arc<std::sync::Mutex<HashMap<String, AgentMessage>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::with_capacity(plan.steps.len())));
 
-        // ── Schedule the run-eligible siblings in parallel. ──────────
-        let level_cancel = cancel.child_token();
-        let workers_ref = &workers;
-        let critic_ref = critic.as_deref();
-        let runtime_ref = runtime.clone();
-        let plan_ref = &plan;
-        let completed_ref = &completed;
-        let traj_ref = &trajectory_id;
-        let config_ref = &config;
+    let by_id: HashMap<&str, &PlanStep> =
+        plan.steps.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut pending: HashSet<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
 
-        let mut tasks: FuturesUnordered<_> = to_run
-            .iter()
-            .map(|step| {
-                let cancel = level_cancel.clone();
-                let step_id_for_label = step.id.clone();
-                let runtime = runtime_ref.clone();
-                async move {
-                    let res = run_one_step(
-                        runtime,
-                        traj_ref,
-                        plan_ref,
-                        step,
-                        completed_ref,
-                        workers_ref,
-                        critic_ref,
-                        config_ref,
-                        cancel,
-                    )
-                    .await;
-                    (step_id_for_label, res)
-                }
-            })
-            .collect();
+    let workers_ref = &workers;
+    let critic_ref = critic.as_deref();
+    let runtime_ref = runtime.clone();
+    let plan_ref = &plan;
+    let traj_ref = &trajectory_id;
+    let config_ref = &config;
 
-        let mut level_approved: Vec<(String, StepOutcome)> = Vec::new();
-        while let Some((step_id, step_res)) = tasks.next().await {
-            match step_res {
-                Ok(StepDecision::Approved(outcome)) => {
-                    level_approved.push((step_id, outcome));
+    let mut tasks: FuturesUnordered<_> = FuturesUnordered::new();
+
+    'schedule: loop {
+        // ── 1. Promote every step whose deps are all resolved. ───────
+        // Loops to a fixpoint because skipping a step resolves it,
+        // which may cascade-skip / unlock dependents in the same pass.
+        // Dispatched (RUN) steps do NOT resolve synchronously, so they
+        // don't unlock dependents here — those wait for completion in
+        // step 3. Suppressed entirely once a reject has landed.
+        if hit_reject.is_none() {
+            loop {
+                let ready: Vec<&str> = pending
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        by_id[id]
+                            .depends_on
+                            .iter()
+                            .all(|d| step_outcomes_by_id.contains_key(d.as_str()))
+                    })
+                    .collect();
+                if ready.is_empty() {
+                    break;
                 }
-                Ok(StepDecision::Rejected {
-                    step_id: rejected_id,
-                    reason,
-                }) => {
-                    if hit_reject.is_none() {
-                        hit_reject = Some((rejected_id, reason));
-                        // Tell still-running siblings to bail — drop
-                        // futures via their cancel observation. The
-                        // Cancelled returns get discarded below.
-                        level_cancel.cancel();
-                    }
-                }
-                Err(e) => {
-                    if hit_reject.is_some() && is_cancellation_err(&e) {
+                let mut progressed = false;
+                for id in ready {
+                    let step = by_id[id];
+                    // (a) cascade skip — priority over condition.
+                    if let Some(dep) = step
+                        .depends_on
+                        .iter()
+                        .find(|d| skipped_ids.contains(d.as_str()))
+                    {
+                        let reason = format!("dep `{dep}` was skipped");
+                        log_skip(&runtime, traj_ref, step, &reason).await?;
+                        skipped_ids.insert(step.id.clone());
+                        step_outcomes_by_id.insert(
+                            step.id.clone(),
+                            StepOutcome::Skipped {
+                                step_id: step.id.clone(),
+                                reason,
+                            },
+                        );
+                        pending.remove(id);
+                        progressed = true;
                         continue;
                     }
-                    level_cancel.cancel();
-                    while let Some((_, drained_res)) = tasks.next().await {
-                        if let Err(drained_err) = &drained_res
-                            && is_cancellation_err(drained_err)
-                        {
-                            continue;
-                        }
-                        tracing::warn!(
-                            trajectory_id = %trajectory_id,
-                            "run_plan: discarding drained-sibling result after first-failure cancel (cause: {e})",
+                    // (b) condition skip — evaluate against completed.
+                    let cond_ok = {
+                        let g = completed_shared.lock().unwrap();
+                        step.condition.matches(&g)
+                    };
+                    if !cond_ok {
+                        let reason = step.condition.skip_reason();
+                        log_skip(&runtime, traj_ref, step, &reason).await?;
+                        skipped_ids.insert(step.id.clone());
+                        step_outcomes_by_id.insert(
+                            step.id.clone(),
+                            StepOutcome::Skipped {
+                                step_id: step.id.clone(),
+                                reason,
+                            },
                         );
+                        pending.remove(id);
+                        progressed = true;
+                        continue;
                     }
-                    return Err(e);
+                    // (c) RUN — dispatch into the in-flight set.
+                    pending.remove(id);
+                    let cancel = run_cancel.clone();
+                    let step_id_for_label = step.id.clone();
+                    let runtime = runtime_ref.clone();
+                    let completed_shared = completed_shared.clone();
+                    let sem = sem.clone();
+                    tasks.push(async move {
+                        let _permit = match sem {
+                            Some(s) => {
+                                Some(s.acquire_owned().await.expect("semaphore not closed"))
+                            }
+                            None => None,
+                        };
+                        // Snapshot the results map once; the worker sees
+                        // an immutable view for its whole run while the
+                        // scheduler keeps recording other steps.
+                        let snapshot = completed_shared.lock().unwrap().clone();
+                        let res = run_one_step(
+                            runtime,
+                            traj_ref,
+                            plan_ref,
+                            step,
+                            &snapshot,
+                            workers_ref,
+                            critic_ref,
+                            config_ref,
+                            cancel,
+                        )
+                        .await;
+                        (step_id_for_label, res)
+                    });
+                    progressed = true;
+                }
+                if !progressed {
+                    break;
                 }
             }
         }
-        drop(tasks);
 
-        if hit_reject.is_none() {
-            for (step_id, outcome) in level_approved {
-                if let StepOutcome::Completed { result, .. } = &outcome {
-                    completed.insert(step_id.clone(), result.clone());
-                }
-                step_outcomes_by_id.insert(step_id, outcome);
-            }
+        // ── 2. Done when nothing is in flight. ───────────────────────
+        // After a reject we stop promoting (step 1 guarded off) and just
+        // drain the in-flight set here until it empties, then break.
+        if tasks.is_empty() {
+            break 'schedule;
         }
-        if hit_reject.is_some() {
-            break 'level_loop;
+
+        // ── 3. React to the next completion. ─────────────────────────
+        let (step_id, step_res) = tasks.next().await.expect("tasks is non-empty");
+        match step_res {
+            Ok(StepDecision::Approved(outcome)) => {
+                // Suppress commits once a reject has landed — matches the
+                // level loop, where in-tier approvals after a reject were
+                // discarded. The plan is failing; these results are moot.
+                if hit_reject.is_none() {
+                    if let StepOutcome::Completed { result, .. } = &outcome {
+                        completed_shared
+                            .lock()
+                            .unwrap()
+                            .insert(step_id.clone(), result.clone());
+                    }
+                    step_outcomes_by_id.insert(step_id, outcome);
+                }
+            }
+            Ok(StepDecision::Rejected {
+                step_id: rejected_id,
+                reason,
+            }) => {
+                if hit_reject.is_none() {
+                    hit_reject = Some((rejected_id, reason));
+                    // Tell still-running siblings to bail; their
+                    // Cancelled returns get drained on subsequent passes.
+                    run_cancel.cancel();
+                }
+            }
+            Err(e) => {
+                if hit_reject.is_some() && is_cancellation_err(&e) {
+                    continue;
+                }
+                run_cancel.cancel();
+                while let Some((_, drained_res)) = tasks.next().await {
+                    if let Err(drained_err) = &drained_res
+                        && is_cancellation_err(drained_err)
+                    {
+                        continue;
+                    }
+                    tracing::warn!(
+                        trajectory_id = %trajectory_id,
+                        "run_plan: discarding drained-sibling result after first-failure cancel (cause: {e})",
+                    );
+                }
+                return Err(e);
+            }
         }
     }
+    drop(tasks);
+
+    // Reclaim the results map for the Rejected error payload below. All
+    // dispatched futures are done (tasks drained), so the scheduler is
+    // the sole Arc holder; fall back to a clone if any straggler clone
+    // somehow outlives (it shouldn't).
+    let completed: HashMap<String, AgentMessage> = Arc::try_unwrap(completed_shared)
+        .map(|m| m.into_inner().unwrap())
+        .unwrap_or_else(|arc| arc.lock().unwrap().clone());
 
     // ── Decide: success or Rejected ──────────────────────────────────
     if let Some((rejected_step_id, reason)) = hit_reject {
