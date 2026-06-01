@@ -237,6 +237,11 @@ pub async fn run_task(
     let workers = crate::executor::WorkerRegistry::new().with_default(llm_worker_impl);
     let run_plan_config = crate::executor::RunPlanConfig {
         max_refinements_per_step: config.max_refinements_per_step,
+        // run_task's LLM agent loop keeps the historical semantics:
+        // unbounded per-tier concurrency + no infra retry (the
+        // LlmService layer owns its own transport retry). The infra
+        // policy is opt-in for direct `run_plan` callers like arc.
+        ..Default::default()
     };
 
     // Build the plan/replan helper closure context. The orchestrator

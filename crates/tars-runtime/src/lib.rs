@@ -60,8 +60,9 @@ pub use critic::{CriticAgent, CriticError, PartialResultRef};
 pub use error::RuntimeError;
 pub use event::{AgentEvent, StepIdempotencyKey};
 pub use executor::{
-    Critic, CriticContext, RunPlanConfig, RunPlanError, Worker, WorkerContext, WorkerOutput,
-    WorkerRegistry, emit_step_lifecycle, run_plan,
+    Critic, CriticContext, InfraClass, InfraRetryPolicy, RunPlanConfig, RunPlanError, Worker,
+    WorkerContext, WorkerOutput, WorkerRegistry, default_infra_classifier, emit_step_lifecycle,
+    run_plan,
 };
 pub use llm_adapters::{LlmCritic, LlmWorker};
 pub use judge::{

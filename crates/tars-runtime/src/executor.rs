@@ -48,7 +48,9 @@
 //! to wrap their work without re-implementing the event shape.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -216,14 +218,136 @@ pub struct RunPlanConfig {
     /// step; any `Refine` verdict immediately fails the step with
     /// [`RunPlanError::RefineExhausted`].
     pub max_refinements_per_step: u32,
+    /// Cap on concurrently-running steps across the WHOLE plan (not
+    /// per graph-depth tier). `None` = unbounded — every step whose
+    /// deps are satisfied starts immediately, matching the historical
+    /// depth-batched loop's peak width. `Some(n)` = at most `n`
+    /// workers in flight at once. This matters now that scheduling is
+    /// dependency-driven: a wide root tier (e.g. arc's 200+ per-file
+    /// scan steps) would otherwise fire hundreds of provider calls
+    /// simultaneously and trip upstream rate limits.
+    pub max_concurrent: Option<usize>,
+    /// Retry policy for *infra* failures — provider rate-limit /
+    /// circuit-open / timeout / transient network. Distinct from
+    /// `max_refinements_per_step`, which retries on a *critic*
+    /// `Refine` verdict (the worker produced output, but it needs
+    /// improvement). Infra retry re-runs the SAME attempt because the
+    /// transport failed, not the work. Default = no retry (so
+    /// pre-existing callers see byte-identical behaviour).
+    pub infra_retry: InfraRetryPolicy,
 }
 
 impl Default for RunPlanConfig {
     fn default() -> Self {
         Self {
             max_refinements_per_step: 2,
+            max_concurrent: None,
+            infra_retry: InfraRetryPolicy::default(),
         }
     }
+}
+
+/// How [`InfraRetryPolicy`] classifies a [`WorkerError`] — decides
+/// whether `run_plan` retries the step or surfaces the failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InfraClass {
+    /// Provider rate-limit / 429 / "circuit open" / quota exhausted —
+    /// retry with backoff (the work is fine; we're being throttled).
+    RateLimited,
+    /// Transient transport failure — network timeout / connection
+    /// drop / 5xx / truncated stream. Retry with backoff.
+    Transient,
+    /// Not an infra failure — a worker bug, decode error, or a
+    /// genuine bad result. Surface immediately; retrying would just
+    /// spin on a deterministic failure.
+    NotInfra,
+}
+
+/// Plan-level retry policy for infra failures. Lifts the
+/// rate-limit / circuit-open / timeout retry loop OUT of every
+/// [`Worker`] body and into the runtime, so a worker's `run` becomes
+/// single-attempt and the policy lives in one place.
+#[derive(Clone)]
+pub struct InfraRetryPolicy {
+    /// Per-step retry budget for infra failures (NOT counting the
+    /// first attempt). `0` = no infra retry: any error surfaces
+    /// immediately, exactly as before this policy existed.
+    pub max_attempts: u32,
+    /// Backoff before each retry attempt. If shorter than
+    /// `max_attempts`, the last entry is reused for the remaining
+    /// attempts; empty = retry with no delay.
+    pub backoffs: Vec<Duration>,
+    /// Maps a [`WorkerError`] to an [`InfraClass`]. Defaults to
+    /// [`default_infra_classifier`], which string-matches common
+    /// provider failure wording; override for provider-specific
+    /// phrasing (arc passes its own to catch tars-provider
+    /// "circuit open").
+    pub classify: Arc<dyn Fn(&WorkerError) -> InfraClass + Send + Sync>,
+}
+
+impl Default for InfraRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 0,
+            backoffs: Vec::new(),
+            classify: Arc::new(default_infra_classifier),
+        }
+    }
+}
+
+impl fmt::Debug for InfraRetryPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InfraRetryPolicy")
+            .field("max_attempts", &self.max_attempts)
+            .field("backoffs", &self.backoffs)
+            .field("classify", &"<fn>")
+            .finish()
+    }
+}
+
+/// Default infra classifier — case-insensitively string-matches the
+/// error's `Display` for common provider failure modes. Conservative:
+/// anything it doesn't recognise is [`InfraClass::NotInfra`] (no
+/// retry), so a worker bug never spins the budget.
+pub fn default_infra_classifier(e: &WorkerError) -> InfraClass {
+    let m = e.to_string().to_lowercase();
+    if m.contains("rate limit")
+        || m.contains("rate_limit")
+        || m.contains("429")
+        || m.contains("circuit open")
+        || m.contains("circuit breaker")
+        || m.contains("quota")
+        || m.contains("too many requests")
+        || m.contains("overloaded")
+        || m.contains("resource exhausted")
+    {
+        return InfraClass::RateLimited;
+    }
+    if m.contains("timeout")
+        || m.contains("timed out")
+        || m.contains("connection reset")
+        || m.contains("connection closed")
+        || m.contains("connection refused")
+        || m.contains("broken pipe")
+        || m.contains("502")
+        || m.contains("503")
+        || m.contains("504")
+        || m.contains("stream ended")
+        || m.contains("eof while")
+    {
+        return InfraClass::Transient;
+    }
+    InfraClass::NotInfra
+}
+
+/// Pick the backoff for the given 0-based retry attempt, clamping to
+/// the last configured value (or `0s` if none configured).
+fn pick_backoff(backoffs: &[Duration], attempt: u32) -> Duration {
+    if backoffs.is_empty() {
+        return Duration::ZERO;
+    }
+    let idx = (attempt as usize).min(backoffs.len() - 1);
+    backoffs[idx]
 }
 
 /// Per-step record in [`TaskOutcome`].
@@ -654,36 +778,84 @@ async fn run_one_step(
     let mut refinements: Vec<String> = Vec::new();
     let mut attempts: u32 = 0;
     loop {
-        // ── Worker invocation ────────────────────────────────────────
+        // ── Worker invocation (with infra retry) ─────────────────────
         // Worker is responsible for its own StepStarted/Completed/Failed
         // events (LLM workers via execute_agent_step, non-LLM via
         // emit_step_lifecycle or manual append). Executor only enforces
         // the WorkerOutput shape invariant + error mapping.
-        let wctx = WorkerContext {
-            runtime: runtime.clone(),
-            trajectory_id: trajectory_id.clone(),
-            cancel: cancel.clone(),
-            refinements: refinements.clone(),
-        };
-        let worker_msg = match worker.run(plan, step, completed, wctx).await {
-            Ok(out) => {
-                if !matches!(out.message, AgentMessage::PartialResult { .. }) {
-                    return Err(RunPlanError::Worker {
-                        trajectory_id: trajectory_id.clone(),
-                        step_id: step.id.clone(),
-                        source: WorkerError::UnexpectedOutput(format!(
-                            "Worker::run must return AgentMessage::PartialResult; got {:?}",
-                            out.message,
-                        )),
-                    });
+        //
+        // Infra failures (rate-limit / circuit-open / timeout) are
+        // retried HERE per `config.infra_retry` instead of inside each
+        // worker — the policy lives in one place and the worker body
+        // stays single-attempt. A `Refine` retry is a different axis
+        // (handled by the outer `loop` + `attempts`): that re-runs
+        // because the OUTPUT needs work; infra retry re-runs because
+        // the TRANSPORT failed.
+        let worker_msg = {
+            let mut infra_attempts: u32 = 0;
+            loop {
+                let wctx = WorkerContext {
+                    runtime: runtime.clone(),
+                    trajectory_id: trajectory_id.clone(),
+                    cancel: cancel.clone(),
+                    refinements: refinements.clone(),
+                };
+                match worker.run(plan, step, completed, wctx).await {
+                    Ok(out) => {
+                        if !matches!(out.message, AgentMessage::PartialResult { .. }) {
+                            return Err(RunPlanError::Worker {
+                                trajectory_id: trajectory_id.clone(),
+                                step_id: step.id.clone(),
+                                source: WorkerError::UnexpectedOutput(format!(
+                                    "Worker::run must return AgentMessage::PartialResult; got {:?}",
+                                    out.message,
+                                )),
+                            });
+                        }
+                        // `out.usage` is informational at this layer — the
+                        // worker's own StepCompleted event already captured
+                        // it for RunReport rollup. We don't re-emit here.
+                        let _ = out.usage;
+                        break out.message;
+                    }
+                    Err(e) => {
+                        let class = (config.infra_retry.classify)(&e);
+                        let retryable = matches!(
+                            class,
+                            InfraClass::RateLimited | InfraClass::Transient
+                        );
+                        if retryable && infra_attempts < config.infra_retry.max_attempts {
+                            let backoff =
+                                pick_backoff(&config.infra_retry.backoffs, infra_attempts);
+                            tracing::warn!(
+                                trajectory_id = %trajectory_id,
+                                step_id = %step.id,
+                                class = ?class,
+                                attempt = infra_attempts + 1,
+                                max = config.infra_retry.max_attempts,
+                                backoff_ms = backoff.as_millis() as u64,
+                                "run_plan: infra failure, retrying after backoff ({e})",
+                            );
+                            // Honour cancellation during the backoff so a
+                            // sibling's reject/error doesn't wait out the
+                            // sleep before this step bails.
+                            tokio::select! {
+                                _ = cancel.cancelled() => {
+                                    return Err(map_worker_error(
+                                        trajectory_id,
+                                        step.id.clone(),
+                                        e,
+                                    ));
+                                }
+                                _ = tokio::time::sleep(backoff) => {}
+                            }
+                            infra_attempts += 1;
+                            continue;
+                        }
+                        return Err(map_worker_error(trajectory_id, step.id.clone(), e));
+                    }
                 }
-                // `out.usage` is informational at this layer — the
-                // worker's own StepCompleted event already captured it
-                // for RunReport rollup. We don't re-emit here.
-                let _ = out.usage;
-                out.message
             }
-            Err(e) => return Err(map_worker_error(trajectory_id, step.id.clone(), e)),
         };
 
         // ── Critic invocation (optional) ─────────────────────────────
