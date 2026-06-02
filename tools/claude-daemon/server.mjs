@@ -31,7 +31,7 @@ import readline from 'node:readline';
 // the final answer. Tools stay disabled below (`disallowedTools:
 // ['*']`) so the model can't go agentic regardless of this
 // counter.
-async function handleChat({ prompt, system, model, max_turns = 7 }) {
+async function handleChat({ prompt, system, model, max_turns = 7, schema }) {
   if (typeof prompt !== 'string' || !prompt.length) {
     throw new Error('prompt (string) is required');
   }
@@ -39,6 +39,7 @@ async function handleChat({ prompt, system, model, max_turns = 7 }) {
   const t0 = performance.now();
   let ttfb = null;
   let text = '';
+  let structuredOutput = null;
   let usage = null;
   let resultSubtype = null;
   let actualModel = null;
@@ -56,6 +57,12 @@ async function handleChat({ prompt, system, model, max_turns = 7 }) {
   };
   if (model) opts.model = model;
   if (system) opts.systemPrompt = system;
+  // Provider-level structured output: when the caller passes a JSON
+  // Schema, the Agent SDK constrains the final answer to it and returns
+  // it on the result message's `structured_output`. This is SEPARATE
+  // from agentic tools, so it coexists with `disallowedTools: ['*']` —
+  // claude_sdk gets strict schema without re-enabling tool agency.
+  if (schema) opts.outputFormat = { type: 'json_schema', schema };
 
   const q = query({ prompt, options: opts });
 
@@ -80,6 +87,7 @@ async function handleChat({ prompt, system, model, max_turns = 7 }) {
         } else if (msg.type === 'result') {
           usage = msg.usage ?? null;
           resultSubtype = msg.subtype ?? null;
+          if (msg.structured_output != null) structuredOutput = msg.structured_output;
         }
       } catch (err) {
         process.stderr.write(
@@ -122,8 +130,12 @@ async function handleChat({ prompt, system, model, max_turns = 7 }) {
   }
 
   const total = performance.now() - t0;
+  // When the SDK returned structured output, IT is the answer — serialize
+  // it as the reply text so the Rust text path (and arc's JSON parser)
+  // carry it unchanged. Falls back to the streamed assistant text.
+  const replyText = structuredOutput != null ? JSON.stringify(structuredOutput) : text;
   return {
-    text,
+    text: replyText,
     result_subtype: resultSubtype,
     usage,
     model: actualModel,

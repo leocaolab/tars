@@ -1,0 +1,21 @@
+
+
+{
+  "languages": [
+    {
+      "name": "Python",
+      "year": 1991,
+      "paradigm": "Multi-paradigm"
+    },
+    {
+      "name": "JavaScript",
+      "year": 1995,
+      "paradigm": "Prototype-based"
+    },
+    {
+      "name": "C",
+      "year": 1972,
+      "paradigm": "Imperative"
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "corpus_path": "/Users/hucao/projects/tars/bench-corpus",
+  "provider_id": "qwen_coder_local",
+  "model": "google/gemma-4-31b",
+  "started_at_ms": 1780362748439,
+  "ended_at_ms": 1780362820295,
+  "case_count": 3,
+  "success_count": 3,
+  "error_count": 0,
+  "total_usage": {
+    "input_tokens": 183,
+    "output_tokens": 633,
+    "cached_input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "thinking_tokens": 0
+  },
+  "checks": [
+    {
+      "name": "not_empty",
+      "evaluated": 3,
+      "violations": 1,
+      "violation_rate": 0.3333333333333333
+    },
+    {
+      "name": "json_shape",
+      "evaluated": 3,
+      "violations": 2,
+      "violation_rate": 0.6666666666666666
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "config_json",
+      "status": "ok",
+      "wall_clock_ms": 31698,
+      "usage": {
+        "input_tokens": 64,
+        "output_tokens": 255,
+        "cached_input_tokens": 0,
+        "cache_creation_tokens": 0,
+        "thinking_tokens": 0
+      },
+      "output_chars": 68,
+      "error": null,
+      "checks": [
+        {
+          "outcome": "passed",
+          "name": "not_empty"
+        },
+        {
+          "outcome": "failed",
+          "name": "json_shape",
+          "reason": "response.text is not valid JSON: expected value at line 1 column 1"
+        }
+      ]
+    },
+    {
+      "case_id": "langs_json",
+      "status": "ok",
+      "wall_clock_ms": 27026,
+      "usage": {
+        "input_tokens": 68,
+        "output_tokens": 255,
+        "cached_input_tokens": 0,
+        "cache_creation_tokens": 0,
+        "thinking_tokens": 0
+      },
+      "output_chars": 0,
+      "error": null,
+      "checks": [
+        {
+          "outcome": "failed",
+          "name": "not_empty",
+          "reason": "response.text is empty"
+        },
+        {
+          "outcome": "passed",
+          "name": "json_shape"
+        }
+      ]
+    },
+    {
+      "case_id": "user_json",
+      "status": "ok",
+      "wall_clock_ms": 13131,
+      "usage": {
+        "input_tokens": 51,
+        "output_tokens": 123,
+        "cached_input_tokens": 0,
+        "cache_creation_tokens": 0,
+        "thinking_tokens": 0
+      },
+      "output_chars": 46,
+      "error": null,
+      "checks": [
+        {
+          "outcome": "passed",
+          "name": "not_empty"
+        },
+        {
+          "outcome": "failed",
+          "name": "json_shape",
+          "reason": "response.text is not valid JSON: expected value at line 1 column 1"
+        }
+      ]
+    }
+  ]
+}

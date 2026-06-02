@@ -1,0 +1,24 @@
+{
+  "case_id": "user_json",
+  "status": "ok",
+  "wall_clock_ms": 35777,
+  "usage": {
+    "input_tokens": 45,
+    "output_tokens": 431,
+    "cached_input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "thinking_tokens": 0
+  },
+  "output_chars": 30,
+  "error": null,
+  "checks": [
+    {
+      "outcome": "passed",
+      "name": "not_empty"
+    },
+    {
+      "outcome": "passed",
+      "name": "json_shape"
+    }
+  ]
+}

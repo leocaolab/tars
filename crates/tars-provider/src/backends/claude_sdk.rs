@@ -135,7 +135,10 @@ fn default_capabilities() -> Capabilities {
         // this provider is intentionally pure-LLM.
         supports_tool_use: false,
         supports_parallel_tool_calls: false,
-        supports_structured_output: StructuredOutputMode::None,
+        // The daemon wires the request's JSON Schema to the Agent SDK's
+        // `outputFormat: {type:'json_schema'}` — separate from agentic
+        // tools, so strict schema works even with tools fully disabled.
+        supports_structured_output: StructuredOutputMode::StrictSchema,
         supports_vision: false,
         supports_thinking: false,
         supports_cancel: true,
@@ -260,6 +263,7 @@ impl ClaudeSdkProvider {
             // the daemon side so the model can't go agentic
             // regardless of how high this counter climbs.
             max_turns: 7,
+            schema: req.structured_output.as_ref().map(|s| &s.schema),
         };
         let mut line = serde_json::to_string(&body)
             .map_err(|e| ProviderError::Internal(format!("claude_sdk: encode body: {e}")))?;
@@ -586,6 +590,11 @@ struct ChatLine<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a str>,
     max_turns: u32,
+    /// JSON Schema for provider-level structured output. The daemon maps
+    /// it to the Agent SDK's `outputFormat: {type:'json_schema', schema}`
+    /// and returns the constrained answer as the reply text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema: Option<&'a serde_json::Value>,
 }
 
 /// Reply lines carry the `id` alongside either reply fields or an

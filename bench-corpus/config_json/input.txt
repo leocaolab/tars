@@ -1,0 +1,1 @@
+Produce a JSON object for a server config with keys "host" (string), "port" (integer), and "tls" (boolean). Use host localhost, port 8080, tls enabled. Return ONLY the JSON.

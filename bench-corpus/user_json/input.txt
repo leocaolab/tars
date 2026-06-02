@@ -1,0 +1,1 @@
+Extract the person as JSON with keys "name" (string) and "age" (integer). Return ONLY the JSON, no prose: "Alice is thirty years old."

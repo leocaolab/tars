@@ -1,0 +1,108 @@
+{
+  "corpus_path": "/Users/hucao/projects/tars/bench-corpus",
+  "provider_id": "qwen_coder_local",
+  "model": "qwen/qwen3.6-27b",
+  "started_at_ms": 1780362855931,
+  "ended_at_ms": 1780362964294,
+  "case_count": 3,
+  "success_count": 3,
+  "error_count": 0,
+  "total_usage": {
+    "input_tokens": 167,
+    "output_tokens": 1536,
+    "cached_input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "thinking_tokens": 0
+  },
+  "checks": [
+    {
+      "name": "not_empty",
+      "evaluated": 3,
+      "violations": 3,
+      "violation_rate": 1.0
+    },
+    {
+      "name": "json_shape",
+      "evaluated": 3,
+      "violations": 0,
+      "violation_rate": 0.0
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "config_json",
+      "status": "ok",
+      "wall_clock_ms": 38393,
+      "usage": {
+        "input_tokens": 59,
+        "output_tokens": 512,
+        "cached_input_tokens": 0,
+        "cache_creation_tokens": 0,
+        "thinking_tokens": 0
+      },
+      "output_chars": 0,
+      "error": null,
+      "checks": [
+        {
+          "outcome": "failed",
+          "name": "not_empty",
+          "reason": "response.text is empty"
+        },
+        {
+          "outcome": "passed",
+          "name": "json_shape"
+        }
+      ]
+    },
+    {
+      "case_id": "langs_json",
+      "status": "ok",
+      "wall_clock_ms": 34771,
+      "usage": {
+        "input_tokens": 63,
+        "output_tokens": 512,
+        "cached_input_tokens": 0,
+        "cache_creation_tokens": 0,
+        "thinking_tokens": 0
+      },
+      "output_chars": 0,
+      "error": null,
+      "checks": [
+        {
+          "outcome": "failed",
+          "name": "not_empty",
+          "reason": "response.text is empty"
+        },
+        {
+          "outcome": "passed",
+          "name": "json_shape"
+        }
+      ]
+    },
+    {
+      "case_id": "user_json",
+      "status": "ok",
+      "wall_clock_ms": 35198,
+      "usage": {
+        "input_tokens": 45,
+        "output_tokens": 512,
+        "cached_input_tokens": 0,
+        "cache_creation_tokens": 0,
+        "thinking_tokens": 0
+      },
+      "output_chars": 0,
+      "error": null,
+      "checks": [
+        {
+          "outcome": "failed",
+          "name": "not_empty",
+          "reason": "response.text is empty"
+        },
+        {
+          "outcome": "passed",
+          "name": "json_shape"
+        }
+      ]
+    }
+  ]
+}

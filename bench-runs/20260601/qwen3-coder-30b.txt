@@ -1,0 +1,16 @@
+tars-melt: RUST_LOG is set but invalid (environment variable not found) — falling back to derived level "warn"
+── tars bench qwen_coder_local (model=qwen/qwen3-coder-30b, prompt=211 chars, max_tokens=128, 2 warmup + 5 measured) ──
+  warmup 1/2  ttfb=  1088ms  total=  9.97s  out=127  decode= 14.3 tok/s
+  warmup 2/2  ttfb=   547ms  total=  9.86s  out=127  decode= 13.6 tok/s
+  iter   1/5  ttfb=   631ms  total=  9.41s  out=127  decode= 14.5 tok/s
+  iter   2/5  ttfb=   795ms  total=  9.55s  out=127  decode= 14.5 tok/s
+  iter   3/5  ttfb=   671ms  total=  9.94s  out=127  decode= 13.7 tok/s
+  iter   4/5  ttfb=   613ms  total=  9.85s  out=127  decode= 13.7 tok/s
+  iter   5/5  ttfb=   527ms  total=  9.23s  out=127  decode= 14.6 tok/s
+
+── stats ── (provider=qwen_coder_local, model=qwen/qwen3-coder-30b, n=5)
+  TTFB     mean=    648ms   p50=    631ms   p99=    795ms
+  Total    mean=   9.60s    p50=   9.55s    p99=   9.94s
+  Decode   mean=   14.2     p50=   14.5     p99=   14.6     tok/s
+  Out      mean=  127.0                                  tokens
+  In       mean=   48.0                                  tokens

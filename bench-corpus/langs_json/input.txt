@@ -1,0 +1,1 @@
+List three programming languages. Return ONLY a JSON object with key "languages" whose value is an array of objects, each with "name" (string), "year" (integer), and "paradigm" (string). No prose, no markdown fences.

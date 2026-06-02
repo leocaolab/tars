@@ -1,0 +1,25 @@
+{
+  "case_id": "user_json",
+  "status": "ok",
+  "wall_clock_ms": 13131,
+  "usage": {
+    "input_tokens": 51,
+    "output_tokens": 123,
+    "cached_input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "thinking_tokens": 0
+  },
+  "output_chars": 46,
+  "error": null,
+  "checks": [
+    {
+      "outcome": "passed",
+      "name": "not_empty"
+    },
+    {
+      "outcome": "failed",
+      "name": "json_shape",
+      "reason": "response.text is not valid JSON: expected value at line 1 column 1"
+    }
+  ]
+}

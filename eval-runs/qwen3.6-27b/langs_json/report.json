@@ -1,0 +1,25 @@
+{
+  "case_id": "langs_json",
+  "status": "ok",
+  "wall_clock_ms": 34771,
+  "usage": {
+    "input_tokens": 63,
+    "output_tokens": 512,
+    "cached_input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "thinking_tokens": 0
+  },
+  "output_chars": 0,
+  "error": null,
+  "checks": [
+    {
+      "outcome": "failed",
+      "name": "not_empty",
+      "reason": "response.text is empty"
+    },
+    {
+      "outcome": "passed",
+      "name": "json_shape"
+    }
+  ]
+}

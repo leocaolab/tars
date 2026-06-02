@@ -1,0 +1,17 @@
+tars-melt: RUST_LOG is set but invalid (environment variable not found) — falling back to derived level "warn"
+── tars bench gemma_local (model=google/gemma-4-e4b, prompt=211 chars, max_tokens=128, 3 warmup + 5 measured) ──
+  warmup 1/3  ttfb= 11631ms  total= 14.50s  out=127  decode= 44.2 tok/s
+  warmup 2/3  ttfb=   188ms  total=  3.05s  out=127  decode= 44.4 tok/s
+  warmup 3/3  ttfb=   283ms  total=  3.06s  out=127  decode= 45.7 tok/s
+  iter   1/5  ttfb=   301ms  total=  3.02s  out=127  decode= 46.7 tok/s
+  iter   2/5  ttfb=   299ms  total=  3.03s  out=127  decode= 46.5 tok/s
+  iter   3/5  ttfb=   176ms  total=  3.02s  out=127  decode= 44.7 tok/s
+  iter   4/5  ttfb=   266ms  total=  3.05s  out=127  decode= 45.6 tok/s
+  iter   5/5  ttfb=   270ms  total=  3.01s  out=127  decode= 46.3 tok/s
+
+── stats ── (provider=gemma_local, model=google/gemma-4-e4b, n=5)
+  TTFB     mean=    262ms   p50=    270ms   p99=    301ms
+  Total    mean=   3.03s    p50=   3.02s    p99=   3.05s
+  Decode   mean=   45.9     p50=   46.3     p99=   46.7     tok/s
+  Out      mean=  127.0                                  tokens
+  In       mean=   56.0                                  tokens
