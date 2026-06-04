@@ -776,6 +776,19 @@ pipeline feed per-provider latency readable from Python. 12 routed
 pytests (construction + 2 live) on top of the 11 Rust tests; the
 `default_chain` refactor keeps all 127 pipeline tests green.
 
+**`CostPolicy`** (same `<unreleased>`) — the second dynamic policy, and
+*simpler* than latency: it needs no runtime observation. It reorders
+candidates cheapest-first by the estimated cost of the request from each
+provider's static `Pricing` (read from `Capabilities`). A free local
+model (`Pricing::default()` = `$0`) sorts first; an unpriced provider
+sorts last. The char/4 token heuristic is rough in absolute terms but
+applies to every candidate equally, so the *relative* ordering is sound.
+Exposed via `tars.Pipeline.routed(policy="cost")`. 2 Rust unit tests
+(cheapest-first; free-first / unknown-last) + 2 routed pytests
+(construction + live). With this, B-8's `LatencyPolicy` + `CostPolicy`
+are both landed; `EnsemblePolicy` (fan-out/merge) + the OTel stack stay
+deferred.
+
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 
 B-15 in TODO. Adds a `.telemetry` field on every `Response` carrying

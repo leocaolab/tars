@@ -58,7 +58,7 @@ use tars_provider::LlmEventStream;
 use tars_provider::registry::ProviderRegistry;
 use tars_types::{
     ChatRequest, CompatibilityCheck, CompatibilityReason, ErrorClass, ModelHint, ModelTier,
-    ProviderError, ProviderId, RequestContext,
+    Pricing, ProviderError, ProviderId, RequestContext,
 };
 
 use crate::latency_stats::{LatencyMetric, LatencyStatsRegistry};
@@ -236,6 +236,75 @@ impl RoutingPolicy for LatencyPolicy {
                 .snapshot(id)
                 .map(|s| s.metric(self.metric))
                 .unwrap_or(0)
+        });
+        Ok(candidates)
+    }
+}
+
+/// Cost-aware policy (B-8). Wraps a base policy and **reorders** its
+/// candidates cheapest-first by the *estimated* cost of serving this
+/// request, using each provider's static [`Pricing`].
+///
+/// Unlike [`LatencyPolicy`], cost needs no runtime observation — pricing
+/// is config, known up front — so the policy carries a snapshot of
+/// `provider → Pricing` taken at construction. The estimate uses the
+/// same char/4 token heuristic for every candidate, so even though the
+/// absolute number is rough the *relative* ordering by price is sound.
+///
+/// A provider priced at zero (a local model — `Pricing::default()`)
+/// estimates to `$0` and correctly sorts first. A provider absent from
+/// the pricing map sorts **last** (we don't route to unknown cost blind).
+pub struct CostPolicy {
+    base: Arc<dyn RoutingPolicy>,
+    pricing: HashMap<ProviderId, Pricing>,
+    /// `max_output_tokens` assumed when the request doesn't specify one
+    /// — applied uniformly to all candidates, so it shifts every
+    /// estimate equally and never changes the ordering.
+    default_max_output: u32,
+}
+
+impl CostPolicy {
+    pub fn new(base: Arc<dyn RoutingPolicy>, pricing: HashMap<ProviderId, Pricing>) -> Self {
+        Self {
+            base,
+            pricing,
+            default_max_output: 1024,
+        }
+    }
+
+    /// Override the assumed output length used in the estimate.
+    pub fn with_default_max_output(mut self, n: u32) -> Self {
+        self.default_max_output = n;
+        self
+    }
+}
+
+/// Map an estimated USD cost to a stable integer sort key (nano-dollars).
+/// Non-finite / negative estimates sort last.
+fn cost_sort_key(cost_usd: f64) -> u64 {
+    if !cost_usd.is_finite() || cost_usd < 0.0 {
+        return u64::MAX;
+    }
+    (cost_usd * 1e9).round() as u64
+}
+
+#[async_trait]
+impl RoutingPolicy for CostPolicy {
+    fn name(&self) -> &'static str {
+        "cost"
+    }
+    async fn select(
+        &self,
+        req: &ChatRequest,
+        registry: &ProviderRegistry,
+    ) -> Result<Vec<ProviderId>, ProviderError> {
+        let mut candidates = self.base.select(req, registry).await?;
+        // Stable sort so equal-cost candidates keep the base order.
+        candidates.sort_by_key(|id| {
+            self.pricing
+                .get(id)
+                .map(|p| cost_sort_key(p.estimate_chat_cost(req, self.default_max_output)))
+                .unwrap_or(u64::MAX)
         });
         Ok(candidates)
     }
@@ -1131,6 +1200,71 @@ mod tests {
             .await
             .expect("dispatch should succeed without latency stats");
         drain(stream).await;
+    }
+
+    // ── CostPolicy (B-8) ────────────────────────────────────────────────
+
+    fn pricing(input: f64, output: f64) -> Pricing {
+        Pricing {
+            input_per_million: input,
+            output_per_million: output,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn cost_policy_orders_cheapest_first() {
+        let mut prices = HashMap::new();
+        prices.insert(ProviderId::new("pricey"), pricing(100.0, 100.0));
+        prices.insert(ProviderId::new("cheap"), pricing(1.0, 1.0));
+        let base = Arc::new(
+            StaticPolicy::new(vec![ProviderId::new("pricey"), ProviderId::new("cheap")]).unwrap(),
+        );
+        let policy = CostPolicy::new(base, prices);
+        let got = policy
+            .select(
+                &req(ModelHint::Explicit("m".into())),
+                &dummy_provider_registry(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![ProviderId::new("cheap"), ProviderId::new("pricey")]
+        );
+    }
+
+    #[tokio::test]
+    async fn cost_policy_free_local_sorts_first_unknown_sorts_last() {
+        let mut prices = HashMap::new();
+        prices.insert(ProviderId::new("paid"), pricing(5.0, 5.0));
+        prices.insert(ProviderId::new("local"), pricing(0.0, 0.0)); // free
+        // "ghost" is intentionally absent from the pricing map.
+        let base = Arc::new(
+            StaticPolicy::new(vec![
+                ProviderId::new("paid"),
+                ProviderId::new("ghost"),
+                ProviderId::new("local"),
+            ])
+            .unwrap(),
+        );
+        let policy = CostPolicy::new(base, prices);
+        let got = policy
+            .select(
+                &req(ModelHint::Explicit("m".into())),
+                &dummy_provider_registry(),
+            )
+            .await
+            .unwrap();
+        // free local first, paid next, unknown-cost ghost last.
+        assert_eq!(
+            got,
+            vec![
+                ProviderId::new("local"),
+                ProviderId::new("paid"),
+                ProviderId::new("ghost"),
+            ]
+        );
     }
 
     // Suppress dead_code warnings on test-only helpers we keep around

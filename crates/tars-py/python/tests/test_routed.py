@@ -28,6 +28,13 @@ def test_routed_static_policy_builds():
     assert "telemetry" in p.layer_names
 
 
+def test_routed_cost_policy_builds():
+    p = tars.Pipeline.routed([PROVIDER_ID], policy="cost")
+    assert "telemetry" in p.layer_names
+    # Cost routing is static-pricing based — no runtime latency stats.
+    assert p.latency_stats() == {}
+
+
 def test_routed_cache_opt_in_adds_cache_layer():
     p = tars.Pipeline.routed([PROVIDER_ID], policy="static", cache=True)
     assert "cache_lookup" in p.layer_names
@@ -98,3 +105,11 @@ def test_routed_static_pipeline_serves_without_stats():
     r = p.complete(model=MODEL, user="reply: ok", max_output_tokens=5)
     assert r.text
     assert p.latency_stats() == {}  # static never records
+
+
+@pytest.mark.requires_provider
+def test_routed_cost_pipeline_serves():
+    # The local provider is free (zero pricing) → cheapest → chosen.
+    p = tars.Pipeline.routed([PROVIDER_ID], policy="cost")
+    r = p.complete(model=MODEL, user="reply: ok", max_output_tokens=5)
+    assert r.text

@@ -47,8 +47,8 @@ use tars_config::{Config, ConfigManager, default_config_path};
 
 use crate::errors::{config_to_py, provider_to_py, runtime_to_py};
 use tars_pipeline::{
-    LatencyMetric, LatencyPolicy, LatencyStatsRegistry, LlmService, Pipeline as RsPipeline,
-    ProviderService, RoutingService, StaticPolicy,
+    CostPolicy, LatencyMetric, LatencyPolicy, LatencyStatsRegistry, LlmService,
+    Pipeline as RsPipeline, ProviderService, RoutingService, StaticPolicy,
 };
 use tars_provider::{
     LlmProvider, auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry,
@@ -934,8 +934,12 @@ impl Pipeline {
     ///   first, learned from observed dispatch latency. Read the running
     ///   numbers with [`Pipeline.latency_stats`]. `latency_metric`
     ///   chooses `"p50"` / `"p95"` (default) / `"mean"`.
+    /// - `"cost"` — try the cheapest provider first, by *estimated* cost
+    ///   of this request from each provider's static pricing (a free
+    ///   local model wins; same token heuristic applies to all, so the
+    ///   ordering is sound even though the absolute number is rough).
     /// - `"static"` — try `provider_ids` in the given order (fallback
-    ///   chain only; no latency learning).
+    ///   chain only; no reordering).
     ///
     /// `cache` defaults to **False** here: a cache shared across
     /// providers could serve one provider's response when another was
@@ -1010,6 +1014,18 @@ impl Pipeline {
         let (routing, latency_stats): (Arc<dyn LlmService>, Option<Arc<LatencyStatsRegistry>>) =
             match policy {
                 "static" => (RoutingService::new(registry, base), None),
+                "cost" => {
+                    // Snapshot each candidate's static pricing from the
+                    // registry; CostPolicy sorts cheapest-first from it.
+                    let mut prices = std::collections::HashMap::new();
+                    for pid in &pids {
+                        if let Some(p) = registry.get(pid) {
+                            prices.insert(pid.clone(), p.capabilities().pricing);
+                        }
+                    }
+                    let pol = Arc::new(CostPolicy::new(base, prices));
+                    (RoutingService::new(registry, pol), None)
+                }
                 "latency" => {
                     let metric = match latency_metric {
                         "p50" => LatencyMetric::P50,
@@ -1030,7 +1046,7 @@ impl Pipeline {
                 }
                 other => {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "unknown policy {other:?}; use \"latency\" or \"static\""
+                        "unknown policy {other:?}; use \"latency\", \"cost\", or \"static\""
                     )));
                 }
             };
