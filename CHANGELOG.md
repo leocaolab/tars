@@ -630,6 +630,45 @@ pytests + tars-pipeline / tars-types / tars-runtime suites green.
 > the fix-stage can now switch on a typed reason kind instead of
 > regex-matching the failure message.
 
+### B-20 v2 follow-up — reject reason in the event log (`<unreleased>`)
+
+v2 made the reject reason typed, but it only reached the live caller's
+Python exception — the moment the call was logged it flattened back to a
+`result: error{kind: validation_failed}` discriminant, so an evaluator
+reading the pipeline event store couldn't tell *why* a validator
+rejected. A reject also never lands in `validation_summary` (it
+short-circuits before a Response exists), so the structured detail had
+no home in the event schema at all.
+
+- **`ValidationReason` now derives serde** (externally tagged,
+  snake_case). Justified by an actual consumer — unlike its sibling
+  `CompatibilityReason`, which stays serde-free because nothing
+  serializes it. External tagging avoids colliding with `Custom`'s own
+  `kind` field.
+- **`LlmCallFinished.validation_reason: Option<ValidationReason>`** —
+  new field, symmetric with `validation_summary`: the summary records
+  Pass/Filter/Annotate on the success path, this records the Reject on
+  the failure path. `#[serde(default, skip_serializing_if)]` keeps the
+  wire form byte-identical for every non-reject event (a
+  backward-compatible schema addition — old blobs deserialize to
+  `None`). `CallResult::Error` stays the minimal `{ kind }` rollup;
+  this field carries the detail beside it.
+- **`EventEmitterMiddleware`** sits outside `ValidationMiddleware` in the
+  onion, so a reject surfaces there as `Err(ValidationFailed)` — it now
+  captures the typed `reason` onto the event before it's flattened.
+
+Tests: ValidationReason serde round-trip (all 4 variants) + Custom/tag
+no-collision; event-store wire-compat (None omitted, old blob → None,
+reason round-trips on the event); an integration test asserting a
+NotEmpty reject lands `validation_reason: NotEmpty{field:"text"}` on the
+persisted `LlmCallFinished`. Full workspace suite + 25 tars-py pytests
+green.
+
+> Lets a Doc 16 evaluator facet on `validation_reason.kind()` —
+> "which reason fired most" / "did max_length rejects spike" — directly
+> from the event store, instead of only knowing a validation failure
+> happened.
+
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 
 B-15 in TODO. Adds a `.telemetry` field on every `Response` carrying

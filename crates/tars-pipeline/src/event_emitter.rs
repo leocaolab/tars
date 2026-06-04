@@ -26,7 +26,7 @@ use tars_provider::LlmEventStream;
 use tars_storage::{BodyStore, PipelineEventStore};
 use tars_types::{
     CallResult, ChatEvent, ChatRequest, ChatResponseBuilder, ContentRef, LlmCallFinished,
-    PipelineEvent, ProviderError, RequestContext,
+    PipelineEvent, ProviderError, RequestContext, ValidationReason,
 };
 
 use crate::middleware::Middleware;
@@ -133,6 +133,17 @@ impl LlmService for EventEmitterService {
             Ok(_) => None,
             Err(e) => Some(CallResult::Error { kind: e.kind() }),
         };
+        // Capture the structured reject reason on the validation-failure
+        // path. EventEmitter sits OUTSIDE ValidationMiddleware in the
+        // onion, so a reject surfaces here as `Err(ValidationFailed)` —
+        // the only place the typed reason is still in hand before it's
+        // flattened to a `validation_failed` discriminant. `None` for
+        // every other outcome (incl. the success/stream path, where a
+        // reject can't occur — it would have errored before the stream).
+        let validation_reason_for_error = match &result {
+            Err(ProviderError::ValidationFailed { reason, .. }) => Some(reason.clone()),
+            _ => None,
+        };
 
         match result {
             Ok(stream) => {
@@ -172,6 +183,7 @@ impl LlmService for EventEmitterService {
                 let req_body_for_write = req_body_bytes.clone();
                 let event = build_event(EventInputs {
                     result: result_for_error.expect("error path"),
+                    validation_reason: validation_reason_for_error,
                     response_body: None,
                     usage: tars_types::Usage::default(),
                     stop_reason: None,
@@ -242,6 +254,9 @@ struct StreamCtx {
 
 struct EventInputs {
     result: CallResult,
+    /// Structured reject reason — `Some` only on the validation-failure
+    /// path, `None` everywhere else.
+    validation_reason: Option<ValidationReason>,
     response_body: Option<ContentRef>,
     usage: tars_types::Usage,
     stop_reason: Option<tars_types::StopReason>,
@@ -328,6 +343,7 @@ fn build_event(i: EventInputs) -> LlmCallFinished {
         stop_reason: i.stop_reason,
         telemetry,
         validation_summary,
+        validation_reason: i.validation_reason,
         result: i.result,
         tags: i.tags,
     }
@@ -425,6 +441,9 @@ fn wrap_stream_for_emit(
 
         let event = build_event(EventInputs {
             result,
+            // Stream path = inner returned Ok, so validation already
+            // passed; a reject would have errored before any stream.
+            validation_reason: None,
             response_body: response_ref,
             usage,
             stop_reason,
@@ -558,6 +577,61 @@ mod tests {
         match &stored[0] {
             PipelineEvent::LlmCallFinished(e) => {
                 assert_eq!(e.validation_summary.validators_run, vec!["max_length"]);
+                // Success path → no reject reason.
+                assert!(e.validation_reason.is_none());
+            }
+            other => panic!("expected LlmCallFinished, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn validation_reject_reason_propagates_into_event() {
+        // B-20.v2 follow-up: a reject's typed reason lands on the event's
+        // `validation_reason` (it can't ride `validation_summary` — a
+        // reject short-circuits before a Response). EventEmitter sees the
+        // reject as `Err(ValidationFailed)` from its inner.call().
+        use crate::validation::{
+            OutputValidator, ValidationMiddleware, builtin::NotEmptyValidator,
+        };
+        use tars_types::ValidationReason;
+
+        let events: Arc<dyn PipelineEventStore> = SqlitePipelineEventStore::in_memory().unwrap();
+        let bodies: Arc<dyn BodyStore> = SqliteBodyStore::in_memory().unwrap();
+
+        // Empty text → NotEmpty rejects.
+        let provider = MockProvider::new("p1", CannedResponse::text(""));
+        let inner: Arc<dyn LlmService> = ProviderService::new(provider);
+        let validated = ValidationMiddleware::new(vec![
+            Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
+        ])
+        .wrap(inner);
+        let svc = EventEmitterMiddleware::new(events.clone(), bodies.clone()).wrap(validated);
+
+        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+        let result = svc.call(req, RequestContext::test_default()).await;
+        assert!(
+            matches!(result, Err(ProviderError::ValidationFailed { .. })),
+            "expected the reject to surface as Err at the outer boundary"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let stored = events.query(&PipelineEventQuery::default()).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        match &stored[0] {
+            PipelineEvent::LlmCallFinished(e) => {
+                // Rollup still flags it as a validation failure.
+                assert!(matches!(
+                    e.result,
+                    CallResult::Error {
+                        kind: tars_types::ProviderErrorKind::ValidationFailed
+                    }
+                ));
+                // …and the structured reason is preserved for faceting.
+                match &e.validation_reason {
+                    Some(ValidationReason::NotEmpty { field }) => assert_eq!(field, "text"),
+                    other => panic!("expected NotEmpty reason, got {other:?}"),
+                }
+                assert_eq!(e.validation_reason.as_ref().unwrap().kind(), "not_empty");
             }
             other => panic!("expected LlmCallFinished, got {other:?}"),
         }

@@ -39,7 +39,15 @@ use crate::response::ChatResponse;
 /// `#[non_exhaustive]` so a future built-in validator can add a variant
 /// without breaking caller `match` arms — the `Custom` catch-all plus
 /// [`ValidationReason::kind`] keep older callers functional.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Derives serde (externally tagged, snake_case) because — unlike its
+/// sibling [`crate::CompatibilityReason`], which is matched only at the
+/// call site — a reject reason is persisted into the pipeline event log
+/// (`LlmCallFinished::validation_reason`) so evaluators can facet on
+/// *why* a validator rejected, not just that one did. External tagging
+/// avoids colliding with `Custom`'s own `kind` field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ValidationReason {
     /// `response.text` was expected to parse as JSON but didn't.
@@ -232,4 +240,79 @@ pub struct ValidationOutcomeRecord {
 /// Construct a fresh `SharedValidationOutcome` for a new request.
 pub fn new_shared_validation_outcome() -> SharedValidationOutcome {
     Arc::new(Mutex::new(ValidationOutcomeRecord::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validation_reason_kind_and_display_match_builtins() {
+        let j = ValidationReason::JsonShape {
+            parse_error: "expected `,`".into(),
+        };
+        assert_eq!(j.kind(), "json_shape");
+        assert!(j.to_string().contains("not valid JSON"));
+
+        let m = ValidationReason::MaxLength {
+            field: "text".into(),
+            length: 12,
+            max: 5,
+        };
+        assert_eq!(m.kind(), "max_length");
+        assert!(m.to_string().contains("max_chars=5"));
+
+        // Custom's kind is the caller's own discriminant, not a fixed tag.
+        let c = ValidationReason::Custom {
+            kind: "snippet".into(),
+            message: "no snippet tag".into(),
+            detail: Some(serde_json::json!({"rule": "R1"})),
+        };
+        assert_eq!(c.kind(), "snippet");
+        assert_eq!(c.to_string(), "no snippet tag");
+    }
+
+    #[test]
+    fn validation_reason_serde_round_trips_every_variant() {
+        // Externally tagged, snake_case. Round-trip must be lossless so
+        // the event store preserves the reason for later faceting.
+        let cases = vec![
+            ValidationReason::JsonShape {
+                parse_error: "bad".into(),
+            },
+            ValidationReason::NotEmpty {
+                field: "thinking".into(),
+            },
+            ValidationReason::MaxLength {
+                field: "text".into(),
+                length: 9,
+                max: 5,
+            },
+            ValidationReason::Custom {
+                kind: "user".into(),
+                message: "nope".into(),
+                detail: Some(serde_json::json!({"k": 1})),
+            },
+        ];
+        for r in cases {
+            let json = serde_json::to_string(&r).expect("ser");
+            let back: ValidationReason = serde_json::from_str(&json).expect("de");
+            assert_eq!(r, back, "round-trip mismatch for {json}");
+        }
+    }
+
+    #[test]
+    fn validation_reason_custom_kind_does_not_collide_with_serde_tag() {
+        // External tagging is deliberate — internal tagging on `kind`
+        // would clash with Custom's own `kind` field. Assert the wire
+        // form nests the payload under the variant name.
+        let c = ValidationReason::Custom {
+            kind: "user".into(),
+            message: "m".into(),
+            detail: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("custom").is_some(), "expected external tag, got {v}");
+        assert_eq!(v["custom"]["kind"], "user");
+    }
 }

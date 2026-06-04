@@ -21,7 +21,7 @@ use crate::events::StopReason;
 use crate::ids::{ProviderId, SessionId, TenantId, TraceId};
 use crate::telemetry::TelemetryAccumulator;
 use crate::usage::Usage;
-use crate::validation::ValidationSummary;
+use crate::validation::{ValidationReason, ValidationSummary};
 
 /// Top-level event variant. `#[non_exhaustive]` plus a catchall
 /// `Other` variant give two layers of forward-compat: old readers
@@ -111,6 +111,25 @@ pub struct LlmCallFinished {
     /// Per-validator outcomes captured at end-of-call. Empty when
     /// no validators ran.
     pub validation_summary: ValidationSummary,
+    /// Why a validator **rejected** this call, when one did. `Some`
+    /// only on the `ValidationFailed` path; `None` otherwise.
+    ///
+    /// Symmetric with [`Self::validation_summary`]: that field records
+    /// the Pass / Filter / Annotate outcomes of a call that produced a
+    /// Response, but a Reject short-circuits *before* a Response exists,
+    /// so it never lands in the summary. This field is the reject's
+    /// home — together they give the complete validator picture, and an
+    /// evaluator can facet on the structured reason (`reason.kind()` +
+    /// detail) rather than re-deriving it from the bare
+    /// `result: error{kind: validation_failed}` discriminant.
+    ///
+    /// `#[serde(default, skip_serializing_if)]` keeps the persisted JSON
+    /// byte-identical for the overwhelming majority of events (every
+    /// non-validation-reject call), so this is a backward-compatible
+    /// schema addition: older event blobs without the field deserialize
+    /// to `None`. (B-20.v2 follow-up.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_reason: Option<ValidationReason>,
 
     // ── outcome ─────────────────────────────────────────────────
     pub result: CallResult,
@@ -204,6 +223,7 @@ mod tests {
             stop_reason: None,
             telemetry: TelemetryAccumulator::default(),
             validation_summary: ValidationSummary::default(),
+            validation_reason: None,
             result: CallResult::Ok,
             tags: vec![],
         }
@@ -245,5 +265,42 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["result"], "error");
         assert_eq!(v["kind"], "rate_limited");
+    }
+
+    #[test]
+    fn validation_reason_omitted_from_wire_when_none() {
+        // Backward-compat: the overwhelming majority of events carry no
+        // reject reason; the field must not appear in their JSON so the
+        // persisted form is byte-identical to pre-B-20.v2 blobs.
+        let ev = fake_finished(); // validation_reason: None
+        let v = serde_json::to_value(&ev).unwrap();
+        assert!(
+            v.get("validation_reason").is_none(),
+            "None reason must be skipped on the wire, got {v}"
+        );
+    }
+
+    #[test]
+    fn old_event_without_validation_reason_deserialises_to_none() {
+        // An event blob persisted before the field existed must still
+        // deserialize (field is `#[serde(default)]`).
+        let mut v = serde_json::to_value(fake_finished()).unwrap();
+        v.as_object_mut().unwrap().remove("validation_reason");
+        let back: LlmCallFinished = serde_json::from_value(v).expect("de without field");
+        assert!(back.validation_reason.is_none());
+    }
+
+    #[test]
+    fn validation_reason_round_trips_on_event() {
+        let mut ev = fake_finished();
+        ev.validation_reason = Some(crate::ValidationReason::NotEmpty {
+            field: "text".into(),
+        });
+        ev.result = CallResult::Error {
+            kind: ProviderErrorKind::ValidationFailed,
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        let back: LlmCallFinished = serde_json::from_value(v).expect("de");
+        assert_eq!(back.validation_reason, ev.validation_reason);
     }
 }

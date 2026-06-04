@@ -542,6 +542,7 @@ mod tests {
             stop_reason: None,
             telemetry: TelemetryAccumulator::default(),
             validation_summary: ValidationSummary::default(),
+            validation_reason: None,
             result: CallResult::Ok,
             tags: vec!["dogfood".into()],
         }))
