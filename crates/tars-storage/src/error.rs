@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn backend_source_is_preserved_in_chain() {
         use std::error::Error as _;
-        let io = std::io::Error::new(std::io::ErrorKind::Other, "underlying boom");
+        let io = std::io::Error::other("underlying boom");
         let err = StorageError::backend_source("writing row", io);
         // Display shows the context; source() exposes the original.
         assert!(err.to_string().contains("writing row"));

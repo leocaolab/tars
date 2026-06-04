@@ -163,7 +163,7 @@ fn try_new_with_valid_capabilities_round_trips_through_wrap() {
 #[test]
 fn cache_policy_default_serde_round_trips() {
     let policy = CachePolicy::default();
-    let v = serde_json::to_value(&policy).unwrap();
+    let v = serde_json::to_value(policy).unwrap();
     let back: CachePolicy = serde_json::from_value(v).unwrap();
     // CachePolicy doesn't impl PartialEq, so check the public surface.
     assert!(back.any_enabled());

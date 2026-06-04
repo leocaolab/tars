@@ -1191,7 +1191,7 @@ where
                         traj: traj.clone(),
                         step_seq,
                         output_summary: input_summary,
-                        usage: usage.clone(),
+                        usage: *usage,
                     },
                 )
                 .await;

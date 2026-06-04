@@ -246,15 +246,19 @@ impl ChatResponseBuilder {
     /// still inspect/log it. Incomplete means either no terminal
     /// `Finished` event, or one or more tool-call Starts that never
     /// received a matching End (whose buffered args would be lost).
-    pub fn finish_checked(self) -> Result<ChatResponse, IncompleteStream> {
+    pub fn finish_checked(self) -> Result<ChatResponse, Box<IncompleteStream>> {
+        // `IncompleteStream` embeds a full `ChatResponse`, so the Err
+        // variant is large; box it to keep `Result` cheap to move on the
+        // (common) Ok path — the allocation only happens on the rare
+        // incomplete-stream error. Satisfies `clippy::result_large_err`.
         let no_terminal = self.inner.stop_reason.is_none();
         let unfinished_tool_calls = self.tool_args_buffer.len();
         if no_terminal || unfinished_tool_calls > 0 {
-            Err(IncompleteStream {
+            Err(Box::new(IncompleteStream {
                 no_terminal,
                 unfinished_tool_calls,
                 partial: self.inner,
-            })
+            }))
         } else {
             Ok(self.inner)
         }
