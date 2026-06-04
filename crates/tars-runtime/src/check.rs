@@ -208,7 +208,7 @@ impl Invariant for ValidatorInvariant {
     fn check(&self, input: &ChatRequest, output: &ChatResponse) -> CheckResult {
         match self.inner.validate(input, output) {
             ValidationOutcome::Pass | ValidationOutcome::Annotate { .. } => CheckResult::pass(),
-            ValidationOutcome::Reject { reason } => CheckResult::fail(reason),
+            ValidationOutcome::Reject { reason } => CheckResult::fail(reason.to_string()),
             ValidationOutcome::Filter { dropped, .. } => {
                 // A Filter only violates the invariant if it actually
                 // dropped something. An empty `dropped` list means the

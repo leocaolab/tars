@@ -8,7 +8,7 @@
 //! `RegexBannedValidator`) are NOT here — consumers compose them via
 //! the trait. See Doc 15 §5 for full philosophy.
 
-use tars_types::{ChatRequest, ChatResponse, ValidationOutcome};
+use tars_types::{ChatRequest, ChatResponse, ValidationOutcome, ValidationReason};
 
 use super::OutputValidator;
 
@@ -19,8 +19,9 @@ use super::OutputValidator;
 /// downstream validators assume JSON output.
 ///
 /// **Schema validation is shape-only** — v1 uses `serde_json` parsing
-/// and doesn't pull a full JSON Schema crate. Future enrichment in
-/// B-20.v2 (typed reasons) when the `jsonschema` crate gets added.
+/// and doesn't pull a full JSON Schema crate. Rejections carry a typed
+/// [`ValidationReason::JsonShape`] (B-20.v2); full JSON-Schema path
+/// matching waits on the `jsonschema` crate being added.
 pub struct JsonShapeValidator {
     name: String,
 }
@@ -55,7 +56,9 @@ impl OutputValidator for JsonShapeValidator {
         match serde_json::from_str::<serde_json::Value>(resp.text.trim()) {
             Ok(_) => ValidationOutcome::Pass,
             Err(e) => ValidationOutcome::Reject {
-                reason: format!("response.text is not valid JSON: {e}"),
+                reason: ValidationReason::JsonShape {
+                    parse_error: e.to_string(),
+                },
             },
         }
     }
@@ -107,7 +110,9 @@ impl OutputValidator for NotEmptyValidator {
         };
         if s.trim().is_empty() {
             ValidationOutcome::Reject {
-                reason: format!("response.{} is empty", field_label(self.field)),
+                reason: ValidationReason::NotEmpty {
+                    field: field_label(self.field).to_string(),
+                },
             }
         } else {
             ValidationOutcome::Pass
@@ -188,11 +193,11 @@ impl OutputValidator for MaxLengthValidator {
         }
         match self.on_exceed {
             OnExceed::Reject => ValidationOutcome::Reject {
-                reason: format!(
-                    "response.{} length={len} exceeds max_chars={}",
-                    field_label(self.field),
-                    self.max_chars
-                ),
+                reason: ValidationReason::MaxLength {
+                    field: field_label(self.field).to_string(),
+                    length: len,
+                    max: self.max_chars,
+                },
             },
             OnExceed::Truncate => {
                 let mut new_resp = resp.clone();

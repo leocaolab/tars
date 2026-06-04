@@ -53,7 +53,7 @@ use pyo3::types::{PyDict, PyList};
 use serde_json::Value as JsonValue;
 
 use tars_pipeline::OutputValidator;
-use tars_types::{ChatRequest, ChatResponse, ValidationOutcome};
+use tars_types::{ChatRequest, ChatResponse, ValidationOutcome, ValidationReason};
 
 // ── Outcome pyclasses ────────────────────────────────────────────────
 
@@ -80,20 +80,95 @@ impl PyPass {
 /// validation failure should catch `TarsProviderError(kind=
 /// "validation_failed")` at their own layer with explicit prompt
 /// variation.
-#[pyclass(frozen, get_all, name = "Reject")]
+///
+/// Two construction paths (B-20.v2 typed reasons):
+/// - `tars.Reject("message")` — back-compat string form; wraps into a
+///   `Custom { kind: "user" }` reason on the Rust side.
+/// - `tars.Reject.typed(kind, message, detail=None)` — explicit typed
+///   path. `kind` is the caller's machine-matchable discriminant,
+///   surfaced on `TarsProviderError.validation_reason["kind"]`; `detail`
+///   is an optional dict carried through verbatim.
+#[pyclass(frozen, name = "Reject")]
 #[derive(Debug, Clone)]
 pub(crate) struct PyReject {
-    pub(crate) reason: String,
+    pub(crate) kind: String,
+    pub(crate) message: String,
+    pub(crate) detail_json: Option<JsonValue>,
 }
 
 #[pymethods]
 impl PyReject {
+    /// `tars.Reject("message")` — back-compat string constructor.
+    /// Wraps into `ValidationReason::Custom { kind: "user", .. }`.
     #[new]
     fn new(reason: String) -> Self {
-        Self { reason }
+        Self {
+            kind: "user".to_string(),
+            message: reason,
+            detail_json: None,
+        }
+    }
+
+    /// `tars.Reject.typed(kind, message, detail=None)` — explicit typed
+    /// rejection. `kind` becomes the machine-matchable discriminant on
+    /// the resulting `TarsProviderError.validation_reason`.
+    #[staticmethod]
+    #[pyo3(signature = (kind, message, detail = None))]
+    fn typed(kind: String, message: String, detail: Option<Bound<'_, PyDict>>) -> PyResult<Self> {
+        let detail_json = match detail {
+            None => None,
+            Some(d) => {
+                let py = d.py();
+                let json_mod = py.import("json")?;
+                let s: String = json_mod.call_method1("dumps", (d,))?.extract()?;
+                // Propagate parse failures rather than silently dropping
+                // malformed detail (e.g. NaN/Inf, which `json.dumps`
+                // emits but serde rejects) — mirrors PyAnnotate.
+                Some(serde_json::from_str(&s).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "failed to parse reject detail as JSON: {e}"
+                    ))
+                })?)
+            }
+        };
+        Ok(Self {
+            kind,
+            message,
+            detail_json,
+        })
+    }
+
+    /// Back-compat alias — pre-v2 code read `Reject(...).reason`.
+    #[getter]
+    fn reason(&self) -> &str {
+        &self.message
+    }
+    #[getter]
+    fn kind(&self) -> &str {
+        &self.kind
+    }
+    #[getter]
+    fn message(&self) -> &str {
+        &self.message
+    }
+    #[getter]
+    fn detail<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        match &self.detail_json {
+            None => Ok(None),
+            Some(v) => {
+                let json_mod = py.import("json")?;
+                let s = serde_json::to_string(v).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "failed to serialize reject detail: {e}"
+                    ))
+                })?;
+                let obj = json_mod.call_method1("loads", (s,))?;
+                Ok(Some(obj.downcast_into::<PyDict>()?))
+            }
+        }
     }
     fn __repr__(&self) -> String {
-        format!("Reject(reason={:?})", self.reason)
+        format!("Reject(kind={:?}, message={:?})", self.kind, self.message)
     }
 }
 
@@ -218,9 +293,9 @@ impl OutputValidator for PyValidatorAdapter {
         // pyclasses; downcast and translate to the Rust enum.
         //
         // On callback failure (panic / exception / wrong return
-        // type), we fall back to Reject{retriable:false} carrying
-        // the error message — caller sees a clear "validator X
-        // crashed" rather than a silent-Pass false-positive.
+        // type), we fall back to a permanent Reject (Custom kind=
+        // "internal") carrying the error message — caller sees a clear
+        // "validator X crashed" rather than a silent-Pass false-positive.
         Python::with_gil(|py| {
             let req_dict = match build_req_dict(py, req) {
                 Ok(d) => d,
@@ -254,8 +329,16 @@ fn reject_internal(validator: &str, reason: &str) -> ValidationOutcome {
         reason = %reason,
         "python validator failed; surfacing as permanent Reject"
     );
+    // Adapter-level failure (callback raised / wrong return type) is
+    // distinct from a caller's deliberate Reject — tag it `kind:
+    // "internal"` so callers can tell "my validator crashed" apart from
+    // "my validator rejected the content".
     ValidationOutcome::Reject {
-        reason: reason.to_string(),
+        reason: ValidationReason::Custom {
+            kind: "internal".to_string(),
+            message: reason.to_string(),
+            detail: None,
+        },
     }
 }
 
@@ -352,8 +435,16 @@ fn parse_outcome(
         return Ok(ValidationOutcome::Pass);
     }
     if let Ok(rej) = bound.extract::<PyRef<'_, PyReject>>() {
+        // Python user validators always map to the Custom variant —
+        // built-in typed variants (JsonShape / NotEmpty / MaxLength) are
+        // reserved for Rust builtins. `kind` carries the caller's
+        // discriminant ("user" for the string constructor).
         return Ok(ValidationOutcome::Reject {
-            reason: rej.reason.clone(),
+            reason: ValidationReason::Custom {
+                kind: rej.kind.clone(),
+                message: rej.message.clone(),
+                detail: rej.detail_json.clone(),
+            },
         });
     }
     if let Ok(filt) = bound.extract::<PyRef<'_, PyFilterText>>() {

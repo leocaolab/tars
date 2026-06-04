@@ -82,5 +82,5 @@ pub use tools::{ToolCall, ToolChoice, ToolSpec};
 pub use usage::{CostUsd, Pricing, Usage};
 pub use validation::{
     OutcomeSummary, SharedValidationOutcome, ValidationOutcome, ValidationOutcomeRecord,
-    ValidationSummary, new_shared_validation_outcome,
+    ValidationReason, ValidationSummary, new_shared_validation_outcome,
 };

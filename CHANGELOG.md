@@ -591,6 +591,45 @@ no-validators empty case, and class export.
 > findings". `r.telemetry.layers` told them *whether* validation
 > ran, not *what* it did.
 
+### B-20 v2 — Typed `ValidationReason` for rejects (`<unreleased>`)
+
+Validator rejections were string-only (`Reject { reason: String }` →
+`ValidationFailed { reason: String }`), so a caller's fix-stage had to
+grep `e.message` to tell "bad JSON" from "empty field" — the brittle
+contract B-31 v1 already retired for the routing/compatibility path.
+This makes rejections typed + machine-matchable, consistent with
+`CompatibilityReason { kind, message, detail }`.
+
+- **`ValidationReason` enum** (`tars-types/validation.rs`,
+  `#[non_exhaustive]`): `JsonShape { parse_error }` /
+  `NotEmpty { field }` / `MaxLength { field, length, max }` /
+  `Custom { kind, message, detail }`. `.kind()` returns a stable
+  snake_case discriminant; `Display` reproduces the exact W1 message
+  strings, so error-message / log-scrape contracts are unchanged.
+- **`ProviderError::ValidationFailed { validator, reason }`** now
+  carries `reason: ValidationReason`. Built-in validators emit the
+  typed variants; Python user validators + the adapter crash-fallback
+  go through `Custom` (`kind="user"` / `kind="internal"`).
+- **No `retriable` field re-added** — W4's "validation failure is
+  always Permanent" stands; the original v2 spec's `retriable` mention
+  was stale.
+- **Python**: `tars.Reject("msg")` wraps into `Custom { kind: "user" }`
+  (back-compat; `.reason` alias retained); new
+  `tars.Reject.typed(kind, message, detail=None)` for the explicit
+  typed path. `TarsProviderError` gains `validator: str` and
+  `validation_reason: {kind, message, detail}` so the fix-stage
+  branches on `e.validation_reason["kind"]`.
+
+Tests: 3 Rust assertions (typed variant + `.kind()` on the builtins),
+3 Python construction tests, 2 live-provider integration tests
+asserting `validation_reason` round-trips (string-form → `kind="user"`,
+typed form → caller kind + structured `detail`). All 25 tars-py
+pytests + tars-pipeline / tars-types / tars-runtime suites green.
+
+> Unblocks the downstream consumer's Tier 2 parse→structured pipeline:
+> the fix-stage can now switch on a typed reason kind instead of
+> regex-matching the failure message.
+
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 
 B-15 in TODO. Adds a `.telemetry` field on every `Response` carrying

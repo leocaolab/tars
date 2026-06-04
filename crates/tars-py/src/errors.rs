@@ -20,13 +20,19 @@
 //! - `kind: str`      — variant name (e.g. `"rate_limited"`, `"auth"`)
 //! - `retry_after: float | None` — seconds, when the provider hinted one
 //! - `is_retriable: bool`        — convenience for fallback logic
+//!
+//! Some variants add their own typed attributes (B-20.v2):
+//! `ValidationFailed` carries `validator: str` and
+//! `validation_reason: {kind, message, detail}` so a fix-stage branches
+//! on `validation_reason["kind"]` rather than parsing the message.
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyDict, PyList};
 
 use tars_config::ConfigError;
+use tars_types::ValidationReason;
 use tars_types::error::{ErrorClass, ProviderError};
 
 create_exception!(tars._tars_py, TarsError, PyException);
@@ -111,6 +117,30 @@ fn build_provider_exc(
         ProviderError::UnknownTool { name } => {
             value.setattr("tool_name", name)?;
         }
+        ProviderError::ValidationFailed { validator, reason } => {
+            // `validation_reason: {kind, message, detail}` (B-20.v2) —
+            // lets the caller's fix-stage branch on `reason["kind"]` +
+            // structured `detail` instead of grepping the message.
+            // `validator` is also surfaced for "which check failed".
+            value.setattr("validator", validator)?;
+            let d = PyDict::new(py);
+            d.set_item("kind", reason.kind())?;
+            d.set_item("message", reason.to_string())?;
+            match validation_reason_detail(reason) {
+                Some(v) => {
+                    let json_mod = py.import("json")?;
+                    let s = serde_json::to_string(&v).map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "failed to serialize validation reason detail: {e}"
+                        ))
+                    })?;
+                    let obj = json_mod.call_method1("loads", (s,))?;
+                    d.set_item("detail", obj)?;
+                }
+                None => d.set_item("detail", py.None())?,
+            }
+            value.setattr("validation_reason", d)?;
+        }
         ProviderError::NoCompatibleCandidate { skipped } => {
             // `skipped_candidates: list[(provider_id: str,
             // reasons: list[CompatibilityReason])]`. Each reason re-uses
@@ -173,6 +203,28 @@ fn compat_reason_detail(r: &tars_types::CompatibilityReason) -> Option<serde_jso
             "max": *max,
         })),
         R::StructuredOutputUnsupported | R::VisionUnsupported => None,
+        _ => None,
+    }
+}
+
+/// Structured `detail` payload for a [`ValidationReason`], mirroring
+/// the typed fields so the Python `validation_reason["detail"]` dict
+/// carries machine-readable specifics (`field` / `length` / `max` /
+/// `parse_error`) rather than only the rendered message. `Custom`
+/// passes the caller's own detail through verbatim.
+fn validation_reason_detail(r: &ValidationReason) -> Option<serde_json::Value> {
+    use ValidationReason as R;
+    match r {
+        R::JsonShape { parse_error } => Some(serde_json::json!({ "parse_error": parse_error })),
+        R::NotEmpty { field } => Some(serde_json::json!({ "field": field })),
+        R::MaxLength { field, length, max } => Some(serde_json::json!({
+            "field": field,
+            "length": *length,
+            "max": *max,
+        })),
+        R::Custom { detail, .. } => detail.clone(),
+        // `#[non_exhaustive]` wildcard — a future variant exposes no
+        // structured detail until taught here.
         _ => None,
     }
 }

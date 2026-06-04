@@ -16,7 +16,7 @@ use futures::StreamExt;
 use tars_provider::backends::mock::{CannedResponse, MockProvider};
 use tars_types::{
     ChatRequest, ChatResponse, ModelHint, OutcomeSummary, ProviderError, RequestContext,
-    ValidationOutcome,
+    ValidationOutcome, ValidationReason,
 };
 
 use super::builtin::{JsonShapeValidator, MaxLengthValidator, NotEmptyValidator};
@@ -63,7 +63,9 @@ fn json_shape_rejects_broken_json() {
     let r = resp_with_text(r#"{"missing": "comma" "next": 1}"#);
     match v.validate(&fake_req(), &r) {
         ValidationOutcome::Reject { reason } => {
-            assert!(reason.contains("not valid JSON"));
+            assert!(matches!(reason, ValidationReason::JsonShape { .. }));
+            assert_eq!(reason.kind(), "json_shape");
+            assert!(reason.to_string().contains("not valid JSON"));
         }
         _ => panic!("expected Reject"),
     }
@@ -114,8 +116,13 @@ fn max_length_rejects_over_limit() {
     let v = MaxLengthValidator::reject_above(5);
     let r = resp_with_text("more than five chars");
     match v.validate(&fake_req(), &r) {
-        ValidationOutcome::Reject { reason, .. } => {
-            assert!(reason.contains("max_chars=5"));
+        ValidationOutcome::Reject { reason } => {
+            assert_eq!(reason.kind(), "max_length");
+            assert!(
+                matches!(reason, ValidationReason::MaxLength { max: 5, .. }),
+                "expected typed MaxLength{{max:5}}, got {reason:?}"
+            );
+            assert!(reason.to_string().contains("max_chars=5"));
         }
         _ => panic!("expected Reject"),
     }
@@ -209,7 +216,9 @@ async fn validation_reject_surfaces_validation_failed_error() {
             // ValidationFailed is always Permanent (W4 — no retriable flag).
             let err = ProviderError::ValidationFailed {
                 validator: "not_empty".into(),
-                reason: "x".into(),
+                reason: ValidationReason::NotEmpty {
+                    field: "text".into(),
+                },
             };
             assert_eq!(err.class(), tars_types::error::ErrorClass::Permanent);
         }

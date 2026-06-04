@@ -19,11 +19,91 @@
 //!   Reject short-circuits the call into an error path.
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::response::ChatResponse;
+
+/// Typed, machine-matchable reason a validator rejected a response.
+///
+/// Mirrors the `CompatibilityReason { kind, message, detail }` shape
+/// (B-31 v4) so a caller's fix-stage can match on a discriminant +
+/// structured detail instead of grepping the message string — the
+/// brittle contract B-31 v1 already retired for the routing path.
+/// Built-in validators emit the typed variants; caller-supplied
+/// validators (Python user callbacks, the internal adapter's
+/// crash-fallback) go through [`ValidationReason::Custom`].
+///
+/// `#[non_exhaustive]` so a future built-in validator can add a variant
+/// without breaking caller `match` arms — the `Custom` catch-all plus
+/// [`ValidationReason::kind`] keep older callers functional.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ValidationReason {
+    /// `response.text` was expected to parse as JSON but didn't.
+    /// `parse_error` is the underlying `serde_json` message.
+    JsonShape { parse_error: String },
+
+    /// A required response field (`text` / `thinking`) was empty or
+    /// whitespace-only. `field` is the field label.
+    NotEmpty { field: String },
+
+    /// A response field exceeded its configured character budget.
+    MaxLength {
+        field: String,
+        length: usize,
+        max: usize,
+    },
+
+    /// Caller-supplied rejection — Python user validators and the
+    /// adapter's crash-fallback land here. `kind` is a free-form
+    /// caller-chosen discriminant (e.g. `"user"`, `"internal"`),
+    /// `message` is human-readable, `detail` an optional structured
+    /// payload the caller can branch on.
+    Custom {
+        kind: String,
+        message: String,
+        detail: Option<serde_json::Value>,
+    },
+}
+
+impl ValidationReason {
+    /// Stable machine-matchable discriminant string. For built-in
+    /// variants it's a fixed snake_case tag; for [`Self::Custom`] it's
+    /// the caller-chosen `kind`. Use this in caller fix-stages instead
+    /// of substring-matching [`fmt::Display`] output.
+    pub fn kind(&self) -> &str {
+        match self {
+            Self::JsonShape { .. } => "json_shape",
+            Self::NotEmpty { .. } => "not_empty",
+            Self::MaxLength { .. } => "max_length",
+            Self::Custom { kind, .. } => kind,
+        }
+    }
+}
+
+impl fmt::Display for ValidationReason {
+    /// Human-readable message. Built-in variants reproduce the exact
+    /// strings the W1 string-only `reason` carried, so log scrapers /
+    /// error messages are unchanged across the v2 migration.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::JsonShape { parse_error } => {
+                write!(f, "response.text is not valid JSON: {parse_error}")
+            }
+            Self::NotEmpty { field } => write!(f, "response.{field} is empty"),
+            Self::MaxLength { field, length, max } => {
+                write!(
+                    f,
+                    "response.{field} length={length} exceeds max_chars={max}"
+                )
+            }
+            Self::Custom { message, .. } => write!(f, "{message}"),
+        }
+    }
+}
 
 /// What a validator decides to do with a response. Distinct from
 /// [`crate::CompatibilityCheck`] — that one is about routing's
@@ -61,7 +141,11 @@ pub enum ValidationOutcome {
     /// the field shrinks the surface and removes the temptation.
     /// Callers that genuinely need to re-ask the model should do so
     /// at their own layer with explicit prompt variation.
-    Reject { reason: String },
+    ///
+    /// `reason` is a typed [`ValidationReason`] (B-20.v2) — callers
+    /// match on `reason.kind()` + structured detail rather than parsing
+    /// a message string.
+    Reject { reason: ValidationReason },
 
     /// Response unchanged, but the validator wants to record per-call
     /// metrics. Propagates into [`ValidationSummary::outcomes`].

@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::chat::CompatibilityReason;
 use crate::ids::ProviderId;
+use crate::validation::ValidationReason;
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
@@ -107,8 +108,15 @@ pub enum ProviderError {
     /// is a gamble that doesn't belong inside the runtime). Callers
     /// that need to re-ask the model with prompt variation should
     /// catch `ValidationFailed` at their own layer.
+    ///
+    /// `reason` is a typed [`ValidationReason`] (B-20.v2); its
+    /// `Display` reproduces the message string while `reason.kind()` +
+    /// structured detail let callers branch programmatically.
     #[error("validation failed: {validator}: {reason}")]
-    ValidationFailed { validator: String, reason: String },
+    ValidationFailed {
+        validator: String,
+        reason: ValidationReason,
+    },
 
     /// Catch-all for adapter bugs. Should be rare.
     #[error("internal: {0}")]

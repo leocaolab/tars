@@ -74,6 +74,31 @@ def test_reject_no_retriable_kwarg():
         tars.Reject("bad", retriable=True)
 
 
+def test_reject_string_form_defaults_to_user_kind():
+    """B-20.v2: `tars.Reject("msg")` wraps into Custom{kind='user'}.
+    `.reason` stays as a back-compat alias for `.message`."""
+    r = tars.Reject("bad")
+    assert r.kind == "user"
+    assert r.message == "bad"
+    assert r.reason == "bad"
+    assert r.detail is None
+
+
+def test_reject_typed_carries_kind_message_detail():
+    """B-20.v2: `tars.Reject.typed(...)` is the explicit typed path."""
+    r = tars.Reject.typed("schema", "missing field id", detail={"field": "id"})
+    assert r.kind == "schema"
+    assert r.message == "missing field id"
+    assert r.reason == "missing field id"  # alias still works
+    assert r.detail == {"field": "id"}
+
+
+def test_reject_typed_detail_optional():
+    r = tars.Reject.typed("schema", "nope")
+    assert r.kind == "schema"
+    assert r.detail is None
+
+
 def test_filter_text_fields():
     f = tars.FilterText("clean", dropped=["bad"])
     assert f.text == "clean"
@@ -131,6 +156,35 @@ def test_validator_reject_surfaces_validation_failed_error():
     assert e.is_retriable is False  # W4: ValidationFailed is always Permanent.
     assert "always_reject" in str(e)
     assert "always reject" in str(e)
+    # B-20.v2: typed reason surfaces structured on the exception.
+    assert e.validator == "always_reject"
+    vr = e.validation_reason
+    assert vr["kind"] == "user"  # string-form Reject → Custom{kind="user"}
+    assert vr["message"] == "always reject"
+    assert vr["detail"] is None
+
+
+def test_validator_typed_reject_surfaces_structured_reason():
+    """B-20.v2: `Reject.typed(kind, msg, detail)` round-trips its kind +
+    structured detail onto `TarsProviderError.validation_reason`, so the
+    caller's fix-stage branches on `kind` instead of grepping the
+    message."""
+
+    def rejector(req, resp):
+        return tars.Reject.typed(
+            "snippet_missing", "no snippet tag", detail={"rule": "R1"}
+        )
+
+    p = _pipeline_with(("snippet", rejector))
+    with pytest.raises(tars.TarsProviderError) as excinfo:
+        p.complete(model=MODEL, user="hi", max_output_tokens=10)
+    e = excinfo.value
+    assert e.kind == "validation_failed"
+    assert e.validator == "snippet"
+    vr = e.validation_reason
+    assert vr["kind"] == "snippet_missing"
+    assert vr["message"] == "no snippet tag"
+    assert vr["detail"] == {"rule": "R1"}
 
 
 def test_filter_text_replaces_response_text():
