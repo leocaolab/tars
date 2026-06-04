@@ -91,6 +91,16 @@ impl Pipeline {
     /// This is the Rust-native counterpart of `tars.Pipeline.from_default`
     /// in tars-py — same composition, no Python dependency.
     pub fn default_chain(provider: Arc<dyn LlmProvider>, opts: PipelineOpts) -> Self {
+        Self::chain_over(crate::service::ProviderService::new(provider), opts)
+    }
+
+    /// Assemble the canonical onion over an arbitrary inner service.
+    /// `default_chain` uses this with a single provider wrapped in
+    /// `ProviderService`; a routed pipeline passes a
+    /// [`crate::RoutingService`] (registry + policy) as `inner` so the
+    /// same Telemetry / Validation / Cache / Retry stack sits on top of
+    /// provider *selection*. Keeps the layer order in exactly one place.
+    pub fn chain_over(inner: Arc<dyn LlmService>, opts: PipelineOpts) -> Self {
         let PipelineOpts {
             cache_origin,
             validators,
@@ -101,7 +111,7 @@ impl Pipeline {
             cache,
         } = opts;
 
-        let mut builder = Self::builder(provider);
+        let mut builder = Self::builder_with_inner(inner);
 
         if let Some(EventStores { events: ev, bodies }) = events {
             builder = builder.layer(crate::event_emitter::EventEmitterMiddleware::new(

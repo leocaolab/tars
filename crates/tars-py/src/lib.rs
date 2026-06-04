@@ -46,7 +46,10 @@ use pyo3::types::{PyAny, PyDict, PyList};
 use tars_config::{Config, ConfigManager, default_config_path};
 
 use crate::errors::{config_to_py, provider_to_py, runtime_to_py};
-use tars_pipeline::{LlmService, Pipeline as RsPipeline, ProviderService};
+use tars_pipeline::{
+    LatencyMetric, LatencyPolicy, LatencyStatsRegistry, LlmService, Pipeline as RsPipeline,
+    ProviderService, RoutingService, StaticPolicy,
+};
 use tars_provider::{
     LlmProvider, auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry,
 };
@@ -504,6 +507,13 @@ pub(crate) struct Pipeline {
     capabilities_summary: CapabilitiesSummary,
     capabilities_full: tars_types::Capabilities,
     layer_names: Vec<String>,
+    /// Set only for a `routed(..., policy="latency")` pipeline — the
+    /// shared registry the bottom `RoutingService` feeds. Exposed via
+    /// `Pipeline.latency_stats()`. `None` for single-provider pipelines.
+    latency_stats: Option<Arc<LatencyStatsRegistry>>,
+    /// Candidate provider ids a routed pipeline chooses among (in
+    /// priority order). Single-element for non-routed pipelines.
+    candidate_ids: Vec<String>,
 }
 
 impl Pipeline {
@@ -566,13 +576,26 @@ impl Pipeline {
             .collect();
         let inner: Arc<dyn LlmService> = Arc::new(pipeline);
         Self {
-            id,
+            id: id.clone(),
             inner,
             capabilities_summary,
             capabilities_full,
             layer_names,
+            latency_stats: None,
+            candidate_ids: vec![id],
         }
     }
+}
+
+/// Build the full multi-provider [`ProviderRegistry`] from a loaded
+/// config (every configured provider, not just one). Used by the routed
+/// pipeline constructor so a [`RoutingService`] can choose among them.
+fn build_registry_from_cfg(cfg: &Config) -> PyResult<Arc<ProviderRegistry>> {
+    let http =
+        HttpProviderBase::default_arc().map_err(|e| runtime_to_py("building HTTP base", e))?;
+    let registry = ProviderRegistry::from_config(&cfg.providers, http, basic())
+        .map_err(|e| runtime_to_py("building provider registry", e))?;
+    Ok(Arc::new(registry))
 }
 
 /// Bundle of stores wired into `EventEmitterMiddleware`. Constructed
@@ -898,6 +921,170 @@ impl Pipeline {
             retry: None,
             cache: true,
         })
+    }
+
+    /// Construct a Pipeline that **routes** across several providers
+    /// (B-8). The bottom of the onion becomes a `RoutingService` over
+    /// `provider_ids` (in priority order) instead of a single provider;
+    /// the usual Telemetry / Validation? / Cache? / Retry stack sits on
+    /// top unchanged.
+    ///
+    /// `policy`:
+    /// - `"latency"` (default) — try the historically-fastest provider
+    ///   first, learned from observed dispatch latency. Read the running
+    ///   numbers with [`Pipeline.latency_stats`]. `latency_metric`
+    ///   chooses `"p50"` / `"p95"` (default) / `"mean"`.
+    /// - `"static"` — try `provider_ids` in the given order (fallback
+    ///   chain only; no latency learning).
+    ///
+    /// `cache` defaults to **False** here: a cache shared across
+    /// providers could serve one provider's response when another was
+    /// routed to. Enable it only when the candidates are
+    /// interchangeable (same model). Provider source / `validators` /
+    /// `event_store_dir` work as in `from_default`.
+    #[staticmethod]
+    #[pyo3(signature = (
+        provider_ids,
+        *,
+        policy = "latency",
+        latency_metric = "p95",
+        config_path = None,
+        config_str = None,
+        cache = false,
+        validators = None,
+        event_store_dir = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn routed(
+        provider_ids: Vec<String>,
+        policy: &str,
+        latency_metric: &str,
+        config_path: Option<String>,
+        config_str: Option<String>,
+        cache: bool,
+        validators: Option<Bound<'_, PyList>>,
+        event_store_dir: Option<String>,
+    ) -> PyResult<Self> {
+        if provider_ids.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "routed() needs at least one provider id",
+            ));
+        }
+        if config_path.is_some() && config_str.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "pass at most one of config_path / config_str, not both",
+            ));
+        }
+        let cfg = match (config_path, config_str) {
+            (Some(p), _) => ConfigManager::load_from_file(&p).map_err(config_to_py)?,
+            (_, Some(s)) => ConfigManager::load_from_str(&s).map_err(config_to_py)?,
+            (None, None) => ConfigManager::load_from_file(&resolve_default_config_path()?)
+                .map_err(config_to_py)?,
+        };
+        let registry = build_registry_from_cfg(&cfg)?;
+
+        // Validate every candidate up front so a typo'd id is a clean
+        // error, not a silent skip at dispatch time.
+        let mut pids = Vec::with_capacity(provider_ids.len());
+        for id in &provider_ids {
+            let pid = ProviderId::new(id.clone());
+            if registry.get(&pid).is_none() {
+                let configured: Vec<String> =
+                    cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
+                return Err(crate::errors::TarsConfigError::new_err(format!(
+                    "provider {id:?} not in config. Configured: [{}]",
+                    configured.join(", "),
+                )));
+            }
+            pids.push(pid);
+        }
+
+        // Capabilities of the first candidate represent the routed
+        // pipeline (routing picks dynamically; the primary is the
+        // sensible default for `check_compatibility`).
+        let first = registry.get(&pids[0]).expect("validated above");
+        let capabilities_full = first.capabilities().clone();
+        let capabilities_summary = CapabilitiesSummary::from(&capabilities_full);
+
+        let base = Arc::new(StaticPolicy::new(pids.clone()).map_err(provider_to_py)?);
+        let (routing, latency_stats): (Arc<dyn LlmService>, Option<Arc<LatencyStatsRegistry>>) =
+            match policy {
+                "static" => (RoutingService::new(registry, base), None),
+                "latency" => {
+                    let metric = match latency_metric {
+                        "p50" => LatencyMetric::P50,
+                        "p95" => LatencyMetric::P95,
+                        "mean" => LatencyMetric::Mean,
+                        other => {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "unknown latency_metric {other:?}; use p50 / p95 / mean"
+                            )));
+                        }
+                    };
+                    let stats = Arc::new(LatencyStatsRegistry::new(100));
+                    let pol = Arc::new(LatencyPolicy::new(base, stats.clone()).with_metric(metric));
+                    (
+                        RoutingService::with_latency_stats(registry, pol, stats.clone()),
+                        Some(stats),
+                    )
+                }
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown policy {other:?}; use \"latency\" or \"static\""
+                    )));
+                }
+            };
+
+        let validators = validation::build_validator_list(validators)?;
+        let stores = event_store_dir
+            .as_deref()
+            .map(EventStorePair::open_in_dir)
+            .transpose()?;
+
+        // `cache_origin` is the cache namespace — a synthetic id for the
+        // routed set (cache defaults off here anyway; see the doc above).
+        let mut opts = tars_pipeline::PipelineOpts::new(ProviderId::new("routed"));
+        opts.validators = validators;
+        opts.events = stores
+            .map(|EventStorePair { events, bodies }| tars_pipeline::EventStores { events, bodies });
+        opts.cache = cache;
+        let pipeline = RsPipeline::chain_over(routing, opts);
+        let layer_names: Vec<String> = pipeline
+            .layer_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        Ok(Self {
+            id: format!("routed[{}]", provider_ids.join(",")),
+            inner: Arc::new(pipeline),
+            capabilities_summary,
+            capabilities_full,
+            layer_names,
+            latency_stats,
+            candidate_ids: provider_ids,
+        })
+    }
+
+    /// Per-provider observed latency for a `routed(policy="latency")`
+    /// pipeline: `{provider_id: {count, mean_ms, p50_ms, p95_ms}}`.
+    /// Empty for non-routed / static pipelines, or before any call has
+    /// been dispatched to a given provider.
+    fn latency_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new(py);
+        if let Some(stats) = &self.latency_stats {
+            for id in &self.candidate_ids {
+                if let Some(s) = stats.snapshot(&ProviderId::new(id.clone())) {
+                    let entry = PyDict::new(py);
+                    entry.set_item("count", s.count)?;
+                    entry.set_item("mean_ms", s.mean_ms)?;
+                    entry.set_item("p50_ms", s.p50_ms)?;
+                    entry.set_item("p95_ms", s.p95_ms)?;
+                    d.set_item(id, entry)?;
+                }
+            }
+        }
+        Ok(d)
     }
 
     #[getter]

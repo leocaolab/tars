@@ -751,12 +751,30 @@ needs — without the full `tars-melt` OTel stack.
   registry, closing the observe→route loop. `new` (no stats) is a
   zero-overhead no-op.
 
-**Speculative**: the Python / `from_default` path is single-provider, so
-no live consumer exercises routing yet. Verified via mock-provider
-integration tests (real `RoutingService` over a mock-backed registry
-feeds the registry on dispatch) + policy reorder/explore/metric unit
-tests — 11 new tests, not a live e2e. `CostPolicy` / `EnsemblePolicy` /
-the OTel stack remain deferred (see TODO B-8).
+`CostPolicy` / `EnsemblePolicy` / the OTel stack remain deferred (see
+TODO B-8).
+
+**Landed into a real consumer** (same `<unreleased>`): rather than leave
+the policy mock-test-only, it's now reachable end to end.
+
+- **`Pipeline::chain_over(inner, opts)`** — extracted from
+  `default_chain` so the canonical onion (Telemetry / Validation? /
+  Cache? / Retry) can sit over *any* inner `LlmService`, not just a
+  single `ProviderService`. `default_chain` now delegates to it; a
+  routed pipeline passes a `RoutingService`.
+- **`tars.Pipeline.routed(provider_ids, *, policy="latency"|"static",
+  latency_metric="p50"|"p95"|"mean", config_path=, config_str=,
+  cache=False, validators=, event_store_dir=)`** — builds a
+  multi-provider routed Pipeline. `"latency"` wires `LatencyPolicy` +
+  `with_latency_stats`; candidates are validated up front; cache
+  defaults off (a shared cache across providers could cross-serve).
+- **`Pipeline.latency_stats()`** — `{provider_id: {count, mean_ms,
+  p50_ms, p95_ms}}`, empty for static / non-routed.
+
+Verified by a live e2e: real completions through a routed latency
+pipeline feed per-provider latency readable from Python. 12 routed
+pytests (construction + 2 live) on top of the 11 Rust tests; the
+`default_chain` refactor keeps all 127 pipeline tests green.
 
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 
