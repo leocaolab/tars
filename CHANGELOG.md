@@ -19,7 +19,7 @@ is authoritative. This file aggregates.
 
 ---
 
-## M8 — Python bindings (`tars-py`) (in progress 2026-05-04)
+## M8 — Python bindings (`tars-py`) (shipped 2026-06-04)
 
 PyO3 + maturin-built wheel exposing tars to Python (and, via the
 same shape, future TS / Go bindings). First non-Rust consumer is
@@ -27,6 +27,36 @@ downstream consumer, migrating from a hand-rolled `LLMClient` + 80-line `Session
 to `tars.Pipeline` + `tars.Session`. Long-term downstream consumer goes full Rust
 but Python is a permanent first-class surface — design treats it as
 such, not as a throwaway scaffold.
+
+### B-6c — `Pipeline.builder()` fluent middleware builder (`<unreleased>`)
+
+The `from_default` / `from_config` / `from_str` shortcuts hardcode the
+middleware stack; the builder gives finer control without dropping to
+Rust. Closes M8.
+
+- **`tars.Pipeline.builder(provider_id, *, config_path=None, config_str=None)`**
+  returns a `PipelineBuilder` with chainable `.validators([...])` /
+  `.event_store(dir)` / `.retry(...)` / `.cache(bool)` / `.build()`.
+- **`.retry(max_attempts=…, initial_backoff_ms=…, max_backoff_ms=…,
+  multiplier=…, max_wait_ms=…, respect_retry_after=…,
+  max_attempts_maybe_retriable=…)`** — exposes the `RetryConfig` that
+  `from_default` previously left at its default (the real gap). Each arg
+  `None` keeps the current value.
+- **`.cache(False)`** — drops the cache layer so every call hits the
+  provider. Backed by a new `PipelineOpts.cache: bool` in tars-pipeline
+  (default `true`; non-breaking, `#[non_exhaustive]`).
+- **Order is fixed by design.** The canonical onion (Validation outside
+  Cache, etc. — load-bearing per B-20 W4) is NOT reorderable from the
+  builder; it configures + opts out of layers only. Arbitrary *custom*
+  Python middleware (async-bridge into the Rust stream) stays deferred —
+  no consumer, and it's genuinely hard (GIL across await, non-Send
+  stream items).
+
+Tests: 12 pytests (construction-only layer-trace assertions + one live
+cache-toggle layer-trace check) + a Rust `default_chain_omits_cache_when_disabled`.
+Bare builder == `from_default`; `.cache(False)` →
+`["telemetry", "retry"]`. Full 45-test tars-py suite + workspace clippy
+gate green.
 
 ### Stage 1 — `from_str` + typed exceptions (`<unreleased>`)
 

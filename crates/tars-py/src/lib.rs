@@ -525,18 +525,37 @@ impl Pipeline {
         validators: Vec<Arc<dyn tars_pipeline::OutputValidator>>,
         event_stores: Option<EventStorePair>,
     ) -> Self {
+        // The three `from_*` constructors keep the canonical defaults
+        // (default retry, cache on). The builder path (`Pipeline.builder`)
+        // routes through `from_provider_tuned` to override them.
+        Self::from_provider_tuned(id, provider, validators, event_stores, None, true)
+    }
+
+    /// Like [`from_provider`] but with the builder-tunable knobs:
+    /// `retry` override and `cache` toggle. Shared by the fluent
+    /// `PipelineBuilder`.
+    fn from_provider_tuned(
+        id: String,
+        provider: Arc<dyn LlmProvider>,
+        validators: Vec<Arc<dyn tars_pipeline::OutputValidator>>,
+        event_stores: Option<EventStorePair>,
+        retry: Option<tars_pipeline::RetryConfig>,
+        cache: bool,
+    ) -> Self {
         let capabilities_full = provider.capabilities().clone();
         let capabilities_summary = CapabilitiesSummary::from(&capabilities_full);
 
         // Delegate the onion composition to `Pipeline::default_chain`
         // — same shape as before (EventEmitter? → Telemetry →
-        // Validation? → Cache → Retry → Provider), now expressed once
+        // Validation? → Cache? → Retry → Provider), now expressed once
         // in tars-pipeline so non-Python callers (arc, tars-cli, etc.)
         // pick up the same canonical stack.
         let mut opts = tars_pipeline::PipelineOpts::new(ProviderId::new(id.clone()));
         opts.validators = validators;
         opts.events = event_stores
             .map(|EventStorePair { events, bodies }| tars_pipeline::EventStores { events, bodies });
+        opts.retry = retry;
+        opts.cache = cache;
         let pipeline = RsPipeline::default_chain(provider, opts);
 
         let layer_names: Vec<String> = pipeline
@@ -602,6 +621,146 @@ impl EventStorePair {
         )
         .map_err(|e| runtime_to_py("open body store", e))?;
         Ok(Self { events, bodies })
+    }
+}
+
+/// Where a [`PipelineBuilder`] resolves its provider from.
+enum ProviderSource {
+    /// `~/.tars/config.toml`.
+    Default,
+    /// An explicit config file path.
+    ConfigPath(String),
+    /// Inline TOML text.
+    ConfigStr(String),
+}
+
+/// Fluent builder returned by [`Pipeline::builder`]. Accumulates
+/// layer config, then `build()` resolves the provider and assembles the
+/// canonical onion via `Pipeline::default_chain`. The order is fixed
+/// (load-bearing); the builder only toggles/configures layers.
+#[pyclass]
+pub(crate) struct PipelineBuilder {
+    provider_id: String,
+    source: ProviderSource,
+    validators: Vec<Arc<dyn tars_pipeline::OutputValidator>>,
+    event_store_dir: Option<String>,
+    retry: Option<tars_pipeline::RetryConfig>,
+    cache: bool,
+}
+
+#[pymethods]
+impl PipelineBuilder {
+    /// Attach output validators — same `[(name, callable), ...]` shape
+    /// as the `from_*` `validators=` kwarg. Replaces any previously set.
+    #[pyo3(signature = (validators = None))]
+    fn validators<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        validators: Option<Bound<'py, PyList>>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        slf.validators = validation::build_validator_list(validators)?;
+        Ok(slf)
+    }
+
+    /// Enable the pipeline event store, writing to `dir` (same as the
+    /// `event_store_dir=` kwarg).
+    fn event_store(mut slf: PyRefMut<'_, Self>, dir: String) -> PyRefMut<'_, Self> {
+        slf.event_store_dir = Some(dir);
+        slf
+    }
+
+    /// Override the retry policy. Any argument left `None` keeps the
+    /// current value (default: 3 attempts, 200ms→30s exp backoff ×2,
+    /// 30s max wait). `max_attempts=1` disables retry.
+    #[pyo3(signature = (
+        *,
+        max_attempts = None,
+        initial_backoff_ms = None,
+        max_backoff_ms = None,
+        multiplier = None,
+        max_wait_ms = None,
+        respect_retry_after = None,
+        max_attempts_maybe_retriable = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn retry<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        max_attempts: Option<u32>,
+        initial_backoff_ms: Option<u64>,
+        max_backoff_ms: Option<u64>,
+        multiplier: Option<f64>,
+        max_wait_ms: Option<u64>,
+        respect_retry_after: Option<bool>,
+        max_attempts_maybe_retriable: Option<u32>,
+    ) -> PyRefMut<'py, Self> {
+        let mut cfg = slf.retry.clone().unwrap_or_default();
+        if let Some(n) = max_attempts {
+            cfg.max_attempts = n;
+        }
+        if let Some(ms) = initial_backoff_ms {
+            cfg.initial_backoff = std::time::Duration::from_millis(ms);
+        }
+        if let Some(ms) = max_backoff_ms {
+            cfg.max_backoff = std::time::Duration::from_millis(ms);
+        }
+        if let Some(m) = multiplier {
+            cfg.multiplier = m;
+        }
+        if let Some(ms) = max_wait_ms {
+            cfg.max_wait = std::time::Duration::from_millis(ms);
+        }
+        if let Some(b) = respect_retry_after {
+            cfg.respect_retry_after = b;
+        }
+        if let Some(n) = max_attempts_maybe_retriable {
+            cfg.max_attempts_maybe_retriable = n;
+        }
+        slf.retry = Some(cfg);
+        slf
+    }
+
+    /// Include (`True`, default) or drop (`False`) the cache layer.
+    /// Dropping it makes every call hit the provider.
+    #[pyo3(signature = (enabled = true))]
+    fn cache(mut slf: PyRefMut<'_, Self>, enabled: bool) -> PyRefMut<'_, Self> {
+        slf.cache = enabled;
+        slf
+    }
+
+    /// Resolve the provider and build the Pipeline. Can be called more
+    /// than once (each call yields an independent Pipeline).
+    fn build(&self) -> PyResult<Pipeline> {
+        let provider = match &self.source {
+            ProviderSource::Default => {
+                let path = resolve_default_config_path()?;
+                build_provider(&path, &self.provider_id)?
+            }
+            ProviderSource::ConfigPath(p) => build_provider(p, &self.provider_id)?,
+            ProviderSource::ConfigStr(s) => build_provider_from_str(s, &self.provider_id)?,
+        };
+        let stores = self
+            .event_store_dir
+            .as_deref()
+            .map(EventStorePair::open_in_dir)
+            .transpose()?;
+        Ok(Pipeline::from_provider_tuned(
+            self.provider_id.clone(),
+            provider,
+            self.validators.clone(),
+            stores,
+            self.retry.clone(),
+            self.cache,
+        ))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PipelineBuilder(id={:?}, validators={}, event_store={}, retry_overridden={}, cache={})",
+            self.provider_id,
+            self.validators.len(),
+            self.event_store_dir.is_some(),
+            self.retry.is_some(),
+            self.cache,
+        )
     }
 }
 
@@ -687,6 +846,57 @@ impl Pipeline {
             validators,
             stores,
         ))
+    }
+
+    /// Start a fluent [`PipelineBuilder`] for finer control over the
+    /// middleware stack than the `from_*` shortcuts give.
+    ///
+    /// The canonical onion **order is fixed** (it's load-bearing — e.g.
+    /// Validation must sit outside Cache; see Doc 02 / B-20 W4), so the
+    /// builder lets you *configure* and *opt out of* layers, not reorder
+    /// them. What it adds over `from_default`:
+    ///
+    /// - `.retry(max_attempts=…, initial_backoff_ms=…, …)` — tune the
+    ///   retry policy that `from_default` leaves at its default.
+    /// - `.cache(False)` — drop the cache layer (every call hits the
+    ///   provider).
+    /// - `.validators([...])` / `.event_store(dir)` — same as the
+    ///   `from_*` kwargs.
+    ///
+    /// Provider source defaults to `~/.tars/config.toml`; pass
+    /// `config_path=` or `config_str=` to override (mutually exclusive).
+    ///
+    /// ```python
+    /// p = (tars.Pipeline.builder("qwen_coder_local")
+    ///         .retry(max_attempts=5, initial_backoff_ms=100)
+    ///         .cache(False)
+    ///         .build())
+    /// ```
+    #[staticmethod]
+    #[pyo3(signature = (provider_id, *, config_path = None, config_str = None))]
+    fn builder(
+        provider_id: String,
+        config_path: Option<String>,
+        config_str: Option<String>,
+    ) -> PyResult<PipelineBuilder> {
+        if config_path.is_some() && config_str.is_some() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "pass at most one of config_path / config_str, not both",
+            ));
+        }
+        let source = match (config_path, config_str) {
+            (Some(p), _) => ProviderSource::ConfigPath(p),
+            (_, Some(s)) => ProviderSource::ConfigStr(s),
+            (None, None) => ProviderSource::Default,
+        };
+        Ok(PipelineBuilder {
+            provider_id,
+            source,
+            validators: Vec::new(),
+            event_store_dir: None,
+            retry: None,
+            cache: true,
+        })
     }
 
     #[getter]
@@ -1550,6 +1760,7 @@ fn _tars_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(default_config_path_py, m)?)?;
     m.add_class::<Provider>()?;
     m.add_class::<Pipeline>()?;
+    m.add_class::<PipelineBuilder>()?;
     m.add_class::<Response>()?;
     m.add_class::<Usage>()?;
     m.add_class::<Telemetry>()?;

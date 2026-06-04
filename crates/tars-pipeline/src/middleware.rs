@@ -98,6 +98,7 @@ impl Pipeline {
             cache_registry,
             cache_factory,
             retry,
+            cache,
         } = opts;
 
         let mut builder = Self::builder(provider);
@@ -113,14 +114,17 @@ impl Pipeline {
             builder = builder.layer(crate::validation::ValidationMiddleware::new(validators));
         }
 
-        let cache_registry =
-            cache_registry.unwrap_or_else(|| tars_cache::MemoryCacheRegistry::default_arc() as _);
-        let cache_factory = cache_factory.unwrap_or_else(|| tars_cache::CacheKeyFactory::new(1));
-        builder = builder.layer(crate::cache::CacheLookupMiddleware::new(
-            cache_registry,
-            cache_factory,
-            cache_origin,
-        ));
+        if cache {
+            let cache_registry = cache_registry
+                .unwrap_or_else(|| tars_cache::MemoryCacheRegistry::default_arc() as _);
+            let cache_factory =
+                cache_factory.unwrap_or_else(|| tars_cache::CacheKeyFactory::new(1));
+            builder = builder.layer(crate::cache::CacheLookupMiddleware::new(
+                cache_registry,
+                cache_factory,
+                cache_origin,
+            ));
+        }
 
         let retry_cfg = retry.unwrap_or_default();
         builder = builder.layer(crate::retry::RetryMiddleware::new(retry_cfg));
@@ -170,6 +174,13 @@ pub struct PipelineOpts {
     /// Retry policy override. `None` = `RetryConfig::default()`
     /// (3 attempts, exp backoff, 30s cap).
     pub retry: Option<crate::retry::RetryConfig>,
+
+    /// Include the `CacheLookup` layer. `true` (default) matches the
+    /// canonical chain. Set `false` to skip caching entirely — useful
+    /// for callers that need every call to hit the provider (latency
+    /// measurement, non-deterministic sampling, deterministic tests
+    /// where a same-prompt cache hit would shadow the provider).
+    pub cache: bool,
 }
 
 impl PipelineOpts {
@@ -184,6 +195,7 @@ impl PipelineOpts {
             cache_registry: None,
             cache_factory: None,
             retry: None,
+            cache: true,
         }
     }
 }
@@ -367,6 +379,17 @@ mod tests {
             pipeline.layer_names(),
             &["telemetry", "cache_lookup", "retry"]
         );
+    }
+
+    #[tokio::test]
+    async fn default_chain_omits_cache_when_disabled() {
+        use tars_types::ProviderId;
+        let mock = MockProvider::new("p", CannedResponse::text("hi"));
+        let mut opts = PipelineOpts::new(ProviderId::new("p"));
+        opts.cache = false;
+        let pipeline = Pipeline::default_chain(mock, opts);
+        // cache_lookup dropped; the rest of the canonical order stands.
+        assert_eq!(pipeline.layer_names(), &["telemetry", "retry"]);
     }
 
     #[tokio::test]
