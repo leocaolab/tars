@@ -531,6 +531,7 @@ mod tests {
         DispatchArgs {
             provider: None,
             tier: None,
+            route_by: crate::dispatch::RouteBy::Fallback,
             model: None,
             no_cache: false,
             cache_path: None,

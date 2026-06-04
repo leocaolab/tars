@@ -803,6 +803,16 @@ pytests. **All three B-8 routing strategies (latency / cost / ensemble)
 now shipped and landed end to end**; only the `tars-melt` OTel stack
 stays deferred (not a routing blocker).
 
+**CLI: `tars run --tier <T> --route-by <fallback|latency|cost|ensemble>`**
+(same `<unreleased>`) — the strategies are now reachable from the CLI
+(a second real consumer beyond tars-py), not just Python. `--tier`
+already routed via `StaticPolicy` (fallback order); `--route-by` wraps
+that base with `LatencyPolicy` / `CostPolicy`, or swaps in
+`EnsembleService`. Default `fallback` preserves prior behaviour. The run
+label surfaces the chosen strategy. 2 dispatch tests (every mode builds
+through `build_dispatch`; default is fallback); verified live against LM
+Studio across cost / ensemble / fallback.
+
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 
 B-15 in TODO. Adds a `.telemetry` field on every `Response` carrying

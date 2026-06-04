@@ -25,12 +25,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use tars_cache::{CacheRegistry, MemoryCacheRegistry, open_at_path};
 use tars_config::Config;
 use tars_pipeline::{
-    CircuitBreaker, CircuitBreakerConfig, LlmService, RoutingService, StaticPolicy,
+    CircuitBreaker, CircuitBreakerConfig, CostPolicy, EnsembleService, LatencyPolicy,
+    LatencyStatsRegistry, LlmService, RoutingService, StaticPolicy,
 };
 use tars_provider::auth::basic;
 use tars_provider::http_base::HttpProviderBase;
@@ -54,6 +57,15 @@ pub struct DispatchArgs {
     /// Valid values: `reasoning`, `default`, `fast`, `local`.
     #[arg(short, long, conflicts_with = "provider", value_parser = parse_tier)]
     pub tier: Option<ModelTier>,
+
+    /// How to choose among a tier's candidates (B-8). Only meaningful
+    /// with `--tier`. `fallback` (default) tries them in configured
+    /// order; `latency` prefers the fastest observed (learns across
+    /// calls within a process); `cost` prefers the cheapest by static
+    /// pricing; `ensemble` fans out to all in parallel and takes the
+    /// first response.
+    #[arg(long, value_enum, default_value_t = RouteBy::Fallback, requires = "tier")]
+    pub route_by: RouteBy,
 
     /// Override the provider's `default_model`.
     #[arg(short, long)]
@@ -82,6 +94,24 @@ pub struct DispatchArgs {
     /// `$XDG_DATA_HOME/tars/events.sqlite`.
     #[arg(long, env = "TARS_EVENTS_PATH")]
     pub events_path: Option<PathBuf>,
+}
+
+/// Strategy for choosing among a tier's candidate providers (B-8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum RouteBy {
+    /// Try candidates in configured order; fall back on retriable error.
+    #[default]
+    Fallback,
+    /// Prefer the fastest provider by observed dispatch latency. Learns
+    /// across calls within one process — a single `tars run` has no
+    /// prior data, so it behaves like `fallback` on the first call.
+    Latency,
+    /// Prefer the cheapest provider by static per-request cost estimate.
+    /// Works on the first call (pricing is config, not learned).
+    Cost,
+    /// Hedged fan-out: dispatch to all candidates in parallel, take the
+    /// first to respond. Trades extra calls for lower tail latency.
+    Ensemble,
 }
 
 /// What every subcommand needs to drive the pipeline once per call.
@@ -187,7 +217,7 @@ fn build_tier_dispatch(
     // Tier→candidates resolution happens at startup; the runtime policy
     // is StaticPolicy (CLI's req.model is always Explicit, so
     // TierPolicy's Tier-keyed lookup wouldn't fire).
-    let policy = Arc::new(StaticPolicy::new(candidates.clone())?);
+    let base = Arc::new(StaticPolicy::new(candidates.clone())?);
     let cost_provider = registry.get(first).ok_or_else(|| {
         anyhow::anyhow!("routing: tier `{tier:?}` first candidate `{first}` not in registry")
     })?;
@@ -206,9 +236,30 @@ fn build_tier_dispatch(
              pass a non-empty --model"
         );
     }
-    let inner: Arc<dyn LlmService> = RoutingService::new(registry.clone(), policy);
+    // The base candidate order is `StaticPolicy`; `--route-by` wraps it
+    // with a B-8 strategy (or swaps in the ensemble dispatch shape).
+    let inner: Arc<dyn LlmService> = match args.route_by {
+        RouteBy::Fallback => RoutingService::new(registry.clone(), base),
+        RouteBy::Latency => {
+            let stats = Arc::new(LatencyStatsRegistry::new(100));
+            let policy = Arc::new(LatencyPolicy::new(base, stats.clone()));
+            RoutingService::with_latency_stats(registry.clone(), policy, stats)
+        }
+        RouteBy::Cost => {
+            let mut pricing = HashMap::new();
+            for c in &candidates {
+                if let Some(p) = registry.get(c) {
+                    pricing.insert(c.clone(), p.capabilities().pricing);
+                }
+            }
+            let policy = Arc::new(CostPolicy::new(base, pricing));
+            RoutingService::new(registry.clone(), policy)
+        }
+        RouteBy::Ensemble => EnsembleService::new(registry.clone(), candidates.clone()),
+    };
     let label = format!(
-        "tier `{tier:?}` (candidates: {})",
+        "tier `{tier:?}` via {:?} (candidates: {})",
+        args.route_by,
         candidates
             .iter()
             .map(|p| p.as_ref())
@@ -376,6 +427,56 @@ mod tests {
         "#);
         let err = pick_provider(&c, None).unwrap_err();
         assert!(err.to_string().contains("multiple"));
+    }
+
+    fn tier_args(tier: ModelTier, route_by: RouteBy) -> DispatchArgs {
+        DispatchArgs {
+            provider: None,
+            tier: Some(tier),
+            route_by,
+            model: Some("m".to_string()),
+            no_cache: false,
+            cache_path: None,
+            breaker: false,
+            no_trajectory: false,
+            events_path: None,
+        }
+    }
+
+    #[test]
+    fn build_tier_dispatch_supports_every_route_by_mode() {
+        let c = cfg(r#"
+            [providers.a]
+            type = "mock"
+            canned_response = "x"
+
+            [providers.b]
+            type = "mock"
+            canned_response = "y"
+
+            [routing.tiers]
+            local = ["a", "b"]
+        "#);
+        let reg = build_registry_with_breaker(&c, false).unwrap();
+        for rb in [
+            RouteBy::Fallback,
+            RouteBy::Latency,
+            RouteBy::Cost,
+            RouteBy::Ensemble,
+        ] {
+            let d = build_dispatch(&c, &reg, &tier_args(ModelTier::Local, rb))
+                .unwrap_or_else(|e| panic!("dispatch should build for {rb:?}: {e}"));
+            // Label surfaces both the tier and the chosen strategy.
+            assert!(d.label.contains("Local"), "label: {}", d.label);
+            assert!(d.label.contains(&format!("{rb:?}")), "label: {}", d.label);
+            // cost_provider is the first candidate regardless of strategy.
+            assert_eq!(d.cache_origin_id.as_ref(), "a");
+        }
+    }
+
+    #[test]
+    fn route_by_defaults_to_fallback() {
+        assert_eq!(RouteBy::default(), RouteBy::Fallback);
     }
 
     #[test]
