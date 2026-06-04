@@ -19,7 +19,7 @@ TODO scan to answer.
 | M2 Multi-prov + Routing | ✅ shipped (M2 scope)  | Routing (Static + Tier) + CircuitBreaker + B-31 capability pre-flight. CostPolicy / LatencyPolicy / Ensemble deferred to M5 (need metrics infra) — not M2 blockers. |
 | M3 Agent Runtime | ✅ shipped                    | Session / Turn / TurnGuard / WorkerAgent + Critic + run_task — see B-4 for *enhancements* on top of working baseline. |
 | M4 Tools         | ✅ shipped                    | Tool trait + ToolRegistry + fs.read_file / fs.list_dir + MCP integration. fs.write_file gated on Backtrack/Saga (B-4). |
-| M5 CLI/MELT      | 🟡 partial                   | tars-cli (init / probe / bench / plan / run / run-task / trajectory) shipped. Per-provider runtime metrics infra (B-8) NOT shipped — blocks Cost/Latency/Ensemble routing. |
+| M5 CLI/MELT      | 🟡 partial                   | tars-cli (init / probe / bench / plan / run / run-task / trajectory) shipped. Per-provider latency metrics slice + `LatencyPolicy` shipped 2026-06-04 (B-8). Still blocked: `CostPolicy` (rolling cost-per-token) + `EnsemblePolicy` (fan-out/merge) + full OTel/tars-melt stack. |
 | M6 Multi-tenant + Server | ❌ not started        | tars-security / HTTP+gRPC server / Auth/IAM/Budget/Guard middleware all blocked here. |
 | M7 Web frontends | ❌ not started                | tui-shape outlined as B-19 (build-our-own, not fork-codex). |
 | M8 Python bindings (`tars-py`) | ✅ shipped           | Stages 1-4 + B-31 + B-20 W1+W2+W4+v3+v2 + B-6c (`Pipeline.builder()`) shipped. Arbitrary *custom* Python middleware (async-bridge) explicitly deferred under B-6c — no consumer, ~weeks of GIL/stream work. napi-rs (B-6b) waits on the first Node user. |
@@ -427,8 +427,9 @@ After an external reviewer read the real code in `routing.rs` / `retry.rs` / `mi
 - **Trigger**: ContentStore = first agent emits a payload that won't fit inline. KVStore = BudgetMiddleware or Tools idempotency table needs persistence.
 
 ### B-8. Full `tars-melt` (metrics, OTel exporter, cardinality validator, `SecretField<T>`)
-- Mini version shipped — see CHANGELOG. Pending for M5 (Doc 14 §11): all metrics from Doc 08 §5, OTel SDK + OTLP exporter, cardinality validator, `SecretField<T>` generic wrapper (today `SecretString` covers the only consumer), trace head + tail sampling, `AdaptiveSampler`.
-- **Trigger**: M5 starts (Doc 14 calls for it concurrent with CLI/TUI work).
+- Mini version shipped — see CHANGELOG. **Per-provider latency slice shipped 2026-06-04**: `LatencyStatsRegistry` (bounded rolling per-provider window + p50/p95/mean) in tars-pipeline + `LatencyPolicy` (reorders a base policy's candidates fastest-first) + `RoutingService::with_latency_stats` (observes each successful dispatch). Self-contained in-process structure (shaped like CircuitBreaker's per-provider state), NOT the OTel stack. **Speculative — no live routing consumer yet** (Python/`from_default` path is single-provider); verified via mock-provider integration tests, not a real e2e.
+- Still pending for M5 (Doc 14 §11): `CostPolicy` (harder — rolling cost-per-token, post-call attribution) + `EnsemblePolicy` (fan-out/merge, a dispatch restructure); all metrics from Doc 08 §5, OTel SDK + OTLP exporter, cardinality validator, `SecretField<T>` generic wrapper (today `SecretString` covers the only consumer), trace head + tail sampling, `AdaptiveSampler`.
+- **Trigger**: the LatencyPolicy unblock fired (this slice). Cost/Ensemble + the OTel stack wait for a real routing consumer / M5 proper.
 
 ### B-9. `tars-tools` — additional builtins + MCP + tool-call mini-pipeline
 - Crate skeleton + `Tool` trait + `ToolRegistry` + `fs.read_file` + `fs.list_dir` + WorkerAgent integration shipped — see CHANGELOG. **Still missing**:

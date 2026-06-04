@@ -9,11 +9,19 @@
 //!   order".
 //! - [`TierPolicy`] — `HashMap<ModelTier, Vec<ProviderId>>`. Resolves
 //!   `ModelHint::Tier(...)` requests by table lookup.
+//! - [`LatencyPolicy`] — wraps a base policy and reorders its candidates
+//!   by observed per-provider latency (B-8). Fed by
+//!   [`RoutingService::with_latency_stats`] →
+//!   [`crate::LatencyStatsRegistry`].
 //!
-//! Out of scope for M2.1 (next commits):
-//! - `CostPolicy` / `LatencyPolicy` — both need runtime metrics
-//!   infrastructure that doesn't exist yet.
-//! - `EnsemblePolicy` — fan-out + merge is its own thing.
+//! Still out of scope:
+//! - `CostPolicy` — needs per-provider rolling cost-per-token (harder
+//!   than latency: aggregate by model within provider, and actual cost
+//!   is only known post-call). `EnsemblePolicy` — fan-out + merge is a
+//!   different primitive (a structural change to dispatch, not a policy).
+//! - Full `tars-melt` metrics/OTel export (Prometheus, cardinality
+//!   validator, trace sampling) — `LatencyStatsRegistry` is a
+//!   self-contained in-process slice, not that stack.
 //! - `CircuitBreaker` — separate middleware (state-per-provider).
 //!
 //! ## Fallback chain
@@ -46,13 +54,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use tars_provider::registry::ProviderRegistry;
 use tars_provider::LlmEventStream;
+use tars_provider::registry::ProviderRegistry;
 use tars_types::{
     ChatRequest, CompatibilityCheck, CompatibilityReason, ErrorClass, ModelHint, ModelTier,
     ProviderError, ProviderId, RequestContext,
 };
 
+use crate::latency_stats::{LatencyMetric, LatencyStatsRegistry};
 use crate::service::LlmService;
 
 /// Decide which providers can serve `req`, in priority order.
@@ -98,7 +107,9 @@ impl StaticPolicy {
     /// statically guaranteed, so the empty-list invariant can't be
     /// violated.
     pub fn single(id: ProviderId) -> Self {
-        Self { candidates: vec![id] }
+        Self {
+            candidates: vec![id],
+        }
     }
 }
 
@@ -170,6 +181,66 @@ impl RoutingPolicy for TierPolicy {
     }
 }
 
+/// Latency-aware policy (B-8). Wraps a base policy and **reorders** its
+/// candidate list by observed per-provider latency (ascending), so the
+/// routing service tries the historically-fastest compatible provider
+/// first. Pure reordering — it never drops or adds candidates, so the
+/// base policy stays authoritative about *which* providers are eligible.
+///
+/// Reads [`LatencyStatsRegistry`], which [`RoutingService`] feeds when
+/// built via [`RoutingService::with_latency_stats`] with the same
+/// `Arc`. A provider with **no samples yet** sorts first (latency `0`)
+/// so it gets explored at least once; after its first dispatch it has
+/// real data and competes on merit. This is a simple explore-then-
+/// exploit default — good enough for the metrics slice; smarter
+/// bandit-style exploration is out of scope.
+pub struct LatencyPolicy {
+    base: Arc<dyn RoutingPolicy>,
+    stats: Arc<LatencyStatsRegistry>,
+    metric: LatencyMetric,
+}
+
+impl LatencyPolicy {
+    /// Reorder `base`'s candidates by p95 latency (the default —
+    /// routing usually cares about the slow tail).
+    pub fn new(base: Arc<dyn RoutingPolicy>, stats: Arc<LatencyStatsRegistry>) -> Self {
+        Self {
+            base,
+            stats,
+            metric: LatencyMetric::default(),
+        }
+    }
+
+    /// Choose which statistic to minimize (P50 / P95 / Mean).
+    pub fn with_metric(mut self, metric: LatencyMetric) -> Self {
+        self.metric = metric;
+        self
+    }
+}
+
+#[async_trait]
+impl RoutingPolicy for LatencyPolicy {
+    fn name(&self) -> &'static str {
+        "latency"
+    }
+    async fn select(
+        &self,
+        req: &ChatRequest,
+        registry: &ProviderRegistry,
+    ) -> Result<Vec<ProviderId>, ProviderError> {
+        let mut candidates = self.base.select(req, registry).await?;
+        // Stable sort so equal-latency (and all-unknown) candidates keep
+        // the base policy's order as the tie-break.
+        candidates.sort_by_key(|id| {
+            self.stats
+                .snapshot(id)
+                .map(|s| s.metric(self.metric))
+                .unwrap_or(0)
+        });
+        Ok(candidates)
+    }
+}
+
 /// Bottom-of-pipeline service: consults a [`RoutingPolicy`] for an
 /// ordered candidate list and dispatches to providers in order with a
 /// fallback chain.
@@ -188,11 +259,35 @@ impl RoutingPolicy for TierPolicy {
 pub struct RoutingService {
     registry: Arc<ProviderRegistry>,
     policy: Arc<dyn RoutingPolicy>,
+    /// When set, each successful provider dispatch's latency is recorded
+    /// here (B-8). Pair the same `Arc` with a [`LatencyPolicy`] so the
+    /// policy reorders on what this service observes. `None` = no
+    /// latency accounting (zero overhead).
+    latency_stats: Option<Arc<LatencyStatsRegistry>>,
 }
 
 impl RoutingService {
     pub fn new(registry: Arc<ProviderRegistry>, policy: Arc<dyn RoutingPolicy>) -> Arc<Self> {
-        Arc::new(Self { registry, policy })
+        Arc::new(Self {
+            registry,
+            policy,
+            latency_stats: None,
+        })
+    }
+
+    /// Like [`new`](Self::new) but records each successful dispatch's
+    /// latency into `stats`. Wire the same `Arc<LatencyStatsRegistry>`
+    /// into a [`LatencyPolicy`] to close the observe→route loop.
+    pub fn with_latency_stats(
+        registry: Arc<ProviderRegistry>,
+        policy: Arc<dyn RoutingPolicy>,
+        stats: Arc<LatencyStatsRegistry>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            registry,
+            policy,
+            latency_stats: Some(stats),
+        })
     }
 }
 
@@ -281,8 +376,19 @@ impl LlmService for RoutingService {
                 "routing: dispatching",
             );
 
+            let dispatch_started = std::time::Instant::now();
             match provider.stream(resolved, ctx.clone()).await {
-                Ok(stream) => return Ok(stream),
+                Ok(stream) => {
+                    // Record dispatch latency (time to obtain the stream
+                    // ≈ time-to-first-byte for HTTP backends) so a
+                    // LatencyPolicy can route on it. Only successful
+                    // dispatches count — a failed one's timing isn't a
+                    // useful "how fast is this provider" signal.
+                    if let Some(stats) = &self.latency_stats {
+                        stats.observe(id, dispatch_started.elapsed().as_millis() as u64);
+                    }
+                    return Ok(stream);
+                }
                 Err(e) => {
                     let class = e.class();
                     if class == ErrorClass::Permanent {
@@ -333,7 +439,10 @@ impl LlmService for RoutingService {
             let skipped_summary: Vec<(String, Vec<&'static str>)> = skipped_with_reasons
                 .iter()
                 .map(|(id, reasons)| {
-                    (id.as_ref().to_string(), reasons.iter().map(|r| r.kind()).collect())
+                    (
+                        id.as_ref().to_string(),
+                        reasons.iter().map(|r| r.kind()).collect(),
+                    )
                 })
                 .collect();
             tracing::warn!(
@@ -897,11 +1006,137 @@ mod tests {
         assert_eq!(calls_a.load(Ordering::SeqCst), 1);
     }
 
+    // ── LatencyPolicy (B-8) ─────────────────────────────────────────────
+
+    use crate::latency_stats::{LatencyMetric, LatencyStatsRegistry};
+
+    #[tokio::test]
+    async fn latency_policy_orders_candidates_fastest_first() {
+        let stats = Arc::new(LatencyStatsRegistry::new(100));
+        stats.observe(&ProviderId::new("slow"), 500);
+        stats.observe(&ProviderId::new("fast"), 10);
+        // Base hands them back slow-then-fast; the policy must flip it.
+        let base = Arc::new(
+            StaticPolicy::new(vec![ProviderId::new("slow"), ProviderId::new("fast")]).unwrap(),
+        );
+        let policy = LatencyPolicy::new(base, stats);
+        let got = policy
+            .select(
+                &req(ModelHint::Explicit("m".into())),
+                &dummy_provider_registry(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(got, vec![ProviderId::new("fast"), ProviderId::new("slow")]);
+    }
+
+    #[tokio::test]
+    async fn latency_policy_explores_unknown_provider_first() {
+        let stats = Arc::new(LatencyStatsRegistry::new(100));
+        stats.observe(&ProviderId::new("known"), 10);
+        // "unknown" has no samples → sorts ahead of the known-10ms one so
+        // it gets a first dispatch (explore-then-exploit).
+        let base = Arc::new(
+            StaticPolicy::new(vec![ProviderId::new("known"), ProviderId::new("unknown")]).unwrap(),
+        );
+        let policy = LatencyPolicy::new(base, stats);
+        let got = policy
+            .select(
+                &req(ModelHint::Explicit("m".into())),
+                &dummy_provider_registry(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![ProviderId::new("unknown"), ProviderId::new("known")]
+        );
+    }
+
+    #[tokio::test]
+    async fn latency_policy_metric_selector_changes_order() {
+        // "a" is mostly fast with a spiky tail: low mean, high p95.
+        // 18×10ms + 2×1000ms over a 20-sample window → mean 109, p95 1000
+        // (the tail needs enough samples that the p95 rank reaches it).
+        let stats = Arc::new(LatencyStatsRegistry::new(100));
+        for _ in 0..18 {
+            stats.observe(&ProviderId::new("a"), 10);
+        }
+        for _ in 0..2 {
+            stats.observe(&ProviderId::new("a"), 1000);
+        }
+        for _ in 0..20 {
+            stats.observe(&ProviderId::new("b"), 300); // mean 300, p95 300
+        }
+        let ids = || vec![ProviderId::new("a"), ProviderId::new("b")];
+        let base = Arc::new(StaticPolicy::new(ids()).unwrap());
+
+        let by_mean =
+            LatencyPolicy::new(base.clone(), stats.clone()).with_metric(LatencyMetric::Mean);
+        let r = req(ModelHint::Explicit("m".into()));
+        let got_mean = by_mean
+            .select(&r, &dummy_provider_registry())
+            .await
+            .unwrap();
+        assert_eq!(
+            got_mean[0],
+            ProviderId::new("a"),
+            "by mean, a (208) beats b (300)"
+        );
+
+        let by_p95 = LatencyPolicy::new(base, stats).with_metric(LatencyMetric::P95);
+        let got_p95 = by_p95.select(&r, &dummy_provider_registry()).await.unwrap();
+        assert_eq!(
+            got_p95[0],
+            ProviderId::new("b"),
+            "by p95, b (300) beats a's 1000 tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn routing_service_records_dispatch_latency() {
+        // Real RoutingService over a real (mock-backed) registry, so the
+        // observe-on-success hook in `call()` actually runs.
+        let reg = registry_with_mocks(vec![("p1", CannedResponse::text("ok"))]);
+        let stats = Arc::new(LatencyStatsRegistry::new(100));
+        let policy = Arc::new(StaticPolicy::single(ProviderId::new("p1")));
+        let routing = RoutingService::with_latency_stats(reg, policy, stats.clone());
+
+        let stream = routing
+            .call(
+                req(ModelHint::Explicit("m".into())),
+                RequestContext::test_default(),
+            )
+            .await
+            .expect("dispatch should succeed");
+        drain(stream).await;
+
+        let snap = stats
+            .snapshot(&ProviderId::new("p1"))
+            .expect("a successful dispatch must record one latency sample");
+        assert_eq!(snap.count, 1);
+    }
+
+    #[tokio::test]
+    async fn routing_service_without_stats_is_a_noop() {
+        // `new` (no stats) must not panic and must serve normally.
+        let reg = registry_with_mocks(vec![("p1", CannedResponse::text("ok"))]);
+        let policy = Arc::new(StaticPolicy::single(ProviderId::new("p1")));
+        let routing = RoutingService::new(reg, policy);
+        let stream = routing
+            .call(
+                req(ModelHint::Explicit("m".into())),
+                RequestContext::test_default(),
+            )
+            .await
+            .expect("dispatch should succeed without latency stats");
+        drain(stream).await;
+    }
+
     // Suppress dead_code warnings on test-only helpers we keep around
     // for future coverage even when no test currently reaches them.
     #[allow(dead_code)]
     fn _suppress_unused() {
         let _ = registry_with;
-        let _ = registry_with_mocks;
     }
 }

@@ -731,6 +731,33 @@ helpers cover the loop, both going through the Rust
 in `tars events list`. 8 pytests incl. a full read→score→write-back loop
 against live LM Studio. Closes the re-scoped M9 W3.
 
+### B-8 slice — per-provider latency stats + `LatencyPolicy` (`<unreleased>`)
+
+The first dynamic routing policy, and the minimal metrics infra it
+needs — without the full `tars-melt` OTel stack.
+
+- **`LatencyStatsRegistry`** (`tars-pipeline/src/latency_stats.rs`) — a
+  bounded rolling per-provider latency window (`Mutex<HashMap<ProviderId,
+  VecDeque<u64>>>`, shaped like CircuitBreaker's per-provider state) with
+  p50 / p95 / mean readout. Self-contained in-process; NOT Prometheus /
+  OTel / cardinality-validator (those stay deferred).
+- **`LatencyPolicy`** — wraps a base `RoutingPolicy` and *reorders* its
+  candidates fastest-first by a chosen metric (`P95` default). Pure
+  reordering: never adds/drops candidates, so the base policy stays
+  authoritative on eligibility. Untested providers sort first
+  (explore-then-exploit) so each gets sampled once.
+- **`RoutingService::with_latency_stats`** — records each successful
+  dispatch's latency (time to obtain the stream ≈ TTFB) into the shared
+  registry, closing the observe→route loop. `new` (no stats) is a
+  zero-overhead no-op.
+
+**Speculative**: the Python / `from_default` path is single-provider, so
+no live consumer exercises routing yet. Verified via mock-provider
+integration tests (real `RoutingService` over a mock-backed registry
+feeds the registry on dispatch) + policy reorder/explore/metric unit
+tests — 11 new tests, not a live e2e. `CostPolicy` / `EnsemblePolicy` /
+the OTel stack remain deferred (see TODO B-8).
+
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 
 B-15 in TODO. Adds a `.telemetry` field on every `Response` carrying
