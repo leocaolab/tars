@@ -125,6 +125,7 @@ def test_annotate_default_metrics_empty():
 # ── 2-8. Pipeline integration tests (require local provider) ────────
 
 
+@pytest.mark.requires_provider
 def test_validator_pass_through_appears_in_layer_trace():
     """Happy path: validator returns Pass → response succeeds, the
     'validation' layer is recorded in telemetry.layers."""
@@ -140,6 +141,7 @@ def test_validator_pass_through_appears_in_layer_trace():
     assert len(calls) == 1, f"validator should run exactly once, ran {len(calls)}"
 
 
+@pytest.mark.requires_provider
 def test_validator_reject_surfaces_validation_failed_error():
     """Reject → TarsProviderError(kind='validation_failed',
     is_retriable=False — W4 cut the retriable flag, always Permanent).
@@ -164,6 +166,7 @@ def test_validator_reject_surfaces_validation_failed_error():
     assert vr["detail"] is None
 
 
+@pytest.mark.requires_provider
 def test_validator_typed_reject_surfaces_structured_reason():
     """B-20.v2: `Reject.typed(kind, msg, detail)` round-trips its kind +
     structured detail onto `TarsProviderError.validation_reason`, so the
@@ -187,6 +190,7 @@ def test_validator_typed_reject_surfaces_structured_reason():
     assert vr["detail"] == {"rule": "R1"}
 
 
+@pytest.mark.requires_provider
 def test_filter_text_replaces_response_text():
     """A FilterText validator on the chain transforms `Response.text`."""
 
@@ -198,6 +202,7 @@ def test_filter_text_replaces_response_text():
     assert r.text == r.text.upper(), f"expected upper-cased, got: {r.text!r}"
 
 
+@pytest.mark.requires_provider
 def test_chain_filter_visible_to_subsequent_validator():
     """Filter chains: validator B sees the post-Filter text from
     validator A. Asserts the chain ordering invariant."""
@@ -223,6 +228,7 @@ def test_chain_filter_visible_to_subsequent_validator():
     assert len(r.text) <= 5
 
 
+@pytest.mark.requires_provider
 def test_buggy_validator_surfaces_as_permanent_reject_not_crash():
     """A validator that raises a Python exception is caught by the
     adapter and translated into ValidationFailed{retriable=false}.
@@ -243,6 +249,7 @@ def test_buggy_validator_surfaces_as_permanent_reject_not_crash():
     assert "bug in my validator" in str(e)
 
 
+@pytest.mark.requires_provider
 def test_validator_wrong_return_type_surfaces_as_permanent_reject():
     """A validator that returns an unexpected type (e.g. plain str) is
     surfaced as a permanent Reject with guidance about valid outcomes."""
@@ -260,6 +267,7 @@ def test_validator_wrong_return_type_surfaces_as_permanent_reject():
     assert "tars.Pass" in msg or "validator" in msg
 
 
+@pytest.mark.requires_provider
 def test_response_validation_summary_populated_after_filter():
     """B-20.v3: Response.validation_summary surfaces per-validator
     outcomes for caller-side metrics rollups."""
@@ -275,6 +283,7 @@ def test_response_validation_summary_populated_after_filter():
     assert s.total_wall_ms >= 0  # wall time recorded, may be 0 on fast paths
 
 
+@pytest.mark.requires_provider
 def test_response_validation_summary_empty_when_no_validators():
     """No validators attached → empty summary, no exception."""
     p = tars.Pipeline.from_default(PROVIDER_ID)
@@ -284,6 +293,7 @@ def test_response_validation_summary_empty_when_no_validators():
     assert dict(s.outcomes) == {}
 
 
+@pytest.mark.requires_provider
 def test_response_validation_summary_records_pass_and_annotate():
     """Pass outcome shows up as `outcome=pass`; if downstream wants the
     pyclass on its own, it's importable as `tars.ValidationSummary`."""
@@ -298,6 +308,7 @@ def test_response_validation_summary_records_pass_and_annotate():
     assert r.validation_summary.outcomes["ok"] == {"outcome": "pass"}
 
 
+@pytest.mark.requires_provider
 def test_validators_none_does_not_add_validation_layer():
     """Backward compat: `validators=None` (or omitted) → no
     `validation` layer in telemetry trace."""
@@ -306,6 +317,7 @@ def test_validators_none_does_not_add_validation_layer():
     assert "validation" not in r.telemetry.layers
 
 
+@pytest.mark.requires_provider
 def test_validators_empty_list_does_not_add_validation_layer():
     """`validators=[]` is equivalent to None (no validators registered
     means no ValidationMiddleware in the chain)."""

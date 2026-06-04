@@ -18,6 +18,10 @@ import tars.eval as ev
 PROVIDER_ID = "qwen_coder_local"
 MODEL = "qwen/qwen3-coder-30b"
 
+# Every test seeds the store with real completions before exercising the
+# helpers, so the whole module is provider-gated.
+pytestmark = pytest.mark.requires_provider
+
 
 def _seed_calls(store_dir: str, n: int = 2) -> None:
     """Run `n` real completions so the event store has calls to score."""

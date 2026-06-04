@@ -76,15 +76,29 @@ jobs:
       - name: pip install built wheel
         run: pip install --force-reinstall target/wheels/tars-*.whl
 
-      # Run the subset of pytest that's pure class-construction —
-      # doesn't need `~/.tars/config.toml` and doesn't make a model
-      # call. The remaining 18 tests in `python/tests/` need either a
-      # config file or a local LLM provider on :1234, both of which CI
-      # doesn't supply. Those still run locally via the wheel install
-      # documented in CONTRIBUTING.md.
-      - name: pytest (pure class-construction subset)
+      # A minimal config so the construction/config tests (e.g. builder
+      # layer-name assertions) can resolve a provider object. The
+      # base_url points at a dead port on purpose — these tests build the
+      # provider and assemble the onion but never call it. Tests that DO
+      # make a live call are marked `requires_provider` and excluded below.
+      - name: Write minimal ~/.tars/config.toml
+        run: |
+          mkdir -p "$HOME/.tars"
+          cat > "$HOME/.tars/config.toml" <<'TOML'
+          [providers.qwen_coder_local]
+          type = "openai_compat"
+          default_model = "qwen/qwen3-coder-30b"
+          base_url = "http://127.0.0.1:1234/v1"
+          TOML
+
+      # Run everything except the `requires_provider`-marked tests (those
+      # need a live LLM on :1234, which CI doesn't supply — they run
+      # locally via the wheel install documented in CONTRIBUTING.md).
+      # New construction/config tests are included automatically; no
+      # hand-maintained `-k` allowlist to keep in sync.
+      - name: pytest (everything except live-provider tests)
         run: |
           pytest crates/tars-py/python/tests \
             -q \
-            -k 'outcome_classes_exposed or pass_construct or reject_fields or reject_no_retriable_kwarg or filter_text_fields or filter_text_default_dropped or annotate_metrics_dict or annotate_default_metrics_empty' \
+            -m 'not requires_provider' \
             --no-header

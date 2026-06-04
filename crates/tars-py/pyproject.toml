@@ -35,6 +35,16 @@ classifiers = [
 [project.urls]
 Repository = "https://github.com/leocaolab/tars"
 
+[tool.pytest.ini_options]
+# `requires_provider` marks tests that make a real LLM call against a
+# local provider on :1234. CI runs `-m "not requires_provider"`, so
+# every other test (construction + config-only, e.g. builder layer
+# assertions) is included automatically — no hand-maintained `-k` list.
+# The live tests still run locally via the wheel install (CONTRIBUTING.md).
+markers = [
+    "requires_provider: needs a live LLM provider on 127.0.0.1:1234 (skipped in CI)",
+]
+
 [tool.maturin]
 # `tars_py` is the cdylib that cargo produces; we publish it as
 # `tars` so consumers write `import tars` not `import tars_py`.

@@ -23,6 +23,9 @@ import tars
 PROVIDER_ID = "qwen_coder_local"
 MODEL = "qwen/qwen3-coder-30b"
 
+# Each test drives a real Pipeline.complete to populate the store.
+pytestmark = pytest.mark.requires_provider
+
 
 def test_event_lands_in_pipeline_events_db(tmp_path):
     p = tars.Pipeline.from_default(PROVIDER_ID, event_store_dir=str(tmp_path))

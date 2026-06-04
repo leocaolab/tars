@@ -107,6 +107,7 @@ base_url = "http://127.0.0.1:9/v1"
 # ── Live test (requires LM Studio on :1234) ──────────────────────────
 
 
+@pytest.mark.requires_provider
 def test_builder_cache_toggle_reflected_in_runtime_layer_trace():
     """cache(False) removes the cache layer, so a real call's runtime
     telemetry.layers trace omits `cache_lookup` (and the default keeps
