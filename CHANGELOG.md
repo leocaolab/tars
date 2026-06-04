@@ -813,10 +813,11 @@ label surfaces the chosen strategy. 2 dispatch tests (every mode builds
 through `build_dispatch`; default is fallback); verified live against LM
 Studio across cost / ensemble / fallback.
 
-### tars-melt — OpenTelemetry OTLP trace export (opt-in) (`<unreleased>`)
+### tars-melt — OpenTelemetry OTLP trace + metric export (opt-in) (`<unreleased>`)
 
 The `tracing` spans the whole stack already emits can now ship to an
-OTLP collector (Jaeger / Tempo / Datadog / OTel Collector).
+OTLP collector (Jaeger / Tempo / Datadog / OTel Collector), plus
+per-call **metrics** derived from the same events.
 
 - **`tars-melt` `otlp` feature** (OFF by default) pulls the
   OpenTelemetry SDK + `tracing-opentelemetry` bridge + OTLP/gRPC span
@@ -830,15 +831,29 @@ OTLP collector (Jaeger / Tempo / Datadog / OTel Collector).
   returns a `TelemetryGuard` whose `Drop` flushes the last batch. Spans
   are tagged `service.name`. Unset endpoint or no feature = zero
   overhead (the prior fmt-only path is byte-for-byte unchanged).
-- **Tested without a collector**: a unit test drives a `tracing` span
-  through the bridge into an in-memory span exporter and asserts it lands
-  (`#[cfg(feature = "otlp")]`). Smoke-tested through `tars run` with an
-  endpoint set (logs "OTLP trace export enabled", call still serves).
-  CI checks the feature explicitly (clippy + test `-p tars-melt
+- **Metrics, with no pipeline instrumentation**: a `MetricsBridge`
+  tracing layer converts the pipeline's existing `llm.call.finished` /
+  `llm.call.failed` events into OTel instruments —
+  `tars.llm.calls` (counter), `tars.llm.latency_ms` (histogram),
+  `tars.llm.tokens` (counter), attributed by `model` + `outcome`
+  (ok/error). The events are the source of truth; tars-pipeline is
+  untouched. Exported over OTLP to the same endpoint via a periodic
+  meter reader. **Per-layer filters** let trace + metric export capture
+  the operational `INFO`-level events regardless of how quiet the log
+  level is set — a `--quiet` run still exports.
+- **Tested without a collector**: one unit test drives a `tracing` span
+  through the bridge into an in-memory *span* exporter; another emits
+  fake `llm.call.{finished,failed}` events and asserts the three metric
+  instruments materialize in an in-memory *metric* exporter (both
+  `#[cfg(feature = "otlp")]`). Smoke-tested through `tars run` with an
+  endpoint set (logs "OTLP trace + metric export enabled", call still
+  serves). CI checks the feature explicitly (clippy + test `-p tars-melt
   --features otlp`).
 
-This is traces only; Prometheus metrics, cardinality validation, and
-sampling remain deferred (TODO B-8).
+Cardinality validation + trace sampling remain deferred (TODO B-8):
+cardinality validation is downstream of metrics (now unblocked — its
+trigger has fired) and sampling is a scale optimization (AlwaysOn is
+correct until trace volume is a cost problem).
 
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 

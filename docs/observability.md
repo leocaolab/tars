@@ -273,9 +273,21 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
 
 Spans are tagged `service.name=tars-cli`. Without
 `OTEL_EXPORTER_OTLP_ENDPOINT` (or without the `--features otlp` build)
-there's zero overhead — stderr logging is unchanged. The exporter
-flushes on process exit. This ships traces only; Prometheus-style
-metrics aren't wired yet.
+there's zero overhead — stderr logging is unchanged. Both exporters
+flush on process exit.
+
+Alongside traces, the same build exports **metrics** derived from the
+per-call events (no extra config):
+
+| Instrument | Type | Attributes |
+|---|---|---|
+| `tars.llm.calls` | counter | `model`, `outcome` (ok/error) |
+| `tars.llm.latency_ms` | histogram | `model`, `outcome` |
+| `tars.llm.tokens` | counter | `model` |
+
+These go to the same OTLP endpoint (a collector can fan traces and
+metrics to different backends). Metrics shine in a long-running process;
+a single `tars run` emits one call's worth.
 
 ---
 

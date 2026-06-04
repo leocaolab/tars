@@ -26,7 +26,7 @@ thiserror.workspace = true
 # setting `OTEL_EXPORTER_OTLP_ENDPOINT` turns export on at runtime.
 opentelemetry = { version = "0.27", optional = true }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"], optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"], optional = true }
 tracing-opentelemetry = { version = "0.28", optional = true }
 
 [features]
@@ -41,6 +41,8 @@ otlp = [
 
 [dev-dependencies]
 serde_json.workspace = true
-# The in-memory span exporter used by the otlp bridge test. Only pulled
-# when the `otlp` feature is active (the test is `#[cfg(feature=otlp)]`).
+# The in-memory span/metric exporters used by the otlp bridge tests.
+# Only pulled when the `otlp` feature is active (tests are
+# `#[cfg(feature = "otlp")]`). tokio drives the metrics PeriodicReader.
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "testing"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

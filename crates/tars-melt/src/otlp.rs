@@ -15,10 +15,11 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::TracerProvider;
 use tracing_subscriber::Layer;
-use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::filter::{EnvFilter, LevelFilter};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::*;
 
+use crate::metrics::{MetricsBridge, build_meter_provider};
 use crate::{TelemetryConfig, TelemetryError, TelemetryFormat, TelemetryGuard, sanitize_service};
 
 /// Install the layered subscriber (stderr fmt + OTLP span export) and
@@ -31,12 +32,17 @@ pub(crate) fn install(
     endpoint: &str,
 ) -> Result<TelemetryGuard, TelemetryError> {
     let safe_service = sanitize_service(&config.service);
-    let provider = build_provider(endpoint, &safe_service)?;
-    let tracer = provider.tracer("tars");
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    // Mirror the no-export path's fmt config exactly; box so Pretty/Json
-    // share one type in the `.with(...)` chain.
+    let tracer_provider = build_provider(endpoint, &safe_service)?;
+    let tracer = tracer_provider.tracer("tars");
+    let meter_provider = build_meter_provider(endpoint, &safe_service)?;
+
+    // fmt layer mirrors the no-export path's config; box so Pretty/Json
+    // share one type. **Per-layer filters** (not a global filter layer):
+    // the fmt logs respect the user's level, but trace + metric export
+    // capture the operational INFO+ events (e.g. `llm.call.finished`)
+    // regardless of how quiet the logs are set — otherwise `--quiet`
+    // runs would silently export nothing.
     let fmt_layer = match config.format {
         TelemetryFormat::Pretty => tracing_subscriber::fmt::layer()
             .with_writer(std::io::stderr)
@@ -54,15 +60,21 @@ pub(crate) fn install(
             .boxed(),
     };
 
+    let trace_layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_filter(LevelFilter::INFO);
+    let metrics_layer = MetricsBridge::new(&meter_provider).with_filter(LevelFilter::INFO);
+
     let installed = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt_layer)
-        .with(otel_layer)
+        .with(fmt_layer.with_filter(filter))
+        .with(trace_layer)
+        .with(metrics_layer)
         .try_init();
 
     if installed.is_err() {
-        // Another subscriber won the race; don't leak the exporter task.
-        let _ = provider.shutdown();
+        // Another subscriber won the race; don't leak the exporter tasks.
+        let _ = tracer_provider.shutdown();
+        let _ = meter_provider.shutdown();
         return Err(TelemetryError::AlreadyInstalled {
             service: safe_service,
             level: config.level.clone(),
@@ -74,9 +86,12 @@ pub(crate) fn install(
         format = ?config.format,
         otlp_endpoint = %endpoint,
         version = env!("CARGO_PKG_VERSION"),
-        "telemetry initialized (OTLP trace export enabled)",
+        "telemetry initialized (OTLP trace + metric export enabled)",
     );
-    Ok(TelemetryGuard::with_provider(provider))
+    Ok(TelemetryGuard::with_providers(
+        tracer_provider,
+        meter_provider,
+    ))
 }
 
 /// Build the batch OTLP tracer provider, tagging spans with

@@ -2560,6 +2560,7 @@ dependencies = [
  "serde_json",
  "tars-types",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",

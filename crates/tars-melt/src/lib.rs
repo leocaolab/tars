@@ -29,6 +29,8 @@ use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[cfg(feature = "otlp")]
+mod metrics;
+#[cfg(feature = "otlp")]
 mod otlp;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -160,7 +162,9 @@ pub struct TelemetryGuard {
     /// installed; its `Drop` shuts the provider down so the final batch
     /// of spans leaves the process. `None` otherwise.
     #[cfg(feature = "otlp")]
-    provider: Option<opentelemetry_sdk::trace::TracerProvider>,
+    tracer_provider: Option<opentelemetry_sdk::trace::TracerProvider>,
+    #[cfg(feature = "otlp")]
+    meter_provider: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
     #[cfg(not(feature = "otlp"))]
     _private: (),
 }
@@ -169,29 +173,41 @@ impl TelemetryGuard {
     fn new() -> Self {
         Self {
             #[cfg(feature = "otlp")]
-            provider: None,
+            tracer_provider: None,
+            #[cfg(feature = "otlp")]
+            meter_provider: None,
             #[cfg(not(feature = "otlp"))]
             _private: (),
         }
     }
 
-    /// Guard owning an OTLP tracer provider; flushed on drop.
+    /// Guard owning the OTLP tracer + meter providers; both flushed on
+    /// drop so the last span/metric batch leaves the process.
     #[cfg(feature = "otlp")]
-    fn with_provider(provider: opentelemetry_sdk::trace::TracerProvider) -> Self {
+    fn with_providers(
+        tracer_provider: opentelemetry_sdk::trace::TracerProvider,
+        meter_provider: opentelemetry_sdk::metrics::SdkMeterProvider,
+    ) -> Self {
         Self {
-            provider: Some(provider),
+            tracer_provider: Some(tracer_provider),
+            meter_provider: Some(meter_provider),
         }
     }
 }
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
+        // Best-effort flush; never panic on exit. A failed flush just
+        // means trailing spans/metrics didn't ship — observability must
+        // not take the process down.
         #[cfg(feature = "otlp")]
-        if let Some(provider) = self.provider.take() {
-            // Best-effort flush of the last span batch; never panic on
-            // exit. Errors here just mean some trailing spans didn't
-            // ship — observability must not take the process down.
-            let _ = provider.shutdown();
+        {
+            if let Some(p) = self.tracer_provider.take() {
+                let _ = p.shutdown();
+            }
+            if let Some(p) = self.meter_provider.take() {
+                let _ = p.shutdown();
+            }
         }
     }
 }
