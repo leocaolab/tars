@@ -707,6 +707,30 @@ without hand-rolling jq. Aggregation core (`aggregate_reasons`) is a
 pure function with unit tests; verified end-to-end (Python reject →
 event store → CLI) against live LM Studio.
 
+### B-20 W3 (re-scoped) — `tars.eval` evaluator helpers (`<unreleased>`)
+
+Doc 16's full evaluation framework (Evaluator traits, online/offline
+runners, samplers) was re-scoped to a thin Python surface: callers write
+evaluator *scripts* (cron / CI / notebook) that read finished calls,
+compute a metric, and write scores back into the same event store. Two
+helpers cover the loop, both going through the Rust
+`SqlitePipelineEventStore` so the on-disk schema can't drift:
+
+- **`tars.eval.read_calls(dir, *, since_secs=, tenant=, tag=, limit=)`**
+  — pull `LlmCallFinished` events as plain dicts (model / usage /
+  telemetry / validation_summary / validation_reason / result / tags +
+  CAS refs). Body resolution from the refs is out of scope for v1.
+- **`tars.eval.write_score(dir, call_event_id, evaluator_name, score, *,
+  tenant_id=None, explanation=None, tags=None)`** — append an
+  `EvaluationScored` event FK'd to the call (the variant was schema-only
+  until now). `tenant_id` is inferred from the referenced call when
+  omitted; a missing call or bad UUID errors loudly. Returns the score
+  event's id.
+
+`EvaluationScored` events sit alongside the calls they grade and show up
+in `tars events list`. 8 pytests incl. a full read→score→write-back loop
+against live LM Studio. Closes the re-scoped M9 W3.
+
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 
 B-15 in TODO. Adds a `.telemetry` field on every `Response` carrying

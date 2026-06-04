@@ -32,6 +32,7 @@
 //! ```
 
 mod errors;
+mod eval;
 mod session;
 mod validation;
 
@@ -1758,6 +1759,8 @@ fn version() -> String {
 fn _tars_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(default_config_path_py, m)?)?;
+    m.add_function(wrap_pyfunction!(eval::write_score, m)?)?;
+    m.add_function(wrap_pyfunction!(eval::read_calls, m)?)?;
     m.add_class::<Provider>()?;
     m.add_class::<Pipeline>()?;
     m.add_class::<PipelineBuilder>()?;
