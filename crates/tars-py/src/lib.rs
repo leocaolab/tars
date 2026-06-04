@@ -47,7 +47,7 @@ use tars_config::{Config, ConfigManager, default_config_path};
 
 use crate::errors::{config_to_py, provider_to_py, runtime_to_py};
 use tars_pipeline::{
-    CostPolicy, LatencyMetric, LatencyPolicy, LatencyStatsRegistry, LlmService,
+    CostPolicy, EnsembleService, LatencyMetric, LatencyPolicy, LatencyStatsRegistry, LlmService,
     Pipeline as RsPipeline, ProviderService, RoutingService, StaticPolicy,
 };
 use tars_provider::{
@@ -938,6 +938,11 @@ impl Pipeline {
     ///   of this request from each provider's static pricing (a free
     ///   local model wins; same token heuristic applies to all, so the
     ///   ordering is sound even though the absolute number is rough).
+    /// - `"ensemble"` — hedged fan-out: dispatch to **all** providers in
+    ///   parallel and take the first to respond (the rest are
+    ///   cancelled). Trades extra calls for lower tail latency /
+    ///   availability. "First response wins" — output-merging ensembles
+    ///   (vote / best-of) are out of scope.
     /// - `"static"` — try `provider_ids` in the given order (fallback
     ///   chain only; no reordering).
     ///
@@ -1014,6 +1019,13 @@ impl Pipeline {
         let (routing, latency_stats): (Arc<dyn LlmService>, Option<Arc<LatencyStatsRegistry>>) =
             match policy {
                 "static" => (RoutingService::new(registry, base), None),
+                "ensemble" => {
+                    // Hedged fan-out: dispatch all candidates in
+                    // parallel, first response wins. Not a RoutingPolicy
+                    // (it's a different dispatch shape), so `base` is
+                    // unused on this arm.
+                    (EnsembleService::new(registry, pids.clone()), None)
+                }
                 "cost" => {
                     // Snapshot each candidate's static pricing from the
                     // registry; CostPolicy sorts cheapest-first from it.
@@ -1046,7 +1058,7 @@ impl Pipeline {
                 }
                 other => {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "unknown policy {other:?}; use \"latency\", \"cost\", or \"static\""
+                        "unknown policy {other:?}; use \"latency\", \"cost\", \"ensemble\", or \"static\""
                     )));
                 }
             };

@@ -63,7 +63,8 @@ pub use latency_stats::{LatencyMetric, LatencyStats, LatencyStatsRegistry};
 pub use middleware::{EventStores, Middleware, Pipeline, PipelineBuilder, PipelineOpts};
 pub use retry::{RetryConfig, RetryMiddleware};
 pub use routing::{
-    CostPolicy, LatencyPolicy, RoutingPolicy, RoutingService, StaticPolicy, TierPolicy,
+    CostPolicy, EnsembleService, LatencyPolicy, RoutingPolicy, RoutingService, StaticPolicy,
+    TierPolicy,
 };
 pub use service::{LlmService, ProviderService};
 pub use telemetry::TelemetryMiddleware;

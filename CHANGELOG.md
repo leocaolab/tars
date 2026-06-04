@@ -785,9 +785,23 @@ sorts last. The char/4 token heuristic is rough in absolute terms but
 applies to every candidate equally, so the *relative* ordering is sound.
 Exposed via `tars.Pipeline.routed(policy="cost")`. 2 Rust unit tests
 (cheapest-first; free-first / unknown-last) + 2 routed pytests
-(construction + live). With this, B-8's `LatencyPolicy` + `CostPolicy`
-are both landed; `EnsemblePolicy` (fan-out/merge) + the OTel stack stay
-deferred.
+(construction + live).
+
+**`EnsembleService`** (same `<unreleased>`) — the third and last B-8
+routing strategy, and a different *dispatch shape* rather than a
+`RoutingPolicy`: it fans the request out to **all** candidates in
+parallel (`FuturesUnordered`) and returns the **first** to produce a
+stream, cancelling the rest. Hedges tail latency / availability. Capability
+pre-flight + tier resolution mirror `RoutingService`. Output-*merging*
+ensembles (best-of-N / vote / judge) are deliberately out of scope —
+they need a domain-specific merge over materialized responses, with no
+universal library answer; "first response wins" is the generic
+streaming-safe variant. Exposed via
+`tars.Pipeline.routed(policy="ensemble")`. 3 Rust unit tests (fan-out
+returns a stream; single-candidate; all-unknown errors) + 2 routed
+pytests. **All three B-8 routing strategies (latency / cost / ensemble)
+now shipped and landed end to end**; only the `tars-melt` OTel stack
+stays deferred (not a routing blocker).
 
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 

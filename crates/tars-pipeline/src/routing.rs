@@ -9,16 +9,19 @@
 //!   order".
 //! - [`TierPolicy`] — `HashMap<ModelTier, Vec<ProviderId>>`. Resolves
 //!   `ModelHint::Tier(...)` requests by table lookup.
-//! - [`LatencyPolicy`] — wraps a base policy and reorders its candidates
-//!   by observed per-provider latency (B-8). Fed by
+//! - [`LatencyPolicy`] — reorders a base policy's candidates by observed
+//!   per-provider latency (B-8). Fed by
 //!   [`RoutingService::with_latency_stats`] →
 //!   [`crate::LatencyStatsRegistry`].
+//! - [`CostPolicy`] — reorders candidates cheapest-first by estimated
+//!   request cost from each provider's static `Pricing` (B-8).
+//! - [`EnsembleService`] — not a policy but a dispatch shape: hedged
+//!   fan-out to all candidates in parallel, first response wins (B-8).
 //!
 //! Still out of scope:
-//! - `CostPolicy` — needs per-provider rolling cost-per-token (harder
-//!   than latency: aggregate by model within provider, and actual cost
-//!   is only known post-call). `EnsemblePolicy` — fan-out + merge is a
-//!   different primitive (a structural change to dispatch, not a policy).
+//! - Output-*merging* ensembles (best-of-N / vote / LLM-judge) — need a
+//!   domain-specific merge over fully-materialized responses, not a
+//!   generic "first response wins" hedge.
 //! - Full `tars-melt` metrics/OTel export (Prometheus, cardinality
 //!   validator, trace sampling) — `LatencyStatsRegistry` is a
 //!   self-contained in-process slice, not that stack.
@@ -53,6 +56,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::future::{BoxFuture, FutureExt};
+use futures::stream::{FuturesUnordered, StreamExt};
 
 use tars_provider::LlmEventStream;
 use tars_provider::registry::ProviderRegistry;
@@ -174,7 +179,7 @@ impl RoutingPolicy for TierPolicy {
             ModelHint::Tier(t) => Ok(self.tiers.get(t).cloned().unwrap_or_default()),
             ModelHint::Explicit(_) => Ok(self.explicit_fallback.clone()),
             ModelHint::Ensemble(_) => Err(ProviderError::InvalidRequest(
-                "TierPolicy does not handle ModelHint::Ensemble — fan-out/merge needs a dedicated EnsemblePolicy"
+                "TierPolicy does not handle ModelHint::Ensemble — fan-out is a different dispatch shape; use EnsembleService (e.g. tars.Pipeline.routed(policy=\"ensemble\"))"
                     .into(),
             )),
         }
@@ -527,6 +532,89 @@ impl LlmService for RoutingService {
                 candidates.len(),
             ))
         }))
+    }
+}
+
+/// Hedged fan-out service (B-8 — the `ModelHint::Ensemble` dispatch
+/// shape). Dispatches the request to **all** candidate providers in
+/// parallel and returns the **first one to produce a stream**; the
+/// rest are cancelled when their futures drop. Trades extra provider
+/// calls for lower tail latency / higher availability (a slow or down
+/// provider doesn't gate the response).
+///
+/// This is the generic, streaming-safe ensemble: "first response wins."
+/// Output-*merging* ensembles (best-of-N, majority vote, LLM-judge)
+/// need a domain-specific merge over fully-materialized responses — a
+/// separate primitive, deliberately out of scope here (there's no
+/// universal "merge two completions" rule to bake into a library).
+///
+/// Capability pre-flight + tier resolution mirror [`RoutingService`]:
+/// incompatible candidates are filtered before dispatch; if none are
+/// compatible the call returns `NoCompatibleCandidate`.
+pub struct EnsembleService {
+    registry: Arc<ProviderRegistry>,
+    candidates: Vec<ProviderId>,
+}
+
+impl EnsembleService {
+    /// `candidates` is fanned out to in full. Caller ensures it's
+    /// non-empty (an empty ensemble can't produce a response).
+    pub fn new(registry: Arc<ProviderRegistry>, candidates: Vec<ProviderId>) -> Arc<Self> {
+        Arc::new(Self {
+            registry,
+            candidates,
+        })
+    }
+}
+
+#[async_trait]
+impl LlmService for EnsembleService {
+    async fn call(
+        self: Arc<Self>,
+        req: ChatRequest,
+        ctx: RequestContext,
+    ) -> Result<LlmEventStream, ProviderError> {
+        let mut futs: FuturesUnordered<BoxFuture<'static, Result<LlmEventStream, ProviderError>>> =
+            FuturesUnordered::new();
+        let mut skipped: Vec<(ProviderId, Vec<CompatibilityReason>)> = Vec::new();
+
+        for id in &self.candidates {
+            let Some(provider) = self.registry.get(id) else {
+                continue;
+            };
+            let resolved = resolve_model_for_provider(req.clone(), self.registry.default_model(id));
+            match resolved.compatibility_check(provider.capabilities()) {
+                CompatibilityCheck::Compatible => {}
+                CompatibilityCheck::Incompatible { reasons } => {
+                    skipped.push((id.clone(), reasons));
+                    continue;
+                }
+                _ => {}
+            }
+            let ctx = ctx.clone();
+            futs.push(async move { provider.stream(resolved, ctx).await }.boxed());
+        }
+
+        if futs.is_empty() {
+            if !skipped.is_empty() {
+                return Err(ProviderError::NoCompatibleCandidate { skipped });
+            }
+            return Err(ProviderError::InvalidRequest(
+                "ensemble: no candidates were registered".into(),
+            ));
+        }
+
+        // First provider to hand back a stream wins; dropping `futs`
+        // cancels the others' in-flight dispatch.
+        let mut last_err: Option<ProviderError> = None;
+        while let Some(res) = futs.next().await {
+            match res {
+                Ok(stream) => return Ok(stream),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err
+            .unwrap_or_else(|| ProviderError::Internal("ensemble: produced no result".into())))
     }
 }
 
@@ -1264,6 +1352,61 @@ mod tests {
                 ProviderId::new("paid"),
                 ProviderId::new("ghost"),
             ]
+        );
+    }
+
+    // ── EnsembleService (B-8) ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ensemble_fans_out_and_returns_a_stream() {
+        // Two mock providers; the hedge returns whichever responds first.
+        let reg = registry_with_mocks(vec![
+            ("p1", CannedResponse::text("ok")),
+            ("p2", CannedResponse::text("ok")),
+        ]);
+        let ensemble =
+            EnsembleService::new(reg, vec![ProviderId::new("p1"), ProviderId::new("p2")]);
+        let stream = ensemble
+            .call(
+                req(ModelHint::Explicit("m".into())),
+                RequestContext::test_default(),
+            )
+            .await
+            .expect("ensemble should produce a stream from at least one provider");
+        drain(stream).await;
+    }
+
+    #[tokio::test]
+    async fn ensemble_single_candidate_still_serves() {
+        let reg = registry_with_mocks(vec![("solo", CannedResponse::text("ok"))]);
+        let ensemble = EnsembleService::new(reg, vec![ProviderId::new("solo")]);
+        let stream = ensemble
+            .call(
+                req(ModelHint::Explicit("m".into())),
+                RequestContext::test_default(),
+            )
+            .await
+            .expect("single-candidate ensemble degenerates to a normal dispatch");
+        drain(stream).await;
+    }
+
+    #[tokio::test]
+    async fn ensemble_unknown_candidates_error() {
+        let reg = registry_with_mocks(vec![("p1", CannedResponse::text("ok"))]);
+        // Neither id is registered → no future is spawned → error.
+        let ensemble = EnsembleService::new(
+            reg,
+            vec![ProviderId::new("ghostA"), ProviderId::new("ghostB")],
+        );
+        let result = ensemble
+            .call(
+                req(ModelHint::Explicit("m".into())),
+                RequestContext::test_default(),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "ensemble with no registered candidates must error"
         );
     }
 

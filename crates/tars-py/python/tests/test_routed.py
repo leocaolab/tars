@@ -35,6 +35,12 @@ def test_routed_cost_policy_builds():
     assert p.latency_stats() == {}
 
 
+def test_routed_ensemble_policy_builds():
+    p = tars.Pipeline.routed([PROVIDER_ID], policy="ensemble")
+    assert "telemetry" in p.layer_names
+    assert p.latency_stats() == {}  # hedge records no per-provider stats
+
+
 def test_routed_cache_opt_in_adds_cache_layer():
     p = tars.Pipeline.routed([PROVIDER_ID], policy="static", cache=True)
     assert "cache_lookup" in p.layer_names
@@ -111,5 +117,13 @@ def test_routed_static_pipeline_serves_without_stats():
 def test_routed_cost_pipeline_serves():
     # The local provider is free (zero pricing) → cheapest → chosen.
     p = tars.Pipeline.routed([PROVIDER_ID], policy="cost")
+    r = p.complete(model=MODEL, user="reply: ok", max_output_tokens=5)
+    assert r.text
+
+
+@pytest.mark.requires_provider
+def test_routed_ensemble_pipeline_serves():
+    # Hedged fan-out over a single candidate degenerates to one dispatch.
+    p = tars.Pipeline.routed([PROVIDER_ID], policy="ensemble")
     r = p.complete(model=MODEL, user="reply: ok", max_output_tokens=5)
     assert r.text
