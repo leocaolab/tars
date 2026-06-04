@@ -112,6 +112,33 @@ hashes into `bodies.db` and prints the actual prompt and completion.
 This is how to recover the full input/output of an old call without
 re-running it.
 
+### Why did validators reject? (cohort by reason)
+
+```bash
+tars events reasons                       # default: last 7d
+tars events reasons --since 1d --tag dogfood
+tars events reasons --since all --json | jq -c .
+```
+
+```
+3 validation reject(s) in window, by reason kind:
+
+kind                     count    share  sample
+--------------------------------------------------------------------------------
+not_empty                    7    53.8%  response.text is empty
+json_shape                   4    30.8%  response.text is not valid JSON: ...
+snippet_missing              2    15.4%  no snippet tag
+```
+
+Each row groups the events' structured `validation_reason` by
+`kind` — `json_shape` / `not_empty` / `max_length` for the built-in
+validators, or the caller's own `kind` for a custom Python reject
+(`tars.Reject.typed(kind, ...)`). This answers **"which validation
+reason fired most"** without exporting JSON and grouping by hand. A
+reject's reason never lands in `validation_summary` (it short-circuits
+before a response), so this view — not `tars events show` — is where the
+structured detail surfaces in aggregate.
+
 ### Useful one-liners
 
 These are the queries that come up over and over again:

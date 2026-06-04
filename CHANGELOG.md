@@ -669,6 +669,14 @@ green.
 > from the event store, instead of only knowing a validation failure
 > happened.
 
+**`tars events reasons` CLI** (`<unreleased>`) — the first consumer of
+the persisted reason. Aggregates `validation_reason` by `kind` over a
+window (`--tenant` / `--since` / `--tag` / `--json`) into a count +
+share + sample table, answering "which validation reason fired most"
+without hand-rolling jq. Aggregation core (`aggregate_reasons`) is a
+pure function with unit tests; verified end-to-end (Python reject →
+event store → CLI) against live LM Studio.
+
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 
 B-15 in TODO. Adds a `.telemetry` field on every `Response` carrying

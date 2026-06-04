@@ -2,13 +2,18 @@
 //! `EventEmitterMiddleware` (Doc 17). Distinct from `tars trajectory`,
 //! which reads trajectory `AgentEvent` logs from a different file.
 //!
-//! Two subcommands ship in v1:
+//! Subcommands:
 //!
 //! - `tars events list [--tenant X] [--since 1d] [--tag T] [--limit N]`
 //!   — one-line-per-event summary (timestamp, tenant, model, result).
 //! - `tars events show <event_id> [--with-bodies]` — full JSON payload;
 //!   `--with-bodies` resolves request_ref / response_ref against the
 //!   body store and prints the bytes.
+//! - `tars events reasons [--tenant X] [--since 1d] [--tag T] [--json]`
+//!   — aggregate validation-reject reasons by `kind` over the window
+//!   ("which reason fired most"), reading the `validation_reason`
+//!   (B-20.v2) off each event. The cohort view that turns the persisted
+//!   reject detail into an answerable question.
 //!
 //! Default `--store-dir` is `~/.tars/events/`; matches the convention
 //! `Pipeline.from_default(event_store_dir=...)` uses.
@@ -46,6 +51,10 @@ enum EventsCommand {
     List(ListArgs),
     /// Show one event's full payload, optionally with body content.
     Show(ShowArgs),
+    /// Aggregate validation-reject reasons by kind — "which reason
+    /// fired most" over a window. Reads `validation_reason` (B-20.v2)
+    /// off the events; an empty result means no rejects in the window.
+    Reasons(ReasonsArgs),
 }
 
 #[derive(Args, Debug)]
@@ -65,6 +74,29 @@ struct ListArgs {
     #[arg(long, default_value_t = 50)]
     limit: u32,
     /// Output as JSON lines instead of human-readable table.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct ReasonsArgs {
+    /// Filter by tenant id.
+    #[arg(long)]
+    tenant: Option<String>,
+    /// Look back this far. Accepts `1d`, `2h`, `30m`, `45s`. Default
+    /// `7d`. Pass `--since all` to disable the lower bound.
+    #[arg(long, default_value = "7d")]
+    since: String,
+    /// Filter by cohort tag — only count rejects on events whose `tags`
+    /// array contains this string. Lets you scope "which reason fired"
+    /// to one dogfood cohort.
+    #[arg(long)]
+    tag: Option<String>,
+    /// Cap on events scanned (the store caps any query at 10_000 too).
+    #[arg(long, default_value_t = 10_000)]
+    scan_limit: u32,
+    /// Output as JSON (array of {kind, count, share, sample}) instead of
+    /// a human-readable table.
     #[arg(long)]
     json: bool,
 }
@@ -101,6 +133,7 @@ pub async fn execute(args: EventsArgs) -> Result<()> {
     match args.command {
         EventsCommand::List(a) => list(&*events, a).await,
         EventsCommand::Show(a) => show(&*events, &*bodies, a).await,
+        EventsCommand::Reasons(a) => reasons(&*events, a).await,
     }
 }
 
@@ -274,6 +307,107 @@ async fn show(
     Ok(())
 }
 
+/// One row of the `tars events reasons` aggregation.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+struct ReasonStat {
+    /// `ValidationReason::kind()` — `json_shape` / `not_empty` /
+    /// `max_length` for builtins, or the caller's `Custom` kind.
+    kind: String,
+    count: usize,
+    /// Fraction of all rejects in the window, 0.0–1.0.
+    share: f64,
+    /// A representative rendered message for this kind (first seen).
+    sample: String,
+}
+
+/// Pure aggregation core — group rejects by reason kind, count, and
+/// attach a sample message. Returns `(total_rejects, stats)` sorted by
+/// count desc (kind asc as a stable tie-break). Split out from the
+/// printing so it can be unit-tested without a store or stdout.
+fn aggregate_reasons(events: &[PipelineEvent]) -> (usize, Vec<ReasonStat>) {
+    use std::collections::HashMap;
+    // kind -> (count, first-seen sample message)
+    let mut acc: HashMap<String, (usize, String)> = HashMap::new();
+    let mut total = 0usize;
+    for ev in events {
+        if let PipelineEvent::LlmCallFinished(e) = ev {
+            if let Some(reason) = &e.validation_reason {
+                total += 1;
+                let entry = acc
+                    .entry(reason.kind().to_string())
+                    .or_insert_with(|| (0, reason.to_string()));
+                entry.0 += 1;
+            }
+        }
+    }
+    let mut stats: Vec<ReasonStat> = acc
+        .into_iter()
+        .map(|(kind, (count, sample))| ReasonStat {
+            kind,
+            count,
+            share: if total == 0 {
+                0.0
+            } else {
+                count as f64 / total as f64
+            },
+            sample,
+        })
+        .collect();
+    // Count desc, then kind asc so output is deterministic on ties.
+    stats.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.kind.cmp(&b.kind)));
+    (total, stats)
+}
+
+async fn reasons(store: &dyn PipelineEventStore, args: ReasonsArgs) -> Result<()> {
+    let since = parse_since(&args.since)?;
+    let q = PipelineEventQuery {
+        tenant_id: args.tenant.map(TenantId::new),
+        since,
+        until: None,
+        // A tag filter is applied in-process, so we must scan the full
+        // window (not push a row cap that would truncate before
+        // filtering) — same reasoning as `list`.
+        limit: if args.tag.is_some() {
+            None
+        } else {
+            Some(args.scan_limit)
+        },
+    };
+    let mut events = store.query(&q).await?;
+    if let Some(tag) = &args.tag {
+        events.retain(|ev| match ev {
+            PipelineEvent::LlmCallFinished(e) => e.tags.iter().any(|t| t == tag),
+            _ => false,
+        });
+    }
+
+    let (total, stats) = aggregate_reasons(&events);
+
+    if args.json {
+        println!("{}", serde_json::to_string(&stats)?);
+        return Ok(());
+    }
+
+    if total == 0 {
+        println!("(no validation rejects in window)");
+        return Ok(());
+    }
+
+    println!("{total} validation reject(s) in window, by reason kind:\n");
+    println!("{:<22}  {:>6}  {:>7}  sample", "kind", "count", "share");
+    println!("{}", "-".repeat(80));
+    for s in &stats {
+        println!(
+            "{:<22}  {:>6}  {:>6.1}%  {}",
+            truncate(&s.kind, 22),
+            s.count,
+            s.share * 100.0,
+            truncate(&s.sample, 44),
+        );
+    }
+    Ok(())
+}
+
 async fn print_body(bodies: &dyn BodyStore, r: &ContentRef, header: &str) -> Result<()> {
     println!("\n=== {header} ===");
     match bodies.fetch(r).await? {
@@ -358,5 +492,96 @@ fn truncate(s: &str, n: usize) -> String {
             .map(|(i, _)| i)
             .unwrap_or(s.len());
         format!("{}…", &s[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tars_types::{
+        CallResult, LlmCallFinished, ProviderErrorKind, TelemetryAccumulator, Usage,
+        ValidationReason, ValidationSummary,
+    };
+    use uuid::Uuid;
+
+    fn reject_event(reason: ValidationReason) -> PipelineEvent {
+        let tenant = TenantId::new("t");
+        PipelineEvent::LlmCallFinished(Box::new(LlmCallFinished {
+            event_id: Uuid::new_v4(),
+            timestamp: SystemTime::now(),
+            tenant_id: tenant.clone(),
+            session_id: None,
+            trace_id: None,
+            provider_id: None,
+            actual_model: "m".into(),
+            request_fingerprint: [0u8; 32],
+            request_ref: ContentRef::from_body(tenant, b"req"),
+            has_tools: false,
+            has_thinking: false,
+            has_structured_output: false,
+            temperature: None,
+            max_output_tokens: None,
+            response_ref: None,
+            usage: Usage::default(),
+            stop_reason: None,
+            telemetry: TelemetryAccumulator::default(),
+            validation_summary: ValidationSummary::default(),
+            validation_reason: Some(reason),
+            result: CallResult::Error {
+                kind: ProviderErrorKind::ValidationFailed,
+            },
+            tags: vec![],
+        }))
+    }
+
+    fn ok_event() -> PipelineEvent {
+        match reject_event(ValidationReason::NotEmpty { field: "x".into() }) {
+            PipelineEvent::LlmCallFinished(mut e) => {
+                e.validation_reason = None;
+                e.result = CallResult::Ok;
+                PipelineEvent::LlmCallFinished(e)
+            }
+            other => other,
+        }
+    }
+
+    #[test]
+    fn aggregate_groups_by_kind_counts_and_shares() {
+        let events = vec![
+            reject_event(ValidationReason::NotEmpty {
+                field: "text".into(),
+            }),
+            reject_event(ValidationReason::NotEmpty {
+                field: "text".into(),
+            }),
+            reject_event(ValidationReason::JsonShape {
+                parse_error: "boom".into(),
+            }),
+            reject_event(ValidationReason::Custom {
+                kind: "snippet_missing".into(),
+                message: "no snippet".into(),
+                detail: None,
+            }),
+            ok_event(), // must be ignored — no reason
+        ];
+
+        let (total, stats) = aggregate_reasons(&events);
+        assert_eq!(total, 4, "ok event must not be counted");
+        // Sorted by count desc: not_empty(2) first, then json_shape and
+        // snippet_missing (1 each, kind-asc tie-break).
+        assert_eq!(stats[0].kind, "not_empty");
+        assert_eq!(stats[0].count, 2);
+        assert!((stats[0].share - 0.5).abs() < 1e-9);
+        assert_eq!(stats[1].kind, "json_shape");
+        assert_eq!(stats[2].kind, "snippet_missing");
+        // Sample is the rendered Display message.
+        assert!(stats[0].sample.contains("is empty"));
+    }
+
+    #[test]
+    fn aggregate_empty_when_no_rejects() {
+        let (total, stats) = aggregate_reasons(&[ok_event()]);
+        assert_eq!(total, 0);
+        assert!(stats.is_empty());
     }
 }
