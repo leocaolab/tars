@@ -13,6 +13,13 @@ workspace = true
 name = "tars"
 path = "src/main.rs"
 
+[features]
+default = []
+# Build `tars` with OpenTelemetry OTLP trace export. Forwards to
+# tars-melt's `otlp` feature (heavy tonic/grpc stack, hence opt-in).
+# Then `OTEL_EXPORTER_OTLP_ENDPOINT=... tars run ...` ships traces.
+otlp = ["tars-melt/otlp"]
+
 [dependencies]
 tars-types = { path = "../tars-types" }
 tars-config = { path = "../tars-config" }

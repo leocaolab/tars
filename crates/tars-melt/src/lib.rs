@@ -28,6 +28,9 @@ use thiserror::Error;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
+#[cfg(feature = "otlp")]
+mod otlp;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TelemetryFormat {
     /// Human-friendly ANSI-coloured output. Default for interactive
@@ -68,6 +71,14 @@ pub struct TelemetryConfig {
     /// Whether to emit span enter/exit events. `false` keeps logs
     /// small; flip to `true` when debugging a span-shape bug.
     pub include_span_events: bool,
+
+    /// OTLP collector endpoint for trace export (e.g.
+    /// `"http://localhost:4317"`). `None` = no OTel export — zero
+    /// overhead, the common case. Honoured only when the crate is built
+    /// with the `otlp` feature; otherwise a set endpoint logs a warning
+    /// and is ignored. Defaults from the standard
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT` env var.
+    pub otlp_endpoint: Option<String>,
 }
 
 impl TelemetryConfig {
@@ -98,11 +109,20 @@ impl TelemetryConfig {
                 TelemetryFormat::default()
             }
         };
+        // OTEL_EXPORTER_OTLP_ENDPOINT is the OpenTelemetry ecosystem's
+        // own standard env var (not a TARS_ knob), so it's read here
+        // directly rather than through tars-types::env. Empty = unset.
+        let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Self {
             level,
             format,
             service: env!("CARGO_PKG_NAME").to_string(),
             include_span_events: false,
+            otlp_endpoint,
         }
     }
 }
@@ -124,19 +144,55 @@ pub enum TelemetryError {
     /// user-supplied.
     #[error("invalid filter directive {directive:?}: {reason}")]
     InvalidFilter { directive: String, reason: String },
+
+    /// Building the OTLP span exporter failed (bad endpoint, transport
+    /// init error). Only constructible with the `otlp` feature.
+    #[error("OTLP exporter init failed (endpoint={endpoint:?}): {reason}")]
+    OtlpExport { endpoint: String, reason: String },
 }
 
 /// RAII handle for the installed telemetry stack. M1: empty marker.
 /// M5: holds the OTel exporter shutdown channel so `Drop` flushes the
 /// last batch of spans.
-#[must_use = "drop the guard at process exit so future OTel exporters can flush"]
+#[must_use = "drop the guard at process exit so the OTel exporter can flush"]
 pub struct TelemetryGuard {
+    /// Held only when the `otlp` feature is on AND an exporter was
+    /// installed; its `Drop` shuts the provider down so the final batch
+    /// of spans leaves the process. `None` otherwise.
+    #[cfg(feature = "otlp")]
+    provider: Option<opentelemetry_sdk::trace::TracerProvider>,
+    #[cfg(not(feature = "otlp"))]
     _private: (),
 }
 
 impl TelemetryGuard {
     fn new() -> Self {
-        Self { _private: () }
+        Self {
+            #[cfg(feature = "otlp")]
+            provider: None,
+            #[cfg(not(feature = "otlp"))]
+            _private: (),
+        }
+    }
+
+    /// Guard owning an OTLP tracer provider; flushed on drop.
+    #[cfg(feature = "otlp")]
+    fn with_provider(provider: opentelemetry_sdk::trace::TracerProvider) -> Self {
+        Self {
+            provider: Some(provider),
+        }
+    }
+}
+
+impl Drop for TelemetryGuard {
+    fn drop(&mut self) {
+        #[cfg(feature = "otlp")]
+        if let Some(provider) = self.provider.take() {
+            // Best-effort flush of the last span batch; never panic on
+            // exit. Errors here just mean some trailing spans didn't
+            // ship — observability must not take the process down.
+            let _ = provider.shutdown();
+        }
     }
 }
 
@@ -178,6 +234,22 @@ pub fn init(config: TelemetryConfig) -> Result<TelemetryGuard, TelemetryError> {
     } else {
         FmtSpan::NONE
     };
+
+    // OTLP export path: when compiled with `otlp` AND an endpoint is set,
+    // install a layered subscriber (fmt + OpenTelemetry bridge) instead
+    // of the plain fmt subscriber below. Keeps the common no-export path
+    // (the `match` further down) byte-for-byte unchanged.
+    #[cfg(feature = "otlp")]
+    if let Some(endpoint) = config.otlp_endpoint.clone() {
+        return otlp::install(&config, filter, span_events, &endpoint);
+    }
+    #[cfg(not(feature = "otlp"))]
+    if config.otlp_endpoint.is_some() {
+        eprintln!(
+            "tars-melt: otlp_endpoint is set but tars-melt was built without the \
+             `otlp` feature — trace export disabled (rebuild with --features otlp)",
+        );
+    }
 
     let result = match config.format {
         TelemetryFormat::Pretty => tracing_subscriber::fmt()
@@ -251,6 +323,14 @@ pub fn init_or_warn(config: TelemetryConfig) -> Option<TelemetryGuard> {
             // Operator misconfig — very much worth shouting about,
             // but still not fatal to the whole process.
             eprintln!("tars-melt: {e}");
+            None
+        }
+        // Only reachable with the `otlp` feature; the arm is always
+        // compiled so the match stays exhaustive either way. Export
+        // setup failing must not take the process down — log + degrade
+        // to stderr-only logging.
+        Err(e @ TelemetryError::OtlpExport { .. }) => {
+            eprintln!("tars-melt: {e} — continuing without trace export");
             None
         }
     }

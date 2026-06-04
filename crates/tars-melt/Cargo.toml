@@ -20,5 +20,27 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
 
+# OTLP trace export (B-8 / M5 observability). Opt-in: the `otlp` feature
+# pulls a heavy tonic/grpc/prost stack, so it's OFF by default — only
+# builds that actually export traces pay for it. Enabling the feature +
+# setting `OTEL_EXPORTER_OTLP_ENDPOINT` turns export on at runtime.
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic"], optional = true }
+tracing-opentelemetry = { version = "0.28", optional = true }
+
+[features]
+default = []
+# Compile the OpenTelemetry OTLP span exporter + tracing→OTel bridge.
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
 [dev-dependencies]
 serde_json.workspace = true
+# The in-memory span exporter used by the otlp bridge test. Only pulled
+# when the `otlp` feature is active (the test is `#[cfg(feature=otlp)]`).
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "testing"] }

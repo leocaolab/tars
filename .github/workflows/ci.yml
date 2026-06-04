@@ -43,6 +43,14 @@ jobs:
       - name: cargo clippy (-D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The `otlp` feature is off by default (heavy tonic/grpc deps), so
+      # the workspace gates above don't compile it. Check + test it
+      # explicitly so the OpenTelemetry bridge can't rot.
+      - name: tars-melt otlp feature (clippy + test)
+        run: |
+          cargo clippy -p tars-melt --features otlp --all-targets -- -D warnings
+          cargo test -p tars-melt --features otlp
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 

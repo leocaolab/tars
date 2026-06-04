@@ -813,6 +813,33 @@ label surfaces the chosen strategy. 2 dispatch tests (every mode builds
 through `build_dispatch`; default is fallback); verified live against LM
 Studio across cost / ensemble / fallback.
 
+### tars-melt — OpenTelemetry OTLP trace export (opt-in) (`<unreleased>`)
+
+The `tracing` spans the whole stack already emits can now ship to an
+OTLP collector (Jaeger / Tempo / Datadog / OTel Collector).
+
+- **`tars-melt` `otlp` feature** (OFF by default) pulls the
+  OpenTelemetry SDK + `tracing-opentelemetry` bridge + OTLP/gRPC span
+  exporter (opentelemetry 0.27 family). It's gated because the
+  tonic/grpc/prost stack is heavy and no consumer needs it yet — lean
+  default builds pay nothing.
+- **Enable**: build with `--features otlp` (tars-cli forwards via its own
+  `otlp` feature) and set `OTEL_EXPORTER_OTLP_ENDPOINT` (the standard
+  OTel env var). `tars_melt::init` then installs a layered subscriber —
+  the same stderr fmt logs *plus* a parallel OTel span pipeline — and
+  returns a `TelemetryGuard` whose `Drop` flushes the last batch. Spans
+  are tagged `service.name`. Unset endpoint or no feature = zero
+  overhead (the prior fmt-only path is byte-for-byte unchanged).
+- **Tested without a collector**: a unit test drives a `tracing` span
+  through the bridge into an in-memory span exporter and asserts it lands
+  (`#[cfg(feature = "otlp")]`). Smoke-tested through `tars run` with an
+  endpoint set (logs "OTLP trace export enabled", call still serves).
+  CI checks the feature explicitly (clippy + test `-p tars-melt
+  --features otlp`).
+
+This is traces only; Prometheus metrics, cardinality validation, and
+sampling remain deferred (TODO B-8).
+
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 
 B-15 in TODO. Adds a `.telemetry` field on every `Response` carrying

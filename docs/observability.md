@@ -256,6 +256,27 @@ tars run ... --log-format json 2>&1 \
            | {model, latency: .elapsed_ms, out_tok: .output_tokens}'
 ```
 
+### Ship spans to an OTLP collector (Jaeger / Tempo / Datadog)
+
+The same `tracing` spans can be exported to any OpenTelemetry collector
+over OTLP/gRPC. It's **opt-in** — the exporter pulls a heavy tonic/grpc
+stack, so it's off by default:
+
+```bash
+# Build tars with the exporter compiled in (one-time).
+cargo build --release -p tars-cli --features otlp
+
+# Point it at a collector and run as usual.
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+  tars run --tier default --prompt "..."
+```
+
+Spans are tagged `service.name=tars-cli`. Without
+`OTEL_EXPORTER_OTLP_ENDPOINT` (or without the `--features otlp` build)
+there's zero overhead — stderr logging is unchanged. The exporter
+flushes on process exit. This ships traces only; Prometheus-style
+metrics aren't wired yet.
+
 ---
 
 ## 4. `arc.log.jsonl` — arc-specific (if you also use arc)
