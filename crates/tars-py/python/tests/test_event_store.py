@@ -52,6 +52,10 @@ def test_event_lands_in_pipeline_events_db(tmp_path):
     assert payload["type"] == "llm_call_finished"
     assert payload["actual_model"]
     assert payload["result"] == {"result": "ok"}
+    # A non-reject call omits validation_reason on the wire entirely
+    # (B-20.v2 follow-up: #[serde(skip_serializing_if)] keeps the blob
+    # byte-identical to pre-field events).
+    assert "validation_reason" not in payload
 
 
 def test_request_and_response_bodies_are_fetchable(tmp_path):
@@ -115,6 +119,48 @@ def test_validation_summary_propagates_to_event(tmp_path):
     summary = payload["validation_summary"]
     assert summary["validators_run"] == ["trunc"]
     assert summary["outcomes"]["trunc"]["dropped"] == ["over5"]
+
+
+def test_validation_reject_reason_persists_to_event(tmp_path):
+    """B-20.v2 follow-up e2e: a reject's typed reason rides through the
+    wheel onto the persisted LlmCallFinished.validation_reason — the
+    detail a Doc 16 evaluator needs to facet on *why* a validator
+    rejected, not just that one did. A reject can't ride
+    validation_summary (it short-circuits before a Response), so this is
+    the field that carries it. Python user rejects map to the Custom
+    variant (externally tagged on the wire)."""
+    def always_reject(req, resp):
+        return tars.Reject.typed("snippet_missing", "no snippet tag", detail={"rule": "R1"})
+
+    p = tars.Pipeline.from_default(
+        PROVIDER_ID,
+        event_store_dir=str(tmp_path),
+        validators=[("snippet", always_reject)],
+    )
+    with pytest.raises(tars.TarsProviderError) as excinfo:
+        p.complete(model=MODEL, user="hi", max_output_tokens=10)
+    assert excinfo.value.kind == "validation_failed"
+
+    import time
+    time.sleep(0.2)
+
+    db = tmp_path / "pipeline_events.db"
+    assert db.exists(), "event store db should exist even on the reject path"
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute("SELECT payload_json FROM pipeline_events").fetchall()
+    assert len(rows) == 1, f"expected 1 event row, got {len(rows)}"
+    payload = json.loads(rows[0][0])
+
+    # Rollup still flags it as a validation failure…
+    assert payload["result"] == {"result": "error", "kind": "validation_failed"}
+    # …and the structured reason is preserved end-to-end.
+    assert payload["validation_reason"] == {
+        "custom": {
+            "kind": "snippet_missing",
+            "message": "no snippet tag",
+            "detail": {"rule": "R1"},
+        }
+    }
 
 
 def test_event_store_dir_omitted_does_not_create_files(tmp_path):
