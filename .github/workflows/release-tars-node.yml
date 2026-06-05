@@ -1,0 +1,106 @@
+name: release-tars-node
+
+# Build the napi native addon for each supported platform and publish the
+# per-platform npm packages + the main `@leocaolab/tars-node` package.
+#
+# Trigger: push a tag `tars-node-vX.Y.Z` whose version matches
+# crates/tars-node/package.json (or run manually). See
+# crates/tars-node/RELEASE.md for the full procedure + prerequisites
+# (npm scope + NPM_TOKEN secret).
+
+on:
+  push:
+    tags: ['tars-node-v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS arm64 — native build (local dev target).
+          - host: macos-14
+            target: aarch64-apple-darwin
+            zig: false
+          # Linux x64 (Cloud Run / Firebase App Hosting). `--zig` links
+          # against a portable older glibc so the binary runs on the
+          # deploy base, not just the (newer) runner. Safe because tars's
+          # TLS is rustls — no openssl/C deps to cross-link.
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            zig: true
+    runs-on: ${{ matrix.host }}
+    defaults:
+      run:
+        working-directory: crates/tars-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . # repo root is the cargo workspace
+      - name: Install zig
+        if: matrix.zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Install JS deps
+        run: npm install
+      - name: Build (host linker)
+        if: ${{ !matrix.zig }}
+        run: npx napi build --platform --release --target ${{ matrix.target }} --strip
+      - name: Build (zig linker)
+        if: matrix.zig
+        run: npx napi build --platform --release --target ${{ matrix.target }} --zig --strip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: crates/tars-node/*.node
+          if-no-files-found: error
+
+  publish:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/tars-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: Install JS deps
+        run: npm install
+      # Regenerate the per-platform package.json stubs so their version
+      # tracks the main package.json — no manual version drift.
+      - name: Sync platform package stubs
+        run: npx napi create-npm-dir -t .
+      - uses: actions/download-artifact@v4
+        with:
+          path: crates/tars-node/artifacts
+      - name: Distribute binaries into the platform packages
+        run: npx napi artifacts -d artifacts
+      - name: Show what will be published
+        run: ls -R npm
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Platform packages first (the main package's optionalDependencies
+          # reference them), then the main package.
+          for dir in npm/*/; do
+            echo "==> publish ${dir}"
+            npm publish "${dir}" --access public
+          done
+          echo "==> publish main package"
+          npm publish --access public

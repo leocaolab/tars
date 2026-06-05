@@ -1,0 +1,28 @@
+{
+  "name": "@leocaolab/tars-node-darwin-arm64",
+  "version": "0.3.1",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "tars-node.darwin-arm64.node",
+  "files": [
+    "tars-node.darwin-arm64.node"
+  ],
+  "description": "Node.js bindings for tars — call Pipeline.complete() from TypeScript.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leocaolab/tars.git",
+    "directory": "crates/tars-node"
+  }
+}
