@@ -54,6 +54,7 @@ pub(crate) struct MetricsBridge {
     calls: Counter<u64>,
     latency_ms: Histogram<u64>,
     tokens: Counter<u64>,
+    cardinality: CardinalityGuard,
 }
 
 impl MetricsBridge {
@@ -63,6 +64,7 @@ impl MetricsBridge {
             calls: meter.u64_counter("tars.llm.calls").build(),
             latency_ms: meter.u64_histogram("tars.llm.latency_ms").build(),
             tokens: meter.u64_counter("tars.llm.tokens").build(),
+            cardinality: CardinalityGuard::new(DEFAULT_CARDINALITY_BUDGET),
         }
     }
 }
@@ -71,7 +73,12 @@ impl<S: tracing::Subscriber> Layer<S> for MetricsBridge {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         let mut v = CallVisitor::default();
         event.record(&mut v);
-        let model = v.model.unwrap_or_else(|| "unknown".to_string());
+        // Cap the `model` label's cardinality before it becomes a metric
+        // attribute — a misconfig that routes to thousands of distinct
+        // model strings (or a bug that leaks an id into the field) would
+        // otherwise explode Prometheus series.
+        let raw_model = v.model.unwrap_or_else(|| "unknown".to_string());
+        let model = self.cardinality.bucket("model", &raw_model);
         match v.event.as_deref() {
             Some("llm.call.finished") => {
                 let attrs = [
@@ -141,6 +148,73 @@ impl Visit for CallVisitor {
     }
 }
 
+/// Distinct values allowed per metric attribute key before extra ones
+/// collapse into a single overflow bucket.
+const DEFAULT_CARDINALITY_BUDGET: usize = 100;
+
+/// Sentinel an over-budget attribute value collapses to, capping the
+/// number of metric series a single label can spawn.
+const OVERFLOW_BUCKET: &str = "__over_cardinality__";
+
+/// Caps the distinct-value count of a metric attribute key at runtime —
+/// the M5 "cardinality validator". A high-cardinality label (an id or a
+/// runaway model string leaked into an attribute) is the classic way to
+/// melt a Prometheus backend; this bounds the damage to the budget plus
+/// one overflow series, and warns once so the misconfig is visible.
+struct CardinalityGuard {
+    budget: usize,
+    seen: std::sync::Mutex<
+        std::collections::HashMap<&'static str, std::collections::HashSet<String>>,
+    >,
+    warned: std::sync::Mutex<std::collections::HashSet<&'static str>>,
+}
+
+impl CardinalityGuard {
+    fn new(budget: usize) -> Self {
+        Self {
+            budget: budget.max(1),
+            seen: std::sync::Mutex::new(std::collections::HashMap::new()),
+            warned: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    /// The value to actually use as the attribute: the real `value` while
+    /// `key` is under budget (or has already seen it), else
+    /// [`OVERFLOW_BUCKET`]. Warns once per key on first overflow.
+    fn bucket(&self, key: &'static str, value: &str) -> String {
+        {
+            let mut seen = self
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let set = seen.entry(key).or_default();
+            if set.contains(value) {
+                return value.to_string();
+            }
+            if set.len() < self.budget {
+                set.insert(value.to_string());
+                return value.to_string();
+            }
+        }
+        // Over budget — warn once per key. `eprintln!`, not `tracing`:
+        // we're inside a `Layer::on_event` and re-entering the subscriber
+        // could deadlock.
+        let mut warned = self
+            .warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if warned.insert(key) {
+            eprintln!(
+                "tars-melt: metric attribute {key:?} exceeded its cardinality budget \
+                 ({}); collapsing further values into {OVERFLOW_BUCKET:?} to protect \
+                 the metrics backend",
+                self.budget,
+            );
+        }
+        OVERFLOW_BUCKET.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +275,20 @@ mod tests {
             names.iter().any(|n| n == "tars.llm.tokens"),
             "got: {names:?}"
         );
+    }
+
+    #[test]
+    fn cardinality_guard_caps_runaway_label() {
+        let guard = CardinalityGuard::new(2);
+        // First two distinct values pass through unchanged.
+        assert_eq!(guard.bucket("model", "a"), "a");
+        assert_eq!(guard.bucket("model", "b"), "b");
+        // A repeat of an already-seen value is always allowed (no growth).
+        assert_eq!(guard.bucket("model", "a"), "a");
+        // The third *new* value overflows into the sentinel.
+        assert_eq!(guard.bucket("model", "c"), OVERFLOW_BUCKET);
+        assert_eq!(guard.bucket("model", "d"), OVERFLOW_BUCKET);
+        // Budget is per-key: a different key has its own allowance.
+        assert_eq!(guard.bucket("outcome", "ok"), "ok");
     }
 }

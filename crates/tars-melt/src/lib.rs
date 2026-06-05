@@ -81,6 +81,14 @@ pub struct TelemetryConfig {
     /// and is ignored. Defaults from the standard
     /// `OTEL_EXPORTER_OTLP_ENDPOINT` env var.
     pub otlp_endpoint: Option<String>,
+
+    /// Head-sampling probability for **root** traces, `0.0..=1.0`.
+    /// `1.0` (default) = sample everything (`AlwaysOn`); `0.1` = keep
+    /// ~10% of root traces. Parent-based: a sampled upstream span is
+    /// always kept so distributed traces stay whole. Only meaningful
+    /// with the `otlp` feature. Defaults from the standard
+    /// `OTEL_TRACES_SAMPLER_ARG` env var.
+    pub trace_sample_ratio: f64,
 }
 
 impl TelemetryConfig {
@@ -119,12 +127,22 @@ impl TelemetryConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        // OTEL_TRACES_SAMPLER_ARG is the standard knob for the ratio of
+        // the traceidratio sampler. Unparseable / out-of-range → 1.0
+        // (sample everything) rather than silently dropping traces.
+        let trace_sample_ratio = std::env::var("OTEL_TRACES_SAMPLER_ARG")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|r| r.is_finite() && (0.0..=1.0).contains(r))
+            .unwrap_or(1.0);
+
         Self {
             level,
             format,
             service: env!("CARGO_PKG_NAME").to_string(),
             include_span_events: false,
             otlp_endpoint,
+            trace_sample_ratio,
         }
     }
 }

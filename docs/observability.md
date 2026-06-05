@@ -287,7 +287,18 @@ per-call events (no extra config):
 
 These go to the same OTLP endpoint (a collector can fan traces and
 metrics to different backends). Metrics shine in a long-running process;
-a single `tars run` emits one call's worth.
+a single `tars run` emits one call's worth. The `model` attribute is
+cardinality-capped (100 distinct values, then an `__over_cardinality__`
+bucket) so a misconfig can't melt the metrics backend.
+
+To keep only a fraction of traces at high volume, set the standard
+`OTEL_TRACES_SAMPLER_ARG` (parent-based traceidratio):
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+  OTEL_TRACES_SAMPLER_ARG=0.1 \
+  tars run ...        # keep ~10% of root traces; default 1.0 = all
+```
 
 ---
 

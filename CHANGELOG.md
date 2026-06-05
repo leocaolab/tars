@@ -850,10 +850,23 @@ per-call **metrics** derived from the same events.
   serves). CI checks the feature explicitly (clippy + test `-p tars-melt
   --features otlp`).
 
-Cardinality validation + trace sampling remain deferred (TODO B-8):
-cardinality validation is downstream of metrics (now unblocked — its
-trigger has fired) and sampling is a scale optimization (AlwaysOn is
-correct until trace volume is a cost problem).
+**Cardinality guard + head sampling** (same `<unreleased>`) close the
+MELT stack and **complete M5**:
+
+- **`CardinalityGuard`** — caps each metric attribute key at 100 distinct
+  values; the 101st new value (and beyond) collapses into
+  `__over_cardinality__` with a once-per-key stderr warning. Wired into
+  `MetricsBridge` for the `model` label, so a misconfig (routing to
+  thousands of model strings, or an id leaking into the field) can't
+  explode the Prometheus series count. The M5 "cardinality validator,"
+  now that there are metrics to validate.
+- **Head sampling** — `OTEL_TRACES_SAMPLER_ARG` sets a parent-based
+  traceidratio sampler on the trace provider (`1.0` / AlwaysOn default;
+  a sampled parent is always kept so distributed traces stay whole).
+
+Tail + adaptive sampling stay deferred (head sampling covers v1; tail is
+largely a collector concern); `SecretField<T>` stays YAGNI. otlp feature:
+7 tests + clippy green; CLI smoke at ratio 0.25.
 
 ### Stage 4 — `Response.telemetry` per-call observability (`<unreleased>`)
 

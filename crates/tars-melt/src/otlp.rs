@@ -33,7 +33,7 @@ pub(crate) fn install(
 ) -> Result<TelemetryGuard, TelemetryError> {
     let safe_service = sanitize_service(&config.service);
 
-    let tracer_provider = build_provider(endpoint, &safe_service)?;
+    let tracer_provider = build_provider(endpoint, &safe_service, config.trace_sample_ratio)?;
     let tracer = tracer_provider.tracer("tars");
     let meter_provider = build_meter_provider(endpoint, &safe_service)?;
 
@@ -95,8 +95,12 @@ pub(crate) fn install(
 }
 
 /// Build the batch OTLP tracer provider, tagging spans with
-/// `service.name` so the collector groups them under this binary.
-fn build_provider(endpoint: &str, service: &str) -> Result<TracerProvider, TelemetryError> {
+/// `service.name` and applying head sampling at `sample_ratio`.
+fn build_provider(
+    endpoint: &str,
+    service: &str,
+    sample_ratio: f64,
+) -> Result<TracerProvider, TelemetryError> {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint)
@@ -111,7 +115,16 @@ fn build_provider(endpoint: &str, service: &str) -> Result<TracerProvider, Telem
         service.to_string(),
     )]);
 
+    // Parent-based traceidratio: a span whose parent was sampled is
+    // always kept (distributed traces stay whole); root spans are kept
+    // at `sample_ratio`. 1.0 keeps everything. Clamp defensively.
+    let ratio = sample_ratio.clamp(0.0, 1.0);
+    let sampler = opentelemetry_sdk::trace::Sampler::ParentBased(Box::new(
+        opentelemetry_sdk::trace::Sampler::TraceIdRatioBased(ratio),
+    ));
+
     Ok(TracerProvider::builder()
+        .with_sampler(sampler)
         .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
         .with_resource(resource)
         .build())
