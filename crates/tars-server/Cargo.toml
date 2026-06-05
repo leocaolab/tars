@@ -1,0 +1,38 @@
+[package]
+name = "tars-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Personal-mode HTTP/REST server over the tars pipeline (Doc 12, M6 subset — no auth/multi-tenant)."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tars-server"
+path = "src/main.rs"
+
+[dependencies]
+tars-types = { path = "../tars-types" }
+tars-config = { path = "../tars-config" }
+tars-provider = { path = "../tars-provider" }
+tars-pipeline = { path = "../tars-pipeline" }
+tars-melt = { path = "../tars-melt" }
+
+axum.workspace = true
+# `net` for the TcpListener axum serves on; `signal` for Ctrl-C shutdown.
+tokio = { workspace = true, features = ["net", "signal"] }
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tars-provider = { path = "../tars-provider" }

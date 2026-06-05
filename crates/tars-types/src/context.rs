@@ -57,6 +57,27 @@ pub struct RequestContext {
 }
 
 impl RequestContext {
+    /// A single-user ("personal mode") context: the given trace, a
+    /// `"local"` tenant / session / principal, no deadline, fresh
+    /// telemetry + validation handles. For local, single-tenant
+    /// frontends (the personal-mode HTTP server, CLI). There is **no
+    /// IAM / audit** here — a multi-tenant server must instead build a
+    /// context from a resolved [`crate::Principal`].
+    pub fn personal(trace_id: TraceId) -> Self {
+        Self {
+            trace_id,
+            tenant_id: TenantId::new("local"),
+            session_id: SessionId::new("local"),
+            principal_id: PrincipalId::new("local"),
+            deadline: None,
+            cancel: CancellationToken::new(),
+            attributes: Arc::new(RwLock::new(HashMap::new())),
+            telemetry: new_shared_telemetry(),
+            validation_outcome: new_shared_validation_outcome(),
+            tags: Vec::new(),
+        }
+    }
+
     /// A test/dev context — fresh trace, no deadline, no real principal.
     /// **Do not use in production** — there's no IAM/audit attached.
     pub fn test_default() -> Self {

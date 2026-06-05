@@ -11,6 +11,7 @@ members = [
     "crates/tars-runtime",
     "crates/tars-tools",
     "crates/tars-cli",
+    "crates/tars-server",
     "crates/tars-py",
     "crates/tars-node",
 ]
@@ -80,6 +81,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # CLI
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 anyhow = "1"
+# HTTP server (tars-server). Pinned to the 0.7 line already resolved in
+# the lockfile (transitive) to avoid a second axum major in the tree.
+axum = "0.7"
 dirs = "5"
 
 # Time

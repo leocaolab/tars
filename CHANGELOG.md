@@ -19,6 +19,39 @@ is authoritative. This file aggregates.
 
 ---
 
+## M6 — Multi-tenant + Server (in progress 2026-06-05)
+
+### `tars-server` — personal-mode HTTP/REST shell (`<unreleased>`)
+
+A thin `axum` server that exposes the already-built `Pipeline` (cache /
+retry / telemetry / routing) over HTTP, so tars is curl-able — the M6
+server **subset**, with the multi-tenant security stack deliberately
+left out (no auth, no IAM, no per-tenant isolation).
+
+- New crate `crates/tars-server/` + binary `tars-server`. Start:
+  `tars-server [--config <path>] [--host 127.0.0.1] [--port 8787]
+  [--default-provider <id>]`. Builds one `Pipeline::default_chain` per
+  configured provider at startup; `#[tokio::main]`, graceful Ctrl-C
+  shutdown, logs via tars-melt.
+- Endpoints: `GET /healthz`, `GET /v1/providers`, `POST /v1/complete`
+  (sync JSON → `{text, thinking, stop_reason, usage}`),
+  `POST /v1/complete/stream` (SSE — `delta` / `thinking` / `done` /
+  `error` events). Request body: `{provider?, model?, system?,
+  user?|messages?, max_output_tokens?, temperature?}`. `ProviderError`
+  maps to typed HTTP statuses (`{error:{kind,message}}`).
+- **Safety**: no auth, so it binds **loopback only** by default and
+  refuses a non-loopback bind without `--insecure-allow-remote`.
+- Added `RequestContext::personal(trace_id)` (non-test, single-tenant
+  `"local"` context) in tars-types for local frontends.
+
+6 HTTP integration tests via `tower::oneshot` over a mock-provider state
+(no socket / no network); live-smoked against LM Studio (sync + SSE
+streaming both return real model output). Workspace clippy gate green.
+
+What's still M6 (not started): `tars-security` (Auth/IAM/Secret), the
+Auth/IAM/Budget middleware layers, per-tenant isolation + lifecycle,
+gRPC, Postgres/Redis stores.
+
 ## M8 — Python bindings (`tars-py`) (shipped 2026-06-04)
 
 PyO3 + maturin-built wheel exposing tars to Python (and, via the
