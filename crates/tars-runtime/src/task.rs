@@ -403,9 +403,7 @@ fn map_run_plan_error(traj: &TrajectoryId, e: crate::executor::RunPlanError) -> 
             step_id,
             attempts,
         },
-        RunPlanError::NoWorkerForRole {
-            role, step_id, ..
-        } => RunTaskError::AgentStep {
+        RunPlanError::NoWorkerForRole { role, step_id, .. } => RunTaskError::AgentStep {
             trajectory_id: traj.clone(),
             step_id,
             source: AgentExecutionError::Agent(AgentError::Internal(format!(

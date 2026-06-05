@@ -54,7 +54,9 @@ fn interpret_exit_code(code: i32) -> &'static str {
         139 => "killed by SIGSEGV (segfault)",
         143 => "killed by SIGTERM (graceful termination signal)",
         // claude-code-specific exit codes we've observed:
-        145 => "claude-code AbortedShellCommand default (a Bash tool was aborted before/during execution; see ShellCommand.ts:420). Common with parallel Task sub-agents stepping on each other",
+        145 => {
+            "claude-code AbortedShellCommand default (a Bash tool was aborted before/during execution; see ShellCommand.ts:420). Common with parallel Task sub-agents stepping on each other"
+        }
         _ if code > 128 && code < 160 => "killed by signal (128 + signal_number)",
         _ => "process-specific exit code (no standard mapping)",
     }
@@ -170,18 +172,17 @@ pub fn diagnose_child_exit(
         (None, Some(s)) => format!("killed by signal {s}"),
         (None, None) => "unknown termination (no exit code, no signal)".to_string(),
     };
-    let (session_log_path, session_log_summary) =
-        if let Some(sid) = claude_session_id {
-            if let Some(p) = find_claude_session_log(repo, sid) {
-                let summary = summarise_claude_session_log(&p)
-                    .unwrap_or_else(|e| format!("(failed to read: {e})"));
-                (Some(p), Some(summary))
-            } else {
-                (None, None)
-            }
+    let (session_log_path, session_log_summary) = if let Some(sid) = claude_session_id {
+        if let Some(p) = find_claude_session_log(repo, sid) {
+            let summary = summarise_claude_session_log(&p)
+                .unwrap_or_else(|e| format!("(failed to read: {e})"));
+            (Some(p), Some(summary))
         } else {
             (None, None)
-        };
+        }
+    } else {
+        (None, None)
+    };
     let worktree_diff_stat = worktree_diff_summary(repo);
     SubprocessDiagnostics {
         command: command.into(),
@@ -258,8 +259,14 @@ mod tests {
         );
         let rendered = format!("{diag}");
         assert!(rendered.contains("145"), "code in output: {rendered}");
-        assert!(rendered.contains("AbortedShellCommand"), "meaning in output: {rendered}");
-        assert!(rendered.contains("claude -p -"), "command in output: {rendered}");
+        assert!(
+            rendered.contains("AbortedShellCommand"),
+            "meaning in output: {rendered}"
+        );
+        assert!(
+            rendered.contains("claude -p -"),
+            "command in output: {rendered}"
+        );
     }
 
     #[test]
@@ -277,10 +284,8 @@ mod tests {
         // Hand-build a minimal jsonl in tmp that mimics the
         // 39-event-but-no-result-event shape we saw in the
         // killed-mid-stream incident.
-        let tmpdir = std::env::temp_dir().join(format!(
-            "tars_subprocess_diag_test_{}",
-            std::process::id(),
-        ));
+        let tmpdir =
+            std::env::temp_dir().join(format!("tars_subprocess_diag_test_{}", std::process::id(),));
         std::fs::create_dir_all(&tmpdir).unwrap();
         let log_path = tmpdir.join("session.jsonl");
         let body = concat!(
@@ -292,10 +297,22 @@ mod tests {
         std::fs::write(&log_path, body).unwrap();
         let summary = summarise_claude_session_log(&log_path).unwrap();
         assert!(summary.contains("3 events"), "event count: {summary}");
-        assert!(summary.contains("2 assistant turns"), "assist count: {summary}");
-        assert!(summary.contains("1 tool_results"), "tool_result count: {summary}");
-        assert!(summary.contains("NO `result` event"), "kill detection: {summary}");
-        assert!(summary.contains("2026-05-31T04:28:15Z"), "last ts: {summary}");
+        assert!(
+            summary.contains("2 assistant turns"),
+            "assist count: {summary}"
+        );
+        assert!(
+            summary.contains("1 tool_results"),
+            "tool_result count: {summary}"
+        );
+        assert!(
+            summary.contains("NO `result` event"),
+            "kill detection: {summary}"
+        );
+        assert!(
+            summary.contains("2026-05-31T04:28:15Z"),
+            "last ts: {summary}"
+        );
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 
@@ -313,8 +330,14 @@ mod tests {
         );
         std::fs::write(&log_path, body).unwrap();
         let summary = summarise_claude_session_log(&log_path).unwrap();
-        assert!(summary.contains("result event present"), "clean exit: {summary}");
-        assert!(!summary.contains("NO `result`"), "must not flag clean as killed: {summary}");
+        assert!(
+            summary.contains("result event present"),
+            "clean exit: {summary}"
+        );
+        assert!(
+            !summary.contains("NO `result`"),
+            "must not flag clean as killed: {summary}"
+        );
         let _ = std::fs::remove_dir_all(&tmpdir);
     }
 }

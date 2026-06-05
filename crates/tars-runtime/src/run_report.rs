@@ -14,8 +14,7 @@ use std::collections::BTreeMap;
 
 use tars_storage::EventStore;
 use tars_types::{
-    AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus, TrajectoryId,
-    Usage,
+    AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus, TrajectoryId, Usage,
 };
 
 use crate::error::RuntimeError;
@@ -51,7 +50,10 @@ pub async fn build_run_report(
     // agent name so LlmCallCaptured (which doesn't carry the agent name
     // directly) can be attributed to the right agent's breakdown.
     let started_at_ms = records.first().map(|r| r.timestamp_ms).unwrap_or(0);
-    let last_event_ts_ms = records.last().map(|r| r.timestamp_ms).unwrap_or(started_at_ms);
+    let last_event_ts_ms = records
+        .last()
+        .map(|r| r.timestamp_ms)
+        .unwrap_or(started_at_ms);
 
     let mut status = RunStatus::Active;
     let mut summary: Option<String> = None;
@@ -205,9 +207,7 @@ fn merge_usage(a: Usage, b: &Usage) -> Usage {
     Usage {
         input_tokens: a.input_tokens.saturating_add(b.input_tokens),
         output_tokens: a.output_tokens.saturating_add(b.output_tokens),
-        cached_input_tokens: a
-            .cached_input_tokens
-            .saturating_add(b.cached_input_tokens),
+        cached_input_tokens: a.cached_input_tokens.saturating_add(b.cached_input_tokens),
         cache_creation_tokens: a
             .cache_creation_tokens
             .saturating_add(b.cache_creation_tokens),
@@ -223,9 +223,7 @@ mod tests {
     use tars_storage::{SqliteEventStore, SqliteEventStoreConfig};
     use tars_types::Usage;
 
-    async fn store_with(
-        records: Vec<(TrajectoryId, serde_json::Value)>,
-    ) -> Arc<dyn EventStore> {
+    async fn store_with(records: Vec<(TrajectoryId, serde_json::Value)>) -> Arc<dyn EventStore> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.sqlite");
         let store: Arc<SqliteEventStore> =
@@ -265,62 +263,86 @@ mod tests {
     async fn completed_trajectory_aggregates_steps_and_tokens() {
         let traj = TrajectoryId::new("t1");
         let events = vec![
-            (traj.clone(), json!({
-                "type": "trajectory_started",
-                "traj": "t1", "parent": null, "reason": "test"
-            })),
-            (traj.clone(), json!({
-                "type": "step_started",
-                "traj": "t1", "step_seq": 1, "agent": "orchestrator",
-                "idempotency_key": "x", "input_summary": "go"
-            })),
-            (traj.clone(), json!({
-                "type": "llm_call_captured",
-                "traj": "t1", "step_seq": 1,
-                "provider": "anthropic",
-                "prompt_summary": "p",
-                "response_summary": "r",
-                "usage": {"input_tokens": 10, "output_tokens": 20,
-                          "cached_input_tokens": 0,
-                          "cache_creation_tokens": 0,
-                          "thinking_tokens": 0}
-            })),
-            (traj.clone(), json!({
-                "type": "step_completed",
-                "traj": "t1", "step_seq": 1, "output_summary": "done",
-                "usage": {"input_tokens": 10, "output_tokens": 20,
-                          "cached_input_tokens": 0,
-                          "cache_creation_tokens": 0,
-                          "thinking_tokens": 0}
-            })),
-            (traj.clone(), json!({
-                "type": "step_started",
-                "traj": "t1", "step_seq": 2, "agent": "worker:summarise",
-                "idempotency_key": "y", "input_summary": "fetch"
-            })),
-            (traj.clone(), json!({
-                "type": "llm_call_captured",
-                "traj": "t1", "step_seq": 2,
-                "provider": "openai",
-                "prompt_summary": "p2",
-                "response_summary": "r2",
-                "usage": {"input_tokens": 50, "output_tokens": 100,
-                          "cached_input_tokens": 5,
-                          "cache_creation_tokens": 0,
-                          "thinking_tokens": 0}
-            })),
-            (traj.clone(), json!({
-                "type": "step_completed",
-                "traj": "t1", "step_seq": 2, "output_summary": "ok",
-                "usage": {"input_tokens": 50, "output_tokens": 100,
-                          "cached_input_tokens": 5,
-                          "cache_creation_tokens": 0,
-                          "thinking_tokens": 0}
-            })),
-            (traj.clone(), json!({
-                "type": "trajectory_completed",
-                "traj": "t1", "summary": "plan emitted"
-            })),
+            (
+                traj.clone(),
+                json!({
+                    "type": "trajectory_started",
+                    "traj": "t1", "parent": null, "reason": "test"
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "step_started",
+                    "traj": "t1", "step_seq": 1, "agent": "orchestrator",
+                    "idempotency_key": "x", "input_summary": "go"
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "llm_call_captured",
+                    "traj": "t1", "step_seq": 1,
+                    "provider": "anthropic",
+                    "prompt_summary": "p",
+                    "response_summary": "r",
+                    "usage": {"input_tokens": 10, "output_tokens": 20,
+                              "cached_input_tokens": 0,
+                              "cache_creation_tokens": 0,
+                              "thinking_tokens": 0}
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "step_completed",
+                    "traj": "t1", "step_seq": 1, "output_summary": "done",
+                    "usage": {"input_tokens": 10, "output_tokens": 20,
+                              "cached_input_tokens": 0,
+                              "cache_creation_tokens": 0,
+                              "thinking_tokens": 0}
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "step_started",
+                    "traj": "t1", "step_seq": 2, "agent": "worker:summarise",
+                    "idempotency_key": "y", "input_summary": "fetch"
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "llm_call_captured",
+                    "traj": "t1", "step_seq": 2,
+                    "provider": "openai",
+                    "prompt_summary": "p2",
+                    "response_summary": "r2",
+                    "usage": {"input_tokens": 50, "output_tokens": 100,
+                              "cached_input_tokens": 5,
+                              "cache_creation_tokens": 0,
+                              "thinking_tokens": 0}
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "step_completed",
+                    "traj": "t1", "step_seq": 2, "output_summary": "ok",
+                    "usage": {"input_tokens": 50, "output_tokens": 100,
+                              "cached_input_tokens": 5,
+                              "cache_creation_tokens": 0,
+                              "thinking_tokens": 0}
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "trajectory_completed",
+                    "traj": "t1", "summary": "plan emitted"
+                }),
+            ),
         ];
         let store = store_with(events).await;
         let report = build_run_report(&*store, &traj).await.unwrap();
@@ -361,25 +383,37 @@ mod tests {
     async fn failed_step_lands_in_errors_and_per_agent_count() {
         let traj = TrajectoryId::new("t2");
         let events = vec![
-            (traj.clone(), json!({
-                "type": "trajectory_started",
-                "traj": "t2", "parent": null, "reason": "test"
-            })),
-            (traj.clone(), json!({
-                "type": "step_started",
-                "traj": "t2", "step_seq": 1, "agent": "worker:fetch",
-                "idempotency_key": "z", "input_summary": "go"
-            })),
-            (traj.clone(), json!({
-                "type": "step_failed",
-                "traj": "t2", "step_seq": 1,
-                "error": "network blew up",
-                "classification": "retriable"
-            })),
-            (traj.clone(), json!({
-                "type": "trajectory_abandoned",
-                "traj": "t2", "cause": "budget exhausted"
-            })),
+            (
+                traj.clone(),
+                json!({
+                    "type": "trajectory_started",
+                    "traj": "t2", "parent": null, "reason": "test"
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "step_started",
+                    "traj": "t2", "step_seq": 1, "agent": "worker:fetch",
+                    "idempotency_key": "z", "input_summary": "go"
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "step_failed",
+                    "traj": "t2", "step_seq": 1,
+                    "error": "network blew up",
+                    "classification": "retriable"
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "trajectory_abandoned",
+                    "traj": "t2", "cause": "budget exhausted"
+                }),
+            ),
         ];
         let store = store_with(events).await;
         let report = build_run_report(&*store, &traj).await.unwrap();
@@ -401,15 +435,21 @@ mod tests {
     async fn active_trajectory_has_no_terminal_summary() {
         let traj = TrajectoryId::new("t3");
         let events = vec![
-            (traj.clone(), json!({
-                "type": "trajectory_started",
-                "traj": "t3", "parent": null, "reason": "test"
-            })),
-            (traj.clone(), json!({
-                "type": "step_started",
-                "traj": "t3", "step_seq": 1, "agent": "orchestrator",
-                "idempotency_key": "k", "input_summary": "go"
-            })),
+            (
+                traj.clone(),
+                json!({
+                    "type": "trajectory_started",
+                    "traj": "t3", "parent": null, "reason": "test"
+                }),
+            ),
+            (
+                traj.clone(),
+                json!({
+                    "type": "step_started",
+                    "traj": "t3", "step_seq": 1, "agent": "orchestrator",
+                    "idempotency_key": "k", "input_summary": "go"
+                }),
+            ),
             // No terminal event — trajectory is still active.
         ];
         let store = store_with(events).await;

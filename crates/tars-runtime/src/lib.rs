@@ -39,8 +39,8 @@ mod critic;
 mod error;
 mod event;
 mod executor;
-mod llm_adapters;
 pub mod judge;
+mod llm_adapters;
 mod message;
 pub mod metamorphic;
 mod orchestrator;
@@ -64,10 +64,10 @@ pub use executor::{
     WorkerContext, WorkerOutput, WorkerRegistry, default_infra_classifier, emit_step_lifecycle,
     run_plan,
 };
-pub use llm_adapters::{LlmCritic, LlmWorker};
 pub use judge::{
     DEFAULT_JUDGE_PROMPT, Judge, JudgeError, LlmJudge, ensure_anti_incest, run_judge_pass,
 };
+pub use llm_adapters::{LlmCritic, LlmWorker};
 pub use message::{AgentMessage, VerdictKind};
 pub use metamorphic::{
     DeleteSubstringMutation, DirectionalRelation, GoldenMatch, InvarianceRelation,

@@ -99,8 +99,7 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     // tracing::warn so the LLM call itself isn't blocked by a
     // local-state hiccup (same Doc 03 §4.3 "best-effort, never fatal"
     // discipline the cache uses).
-    let trajectory_logger =
-        build_trajectory_logger(&args, &dispatch, prompt.chars().count()).await;
+    let trajectory_logger = build_trajectory_logger(&args, &dispatch, prompt.chars().count()).await;
 
     let dispatch_label = dispatch.label.clone();
 

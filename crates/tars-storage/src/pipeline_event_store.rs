@@ -200,7 +200,9 @@ fn migrate_v1_to_v2_unresolved_to_null(conn: &Connection) -> Result<(), StorageE
         )
         .map_err(|e| StorageError::backend_source("v1→v2 migrate: prepare select", e))?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })
         .map_err(|e| StorageError::backend_source("v1→v2 migrate: query", e))?;
 
     let mut updates: Vec<(String, Vec<u8>)> = Vec::new();
@@ -298,9 +300,7 @@ const DEFAULT_QUERY_LIMIT: u32 = 10_000;
 /// mutex means a previous writer panicked mid-operation; SQLite's own
 /// transaction rollback keeps the on-disk state consistent, so we
 /// recover the guard via `into_inner` and let the caller decide.
-fn lock_conn(
-    conn: &Mutex<Connection>,
-) -> std::sync::MutexGuard<'_, Connection> {
+fn lock_conn(conn: &Mutex<Connection>) -> std::sync::MutexGuard<'_, Connection> {
     conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -719,7 +719,10 @@ mod tests {
                 "00000000-0000-0000-0000-000000000002",
                 &already_resolved_payload,
             ),
-            ("00000000-0000-0000-0000-000000000003", &already_null_payload),
+            (
+                "00000000-0000-0000-0000-000000000003",
+                &already_null_payload,
+            ),
         ] {
             conn.execute(
                 "INSERT INTO pipeline_events (event_id, event_type, timestamp_ms, \

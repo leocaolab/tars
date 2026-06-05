@@ -40,9 +40,8 @@ pub fn load(path: Option<PathBuf>) -> Result<Config> {
             resolved.display(),
         ),
         Err(e) => {
-            return Err(anyhow::Error::new(e)).with_context(|| {
-                format!("cannot access config file at {}", resolved.display())
-            });
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("cannot access config file at {}", resolved.display()));
         }
     }
     ConfigManager::load_from_file(&resolved)

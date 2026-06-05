@@ -116,8 +116,12 @@ enum Decision {
     /// single HalfOpen probe (it flipped `probe_in_flight` to true), so
     /// the dispatch path knows it must arm a [`ProbeGuard`] to clear
     /// that flag if the probing future is cancelled.
-    Allow { is_probe: bool },
-    Reject { until: Instant },
+    Allow {
+        is_probe: bool,
+    },
+    Reject {
+        until: Instant,
+    },
 }
 
 /// RAII guard that clears a HalfOpen `probe_in_flight` flag if the

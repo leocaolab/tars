@@ -240,7 +240,7 @@ impl BatchSubmitter for MockBatchSubmitter {
 }
 
 fn echo_response(req: &ChatRequest) -> ChatResponse {
-    use tars_types::{ChatResponseBuilder, ChatEvent, StopReason, Usage};
+    use tars_types::{ChatEvent, ChatResponseBuilder, StopReason, Usage};
     let mut acc = ChatResponseBuilder::new();
     acc.apply(ChatEvent::started(req.model.label()));
     // Echo "ok" — keeps the response stream-shape valid for downstream
@@ -257,8 +257,9 @@ fn clone_via_serde(resp: &ChatResponse) -> Result<ChatResponse, ProviderError> {
     // Don't `expect` here: this runs inside `results()` while the state
     // lock is held, so a panic would unwind through the guard. Surface a
     // typed error instead and let the caller decide.
-    let v = serde_json::to_value(resp)
-        .map_err(|e| ProviderError::Internal(format!("mock results: ChatResponse serialize: {e}")))?;
+    let v = serde_json::to_value(resp).map_err(|e| {
+        ProviderError::Internal(format!("mock results: ChatResponse serialize: {e}"))
+    })?;
     serde_json::from_value(v)
         .map_err(|e| ProviderError::Internal(format!("mock results: ChatResponse round-trip: {e}")))
 }
@@ -387,7 +388,10 @@ mod tests {
             .submit(vec![(BatchItemId::new("a"), req("x"))], &ctx())
             .await
             .unwrap();
-        let err = m.cancel(&id, &ctx()).await.expect_err("default unsupported");
+        let err = m
+            .cancel(&id, &ctx())
+            .await
+            .expect_err("default unsupported");
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
     }
 

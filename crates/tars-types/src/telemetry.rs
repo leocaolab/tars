@@ -145,8 +145,6 @@ pub fn new_shared_telemetry() -> SharedTelemetry {
 /// should not propagate into every later telemetry write. This returns
 /// the guard regardless, unwrapping the `PoisonError` to its inner
 /// guard. Use this everywhere instead of `.lock().unwrap()`.
-pub fn lock_telemetry(
-    t: &SharedTelemetry,
-) -> std::sync::MutexGuard<'_, TelemetryAccumulator> {
+pub fn lock_telemetry(t: &SharedTelemetry) -> std::sync::MutexGuard<'_, TelemetryAccumulator> {
     t.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

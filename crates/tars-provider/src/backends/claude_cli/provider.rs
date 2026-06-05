@@ -217,9 +217,10 @@ impl LlmProvider for ClaudeCliProvider {
             // * 4) can land mid-codepoint, and byte-indexing `[..cap]`
             // would panic. `truncate_utf8` rounds down to the previous
             // boundary (no ellipsis, so the byte cap is still honored).
-            Some(cap) if response_text.len() > cap => {
-                (crate::http_base::truncate_utf8(&response_text, cap).to_string(), true)
-            }
+            Some(cap) if response_text.len() > cap => (
+                crate::http_base::truncate_utf8(&response_text, cap).to_string(),
+                true,
+            ),
             _ => (response_text, false),
         };
 

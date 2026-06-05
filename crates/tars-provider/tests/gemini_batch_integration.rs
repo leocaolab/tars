@@ -13,14 +13,11 @@ use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::gemini::GeminiProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
-use tars_types::{
-    BatchItemId, BatchJobId, ChatRequest, ModelHint, ProviderError,
-};
+use tars_types::{BatchItemId, BatchJobId, ChatRequest, ModelHint, ProviderError};
 
 fn build_provider() -> Arc<dyn LlmProvider> {
     let http = HttpProviderBase::default_arc().unwrap();
-    GeminiProviderBuilder::new("gemini_test", Auth::inline("AIza_test_key"))
-        .build(http, basic())
+    GeminiProviderBuilder::new("gemini_test", Auth::inline("AIza_test_key")).build(http, basic())
 }
 
 fn assert_not_implemented(err: ProviderError) {
@@ -49,10 +46,13 @@ async fn submit_returns_not_implemented_invalid_request() {
     let provider = build_provider();
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .submit(vec![(
-            BatchItemId::new("x"),
-            ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "hi"),
-        )], &tars_types::RequestContext::test_default())
+        .submit(
+            vec![(
+                BatchItemId::new("x"),
+                ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "hi"),
+            )],
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .expect_err("must reject");
     assert_not_implemented(err);
@@ -63,7 +63,10 @@ async fn status_returns_not_implemented_invalid_request() {
     let provider = build_provider();
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .status(&BatchJobId::new("ignored"), &tars_types::RequestContext::test_default())
+        .status(
+            &BatchJobId::new("ignored"),
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .expect_err("must reject");
     assert_not_implemented(err);
@@ -74,7 +77,10 @@ async fn results_returns_not_implemented_invalid_request() {
     let provider = build_provider();
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .results(&BatchJobId::new("ignored"), &tars_types::RequestContext::test_default())
+        .results(
+            &BatchJobId::new("ignored"),
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .expect_err("must reject");
     assert_not_implemented(err);
@@ -85,7 +91,10 @@ async fn cancel_returns_not_implemented_invalid_request() {
     let provider = build_provider();
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .cancel(&BatchJobId::new("ignored"), &tars_types::RequestContext::test_default())
+        .cancel(
+            &BatchJobId::new("ignored"),
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .expect_err("must reject");
     assert_not_implemented(err);

@@ -74,7 +74,10 @@ pub(super) fn translate_batch_status(v: &Value) -> Result<BatchStatus, ProviderE
         .and_then(|s| s.as_str())
         .ok_or_else(|| ProviderError::Parse("batch status: missing `processing_status`".into()))?;
 
-    let counts = v.get("request_counts").cloned().unwrap_or_else(|| json!({}));
+    let counts = v
+        .get("request_counts")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let get = |k: &str| counts.get(k).and_then(|n| n.as_u64()).unwrap_or(0) as u32;
     let processing = get("processing");
     let succeeded = get("succeeded");
@@ -134,21 +137,21 @@ pub(super) fn parse_batch_results(text: &str) -> Result<Vec<BatchResultItem>, Pr
             .get("custom_id")
             .and_then(|s| s.as_str())
             .ok_or_else(|| {
-                ProviderError::Parse(format!(
-                    "batch results line {}: missing custom_id",
-                    idx + 1
-                ))
+                ProviderError::Parse(format!("batch results line {}: missing custom_id", idx + 1))
             })?
             .to_string();
         let result_val = v.get("result").ok_or_else(|| {
             ProviderError::Parse(format!("batch results line {}: missing result", idx + 1))
         })?;
-        let result_type = result_val.get("type").and_then(|t| t.as_str()).ok_or_else(|| {
-            ProviderError::Parse(format!(
-                "batch results line {}: missing result.type",
-                idx + 1
-            ))
-        })?;
+        let result_type = result_val
+            .get("type")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| {
+                ProviderError::Parse(format!(
+                    "batch results line {}: missing result.type",
+                    idx + 1
+                ))
+            })?;
 
         let outcome: Result<ChatResponse, ProviderError> = match result_type {
             "succeeded" => {
@@ -161,7 +164,10 @@ pub(super) fn parse_batch_results(text: &str) -> Result<Vec<BatchResultItem>, Pr
                 message_to_chat_response(message)
             }
             "errored" => {
-                let err = result_val.get("error").cloned().unwrap_or_else(|| json!({}));
+                let err = result_val
+                    .get("error")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 let err_type = err.get("type").and_then(|t| t.as_str()).unwrap_or("error");
                 let err_msg = err
                     .get("message")

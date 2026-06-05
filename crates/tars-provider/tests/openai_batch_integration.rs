@@ -12,9 +12,7 @@ use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::openai::OpenAiProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
-use tars_types::{
-    BatchItemId, BatchJobId, BatchStatus, ChatRequest, ModelHint, ProviderError,
-};
+use tars_types::{BatchItemId, BatchJobId, BatchStatus, ChatRequest, ModelHint, ProviderError};
 
 fn build_provider(server: &MockServer) -> Arc<dyn LlmProvider> {
     let http = HttpProviderBase::default_arc().unwrap();
@@ -58,18 +56,23 @@ async fn submit_uploads_jsonl_file_then_creates_batch() {
         .await;
 
     let provider = build_provider(&server);
-    let submitter = provider.as_batch_submitter().expect("openai supports batch");
+    let submitter = provider
+        .as_batch_submitter()
+        .expect("openai supports batch");
     let id = submitter
-        .submit(vec![
-            (
-                BatchItemId::new("draft-1"),
-                ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "draft one"),
-            ),
-            (
-                BatchItemId::new("draft-2"),
-                ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "draft two"),
-            ),
-        ], &tars_types::RequestContext::test_default())
+        .submit(
+            vec![
+                (
+                    BatchItemId::new("draft-1"),
+                    ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "draft one"),
+                ),
+                (
+                    BatchItemId::new("draft-2"),
+                    ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "draft two"),
+                ),
+            ],
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .unwrap();
     assert_eq!(id.as_str(), "batch_01abc");
@@ -80,7 +83,10 @@ async fn submit_empty_items_is_invalid_request_before_http() {
     let server = MockServer::start().await;
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
-    let err = submitter.submit(vec![], &tars_types::RequestContext::test_default()).await.expect_err("reject");
+    let err = submitter
+        .submit(vec![], &tars_types::RequestContext::test_default())
+        .await
+        .expect_err("reject");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));
 }
 
@@ -101,7 +107,10 @@ async fn status_translates_in_progress_with_counts() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     let st = submitter
-        .status(&BatchJobId::new("batch_xyz"), &tars_types::RequestContext::test_default())
+        .status(
+            &BatchJobId::new("batch_xyz"),
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .unwrap();
     match st {
@@ -137,7 +146,10 @@ async fn status_failed_surfaces_message_from_errors_array() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     let st = submitter
-        .status(&BatchJobId::new("batch_dead"), &tars_types::RequestContext::test_default())
+        .status(
+            &BatchJobId::new("batch_dead"),
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .unwrap();
     match st {
@@ -171,11 +183,23 @@ async fn status_expired_and_cancelled() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     assert_eq!(
-        submitter.status(&BatchJobId::new("batch_exp"), &tars_types::RequestContext::test_default()).await.unwrap(),
+        submitter
+            .status(
+                &BatchJobId::new("batch_exp"),
+                &tars_types::RequestContext::test_default()
+            )
+            .await
+            .unwrap(),
         BatchStatus::Expired,
     );
     assert_eq!(
-        submitter.status(&BatchJobId::new("batch_can"), &tars_types::RequestContext::test_default()).await.unwrap(),
+        submitter
+            .status(
+                &BatchJobId::new("batch_can"),
+                &tars_types::RequestContext::test_default()
+            )
+            .await
+            .unwrap(),
         BatchStatus::Cancelled,
     );
 }
@@ -208,7 +232,10 @@ async fn results_downloads_output_file_and_parses_jsonl() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     let results = submitter
-        .results(&BatchJobId::new("batch_done"), &tars_types::RequestContext::test_default())
+        .results(
+            &BatchJobId::new("batch_done"),
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .unwrap();
     assert_eq!(results.len(), 2);
@@ -241,7 +268,10 @@ async fn results_on_non_terminal_refuses_without_fetching_output_file() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .results(&BatchJobId::new("batch_running"), &tars_types::RequestContext::test_default())
+        .results(
+            &BatchJobId::new("batch_running"),
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .expect_err("must refuse");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));
@@ -265,7 +295,10 @@ async fn results_completed_without_output_file_is_empty_vec() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     let r = submitter
-        .results(&BatchJobId::new("batch_empty"), &tars_types::RequestContext::test_default())
+        .results(
+            &BatchJobId::new("batch_empty"),
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .unwrap();
     assert!(r.is_empty());
@@ -287,7 +320,10 @@ async fn cancel_posts_to_cancel_endpoint() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     submitter
-        .cancel(&BatchJobId::new("batch_01abc"), &tars_types::RequestContext::test_default())
+        .cancel(
+            &BatchJobId::new("batch_01abc"),
+            &tars_types::RequestContext::test_default(),
+        )
         .await
         .unwrap();
 }

@@ -6,7 +6,6 @@
 //! are follow-on wiring; the traits + their pure logic live here and
 //! are unit-tested without a provider.
 
-
 use tars_types::{ChatRequest, ChatResponse};
 
 use crate::check::CheckResult;
@@ -70,21 +69,15 @@ impl MetamorphicRelation for InvarianceRelation {
         // Rewrite the last user text via transform_text; other turns
         // pass through. Most invariance tests perturb the user prompt.
         let mut req = base.clone();
-        if let Some(last_user_text) = req
-            .messages
-            .iter_mut()
-            .rev()
-            .find_map(|m| match m {
-                tars_types::Message::User { content } => content
-                    .iter_mut()
-                    .rev()
-                    .find_map(|b| match b {
-                        tars_types::ContentBlock::Text { text } => Some(text),
-                        _ => None,
-                    }),
-                _ => None,
-            })
-        {
+        if let Some(last_user_text) = req.messages.iter_mut().rev().find_map(|m| match m {
+            tars_types::Message::User { content } => {
+                content.iter_mut().rev().find_map(|b| match b {
+                    tars_types::ContentBlock::Text { text } => Some(text),
+                    _ => None,
+                })
+            }
+            _ => None,
+        }) {
             *last_user_text = (self.transform_text)(last_user_text);
         }
         req
@@ -136,12 +129,12 @@ impl MetamorphicRelation for DirectionalRelation {
     fn transform(&self, base: &ChatRequest) -> ChatRequest {
         let mut req = base.clone();
         if let Some(t) = req.messages.iter_mut().rev().find_map(|m| match m {
-            tars_types::Message::User { content } => content.iter_mut().rev().find_map(|b| {
-                match b {
+            tars_types::Message::User { content } => {
+                content.iter_mut().rev().find_map(|b| match b {
                     tars_types::ContentBlock::Text { text } => Some(text),
                     _ => None,
-                }
-            }),
+                })
+            }
             _ => None,
         }) {
             *t = (self.transform_text)(t);
@@ -330,11 +323,7 @@ mod tests {
 
     #[test]
     fn invariance_transform_rewrites_user_text() {
-        let rel = InvarianceRelation::new(
-            "uppercase",
-            |s| s.to_uppercase(),
-            |a, b| a == b,
-        );
+        let rel = InvarianceRelation::new("uppercase", |s| s.to_uppercase(), |a, b| a == b);
         let t = rel.transform(&user_req("hello world"));
         let txt = t.messages[0].content()[0].as_text().unwrap();
         assert_eq!(txt, "HELLO WORLD");

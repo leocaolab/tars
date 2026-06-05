@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest,
-    Modality, PromptCacheKind, ProviderError, ProviderId, RequestContext, StructuredOutputMode,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest, Modality,
+    PromptCacheKind, ProviderError, ProviderId, RequestContext, StructuredOutputMode,
 };
 
 use crate::auth::{Auth, AuthResolver};

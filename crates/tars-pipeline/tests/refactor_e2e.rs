@@ -16,8 +16,8 @@ use tars_pipeline::{
     BudgetConfigError, CircuitBreakerConfig, FallbackTrigger, PerCallBudgetMiddleware,
 };
 use tars_provider::{
-    backends::mock::{CannedResponse, MockProvider},
     LlmProvider,
+    backends::mock::{CannedResponse, MockProvider},
 };
 use tars_types::{Pricing, ProviderError, ProviderErrorKind, RetryAttempt};
 
@@ -147,8 +147,7 @@ fn try_new_with_valid_capabilities_round_trips_through_wrap() {
         output_per_million: 15.0,
         ..Pricing::default()
     });
-    let mw = PerCallBudgetMiddleware::try_new(1.0, &caps)
-        .expect("valid caps must construct");
+    let mw = PerCallBudgetMiddleware::try_new(1.0, &caps).expect("valid caps must construct");
     let mock = MockProvider::new("p", CannedResponse::text("hi"));
     let inner: Arc<dyn tars_pipeline::LlmService> = tars_pipeline::ProviderService::new(mock);
     let _wrapped = mw.wrap(inner);
@@ -239,9 +238,11 @@ fn provider_error_kind_set_contains_uses_typed_equality() {
     // via FallbackTrigger::on (FallbackTrigger uses the same hash
     // table internally).
     let trigger = FallbackTrigger::on(&[ProviderErrorKind::Network]);
-    assert!(trigger.matches(&ProviderError::Network(Box::new(
-        std::io::Error::other("x")
-    ))));
+    assert!(
+        trigger.matches(&ProviderError::Network(Box::new(std::io::Error::other(
+            "x"
+        ))))
+    );
     assert!(!trigger.matches(&ProviderError::Auth("nope".into())));
 }
 

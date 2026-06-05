@@ -128,9 +128,7 @@ impl LocalRuntime {
     pub fn new(event_store: Arc<dyn EventStore>) -> Arc<Self> {
         Arc::new(Self {
             event_store,
-            step_seq_counters: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
+            step_seq_counters: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         })
     }
 

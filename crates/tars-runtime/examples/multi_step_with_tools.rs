@@ -311,9 +311,9 @@ async fn main() -> anyhow::Result<()> {
             } => println!(
                 "│   - {step_id} (worker_role={role}, refine_attempts={refinement_attempts})",
             ),
-            tars_runtime::StepOutcome::Skipped { step_id, reason } => println!(
-                "│   - {step_id} (worker_role={role}, SKIPPED: {reason})",
-            ),
+            tars_runtime::StepOutcome::Skipped { step_id, reason } => {
+                println!("│   - {step_id} (worker_role={role}, SKIPPED: {reason})",)
+            }
         }
     }
     println!("╰───────────────────────────────────────────────────────────");

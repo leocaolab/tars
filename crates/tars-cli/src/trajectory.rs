@@ -67,9 +67,7 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
     let mut buf: Vec<u8> = Vec::new();
     match args.command {
         TrajectoryCommand::List => list(&runtime, &mut buf).await?,
-        TrajectoryCommand::Show { id } => {
-            show(&runtime, &TrajectoryId::new(id), &mut buf).await?
-        }
+        TrajectoryCommand::Show { id } => show(&runtime, &TrajectoryId::new(id), &mut buf).await?,
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();

@@ -160,11 +160,7 @@ impl CheckRunner {
     }
 
     /// Run every invariant; return `(name, result)` in declared order.
-    pub fn run(
-        &self,
-        input: &ChatRequest,
-        output: &ChatResponse,
-    ) -> Vec<(String, CheckResult)> {
+    pub fn run(&self, input: &ChatRequest, output: &ChatResponse) -> Vec<(String, CheckResult)> {
         self.invariants
             .iter()
             .map(|inv| (inv.name().to_string(), inv.check(input, output)))
@@ -287,10 +283,7 @@ mod tests {
             |resp| resp.text.split(',').map(|s| s.trim().to_string()).collect(),
         );
         // all valid
-        assert!(
-            inv.check(&req(), &resp_text("midjourney, dall-e"))
-                .passed
-        );
+        assert!(inv.check(&req(), &resp_text("midjourney, dall-e")).passed);
         // two hallucinated
         let bad = inv.check(&req(), &resp_text("midjourney, fake-tool, other-fake"));
         assert!(!bad.passed);

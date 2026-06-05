@@ -40,9 +40,7 @@ impl ModelHint {
     /// an `Ensemble` is `1 + max(child depth)` (empty ensemble = 1).
     pub fn depth(&self) -> usize {
         match self {
-            Self::Ensemble(children) => {
-                1 + children.iter().map(Self::depth).max().unwrap_or(0)
-            }
+            Self::Ensemble(children) => 1 + children.iter().map(Self::depth).max().unwrap_or(0),
             _ => 1,
         }
     }
@@ -95,9 +93,7 @@ impl ModelHint {
         match self {
             Self::Explicit(s) => std::borrow::Cow::Borrowed(s.as_str()),
             Self::Tier(t) => std::borrow::Cow::Owned(format!("tier:{:?}", t).to_lowercase()),
-            Self::Ensemble(models) => {
-                std::borrow::Cow::Owned(format!("ensemble:{}", models.len()))
-            }
+            Self::Ensemble(models) => std::borrow::Cow::Owned(format!("ensemble:{}", models.len())),
         }
     }
 }
@@ -139,13 +135,18 @@ mod tests {
 
     #[test]
     fn model_hint_label_is_diagnostic() {
-        assert_eq!(ModelHint::Explicit("gpt-4o".into()).label().as_ref(), "gpt-4o");
+        assert_eq!(
+            ModelHint::Explicit("gpt-4o".into()).label().as_ref(),
+            "gpt-4o"
+        );
         assert_eq!(
             ModelHint::Tier(ModelTier::Reasoning).label().as_ref(),
             "tier:reasoning"
         );
         assert_eq!(
-            ModelHint::Ensemble(vec![ModelHint::Tier(ModelTier::Fast); 3]).label().as_ref(),
+            ModelHint::Ensemble(vec![ModelHint::Tier(ModelTier::Fast); 3])
+                .label()
+                .as_ref(),
             "ensemble:3"
         );
     }

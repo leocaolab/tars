@@ -61,7 +61,10 @@ pub fn claude_cli_streaming() -> Result<Option<bool>, std::env::VarError> {
     match std::env::var("TARS_CLAUDE_CLI_STREAM") {
         Ok(v) => {
             let v = v.trim().to_ascii_lowercase();
-            Ok(Some(!matches!(v.as_str(), "" | "0" | "false" | "off" | "no")))
+            Ok(Some(!matches!(
+                v.as_str(),
+                "" | "0" | "false" | "off" | "no"
+            )))
         }
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(e) => Err(e),

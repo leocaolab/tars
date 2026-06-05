@@ -44,8 +44,7 @@ use tokio::sync::Mutex;
 
 use tars_provider::LlmEventStream;
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, RequestContext,
-    TenantId,
+    Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, RequestContext, TenantId,
 };
 
 use crate::middleware::Middleware;

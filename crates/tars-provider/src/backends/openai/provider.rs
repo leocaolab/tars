@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest,
-    Modality, ProviderError, ProviderId, RequestContext, StructuredOutputMode,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest, Modality,
+    ProviderError, ProviderId, RequestContext, StructuredOutputMode,
 };
 
 use crate::auth::{Auth, AuthResolver};
@@ -237,9 +237,7 @@ impl BatchSubmitter for OpenAiProvider {
         let input_file_id = file_v
             .get("id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ProviderError::Parse("file upload: response missing `id`".into())
-            })?
+            .ok_or_else(|| ProviderError::Parse("file upload: response missing `id`".into()))?
             .to_string();
 
         // 3) Create the batch referencing that file.

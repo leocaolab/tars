@@ -78,7 +78,10 @@ fn deterministic_output() {
     // prompt assembly is correct, not just its output parsing.
     assert_eq!(mock.call_count(), 2);
     let sent = format!("{:?}", mock.history_snapshot());
-    assert!(sent.contains("exactly one word"), "prompt should carry the instruction");
+    assert!(
+        sent.contains("exactly one word"),
+        "prompt should carry the instruction"
+    );
 
     println!("✓ deterministic_output — same script, same answer, prompt verified");
 }
@@ -92,7 +95,10 @@ fn error_injection() {
     let agent = agent_with(&mock);
 
     let result = agent.classify("anything");
-    assert!(result.is_err(), "scripted provider error must surface to the caller");
+    assert!(
+        result.is_err(),
+        "scripted provider error must surface to the caller"
+    );
 
     println!("✓ error_injection — failure path exercised without a flaky network");
 }
@@ -109,7 +115,10 @@ fn multi_turn() {
     assert_eq!(agent.classify("ambiguous code").unwrap(), "unsure");
 
     mock.set_response(CannedResponse::text("bug"));
-    assert_eq!(agent.classify("ambiguous code, second look").unwrap(), "bug");
+    assert_eq!(
+        agent.classify("ambiguous code, second look").unwrap(),
+        "bug"
+    );
 
     assert_eq!(mock.call_count(), 2);
 

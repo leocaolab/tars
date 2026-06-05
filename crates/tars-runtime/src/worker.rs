@@ -210,9 +210,9 @@ impl WorkerAgent {
             .iter()
             .filter_map(|dep_id| {
                 completed.get(dep_id).map(|msg| {
-                    let v = serde_json::to_value(msg).unwrap_or_else(|e| {
-                        serde_json::json!({"error": format!("encode dep result: {e}")})
-                    });
+                    let v = serde_json::to_value(msg).unwrap_or_else(
+                        |e| serde_json::json!({"error": format!("encode dep result: {e}")}),
+                    );
                     (dep_id.clone(), v)
                 })
             })

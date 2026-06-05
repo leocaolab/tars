@@ -294,9 +294,7 @@ fn next_backoff(current: Duration, multiplier: f64, max: Duration) -> Duration {
     if !scaled.is_finite() {
         return max;
     }
-    Duration::try_from_secs_f64(scaled)
-        .unwrap_or(max)
-        .min(max)
+    Duration::try_from_secs_f64(scaled).unwrap_or(max).min(max)
 }
 
 #[cfg(test)]

@@ -192,8 +192,7 @@ impl LlmProvider for GeminiProvider {
 // has matured) — kept deferred until a contributor has time to do
 // that work end-to-end.
 
-const GEMINI_BATCH_NOT_SUPPORTED: &str =
-    "Gemini batch is not yet implemented in this tars backend. \
+const GEMINI_BATCH_NOT_SUPPORTED: &str = "Gemini batch is not yet implemented in this tars backend. \
      Tracked at docs/roadmap.md §5 Phase 4. \
      (Vertex AI Batch Prediction requires a different auth path and is out of scope.)";
 
@@ -204,7 +203,9 @@ impl BatchSubmitter for GeminiProvider {
         _items: Vec<(BatchItemId, ChatRequest)>,
         _ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError> {
-        Err(ProviderError::InvalidRequest(GEMINI_BATCH_NOT_SUPPORTED.into()))
+        Err(ProviderError::InvalidRequest(
+            GEMINI_BATCH_NOT_SUPPORTED.into(),
+        ))
     }
 
     async fn status(
@@ -212,7 +213,9 @@ impl BatchSubmitter for GeminiProvider {
         _id: &BatchJobId,
         _ctx: &RequestContext,
     ) -> Result<BatchStatus, ProviderError> {
-        Err(ProviderError::InvalidRequest(GEMINI_BATCH_NOT_SUPPORTED.into()))
+        Err(ProviderError::InvalidRequest(
+            GEMINI_BATCH_NOT_SUPPORTED.into(),
+        ))
     }
 
     async fn results(
@@ -220,14 +223,14 @@ impl BatchSubmitter for GeminiProvider {
         _id: &BatchJobId,
         _ctx: &RequestContext,
     ) -> Result<Vec<BatchResultItem>, ProviderError> {
-        Err(ProviderError::InvalidRequest(GEMINI_BATCH_NOT_SUPPORTED.into()))
+        Err(ProviderError::InvalidRequest(
+            GEMINI_BATCH_NOT_SUPPORTED.into(),
+        ))
     }
 
-    async fn cancel(
-        &self,
-        _id: &BatchJobId,
-        _ctx: &RequestContext,
-    ) -> Result<(), ProviderError> {
-        Err(ProviderError::InvalidRequest(GEMINI_BATCH_NOT_SUPPORTED.into()))
+    async fn cancel(&self, _id: &BatchJobId, _ctx: &RequestContext) -> Result<(), ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            GEMINI_BATCH_NOT_SUPPORTED.into(),
+        ))
     }
 }

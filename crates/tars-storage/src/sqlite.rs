@@ -328,9 +328,7 @@ fn now_ms() -> Result<i64, StorageError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-        .map_err(|e| {
-            StorageError::backend_source("system clock is before the Unix epoch", e)
-        })
+        .map_err(|e| StorageError::backend_source("system clock is before the Unix epoch", e))
 }
 
 #[cfg(test)]

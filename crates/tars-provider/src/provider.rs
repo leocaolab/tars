@@ -110,9 +110,7 @@ pub trait LlmProvider: Send + Sync + 'static {
     ///     None => /* this provider has no batch surface — sync only */,
     /// }
     /// ```
-    fn as_batch_submitter(
-        self: Arc<Self>,
-    ) -> Option<Arc<dyn crate::batch::BatchSubmitter>> {
+    fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn crate::batch::BatchSubmitter>> {
         let _ = self; // suppress unused-self warning
         None
     }

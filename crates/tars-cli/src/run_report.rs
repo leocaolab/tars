@@ -85,7 +85,11 @@ fn render_human(r: &RunReport, out: &mut dyn Write) -> std::io::Result<()> {
     )?;
     writeln!(out)?;
 
-    writeln!(out, "steps:       {} ({} failed)", r.step_count, r.failed_step_count)?;
+    writeln!(
+        out,
+        "steps:       {} ({} failed)",
+        r.step_count, r.failed_step_count
+    )?;
     writeln!(out, "llm calls:   {}", r.llm_call_count)?;
     writeln!(
         out,
@@ -99,7 +103,11 @@ fn render_human(r: &RunReport, out: &mut dyn Write) -> std::io::Result<()> {
     if !r.by_provider.is_empty() {
         writeln!(out)?;
         writeln!(out, "by provider:")?;
-        writeln!(out, "  {:<24}  {:>6}  {:>10}  {:>10}", "provider", "calls", "in_tok", "out_tok")?;
+        writeln!(
+            out,
+            "  {:<24}  {:>6}  {:>10}  {:>10}",
+            "provider", "calls", "in_tok", "out_tok"
+        )?;
         writeln!(out, "  {}", "-".repeat(56))?;
         for (provider, b) in &r.by_provider {
             writeln!(

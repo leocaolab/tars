@@ -484,9 +484,7 @@ mod tests {
         assert!(!FallbackTrigger::availability().matches(&e_budget));
 
         assert!(FallbackTrigger::any().matches(&e_auth));
-        assert!(
-            FallbackTrigger::on(&[tars_types::ProviderErrorKind::Auth]).matches(&e_auth)
-        );
+        assert!(FallbackTrigger::on(&[tars_types::ProviderErrorKind::Auth]).matches(&e_auth));
 
         // sanity: kind strings are stable
         assert_eq!(

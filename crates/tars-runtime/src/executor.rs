@@ -678,11 +678,11 @@ pub async fn run_plan(
     let sem = config
         .max_concurrent
         .map(|n| Arc::new(tokio::sync::Semaphore::new(n.max(1))));
-    let completed_shared: Arc<std::sync::Mutex<HashMap<String, AgentMessage>>> =
-        Arc::new(std::sync::Mutex::new(HashMap::with_capacity(plan.steps.len())));
+    let completed_shared: Arc<std::sync::Mutex<HashMap<String, AgentMessage>>> = Arc::new(
+        std::sync::Mutex::new(HashMap::with_capacity(plan.steps.len())),
+    );
 
-    let by_id: HashMap<&str, &PlanStep> =
-        plan.steps.iter().map(|s| (s.id.as_str(), s)).collect();
+    let by_id: HashMap<&str, &PlanStep> = plan.steps.iter().map(|s| (s.id.as_str(), s)).collect();
     let mut pending: HashSet<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
 
     let workers_ref = &workers;
@@ -768,9 +768,7 @@ pub async fn run_plan(
                     let sem = sem.clone();
                     tasks.push(async move {
                         let _permit = match sem {
-                            Some(s) => {
-                                Some(s.acquire_owned().await.expect("semaphore not closed"))
-                            }
+                            Some(s) => Some(s.acquire_owned().await.expect("semaphore not closed")),
                             None => None,
                         };
                         // Snapshot the results map once; the worker sees
@@ -942,23 +940,22 @@ async fn run_one_step(
                 //  - step_time_budget (P3): a hung call is aborted as
                 //    `WorkerError::TimedOut`. Both classify Transient, so
                 //    infra_retry can retry them.
-                let invoke = AssertUnwindSafe(worker.run(plan, step, completed, wctx))
-                    .catch_unwind();
-                let run_result: Result<WorkerOutput, WorkerError> =
-                    match config.step_time_budget {
-                        Some(budget) => match tokio::time::timeout(budget, invoke).await {
-                            Ok(caught) => caught.unwrap_or_else(|p| {
-                                Err(WorkerError::Crashed(panic_message(p)))
-                            }),
-                            Err(_elapsed) => Err(WorkerError::TimedOut(format!(
-                                "step `{}` exceeded {:?}",
-                                step.id, budget,
-                            ))),
-                        },
-                        None => invoke.await.unwrap_or_else(|p| {
-                            Err(WorkerError::Crashed(panic_message(p)))
-                        }),
-                    };
+                let invoke =
+                    AssertUnwindSafe(worker.run(plan, step, completed, wctx)).catch_unwind();
+                let run_result: Result<WorkerOutput, WorkerError> = match config.step_time_budget {
+                    Some(budget) => match tokio::time::timeout(budget, invoke).await {
+                        Ok(caught) => {
+                            caught.unwrap_or_else(|p| Err(WorkerError::Crashed(panic_message(p))))
+                        }
+                        Err(_elapsed) => Err(WorkerError::TimedOut(format!(
+                            "step `{}` exceeded {:?}",
+                            step.id, budget,
+                        ))),
+                    },
+                    None => invoke
+                        .await
+                        .unwrap_or_else(|p| Err(WorkerError::Crashed(panic_message(p)))),
+                };
                 match run_result {
                     Ok(out) => {
                         if !matches!(out.message, AgentMessage::PartialResult { .. }) {
@@ -979,10 +976,8 @@ async fn run_one_step(
                     }
                     Err(e) => {
                         let class = (config.infra_retry.classify)(&e);
-                        let retryable = matches!(
-                            class,
-                            InfraClass::RateLimited | InfraClass::Transient
-                        );
+                        let retryable =
+                            matches!(class, InfraClass::RateLimited | InfraClass::Transient);
                         if retryable && infra_attempts < config.infra_retry.max_attempts {
                             let backoff =
                                 pick_backoff(&config.infra_retry.backoffs, infra_attempts);
@@ -1167,8 +1162,7 @@ where
             0
         }
     };
-    let idempotency_key =
-        crate::event::StepIdempotencyKey::compute(traj, step_seq, &input_summary);
+    let idempotency_key = crate::event::StepIdempotencyKey::compute(traj, step_seq, &input_summary);
     let _ = runtime
         .append(
             traj,

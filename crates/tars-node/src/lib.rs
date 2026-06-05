@@ -54,15 +54,15 @@ use tokio::runtime::Runtime;
 use tars_config::ConfigManager;
 use tars_pipeline::{LlmService, Pipeline as RsPipeline, PipelineOpts};
 use tars_provider::{
-    auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry, LlmProvider,
+    LlmProvider, auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry,
 };
 use tars_types::{
+    Message, RequestContext,
     chat::{ChatRequest, ContentBlock},
     ids::ProviderId,
     model::{ModelHint, ThinkingMode},
     response::ChatResponseBuilder,
     schema::JsonSchema,
-    Message, RequestContext,
 };
 
 /// Process-wide tokio runtime shared by all `complete()` calls. Lazy
@@ -372,12 +372,9 @@ fn parse_messages_json(v: serde_json::Value) -> Result<Vec<Message>> {
             .get("role")
             .and_then(|r| r.as_str())
             .ok_or_else(|| Error::from_reason(format!("messages[{i}].role missing")))?;
-        let content = m
-            .get("content")
-            .and_then(|c| c.as_str())
-            .ok_or_else(|| {
-                Error::from_reason(format!("messages[{i}].content missing or not a string"))
-            })?;
+        let content = m.get("content").and_then(|c| c.as_str()).ok_or_else(|| {
+            Error::from_reason(format!("messages[{i}].content missing or not a string"))
+        })?;
         let msg = match role {
             "user" => Message::user_text(content.to_string()),
             "assistant" => Message::assistant_text(content.to_string()),

@@ -29,7 +29,6 @@ pub mod cache;
 pub mod capabilities;
 pub mod chat;
 pub mod content_ref;
-pub mod run_report;
 pub mod context;
 pub mod env;
 pub mod error;
@@ -41,6 +40,7 @@ pub mod model;
 pub mod pipeline_events;
 pub mod principal;
 pub mod response;
+pub mod run_report;
 pub mod schema;
 pub mod secret;
 pub mod telemetry;
@@ -72,9 +72,7 @@ pub use pipeline_events::{
 };
 pub use principal::{Principal, PrincipalKind, Scope};
 pub use response::{ChatResponse, ChatResponseBuilder};
-pub use run_report::{
-    AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus,
-};
+pub use run_report::{AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus};
 pub use schema::JsonSchema;
 pub use secret::{SecretRef, SecretString};
 pub use telemetry::{RetryAttempt, SharedTelemetry, TelemetryAccumulator, new_shared_telemetry};

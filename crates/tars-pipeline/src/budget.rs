@@ -63,17 +63,10 @@ pub struct PerCallBudgetMiddleware {
 /// input (`arc scan --judge` finding `ARC-L5-EF-9`).
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum BudgetConfigError {
-    #[error(
-        "PerCallBudgetMiddleware cap_usd must be finite and non-negative, got {value}"
-    )]
+    #[error("PerCallBudgetMiddleware cap_usd must be finite and non-negative, got {value}")]
     InvalidCap { value: f64 },
-    #[error(
-        "Pricing.{field} must be finite and non-negative, got {value}"
-    )]
-    InvalidPricing {
-        field: &'static str,
-        value: f64,
-    },
+    #[error("Pricing.{field} must be finite and non-negative, got {value}")]
+    InvalidPricing { field: &'static str, value: f64 },
 }
 
 impl PerCallBudgetMiddleware {
@@ -89,10 +82,7 @@ impl PerCallBudgetMiddleware {
     /// Fallible construction from a provider's capability snapshot.
     /// Returns [`BudgetConfigError`] when `cap_usd` or
     /// `capabilities.pricing` would silently break budgeting.
-    pub fn try_new(
-        cap_usd: f64,
-        capabilities: &Capabilities,
-    ) -> Result<Self, BudgetConfigError> {
+    pub fn try_new(cap_usd: f64, capabilities: &Capabilities) -> Result<Self, BudgetConfigError> {
         validate_cap(cap_usd)?;
         validate_pricing(&capabilities.pricing)?;
         Ok(Self {
@@ -154,7 +144,10 @@ fn validate_pricing(pricing: &Pricing) -> Result<(), BudgetConfigError> {
         ("input_per_million", pricing.input_per_million),
         ("output_per_million", pricing.output_per_million),
         ("cached_input_per_million", pricing.cached_input_per_million),
-        ("cache_creation_per_million", pricing.cache_creation_per_million),
+        (
+            "cache_creation_per_million",
+            pricing.cache_creation_per_million,
+        ),
         ("thinking_per_million", pricing.thinking_per_million),
     ] {
         if !(value.is_finite() && value >= 0.0) {
@@ -467,23 +460,21 @@ mod tests {
     #[test]
     fn try_from_parts_rejects_nan_cap() {
         let err =
-            PerCallBudgetMiddleware::try_from_parts(f64::NAN, priced(3.0, 15.0), 1000)
-                .unwrap_err();
+            PerCallBudgetMiddleware::try_from_parts(f64::NAN, priced(3.0, 15.0), 1000).unwrap_err();
         assert!(matches!(err, BudgetConfigError::InvalidCap { value } if value.is_nan()));
     }
 
     #[test]
     fn try_from_parts_rejects_negative_cap() {
         let err =
-            PerCallBudgetMiddleware::try_from_parts(-1.0, priced(3.0, 15.0), 1000)
-                .unwrap_err();
+            PerCallBudgetMiddleware::try_from_parts(-1.0, priced(3.0, 15.0), 1000).unwrap_err();
         assert!(matches!(err, BudgetConfigError::InvalidCap { value } if value < 0.0));
     }
 
     #[test]
     fn try_from_parts_rejects_negative_pricing() {
-        let err = PerCallBudgetMiddleware::try_from_parts(0.05, priced(-3.0, 15.0), 1000)
-            .unwrap_err();
+        let err =
+            PerCallBudgetMiddleware::try_from_parts(0.05, priced(-3.0, 15.0), 1000).unwrap_err();
         assert!(matches!(
             err,
             BudgetConfigError::InvalidPricing { field: "input_per_million", value } if value < 0.0
@@ -492,12 +483,8 @@ mod tests {
 
     #[test]
     fn try_from_parts_rejects_infinite_output_rate() {
-        let err = PerCallBudgetMiddleware::try_from_parts(
-            0.05,
-            priced(3.0, f64::INFINITY),
-            1000,
-        )
-        .unwrap_err();
+        let err = PerCallBudgetMiddleware::try_from_parts(0.05, priced(3.0, f64::INFINITY), 1000)
+            .unwrap_err();
         assert!(matches!(
             err,
             BudgetConfigError::InvalidPricing {

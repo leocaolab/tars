@@ -147,7 +147,10 @@ impl StepCondition {
     /// `false` defensively in that case rather than panicking, so a
     /// future refactor can't accidentally execute work with stale
     /// dep state.
-    pub fn matches(&self, completed: &std::collections::HashMap<String, crate::message::AgentMessage>) -> bool {
+    pub fn matches(
+        &self,
+        completed: &std::collections::HashMap<String, crate::message::AgentMessage>,
+    ) -> bool {
         match self {
             Self::Always => true,
             Self::IfDepSummaryContains { if_dep, contains } => {
@@ -417,9 +420,9 @@ impl OrchestratorAgent {
             .map(|(k, v)| {
                 (
                     k.clone(),
-                    serde_json::to_value(v).unwrap_or_else(|e| {
-                        serde_json::json!({"error": format!("encode prior result: {e}")})
-                    }),
+                    serde_json::to_value(v).unwrap_or_else(
+                        |e| serde_json::json!({"error": format!("encode prior result: {e}")}),
+                    ),
                 )
             })
             .collect();

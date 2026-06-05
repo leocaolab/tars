@@ -148,8 +148,9 @@ pub mod systemtime_millis {
             Ok(d) => i64::try_from(d.as_millis())
                 .map_err(|_| S::Error::custom("SystemTime too far in the future for i64 millis"))?,
             Err(e) => {
-                let neg = i64::try_from(e.duration().as_millis())
-                    .map_err(|_| S::Error::custom("SystemTime too far in the past for i64 millis"))?;
+                let neg = i64::try_from(e.duration().as_millis()).map_err(|_| {
+                    S::Error::custom("SystemTime too far in the past for i64 millis")
+                })?;
                 -neg
             }
         };

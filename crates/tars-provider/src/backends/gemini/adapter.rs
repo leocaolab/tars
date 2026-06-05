@@ -750,7 +750,10 @@ mod tests {
         assert_eq!(map_stop_reason_test("STOP"), StopReason::EndTurn);
         assert_eq!(map_stop_reason_test("MAX_TOKENS"), StopReason::MaxTokens);
         assert_eq!(map_stop_reason_test("SAFETY"), StopReason::ContentFilter);
-        assert_eq!(map_stop_reason_test("RECITATION"), StopReason::ContentFilter);
+        assert_eq!(
+            map_stop_reason_test("RECITATION"),
+            StopReason::ContentFilter
+        );
         assert_eq!(map_stop_reason_test("WHATEVER"), StopReason::Other);
     }
 

@@ -179,8 +179,7 @@ impl AuthResolver for BasicAuthResolver {
                 }
                 SecretRef::Env { var } => match std::env::var(var) {
                     Ok(v) => {
-                        let trimmed =
-                            validate_credential(&v, CredentialSource::Env { var })?;
+                        let trimmed = validate_credential(&v, CredentialSource::Env { var })?;
                         Ok(ResolvedAuth::ApiKey(trimmed))
                     }
                     // Audit `tars-provider-src-auth-1`: VarError has
@@ -216,8 +215,7 @@ impl AuthResolver for BasicAuthResolver {
                             path.display()
                         ))
                     })?;
-                    let trimmed =
-                        validate_credential(&raw, CredentialSource::File { path })?;
+                    let trimmed = validate_credential(&raw, CredentialSource::File { path })?;
                     Ok(ResolvedAuth::ApiKey(trimmed))
                 }
             },

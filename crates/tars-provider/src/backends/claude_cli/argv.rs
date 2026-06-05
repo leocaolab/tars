@@ -194,7 +194,13 @@ pub(super) fn build_argv_with(inv: &SubprocessInvocation, streaming: bool) -> Ve
                     }
                 })
                 .collect();
-            argv.push(cleaned.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","));
+            argv.push(
+                cleaned
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
     }
 

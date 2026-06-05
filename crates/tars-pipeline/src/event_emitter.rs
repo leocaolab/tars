@@ -210,9 +210,7 @@ impl LlmService for EventEmitterService {
                     // the body write fails the ref would dangle, so skip
                     // emitting the event entirely (best-effort, but never
                     // a broken reference).
-                    if let Err(err) =
-                        bodies.put(&body_ref, Bytes::from(req_body_for_write)).await
-                    {
+                    if let Err(err) = bodies.put(&body_ref, Bytes::from(req_body_for_write)).await {
                         tracing::warn!(
                             error = %err,
                             "event_emitter: request body write failed on error path; \

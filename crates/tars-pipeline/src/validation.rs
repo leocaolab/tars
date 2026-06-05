@@ -284,9 +284,7 @@ impl LlmService for ValidationService {
             // verbatim-replay (non-filtered) path below and corrupting
             // downstream cache accounting / observability.
             let cache_hit = response.cache_hit.clone();
-            let stream = futures::stream::iter(
-                response.into_events(cache_hit).into_iter().map(Ok),
-            );
+            let stream = futures::stream::iter(response.into_events(cache_hit).into_iter().map(Ok));
             Ok(Box::pin(stream))
         } else {
             let stream = futures::stream::iter(events_held.into_iter().map(Ok));

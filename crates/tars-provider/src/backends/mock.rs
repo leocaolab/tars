@@ -80,7 +80,10 @@ impl MockProvider {
     /// prior panic while holding the lock shouldn't cascade-panic this
     /// helper and mask the original test failure.
     pub fn set_response(&self, r: CannedResponse) {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).response = r;
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .response = r;
     }
 
     /// Snapshot of the requests recorded so far. **Used by**

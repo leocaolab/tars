@@ -181,9 +181,7 @@ fn write_starter_config(target: &Path, force: bool) -> Result<()> {
             "{} already exists; pass --force to overwrite",
             target.display()
         )),
-        Err(e) => {
-            Err(e).with_context(|| format!("writing starter config to {}", target.display()))
-        }
+        Err(e) => Err(e).with_context(|| format!("writing starter config to {}", target.display())),
     }
 }
 

@@ -51,9 +51,9 @@ fn expect_completed(outcome: &StepOutcome) -> CompletedView<'_> {
             verdict,
             refinement_attempts: *refinement_attempts,
         },
-        StepOutcome::Skipped { step_id, reason } => panic!(
-            "expected Completed outcome for step {step_id}; got Skipped (reason: {reason})",
-        ),
+        StepOutcome::Skipped { step_id, reason } => {
+            panic!("expected Completed outcome for step {step_id}; got Skipped (reason: {reason})",)
+        }
     }
 }
 
@@ -342,11 +342,17 @@ async fn reject_verdict_aborts_task_when_max_replans_is_zero() {
     let traj = err.trajectory_id().clone();
     match err {
         RunTaskError::ReplanExhausted {
-            step_id, reason, replans, ..
+            step_id,
+            reason,
+            replans,
+            ..
         } => {
             assert_eq!(step_id, "s1");
             assert!(reason.contains("missed the entire point"));
-            assert_eq!(replans, 0, "max_replans=0 → no replan attempts before giving up");
+            assert_eq!(
+                replans, 0,
+                "max_replans=0 → no replan attempts before giving up"
+            );
         }
         other => panic!("expected ReplanExhausted, got {other:?}"),
     }
@@ -587,10 +593,7 @@ async fn dag_fanout_plan_threads_dep_results_into_merge_step() {
             worker_ok("merge done"),
         ],
     );
-    by_schema.insert(
-        "Verdict".into(),
-        vec![approve(), approve(), approve()],
-    );
+    by_schema.insert("Verdict".into(), vec![approve(), approve(), approve()]);
     let provider = SchemaDispatchProvider::new(by_schema);
     let inner: Arc<dyn LlmService> = ProviderService::new(provider);
     let llm: Arc<dyn LlmService> = Arc::new(Pipeline::builder_with_inner(inner).build());
@@ -626,7 +629,10 @@ async fn dag_fanout_plan_threads_dep_results_into_merge_step() {
     let mut worker_seqs: Vec<u32> = Vec::new();
     let mut worker_starts_idx: Vec<usize> = Vec::new();
     for (i, ev) in events.iter().enumerate() {
-        if let StepStarted { agent, step_seq, .. } = ev {
+        if let StepStarted {
+            agent, step_seq, ..
+        } = ev
+        {
             if agent == "worker" {
                 worker_seqs.push(*step_seq);
                 worker_starts_idx.push(i);
@@ -643,9 +649,7 @@ async fn dag_fanout_plan_threads_dep_results_into_merge_step() {
     let leaf_seqs: std::collections::HashSet<u32> = worker_seqs[..2].iter().copied().collect();
     let leaf_completes_before_merge = events[..merge_start_idx]
         .iter()
-        .filter(
-            |ev| matches!(ev, StepCompleted { step_seq, .. } if leaf_seqs.contains(step_seq)),
-        )
+        .filter(|ev| matches!(ev, StepCompleted { step_seq, .. } if leaf_seqs.contains(step_seq)))
         .count();
     assert_eq!(
         leaf_completes_before_merge, 2,
@@ -664,12 +668,15 @@ async fn dag_fanout_plan_threads_dep_results_into_merge_step() {
     let mut saw_parallel_overlap = false;
     let mut last_worker_start_seq: Option<(usize, u32)> = None;
     for (i, ev) in events.iter().enumerate() {
-        if let StepStarted { agent, step_seq, .. } = ev {
+        if let StepStarted {
+            agent, step_seq, ..
+        } = ev
+        {
             if agent == "worker" {
                 if let Some((prev_i, prev_seq)) = last_worker_start_seq {
-                    let between_completed = events[prev_i + 1..i].iter().any(|e| {
-                        matches!(e, StepCompleted { step_seq, .. } if *step_seq == prev_seq)
-                    });
+                    let between_completed = events[prev_i + 1..i].iter().any(
+                        |e| matches!(e, StepCompleted { step_seq, .. } if *step_seq == prev_seq),
+                    );
                     if !between_completed {
                         saw_parallel_overlap = true;
                         break;
@@ -734,7 +741,7 @@ async fn replan_on_reject_recovers_with_second_plan() {
     by_schema.insert(
         "WorkerResult".into(),
         vec![
-            worker_ok("Off-base summary."),     // plan 1's s1 worker
+            worker_ok("Off-base summary."),      // plan 1's s1 worker
             worker_ok("Tighter take this time"), // plan 2's s1 worker
         ],
     );
@@ -742,7 +749,7 @@ async fn replan_on_reject_recovers_with_second_plan() {
         "Verdict".into(),
         vec![
             reject("the summary missed the entire point"), // rejects plan 1's s1
-            approve(),                                      // approves plan 2's s1
+            approve(),                                     // approves plan 2's s1
         ],
     );
     let provider = SchemaDispatchProvider::new(by_schema);
@@ -921,7 +928,11 @@ async fn cancel_on_reject_terminates_in_flight_sibling_workers() {
     }
 
     impl GatedProvider {
-        fn new(plan_response: String, fast_worker_response: String, reject_response: String) -> Arc<Self> {
+        fn new(
+            plan_response: String,
+            fast_worker_response: String,
+            reject_response: String,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 id: ProviderId::new("gated"),
                 capabilities: Capabilities::text_only_baseline(Pricing::default()),
@@ -980,7 +991,7 @@ async fn cancel_on_reject_terminates_in_flight_sibling_workers() {
                 other => {
                     return Err(ProviderError::Internal(format!(
                         "GatedProvider: unknown schema {other:?}"
-                    )))
+                    )));
                 }
             };
             let events: Vec<Result<ChatEvent, ProviderError>> = vec![

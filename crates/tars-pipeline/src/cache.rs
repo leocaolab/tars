@@ -799,10 +799,7 @@ mod tests {
     fn read_policy_raw_distinguishes_unset_set_malformed() {
         let ctx = RequestContext::test_default();
         // Unset: no `cache.policy` attribute.
-        assert!(matches!(
-            read_policy_raw(&ctx),
-            PolicySource::Unset
-        ));
+        assert!(matches!(read_policy_raw(&ctx), PolicySource::Unset));
 
         // Set: well-formed CachePolicy.
         let policy_value = serde_json::to_value(CachePolicy::default()).unwrap();

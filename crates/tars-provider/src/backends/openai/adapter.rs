@@ -11,9 +11,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use url::Url;
 
-use tars_types::{
-    ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason, Usage,
-};
+use tars_types::{ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason, Usage};
 
 use crate::auth::ResolvedAuth;
 use crate::http_base::{HttpAdapter, HttpProviderExtras, SseEvent, truncate};
@@ -583,8 +581,8 @@ impl HttpAdapter for OpenAiAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::provider::DEFAULT_BASE_URL;
+    use super::*;
 
     #[test]
     fn picks_max_completion_tokens_for_o1() {

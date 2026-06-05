@@ -221,7 +221,9 @@ mod tests {
     #[test]
     fn policy_round_trips_through_serde_for_all_layer_variants() {
         let p = CachePolicy {
-            l1: CacheLayerPolicy::Override { ttl: Duration::from_secs(60) },
+            l1: CacheLayerPolicy::Override {
+                ttl: Duration::from_secs(60),
+            },
             l2: CacheLayerPolicy::Default,
             l3: CacheLayerPolicy::Disabled,
         };

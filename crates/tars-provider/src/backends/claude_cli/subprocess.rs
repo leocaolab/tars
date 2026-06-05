@@ -10,9 +10,7 @@ use tokio::process::Command;
 
 use tars_types::{ProviderError, Usage};
 
-use super::argv::{
-    SubprocessInvocation, SubprocessRunner, build_argv_with, streaming_enabled,
-};
+use super::argv::{SubprocessInvocation, SubprocessRunner, build_argv_with, streaming_enabled};
 use super::streaming::run_streaming;
 
 pub struct RealSubprocessRunner;

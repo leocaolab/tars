@@ -181,7 +181,6 @@ impl SqliteCacheRegistry {
             .map_err(|e| CacheError::Backend(format!("set user_version: {e}")))?;
         Ok(())
     }
-
 }
 
 #[async_trait]
@@ -457,10 +456,10 @@ mod tests {
         {
             let r = open_at_path(&path).unwrap();
             let policy = CachePolicy {
-            l1: CacheLayerPolicy::Default,
-            l2: CacheLayerPolicy::Default,
-            l3: CacheLayerPolicy::Disabled,
-        };
+                l1: CacheLayerPolicy::Default,
+                l2: CacheLayerPolicy::Default,
+                l3: CacheLayerPolicy::Disabled,
+            };
             r.write(key(7), value("persisted"), &policy).await.unwrap();
             // Drop r → close connection → flush WAL on next open.
         }
@@ -534,7 +533,9 @@ mod tests {
         let r = SqliteCacheRegistry::in_memory().unwrap();
         let policy_short = CachePolicy {
             l1: CacheLayerPolicy::Disabled,
-            l2: CacheLayerPolicy::Override { ttl: Duration::ZERO },
+            l2: CacheLayerPolicy::Override {
+                ttl: Duration::ZERO,
+            },
             l3: CacheLayerPolicy::Disabled,
         };
         r.write(key(2), value("ephemeral"), &policy_short)

@@ -108,7 +108,9 @@ use tars_pipeline::{
     JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, Pipeline, PipelineOpts,
 };
 use tars_runtime::{CheckRunner, Invariant, ValidatorInvariant};
-use tars_types::{ChatRequest, ChatResponse, ChatResponseBuilder, ModelHint, RequestContext, Usage};
+use tars_types::{
+    ChatRequest, ChatResponse, ChatResponseBuilder, ModelHint, RequestContext, Usage,
+};
 
 use crate::config_loader;
 use crate::dispatch::{build_registry_with_breaker, pick_provider};
@@ -211,12 +213,8 @@ pub struct EvalRunArgs {
 /// running no check.
 fn build_invariant(spec: &str) -> Result<Arc<dyn Invariant>> {
     let inv: Arc<dyn Invariant> = match spec {
-        "non-empty" => {
-            Arc::new(ValidatorInvariant::new(Arc::new(NotEmptyValidator::new())))
-        }
-        "valid-json" => {
-            Arc::new(ValidatorInvariant::new(Arc::new(JsonShapeValidator::new())))
-        }
+        "non-empty" => Arc::new(ValidatorInvariant::new(Arc::new(NotEmptyValidator::new()))),
+        "valid-json" => Arc::new(ValidatorInvariant::new(Arc::new(JsonShapeValidator::new()))),
         other if other.starts_with("max-length:") => {
             let n: usize = other
                 .trim_start_matches("max-length:")
@@ -382,8 +380,7 @@ fn migrate_legacy_check(check: &mut serde_json::Value) -> std::io::Result<bool> 
         // Already new shape.
         return Ok(false);
     }
-    let Some(name) = obj.get("name").and_then(|v| v.as_str()).map(String::from)
-    else {
+    let Some(name) = obj.get("name").and_then(|v| v.as_str()).map(String::from) else {
         // Not a check object — leave alone.
         return Ok(false);
     };
@@ -435,10 +432,7 @@ fn migrate_legacy_checks_in_value(v: &mut serde_json::Value) -> std::io::Result<
     }
     if let Some(cases) = v.get_mut("cases").and_then(|c| c.as_array_mut()) {
         for case in cases {
-            if let Some(checks) = case
-                .get_mut("checks")
-                .and_then(|c| c.as_array_mut())
-            {
+            if let Some(checks) = case.get_mut("checks").and_then(|c| c.as_array_mut()) {
                 for c in checks {
                     if migrate_legacy_check(c)? {
                         rewrites += 1;
@@ -491,8 +485,7 @@ fn migrate_one_file(path: &Path) -> Result<Option<usize>> {
     }
     let out = serde_json::to_string_pretty(&v)
         .with_context(|| format!("re-serializing migrated {}", path.display()))?;
-    std::fs::write(path, out)
-        .with_context(|| format!("writing migrated {}", path.display()))?;
+    std::fs::write(path, out).with_context(|| format!("writing migrated {}", path.display()))?;
     Ok(Some(n))
 }
 
@@ -533,10 +526,11 @@ async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<
     let cfg = config_loader::load(config_path)?;
     let registry = build_registry_with_breaker(&cfg, true)?;
     let judge_pid = ProviderId::new(&args.judge);
-    let judge_provider = registry.get(&judge_pid).ok_or_else(|| {
-        anyhow::anyhow!("judge provider `{}` not in config", args.judge)
-    })?;
-    let judge_pipeline = Pipeline::default_chain(judge_provider, PipelineOpts::new(judge_pid.clone()));
+    let judge_provider = registry
+        .get(&judge_pid)
+        .ok_or_else(|| anyhow::anyhow!("judge provider `{}` not in config", args.judge))?;
+    let judge_pipeline =
+        Pipeline::default_chain(judge_provider, PipelineOpts::new(judge_pid.clone()));
     let judge_model = args
         .judge_model
         .clone()
@@ -544,7 +538,11 @@ async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<
         .unwrap_or_else(|| ModelHint::Explicit("".into()));
     let judge = LlmJudge::new(
         Arc::new(judge_pipeline),
-        format!("{}:{}", args.judge, args.judge_model.as_deref().unwrap_or("default")),
+        format!(
+            "{}:{}",
+            args.judge,
+            args.judge_model.as_deref().unwrap_or("default")
+        ),
         judge_model,
     );
 
@@ -685,11 +683,47 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
     println!("  candidate: {}", args.candidate.display());
     println!();
     println!("operational:");
-    println!("  {:<14} {:>10} → {:>10}   {}", "cases", a.case_count, b.case_count, delta_i(a.case_count as i64, b.case_count as i64));
-    println!("  {:<14} {:>10} → {:>10}   {}", "errors", a.error_count, b.error_count, delta_i(a.error_count as i64, b.error_count as i64));
-    println!("  {:<14} {:>10} → {:>10}   {}", "tokens in", a.total_usage.input_tokens, b.total_usage.input_tokens, delta_pct(a.total_usage.input_tokens as f64, b.total_usage.input_tokens as f64));
-    println!("  {:<14} {:>10} → {:>10}   {}", "tokens out", a.total_usage.output_tokens, b.total_usage.output_tokens, delta_pct(a.total_usage.output_tokens as f64, b.total_usage.output_tokens as f64));
-    println!("  {:<14} {:>9}ms → {:>9}ms   {}", "latency p50", a_lat, b_lat, delta_pct(a_lat as f64, b_lat as f64));
+    println!(
+        "  {:<14} {:>10} → {:>10}   {}",
+        "cases",
+        a.case_count,
+        b.case_count,
+        delta_i(a.case_count as i64, b.case_count as i64)
+    );
+    println!(
+        "  {:<14} {:>10} → {:>10}   {}",
+        "errors",
+        a.error_count,
+        b.error_count,
+        delta_i(a.error_count as i64, b.error_count as i64)
+    );
+    println!(
+        "  {:<14} {:>10} → {:>10}   {}",
+        "tokens in",
+        a.total_usage.input_tokens,
+        b.total_usage.input_tokens,
+        delta_pct(
+            a.total_usage.input_tokens as f64,
+            b.total_usage.input_tokens as f64
+        )
+    );
+    println!(
+        "  {:<14} {:>10} → {:>10}   {}",
+        "tokens out",
+        a.total_usage.output_tokens,
+        b.total_usage.output_tokens,
+        delta_pct(
+            a.total_usage.output_tokens as f64,
+            b.total_usage.output_tokens as f64
+        )
+    );
+    println!(
+        "  {:<14} {:>9}ms → {:>9}ms   {}",
+        "latency p50",
+        a_lat,
+        b_lat,
+        delta_pct(a_lat as f64, b_lat as f64)
+    );
 
     if !a.checks.is_empty() || !b.checks.is_empty() {
         println!();
@@ -702,8 +736,16 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
             }
         }
         for name in &names {
-            let av = a.checks.iter().find(|c| &c.name == name).map(|c| c.violation_rate);
-            let bv = b.checks.iter().find(|c| &c.name == name).map(|c| c.violation_rate);
+            let av = a
+                .checks
+                .iter()
+                .find(|c| &c.name == name)
+                .map(|c| c.violation_rate);
+            let bv = b
+                .checks
+                .iter()
+                .find(|c| &c.name == name)
+                .map(|c| c.violation_rate);
             let arrow = match (av, bv) {
                 (Some(x), Some(y)) => format!(
                     "{:>6.1}% → {:>6.1}%   {}",
@@ -743,15 +785,18 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
         let to_map = |r: &tars_types::JudgeReport| {
             r.verdicts
                 .iter()
-                .map(|v| (v.item_id.clone(), matches!(v.verdict, JudgeVerdict::TruePositive)))
+                .map(|v| {
+                    (
+                        v.item_id.clone(),
+                        matches!(v.verdict, JudgeVerdict::TruePositive),
+                    )
+                })
                 .collect::<std::collections::BTreeMap<_, _>>()
         };
         let m = mcnemar(&to_map(&ja), &to_map(&jb));
         let improved = m.c;
         let regressed = m.b;
-        println!(
-            "  paired changes: improved (FP→TP)={improved}, regressed (TP→FP)={regressed}"
-        );
+        println!("  paired changes: improved (FP→TP)={improved}, regressed (TP→FP)={regressed}");
         match m.chi_squared {
             None => println!("  McNemar: no discordant pairs (runs agree on every item)"),
             Some(chi2) => {
@@ -788,7 +833,11 @@ fn delta_i(a: i64, b: i64) -> String {
 /// Percent change a→b.
 fn delta_pct(a: f64, b: f64) -> String {
     if a == 0.0 {
-        return if b == 0.0 { "(=)".into() } else { "(new)".into() };
+        return if b == 0.0 {
+            "(=)".into()
+        } else {
+            "(new)".into()
+        };
     }
     let pct = (b - a) / a * 100.0;
     if pct.abs() < 0.05 {
@@ -1161,9 +1210,7 @@ fn merge_usage(a: Usage, b: &Usage) -> Usage {
     Usage {
         input_tokens: a.input_tokens.saturating_add(b.input_tokens),
         output_tokens: a.output_tokens.saturating_add(b.output_tokens),
-        cached_input_tokens: a
-            .cached_input_tokens
-            .saturating_add(b.cached_input_tokens),
+        cached_input_tokens: a.cached_input_tokens.saturating_add(b.cached_input_tokens),
         cache_creation_tokens: a
             .cache_creation_tokens
             .saturating_add(b.cache_creation_tokens),
@@ -1377,7 +1424,10 @@ mod tests {
     #[test]
     fn case_check_result_round_trips_through_serde() {
         let cases = vec![
-            CaseCheckResult::Passed { name: "p".into(), note: None },
+            CaseCheckResult::Passed {
+                name: "p".into(),
+                note: None,
+            },
             CaseCheckResult::Passed {
                 name: "p".into(),
                 note: Some("n".into()),

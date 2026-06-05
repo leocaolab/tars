@@ -283,10 +283,7 @@ mod tests {
         assert_eq!(JudgeVerdict::TruePositive.label(), "TP");
         assert_eq!(JudgeVerdict::FalsePositive.label(), "FP");
         assert_eq!(
-            JudgeVerdict::Unsure {
-                reason: "x".into()
-            }
-            .label(),
+            JudgeVerdict::Unsure { reason: "x".into() }.label(),
             "UNSURE",
         );
     }
@@ -302,12 +299,7 @@ mod tests {
             verdicts: vec![
                 verdict("a", JudgeVerdict::TruePositive),
                 verdict("b", JudgeVerdict::FalsePositive),
-                verdict(
-                    "c",
-                    JudgeVerdict::Unsure {
-                        reason: "?".into(),
-                    },
-                ),
+                verdict("c", JudgeVerdict::Unsure { reason: "?".into() }),
             ],
         };
         // 7 / (7 + 1) = 0.875; Unsure NOT in denominator.
@@ -364,7 +356,10 @@ mod tests {
         let (p, lo, hi) = r.precision_with_ci(0.95).unwrap();
         assert!((p - 1.0).abs() < 1e-9);
         assert!(hi <= 1.0 && hi >= lo, "hi={hi} lo={lo}");
-        assert!(lo > 0.5, "tight upper-bound case should still have lo > 0.5, got {lo}");
+        assert!(
+            lo > 0.5,
+            "tight upper-bound case should still have lo > 0.5, got {lo}"
+        );
 
         // Zero precision: TP=0, FP=10.
         let r = report_with(0, 10);

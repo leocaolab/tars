@@ -113,11 +113,11 @@ impl Critic for LlmCritic {
         ctx: CriticContext,
     ) -> Result<VerdictKind, CriticError> {
         let result_ref = PartialResultRef::from_message(worker_output).ok_or_else(|| {
-            CriticError::UnexpectedOutput(
-                "worker did not produce a PartialResult message".into(),
-            )
+            CriticError::UnexpectedOutput("worker did not produce a PartialResult message".into())
         })?;
-        let req = self.agent.build_critique_request(plan, &result_ref, &plan.goal);
+        let req = self
+            .agent
+            .build_critique_request(plan, &result_ref, &plan.goal);
         let agent: Arc<dyn Agent> = self.agent.clone();
         let result = execute_agent_step(
             ctx.runtime.as_ref(),

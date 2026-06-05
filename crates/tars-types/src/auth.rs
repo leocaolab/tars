@@ -44,7 +44,6 @@ impl Auth {
             secret: SecretRef::File { path: path.into() },
         }
     }
-
 }
 
 #[cfg(test)]

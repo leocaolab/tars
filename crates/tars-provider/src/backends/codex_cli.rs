@@ -318,13 +318,12 @@ impl SubprocessLineRunner for RealSubprocessLineRunner {
         let mut stdin = child.stdin.take().ok_or_else(|| {
             ProviderError::Internal("codex child has no stdin pipe (Stdio::piped above)".into())
         })?;
-        stdin
-            .write_all(inv.prompt.as_bytes())
-            .await
-            .map_err(|e| ProviderError::CliSubprocessDied {
+        stdin.write_all(inv.prompt.as_bytes()).await.map_err(|e| {
+            ProviderError::CliSubprocessDied {
                 exit_code: None,
                 stderr: format!("stdin write failed: {e}"),
-            })?;
+            }
+        })?;
         drop(stdin);
 
         let stdout = child.stdout.take().ok_or_else(|| {

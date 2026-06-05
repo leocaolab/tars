@@ -35,8 +35,8 @@ use thiserror::Error;
 
 use tars_pipeline::LlmService;
 use tars_types::{
-    ChatRequest, ChatResponseBuilder, JudgeItem, JudgeReport, JudgeVerdict, JudgedItem,
-    ModelHint, ProviderError, RequestContext,
+    ChatRequest, ChatResponseBuilder, JudgeItem, JudgeReport, JudgeVerdict, JudgedItem, ModelHint,
+    ProviderError, RequestContext,
 };
 
 /// Async judging trait. One verdict per item.
@@ -73,10 +73,7 @@ pub enum JudgeError {
 /// Match policy: case-insensitive prefix on the part before `:` in
 /// `judge_id`. So `"anthropic:claude-opus-4-7"` collides with
 /// `"anthropic"` but not with `"openai"`.
-pub fn ensure_anti_incest(
-    judge_id: &str,
-    critic_provider_ids: &[&str],
-) -> Result<(), JudgeError> {
+pub fn ensure_anti_incest(judge_id: &str, critic_provider_ids: &[&str]) -> Result<(), JudgeError> {
     let judge_provider = judge_id.split(':').next().unwrap_or(judge_id);
     for cp in critic_provider_ids {
         if judge_provider.eq_ignore_ascii_case(cp) {
@@ -220,11 +217,7 @@ impl Judge for LlmJudge {
             .replace("{context}", item.context.as_deref().unwrap_or(""));
 
         let req = ChatRequest::user(self.model.clone(), prompt);
-        let stream = self
-            .service
-            .clone()
-            .call(req, self.ctx.clone())
-            .await?;
+        let stream = self.service.clone().call(req, self.ctx.clone()).await?;
         let mut s = stream;
         let mut acc = ChatResponseBuilder::new();
         // Bound the stream so a runaway / malicious model can't OOM the
@@ -346,12 +339,9 @@ mod tests {
                 },
             ],
         );
-        let report = run_judge_pass(
-            vec![item("a"), item("b"), item("c"), item("d")],
-            &judge,
-        )
-        .await
-        .unwrap();
+        let report = run_judge_pass(vec![item("a"), item("b"), item("c"), item("d")], &judge)
+            .await
+            .unwrap();
         assert_eq!(report.judge_id, "openai:gpt-4o");
         assert_eq!(report.item_count, 4);
         assert_eq!(report.true_positives, 2);
@@ -439,8 +429,7 @@ mod tests {
 
     #[test]
     fn parse_verdict_unknown_errors() {
-        let err = parse_verdict("I think the agent did a great job!")
-            .expect_err("must error");
+        let err = parse_verdict("I think the agent did a great job!").expect_err("must error");
         assert!(matches!(err, JudgeError::Parse(_)));
     }
 

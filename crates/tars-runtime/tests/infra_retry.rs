@@ -73,8 +73,7 @@ fn one_step_plan() -> Plan {
 }
 
 fn runtime() -> Arc<LocalRuntime> {
-    let store: Arc<dyn EventStore> =
-        SqliteEventStore::in_memory().expect("in-memory store");
+    let store: Arc<dyn EventStore> = SqliteEventStore::in_memory().expect("in-memory store");
     LocalRuntime::new(store)
 }
 

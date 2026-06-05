@@ -235,7 +235,10 @@ mod tests {
 
     impl CapturedEvents {
         fn snapshot(&self) -> Vec<EventFields> {
-            self.0.lock().expect("captured events lock poisoned").clone()
+            self.0
+                .lock()
+                .expect("captured events lock poisoned")
+                .clone()
         }
         /// Returns the first event whose `event` field matches `name`.
         fn find(&self, name: &str) -> Option<EventFields> {
@@ -253,7 +256,11 @@ mod tests {
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
             let mut visitor = FieldCollector::default();
             event.record(&mut visitor);
-            self.sink.0.lock().expect("captured events lock poisoned").push(visitor.0);
+            self.sink
+                .0
+                .lock()
+                .expect("captured events lock poisoned")
+                .push(visitor.0);
         }
     }
 

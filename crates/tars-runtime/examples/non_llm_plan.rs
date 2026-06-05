@@ -104,7 +104,11 @@ impl Worker for MergeWorker {
         ctx: WorkerContext,
     ) -> Result<WorkerOutput, tars_runtime::WorkerError> {
         let agent_label = format!("worker:{}", step.worker_role);
-        let input_summary = format!("merge {} prior result(s) for step `{}`", prior.len(), step.id);
+        let input_summary = format!(
+            "merge {} prior result(s) for step `{}`",
+            prior.len(),
+            step.id
+        );
         let summaries: Vec<String> = step
             .depends_on
             .iter()
@@ -124,10 +128,7 @@ impl Worker for MergeWorker {
             &agent_label,
             input_summary,
             |_step_seq| async move {
-                println!(
-                    "  [{step_id}] merging deps: {:?}",
-                    summaries_clone,
-                );
+                println!("  [{step_id}] merging deps: {:?}", summaries_clone,);
                 Ok::<((), Usage), tars_runtime::WorkerError>(((), Usage::default()))
             },
         )
@@ -203,9 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
     };
 
-    let traj = runtime
-        .create_trajectory(None, "non-llm DAG demo")
-        .await?;
+    let traj = runtime.create_trajectory(None, "non-llm DAG demo").await?;
 
     let outcome = run_plan(
         runtime.clone(),
@@ -221,7 +220,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n══ outcome ══════════════════════════════════════════════");
     for s in &outcome.steps {
         match s {
-            StepOutcome::Completed { step_id, result, .. } => {
+            StepOutcome::Completed {
+                step_id, result, ..
+            } => {
                 if let AgentMessage::PartialResult { summary, .. } = result {
                     println!("  {step_id:<8} completed — {summary}");
                 }
@@ -245,11 +246,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tars_runtime::AgentEvent::TrajectoryCompleted { .. } => "TrajectoryCompleted",
             tars_runtime::AgentEvent::TrajectorySuspended { .. } => "TrajectorySuspended",
             tars_runtime::AgentEvent::TrajectoryAbandoned { .. } => "TrajectoryAbandoned",
-            tars_runtime::AgentEvent::StepStarted { agent, step_seq, .. } => {
+            tars_runtime::AgentEvent::StepStarted {
+                agent, step_seq, ..
+            } => {
                 println!("  [{i:>2}] StepStarted    seq={step_seq} agent={agent}");
                 continue;
             }
-            tars_runtime::AgentEvent::StepCompleted { step_seq, usage, .. } => {
+            tars_runtime::AgentEvent::StepCompleted {
+                step_seq, usage, ..
+            } => {
                 println!(
                     "  [{i:>2}] StepCompleted  seq={step_seq} usage={}/{}",
                     usage.input_tokens, usage.output_tokens,

@@ -39,8 +39,8 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -48,7 +48,7 @@ use futures::stream;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 use tars_types::{
     Capabilities, ChatEvent, ChatRequest, ContentBlock, Message, Modality, PromptCacheKind,
@@ -76,8 +76,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 900;
 /// the entry on the matching reply line; the `call()` path removes it
 /// if it hits the per-call timeout first (so a late reply doesn't try
 /// to send into a dropped sender).
-type PendingMap =
-    Arc<Mutex<HashMap<u64, oneshot::Sender<Result<DaemonChatReply, ProviderError>>>>>;
+type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<DaemonChatReply, ProviderError>>>>>;
 
 pub struct ClaudeSdkProviderBuilder {
     id: ProviderId,
@@ -394,8 +393,7 @@ impl ClaudeSdkProvider {
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
-                        if let Err(e) =
-                            dispatch_reply_line(&line, pending_for_reader.clone()).await
+                        if let Err(e) = dispatch_reply_line(&line, pending_for_reader.clone()).await
                         {
                             tracing::warn!(
                                 error = %e,

@@ -174,7 +174,6 @@ impl MaxLengthValidator {
             on_exceed: OnExceed::Truncate,
         }
     }
-
 }
 
 impl OutputValidator for MaxLengthValidator {
