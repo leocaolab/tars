@@ -42,6 +42,8 @@ mod executor;
 pub mod judge;
 mod llm_adapters;
 mod message;
+mod native_agent;
+pub use native_agent::NativeAgent;
 pub mod metamorphic;
 mod orchestrator;
 mod prompt;
