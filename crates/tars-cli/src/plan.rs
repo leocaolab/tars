@@ -157,6 +157,7 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
             step_seq: 1,
             llm: llm.clone(),
             cancel,
+            cwd: None,
         };
         agent
             .plan(ctx, &goal)
