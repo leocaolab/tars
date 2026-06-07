@@ -208,6 +208,29 @@ Buggy validators (raising or returning the wrong type) are caught and translated
    └─────────────────────────────────────────────────────────┘
 ```
 
+### The Agent abstraction
+
+> An **Agent** is a collection of capabilities (skills) that you hand a
+> **task** to. ([docs/architecture/20-agent-abstraction.md](./docs/architecture/20-agent-abstraction.md))
+
+The contract lives in **`tars-model`** (pure, depends only on `tars-types`):
+`trait Agent { id, role, skills, run(task) }` + `Task` (the recursive unit
+of intent) + `Permissions` / `AgentContext`. `run` takes a **Task** — user
+intent — not a `ChatRequest`; turning a task into LLM calls is a *native*
+agent's internal job, so an agent that uses no LLM stays first-class.
+
+Two implementers, one interface (tars is an adaptor over both):
+- **`NativeAgent`** (`tars-runtime`) — LLM-backed: turns the task into a
+  prompt and drives a white-box tool loop over a *pure-inference* provider.
+  Swap the provider and the same agent is a "gemini agent" or a
+  "claude_cli agent" — tars owns the loop, tools, and `cwd`, not the CLI's
+  internal black box.
+- **user agents** — anything that implements `Agent::run(task)`.
+
+Compose them: **`EnsembleAgent`** runs one task on N agents concurrently and
+takes the first success (tail-latency hedge at *task* granularity, above
+the pipeline's completion-level ensemble).
+
 For a guided tour by role (consumerhitect / SDK author / SRE / security), see [docs/architecture/00-overview.md](./docs/architecture/00-overview.md).
 
 ---

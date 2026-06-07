@@ -289,6 +289,62 @@ with real filesystem tools, see
 cargo run -p tars-runtime --example multi_step_with_tools
 ```
 
+## Agents — hand a task to a capability set
+
+The three shapes above are *calls*. An **Agent** is one level up: a set of
+capabilities (skills) you give a **task** to, and it does the work — driving
+its own multi-turn tool loop internally. The contract is `tars-model`'s
+`trait Agent { id, role, skills, run(task) }`; see
+[architecture/20-agent-abstraction.md](architecture/20-agent-abstraction.md).
+
+A **native** agent is LLM-backed — it turns the task into prompts and runs a
+tool loop over a *pure-inference* provider. Swap the provider and the same
+agent is a "gemini agent" or a "claude_cli agent"; tars owns the loop +
+tools + working dir (white box), not the CLI's internal black box.
+
+```rust
+use std::sync::Arc;
+use tars_model::{Agent, AgentContext, Skill, SkillSet, Task, TaskId};
+use tars_runtime::NativeAgent;
+use tars_tools::{builtins::{EditFileTool, WriteFileTool, BashTool}, ToolRegistry};
+
+// 1. The capabilities (concrete tools), jailed to the worktree.
+let mut reg = ToolRegistry::new();
+reg.register_owned(WriteFileTool::with_root(&worktree).unwrap()).unwrap();
+reg.register_owned(EditFileTool::with_root(&worktree).unwrap()).unwrap();
+reg.register_owned(BashTool::new()).unwrap();
+
+// 2. Assemble the agent over a pure-inference provider (`llm`).
+let agent = NativeAgent::new(
+    "agent:fixer", "fix",
+    SkillSet::new()
+        .with(Skill::new("fs.write_file", "write files"))
+        .with(Skill::new("fs.edit_file", "edit files"))
+        .with(Skill::new("bash.run", "run commands")),
+    "claude-sonnet-4-5", llm, Arc::new(reg),
+);
+
+// 3. Hand it a task. cwd scopes where its tools act.
+let task = Task::new(TaskId::new("t1"), "fix the failing test in src/foo.rs");
+let ctx = AgentContext::new().with_cwd(&worktree);
+let out = agent.run(task, ctx).await?;
+println!("{}", out.summary);
+```
+
+**Hedge across agents** — run one task on several agents, take the first
+success (tail-latency hedge at *task* granularity):
+
+```rust
+use tars_runtime::EnsembleAgent;
+use tars_model::AgentRole;
+
+let ens = EnsembleAgent::new(
+    "ens:fix", AgentRole::worker("fix"),
+    vec![claude_cli_agent, gemini_agent, user_agent],
+);
+let out = ens.run(task, ctx).await?; // first to succeed wins; the rest are cancelled
+```
+
 ## Output validators
 
 Attach Python callbacks that run after the model reply, before the

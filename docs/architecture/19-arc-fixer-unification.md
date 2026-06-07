@@ -83,17 +83,55 @@ Two routing granularities, no conflict: **completion-level** stays in
 the Agent layer (a whole task across agents — `gemini agent` vs
 `claude_cli agent` vs a user agent). The tool-using fixer needs the latter.
 
-## 5. Plan
+## 5. Plan — status
 
 1. **Coding builtins** — `fs.write_file` / `fs.edit_file` / `bash.run`.
    ✅ Done (`3784992`).
-2. **Agent interface** — promote `Worker` to `Agent` (skills/permissions/
-   config); native (`Session`) + user impls conform.
-3. **Agent-level routing/ensemble** — `EnsembleAgent`/`RoutingAgent` over
-   `Agent`.
-4. **arc fixer → tars-native coding agent** — `Session` + the new tools
-   over `claude_cli` (Disabled = pure inference). Delete arc's `claude.rs`.
-5. tars user-guide + README; arc cleanup; dogfood.
+2. **Agent interface** — `tars-model` crate: `trait Agent { id, role,
+   skills, run(task) }` + `Task`/`SkillSet`/`Permissions`/`AgentContext`.
+   ✅ Done (`e66a73c`). (Note: it's a NEW top-level abstraction, not a
+   promotion of `Worker` — see Doc 20. The old single-call `trait Agent`
+   stays as plumbing.)
+3. **NativeAgent** — LLM-backed `tars_model::Agent`; task → white-box tool
+   loop over a pure-inference provider; cwd threaded model→tool. ✅ Done
+   (`73fefd1`, e2e tested). cwd seam: `767bd8c`.
+4. **EnsembleAgent** — agent-level hedge (first success wins). ✅ Done
+   (`653abd8`).
+5. tars user-guide + README — ✅ Done. arc cleanup; dogfood — open.
+6. **arc fixer → tars-native coding agent** — NOT done; risky to execute
+   pre-release while the dogfood runs. Plan documented in §7 below;
+   review before executing.
+
+## 6. What lands a working coding agent today
+
+```rust
+let agent = NativeAgent::new("agent:fixer", "fix", skills, model, llm /*pure inference*/, tools);
+let out = agent.run(Task::new(id, goal), AgentContext::new().with_cwd(&worktree)).await?;
+```
+Hedge: `EnsembleAgent::new("ens", role, vec![claude_cli_agent, gemini_agent])`.
+
+## 7. arc integration plan (documented, NOT executed)
+
+The remaining step — arc's fixer stops using its private `claude.rs`
+black-box loop and becomes a `tars_model::Agent`:
+
+1. arc bumps its `tars` git rev to one with the agent layer (≥ `653abd8`).
+2. arc builds a `NativeAgent` for the fixer role: a `ToolRegistry` of
+   `WriteFileTool`/`EditFileTool`/`BashTool` jailed to the fix worktree, a
+   `claude_cli` provider in `ClaudeCliTools::Disabled` (pure inference),
+   the fixer model. Optionally wrap N providers in an `EnsembleAgent`.
+3. arc's fixer call site (`agent_backend`) builds a `Task` from the finding
+   (goal = the fix instruction, inputs = file/snippet/critic history,
+   acceptance = "compiles + the finding is resolved") and calls
+   `agent.run(task, ctx.with_cwd(worktree))`.
+4. Map `AgentOutput` back into arc's fix-loop result; the worktree diff is
+   read as today.
+5. Delete `arc_shell/src/agent_backend/claude.rs` — now redundant.
+
+Risks to weigh first (why this is documented, not done): it's a core change
+to a pre-release fixer with a long dogfood run in flight; the
+`{summary,confidence}` final-turn contract (Doc 21) may not fit arc's fixer
+prompt; and the two-tool-systems fork (Doc 21 §2) is still open.
 
 ## 6. What this is NOT
 
