@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/tars-types",
+    "crates/tars-model",
     "crates/tars-config",
     "crates/tars-provider",
     "crates/tars-pipeline",
