@@ -88,6 +88,62 @@ async fn streaming_text_response_decodes_to_events() {
     assert_eq!(u.output_tokens, 3);
 }
 
+/// DeepSeek's reasoner (`deepseek-v4-pro`, formerly `deepseek-reasoner`)
+/// streams its chain-of-thought in `delta.reasoning_content`, separate
+/// from the final `delta.content`. The OpenAI-compat adapter must surface
+/// that as `ThinkingDelta` — this is what makes the built-in `deepseek`
+/// provider's reasoning mode work (same code path as o1 / Qwen3-thinking).
+#[tokio::test]
+async fn deepseek_reasoning_content_surfaces_as_thinking_delta() {
+    let server = MockServer::start().await;
+
+    let body = sse_body(&[
+        r#"{"id":"ds1","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Let me think: "},"finish_reason":null}]}"#,
+        r#"{"id":"ds1","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":"2+2 is 4."},"finish_reason":null}]}"#,
+        r#"{"id":"ds1","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"The answer is 4."},"finish_reason":null}]}"#,
+        r#"{"id":"ds1","object":"chat.completion.chunk","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+
+    let http = HttpProviderBase::default_arc().unwrap();
+    // Mirrors the built-in `deepseek` provider (openai_compat at a DeepSeek
+    // base_url), pointed at the mock instead of api.deepseek.com.
+    let provider = OpenAiProviderBuilder::new("deepseek", Auth::inline("test-key"))
+        .base_url(server.uri())
+        .build(http, basic());
+
+    let req = ChatRequest::user(
+        ModelHint::Explicit("deepseek-v4-pro".into()),
+        "what is 2+2?",
+    );
+    let mut stream = provider
+        .stream(req, RequestContext::test_default())
+        .await
+        .expect("stream open");
+
+    let mut thinking = String::new();
+    let mut text = String::new();
+    while let Some(ev) = stream.next().await {
+        match ev.expect("event") {
+            ChatEvent::ThinkingDelta { text: t } => thinking.push_str(&t),
+            ChatEvent::Delta { text: t } => text.push_str(&t),
+            _ => {}
+        }
+    }
+
+    assert_eq!(thinking, "Let me think: 2+2 is 4.");
+    assert_eq!(text, "The answer is 4.");
+}
+
 #[tokio::test]
 async fn complete_aggregates_streaming_response() {
     let server = MockServer::start().await;

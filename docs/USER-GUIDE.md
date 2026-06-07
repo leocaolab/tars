@@ -59,6 +59,19 @@ in `~/.tars/config.toml` (`-p openai_main`, `-p claude_cli`, etc.).
 For the long-lived subscription path, see
 [`providers/claude-cli.md`](./providers/claude-cli.md).
 
+Built-in providers (available without writing any config — just export
+the key): `openai`, `anthropic`, `gemini`, `deepseek`, plus the local /
+subscription backends (`claude_cli`, `gemini_cli`, `mlx`, `llamacpp`,
+`vllm`). DeepSeek is reached via its OpenAI-compatible API
+(`DEEPSEEK_API_KEY`, default model `deepseek-v4-flash`); request
+`deepseek-v4-pro` for the reasoning model — its chain-of-thought arrives
+on the thinking channel automatically:
+
+```bash
+export DEEPSEEK_API_KEY=sk-...
+cargo run -p tars-cli -- run -p deepseek "Say hi in 5 words."
+```
+
 Once that works, the rest of this guide covers calling tars from
 **Python** and **Rust**.
 

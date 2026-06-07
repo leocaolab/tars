@@ -243,10 +243,10 @@ async fn registry_built_from_toml_can_drive_pipeline_call() {
 
     let registry = registry_from_toml(&toml);
     // The loader merges built-in defaults under user-declared
-    // providers (8 builtins + 2 user-declared = 10). The exact number
+    // providers (9 builtins + 2 user-declared = 11). The exact number
     // is incidental — what matters is that both user entries resolve
     // and that builtins are also present.
-    assert_eq!(registry.len(), 10);
+    assert_eq!(registry.len(), 11);
     assert!(registry.get(&ProviderId::new("unused_mock")).is_some());
     assert!(
         registry

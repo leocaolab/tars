@@ -19,6 +19,24 @@ is authoritative. This file aggregates.
 
 ---
 
+## Providers
+
+### DeepSeek built-in (`<unreleased>`, 2026-06-06)
+
+Added `deepseek` to the built-in provider table — available out of the
+box with just `DEEPSEEK_API_KEY` (default model `deepseek-v4-flash`).
+
+**No new backend.** DeepSeek ships an OpenAI-compatible API, so the
+built-in is an `openai_compat` pointed at `https://api.deepseek.com`. The
+OpenAI adapter already surfaces DeepSeek's reasoning channel
+(`delta.reasoning_content`) as `ChatEvent::ThinkingDelta`, so the
+reasoning model (`deepseek-v4-pro`) works with thinking out of the box —
+covered by a new wiremock test
+(`deepseek_reasoning_content_surfaces_as_thinking_delta`).
+
+Known gap: no per-model pricing, so `CostPolicy` treats DeepSeek as free
+(`Pricing::default()`) — fine until cost-based routing needs it.
+
 ## M6 — Multi-tenant + Server (in progress 2026-06-05)
 
 ### `tars-server` — personal-mode HTTP/REST shell (`<unreleased>`)

@@ -28,6 +28,7 @@ pub fn built_in_provider_defaults() -> HashMap<ProviderId, ProviderConfig> {
         (ProviderId::new("openai"), default_openai()),
         (ProviderId::new("anthropic"), default_anthropic()),
         (ProviderId::new("gemini"), default_gemini()),
+        (ProviderId::new("deepseek"), default_deepseek()),
         (ProviderId::new("claude_cli"), default_claude_cli()),
         (ProviderId::new("gemini_cli"), default_gemini_cli()),
         (ProviderId::new("mlx"), default_mlx()),
@@ -77,6 +78,25 @@ pub fn default_gemini() -> ProviderConfig {
         auth: Auth::env("GEMINI_API_KEY"),
         default_model: "gemini-2.5-pro".into(),
         extras: HttpProviderExtras::default(),
+    }
+}
+
+/// Default DeepSeek: `DEEPSEEK_API_KEY`, `deepseek-v4-flash`.
+///
+/// DeepSeek ships an OpenAI-compatible API, so this is just an
+/// `openai_compat` pointed at `api.deepseek.com` — no dedicated backend.
+/// The OpenAI adapter already surfaces DeepSeek's reasoning channel
+/// (`delta.reasoning_content`) as [`tars_types::ChatEvent::ThinkingDelta`],
+/// so `deepseek-v4-pro` / thinking mode works out of the box. `-flash` is
+/// the cheaper non-reasoning default; request `deepseek-v4-pro` per call
+/// for the reasoning model.
+pub fn default_deepseek() -> ProviderConfig {
+    ProviderConfig::OpenaiCompat {
+        base_url: "https://api.deepseek.com".into(),
+        auth: Auth::env("DEEPSEEK_API_KEY"),
+        default_model: "deepseek-v4-flash".into(),
+        extras: HttpProviderExtras::default(),
+        capabilities: Default::default(),
     }
 }
 
@@ -190,6 +210,7 @@ mod tests {
             "openai",
             "anthropic",
             "gemini",
+            "deepseek",
             "claude_cli",
             "gemini_cli",
             "mlx",
@@ -275,10 +296,27 @@ mod tests {
         .into_iter()
         .collect();
         let merged = merge_builtin_with_user(user);
-        // 8 built-ins (openai, anthropic, gemini, claude_cli, gemini_cli,
-        // mlx, llamacpp, vllm) + 1 user-added.
-        assert_eq!(merged.len(), 9);
+        // 9 built-ins (openai, anthropic, gemini, deepseek, claude_cli,
+        // gemini_cli, mlx, llamacpp, vllm) + 1 user-added.
+        assert_eq!(merged.len(), 10);
         assert!(merged.contains_key(&ProviderId::new("local_qwen")));
+    }
+
+    #[test]
+    fn deepseek_default_is_openai_compat_pointed_at_deepseek() {
+        match default_deepseek() {
+            ProviderConfig::OpenaiCompat {
+                base_url,
+                auth,
+                default_model,
+                ..
+            } => {
+                assert_eq!(base_url, "https://api.deepseek.com");
+                assert!(default_model.starts_with("deepseek-"));
+                assert!(matches!(auth, Auth::Secret { .. }));
+            }
+            other => panic!("expected OpenaiCompat variant, got: {other:?}"),
+        }
     }
 
     #[test]

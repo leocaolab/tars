@@ -458,10 +458,10 @@ mod tests {
         "#;
         let cfg = ConfigManager::load_from_str(toml_str).unwrap();
         let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
-        // 11 user-declared + 8 builtins, but two of the user-declared
+        // 11 user-declared + 9 builtins, but two of the user-declared
         // ids (`claude_cli`, `gemini_cli`) collide with builtins of the
-        // same name and override them — net 11 + (8 - 2) = 17.
-        assert_eq!(reg.len(), 17);
+        // same name and override them — net 11 + (9 - 2) = 18.
+        assert_eq!(reg.len(), 18);
         assert!(reg.get(&ProviderId::new("openai_main")).is_some());
         assert!(reg.get(&ProviderId::new("openai_compat_local")).is_some());
         assert!(reg.get(&ProviderId::new("anthropic_main")).is_some());
