@@ -132,6 +132,7 @@ impl Agent for NativeAgent {
             llm: self.llm.clone(),
             cancel: ctx.cancel.clone(),
             cwd: ctx.cwd.clone(),
+            permissions: ctx.permissions.clone(),
         };
 
         let msg = self

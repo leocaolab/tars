@@ -158,6 +158,7 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
             llm: llm.clone(),
             cancel,
             cwd: None,
+            permissions: Default::default(),
         };
         agent
             .plan(ctx, &goal)

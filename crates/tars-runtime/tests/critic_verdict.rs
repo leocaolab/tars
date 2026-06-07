@@ -30,6 +30,7 @@ fn ctx(llm: Arc<dyn LlmService>) -> AgentContext {
         llm,
         cancel: CancellationToken::new(),
         cwd: None,
+        permissions: Default::default(),
     }
 }
 

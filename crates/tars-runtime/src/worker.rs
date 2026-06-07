@@ -381,6 +381,23 @@ impl WorkerAgent {
 
             let mut errors_this_iter = 0usize;
             for call in &response.tool_calls {
+                // Permission gate: a Deny/Ask skill never reaches the tool.
+                // Feed the refusal back as an is_error result so the model
+                // adapts (picks an allowed path) rather than the call
+                // silently running. `Ask` is treated as a refusal until a
+                // human-prompt channel exists (tracked in Doc 21).
+                if !ctx.permissions.is_allowed(&call.name) {
+                    errors_this_iter += 1;
+                    req.messages.push(Message::Tool {
+                        tool_call_id: call.id.clone(),
+                        content: vec![ContentBlock::text(format!(
+                            "permission denied: `{}` is not allowed for this agent",
+                            call.name
+                        ))],
+                        is_error: true,
+                    });
+                    continue;
+                }
                 let tool_ctx = ToolContext {
                     cancel: ctx.cancel.clone(),
                     cwd: ctx.cwd.clone(),

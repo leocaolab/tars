@@ -84,6 +84,11 @@ pub struct AgentContext {
     /// so a tool-using agent edits THAT tree, not the process cwd. `None`
     /// = inherit the process cwd (the historical behaviour).
     pub cwd: Option<std::path::PathBuf>,
+    /// What the agent is ALLOWED to do — checked at tool dispatch before a
+    /// tool runs (a `Deny` skill yields an `is_error` tool result the model
+    /// can adapt to, instead of running). Default `allow_all` keeps the
+    /// historical behaviour: everything the model can call, it may.
+    pub permissions: tars_model::Permissions,
 }
 
 /// What an Agent returns from one execute() call.

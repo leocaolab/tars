@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::stream;
 
-use tars_model::{Agent, AgentContext, Skill, SkillSet, Task, TaskId};
+use tars_model::{Agent, AgentContext, Permissions, Skill, SkillSet, Task, TaskId};
 use tars_pipeline::{LlmService, Pipeline, ProviderService};
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::NativeAgent;
@@ -171,4 +171,50 @@ async fn native_agent_runs_a_task_and_tool_writes_into_the_cwd() {
     // And the agent advertises its capability.
     assert!(agent.skills().contains("fs.write_file"));
     assert_eq!(agent.role().kind(), "worker");
+}
+
+#[tokio::test]
+async fn a_denied_skill_never_runs_the_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut reg = ToolRegistry::new();
+    reg.register_owned(WriteFileTool::with_root(dir.path()).unwrap())
+        .unwrap();
+    let tools = Arc::new(reg);
+
+    // Same 2-turn script: the model tries to write, then reports.
+    let final_json = serde_json::json!({ "summary": "tried", "confidence": 0.5 }).to_string();
+    let provider = EventQueueProvider::new(vec![
+        tool_call_events(
+            "call_1",
+            "fs.write_file",
+            serde_json::json!({ "path": "blocked.txt", "content": "should not exist" }),
+        ),
+        final_text_events(&final_json),
+    ]);
+    let agent = NativeAgent::new(
+        "agent:coder",
+        "fix",
+        SkillSet::new().with(Skill::new("fs.write_file", "writes files")),
+        "any-model",
+        build_llm(provider),
+        tools,
+    );
+
+    // Permissions DENY the write skill.
+    let ctx = AgentContext::new()
+        .with_cwd(dir.path())
+        .with_permissions(Permissions::default().deny("fs.write_file"));
+
+    let out = agent
+        .run(Task::new(TaskId::new("t-2"), "write blocked.txt"), ctx)
+        .await
+        .expect("agent still completes (the model adapts to the refusal)");
+    assert_eq!(out.summary, "tried");
+
+    // THE PROOF: the tool never ran — the permission gate refused it
+    // before dispatch, so no file landed.
+    assert!(
+        !dir.path().join("blocked.txt").exists(),
+        "denied skill must not have written the file"
+    );
 }
