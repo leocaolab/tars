@@ -74,17 +74,20 @@ on a worktree. The bounded fix: add `cwd: Option<PathBuf>` to
 additive + safe and unblocks ANY tars-tools-based agent loop from acting on
 a scoped tree. (Doing this next.)
 
-## 5. Open questions parked here (per "record issues in docs")
+## 5. Open questions (status)
 
-- The two-`ToolRegistry` fork (§2) — is the long-term plan to unify on
-  `tars_tools::ToolRegistry`? (Assumed yes; Session's is the odd one out.)
-- `skills() → tools` binding: a native agent's `SkillSet` must map to the
-  concrete `tars_tools` tools it exposes. Where does that mapping live — a
-  registry from skill-name → Tool, in `tars-runtime`? (Likely a
-  `tars-agent` assembly crate.)
-- `Permissions` enforcement point: gate at tool-dispatch (filter the
-  registry / reject a call whose skill is `Deny`/`Ask`). The native loop
-  consults `ctx.permissions` before each `dispatch`. Not yet wired.
-- `AgentRole` duplication: `tars-model::AgentRole` vs the one still in
-  `tars-runtime/agent.rs` (the single-call thing). Unify by having runtime
-  re-export the model's, and rename runtime's `trait Agent` → `Call`/`Step`.
+- ✅ **`Permissions` enforcement** — DONE (`3d6a79f`). The WorkerAgent tool
+  loop checks `ctx.permissions.is_allowed(tool)` before dispatch; a
+  Deny/Ask skill yields an `is_error` result, never running. (`Ask` is
+  treated as a refusal until a human-prompt channel exists.)
+- ⬜ The two-`ToolRegistry` fork (§2) — long-term plan is to unify on
+  `tars_tools::ToolRegistry` (Session's `.call` registry is the odd one
+  out). Not started; it's the lever to retire option A for a clean loop.
+- ⬜ `skills() → tools` binding: a native agent's `SkillSet` is advertised
+  separately from the concrete `tars_tools` it's built with. A registry
+  from skill-name → Tool (so skills and tools can't drift) is a follow-on.
+- ⬜ `Ask` permission: needs a human-prompt channel; currently == Deny.
+- ⬜ `AgentRole` / `trait Agent` duplication: `tars-model::AgentRole` vs the
+  one in `tars-runtime/agent.rs` (the single-call thing). Unify by having
+  runtime re-export the model's, and rename runtime's `trait Agent` →
+  `Call`/`Step` to free the name.
