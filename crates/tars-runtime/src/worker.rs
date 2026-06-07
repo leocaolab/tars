@@ -383,7 +383,7 @@ impl WorkerAgent {
             for call in &response.tool_calls {
                 let tool_ctx = ToolContext {
                     cancel: ctx.cancel.clone(),
-                    cwd: None,
+                    cwd: ctx.cwd.clone(),
                 };
                 let tool_msg = registry.dispatch(call, tool_ctx).await;
                 if matches!(&tool_msg, Message::Tool { is_error: true, .. }) {

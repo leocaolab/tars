@@ -87,6 +87,7 @@ fn ctx(llm: Arc<dyn LlmService>) -> AgentContext {
         step_seq: 1,
         llm,
         cancel: CancellationToken::new(),
+        cwd: None,
     }
 }
 

@@ -361,6 +361,9 @@ pub async fn execute_agent_step(
         step_seq,
         llm,
         cancel,
+        // run_plan agents act on the process cwd; a per-step worktree
+        // would flow in here once PlanStep carries one.
+        cwd: None,
     };
     let result = agent.clone().execute(ctx, input).await;
 

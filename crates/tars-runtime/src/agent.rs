@@ -79,6 +79,11 @@ pub struct AgentContext {
     /// expensive should `select!` against `cancel.cancelled()` so an
     /// upstream Drop / SIGINT propagates.
     pub cancel: CancellationToken,
+    /// Working directory the agent's tools act on (its worktree). Flows
+    /// into the [`tars_tools::ToolContext`] built for each tool dispatch,
+    /// so a tool-using agent edits THAT tree, not the process cwd. `None`
+    /// = inherit the process cwd (the historical behaviour).
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 /// What an Agent returns from one execute() call.
