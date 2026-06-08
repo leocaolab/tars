@@ -305,7 +305,7 @@ tools + working dir (white box), not the CLI's internal black box.
 ```rust
 use std::sync::Arc;
 use tars_model::{Agent, AgentContext, Skill, SkillSet, Task, TaskId};
-use tars_runtime::NativeAgent;
+use tars_runtime::TarsAgent;
 use tars_tools::{builtins::{EditFileTool, WriteFileTool, BashTool}, ToolRegistry};
 
 // 1. The capabilities (concrete tools), jailed to the worktree.
@@ -315,7 +315,7 @@ reg.register_owned(EditFileTool::with_root(&worktree).unwrap()).unwrap();
 reg.register_owned(BashTool::new()).unwrap();
 
 // 2. Assemble the agent over a pure-inference provider (`llm`).
-let agent = NativeAgent::new(
+let agent = TarsAgent::new(
     "agent:fixer", "fix",
     SkillSet::new()
         .with(Skill::new("fs.write_file", "write files"))

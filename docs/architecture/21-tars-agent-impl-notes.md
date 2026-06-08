@@ -2,7 +2,7 @@
 
 > Working notes from implementing the native `Agent` (the LLM-backed
 > implementer of `tars_model::Agent`). Records a real fork in tars's tool
-> machinery that has to be resolved before the native agent is clean.
+> machinery that has to be resolved before the tars agent is clean.
 > Captured for the team to decide — see §3.
 
 ## 1. What's done
@@ -37,7 +37,7 @@ So:
 This fork is pre-existing tech debt, surfaced (not caused) by the native
 agent work.
 
-## 3. Open decision — which loop backs the native agent?
+## 3. Open decision — which loop backs the tars agent?
 
 Three options:
 
@@ -50,7 +50,7 @@ Three options:
   in-`session.rs` registry). Cleanest END state (one tool system, the nice
   `send_text` API), but a bigger refactor touching the Session tool loop +
   every Session tool caller.
-- **C. Purpose-built native-agent loop.** A small new loop (in
+- **C. Purpose-built tars-agent loop.** A small new loop (in
   `tars-runtime` or a `tars-agent` crate): take `Task` + `AgentContext`,
   call the `LlmService` in a loop, dispatch `tars_tools` tools with
   `ToolContext{ cwd: ctx.cwd, cancel: ctx.cancel }`, return `AgentOutput`.
@@ -83,7 +83,7 @@ a scoped tree. (Doing this next.)
 - ⬜ The two-`ToolRegistry` fork (§2) — long-term plan is to unify on
   `tars_tools::ToolRegistry` (Session's `.call` registry is the odd one
   out). Not started; it's the lever to retire option A for a clean loop.
-- ⬜ `skills() → tools` binding: a native agent's `SkillSet` is advertised
+- ⬜ `skills() → tools` binding: a tars agent's `SkillSet` is advertised
   separately from the concrete `tars_tools` it's built with. A registry
   from skill-name → Tool (so skills and tools can't drift) is a follow-on.
 - ⬜ `Ask` permission: needs a human-prompt channel; currently == Deny.

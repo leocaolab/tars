@@ -1,4 +1,4 @@
-//! End-to-end: a [`NativeAgent`] runs a [`Task`] over a mock provider,
+//! End-to-end: a [`TarsAgent`] runs a [`Task`] over a mock provider,
 //! driving a real tars-tools loop — and the `AgentContext::cwd` set at the
 //! task level lands in the tool, so a relative write resolves inside the
 //! scoped worktree (NOT the process cwd). This is the proof the cwd seam
@@ -12,7 +12,7 @@ use futures::stream;
 use tars_model::{Agent, AgentContext, Permissions, Skill, SkillSet, Task, TaskId};
 use tars_pipeline::{LlmService, Pipeline, ProviderService};
 use tars_provider::{LlmEventStream, LlmProvider};
-use tars_runtime::NativeAgent;
+use tars_runtime::TarsAgent;
 use tars_tools::{builtins::WriteFileTool, ToolRegistry};
 use tars_types::{
     Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, RequestContext,
@@ -108,7 +108,7 @@ fn final_text_events(text: &str) -> Vec<ChatEvent> {
 }
 
 #[tokio::test]
-async fn native_agent_runs_a_task_and_tool_writes_into_the_cwd() {
+async fn tars_agent_runs_a_task_and_tool_writes_into_the_cwd() {
     let dir = tempfile::tempdir().unwrap();
 
     // The agent's one capability: write files, jailed to the worktree.
@@ -133,7 +133,7 @@ async fn native_agent_runs_a_task_and_tool_writes_into_the_cwd() {
     ]);
     let llm = build_llm(provider);
 
-    let agent = NativeAgent::new(
+    let agent = TarsAgent::new(
         "agent:coder",
         "fix",
         SkillSet::new().with(Skill::new("fs.write_file", "writes files")),
@@ -159,7 +159,7 @@ async fn native_agent_runs_a_task_and_tool_writes_into_the_cwd() {
     assert!((conf - 0.95).abs() < 1e-4, "confidence ≈ 0.95, got {conf}");
 
     // THE PROOF: the relative write landed inside the cwd we set at the
-    // task level — the cwd threaded model → NativeAgent → WorkerAgent →
+    // task level — the cwd threaded model → TarsAgent → WorkerAgent →
     // ToolContext, not the process cwd.
     let written = dir.path().join("out.txt");
     assert!(written.exists(), "out.txt must exist inside the agent's cwd");
@@ -191,7 +191,7 @@ async fn a_denied_skill_never_runs_the_tool() {
         ),
         final_text_events(&final_json),
     ]);
-    let agent = NativeAgent::new(
+    let agent = TarsAgent::new(
         "agent:coder",
         "fix",
         SkillSet::new().with(Skill::new("fs.write_file", "writes files")),

@@ -2586,6 +2586,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tars-model"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tars-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "tars-node"
 version = "0.3.0"
 dependencies = [
@@ -2687,6 +2700,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tars-model",
  "tars-pipeline",
  "tars-provider",
  "tars-storage",

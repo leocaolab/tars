@@ -92,7 +92,7 @@ the Agent layer (a whole task across agents — `gemini agent` vs
    ✅ Done (`e66a73c`). (Note: it's a NEW top-level abstraction, not a
    promotion of `Worker` — see Doc 20. The old single-call `trait Agent`
    stays as plumbing.)
-3. **NativeAgent** — LLM-backed `tars_model::Agent`; task → white-box tool
+3. **TarsAgent** — LLM-backed `tars_model::Agent`; task → white-box tool
    loop over a pure-inference provider; cwd threaded model→tool. ✅ Done
    (`73fefd1`, e2e tested). cwd seam: `767bd8c`.
 4. **EnsembleAgent** — agent-level hedge (first success wins). ✅ Done
@@ -105,7 +105,7 @@ the Agent layer (a whole task across agents — `gemini agent` vs
 ## 6. What lands a working coding agent today
 
 ```rust
-let agent = NativeAgent::new("agent:fixer", "fix", skills, model, llm /*pure inference*/, tools);
+let agent = TarsAgent::new("agent:fixer", "fix", skills, model, llm /*pure inference*/, tools);
 let out = agent.run(Task::new(id, goal), AgentContext::new().with_cwd(&worktree)).await?;
 ```
 Hedge: `EnsembleAgent::new("ens", role, vec![claude_cli_agent, gemini_agent])`.
@@ -116,7 +116,7 @@ The remaining step — arc's fixer stops using its private `claude.rs`
 black-box loop and becomes a `tars_model::Agent`:
 
 1. arc bumps its `tars` git rev to one with the agent layer (≥ `653abd8`).
-2. arc builds a `NativeAgent` for the fixer role: a `ToolRegistry` of
+2. arc builds a `TarsAgent` for the fixer role: a `ToolRegistry` of
    `WriteFileTool`/`EditFileTool`/`BashTool` jailed to the fix worktree, a
    `claude_cli` provider in `ClaudeCliTools::Disabled` (pure inference),
    the fixer model. Optionally wrap N providers in an `EnsembleAgent`.

@@ -1,9 +1,9 @@
-//! [`NativeAgent`] — the LLM-backed implementer of [`tars_model::Agent`].
+//! [`TarsAgent`] — the LLM-backed implementer of [`tars_model::Agent`].
 //!
 //! THIS is the "native agent" of Doc 20: you hand it a [`Task`], and it
 //! internally turns the task into an LLM prompt and drives a tool loop over
 //! a pure-inference provider — white-box (tars owns the loop + tools). The
-//! same `NativeAgent` over a `gemini` provider is a "gemini agent"; over
+//! same `TarsAgent` over a `gemini` provider is a "gemini agent"; over
 //! `claude_cli` (Disabled tools = pure inference) it's a "claude_cli agent".
 //!
 //! Implementation: it reuses the existing [`WorkerAgent`] tool loop (the
@@ -33,7 +33,7 @@ use crate::worker::WorkerAgent;
 
 /// An LLM-backed [`Agent`]: a [`SkillSet`] (backed by a tars-tools
 /// `ToolRegistry`) driven over a pure-inference provider.
-pub struct NativeAgent {
+pub struct TarsAgent {
     id: AgentId,
     role: AgentRole,
     skills: SkillSet,
@@ -44,7 +44,7 @@ pub struct NativeAgent {
     worker: Arc<WorkerAgent>,
 }
 
-impl NativeAgent {
+impl TarsAgent {
     /// Assemble a native agent.
     ///
     /// - `id` / `domain` — identity + the worker domain (its [`AgentRole`]).
@@ -92,7 +92,7 @@ impl NativeAgent {
 }
 
 #[async_trait]
-impl Agent for NativeAgent {
+impl Agent for TarsAgent {
     fn id(&self) -> &AgentId {
         &self.id
     }

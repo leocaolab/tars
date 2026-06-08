@@ -78,7 +78,7 @@ user input ──generate──> top Task ──decompose──> sub Task ──
 
 ## 5. Two implementers, one interface (tars = adaptor)
 
-- **native agent** — built on an LLM: `run(task)` internally turns the task
+- **tars agent** — built on an LLM: `run(task)` internally turns the task
   into prompts and drives a `Session` loop over a pure-inference provider +
   its skills' tools. "gemini agent" / "claude_cli agent" = the same native
   machinery, different provider. White-box (tars owns the loop, tools,
