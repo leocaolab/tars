@@ -19,6 +19,57 @@ is authoritative. This file aggregates.
 
 ---
 
+## Agent abstraction (Doc 20 / 21) — `v0.4.0`
+
+The user-facing **Agent** layer: a capability set (skills) you hand a
+**Task** to, sitting one level above the call-granular pipeline.
+
+### `tars-model` — the `Agent` contract (`e66a73c`)
+
+New pure crate (depends only on `tars-types`): `trait Agent { id, role,
+skills, run(task) }` + the vocabulary — `Task`, `SkillSet`, `Permissions`,
+`AgentContext`, `AgentOutput`, `AgentError`. `run` takes a **Task** (user
+intent), not a `ChatRequest` — turning a task into LLM calls is a *native*
+agent's internal job, so an agent that uses no LLM stays first-class.
+
+### `TarsAgent` — the LLM-backed native agent (`73fefd1`)
+
+The native implementer of `tars_model::Agent`: renders a `Task` into a
+prompt and drives a white-box tool loop over a *pure-inference* provider,
+acting on `ctx.cwd`. Swap the provider and the same agent is a "gemini
+agent" or "claude_cli agent" — tars owns the loop, tools, and cwd.
+
+**Reuses the WorkerAgent loop (option A, Doc 21 §3)** via a synthetic
+one-step `Plan` rather than adding a new loop — fastest path to a working,
+cwd-aware native agent. Carry-over: the model's final turn must be the
+WorkerAgent `{summary, confidence}` shape; a freer output contract is a
+follow-on. Originally `NativeAgent`, renamed → `TarsAgent` (`1ab096b`).
+
+### `EnsembleAgent` — agent-level hedging (`653abd8`)
+
+Runs one `Task` on N candidate agents concurrently, returns the first
+success, cancels the rest — tail-latency hedge at *task* granularity, above
+the pipeline's completion-level ensemble. Composes over the `Agent` trait,
+so it's blind to native vs user candidates.
+
+### Supporting seams
+
+- **cwd threaded through the WorkerAgent tool loop** (`767bd8c`, CLI site
+  `8e63232`) — `AgentContext.cwd` builds each `ToolContext`; tools act on a
+  scoped worktree, not the process cwd. `run_plan` sites unchanged (`None`).
+- **Permission enforcement at tool dispatch** (`3d6a79f`) — the loop checks
+  `ctx.permissions.is_allowed(tool)` before running; Deny/Ask yields an
+  `is_error` result, never executing. `Ask` == refusal until a human-prompt
+  channel exists.
+- **`MockProvider::with_responses`** (`a769f32`) — per-call response queue,
+  so a multi-turn agent loop is deterministically testable.
+
+See [Doc 20](./docs/architecture/20-agent-abstraction.md) (the abstraction)
+and [Doc 21](./docs/architecture/21-tars-agent-impl-notes.md) (impl notes +
+the still-open two-`ToolRegistry` unification).
+
+---
+
 ## Providers
 
 ### DeepSeek built-in (`<unreleased>`, 2026-06-06)

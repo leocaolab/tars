@@ -2511,7 +2511,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tars-cache"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "dirs",
@@ -2529,7 +2529,7 @@ dependencies = [
 
 [[package]]
 name = "tars-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2556,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "tars-config"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dirs",
  "figment",
@@ -2571,7 +2571,7 @@ dependencies = [
 
 [[package]]
 name = "tars-melt"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
@@ -2587,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "tars-model"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -2600,7 +2600,7 @@ dependencies = [
 
 [[package]]
 name = "tars-node"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures",
  "napi",
@@ -2622,7 +2622,7 @@ dependencies = [
 
 [[package]]
 name = "tars-pipeline"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2647,7 +2647,7 @@ dependencies = [
 
 [[package]]
 name = "tars-provider"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2672,7 +2672,7 @@ dependencies = [
 
 [[package]]
 name = "tars-py"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures",
  "pyo3",
@@ -2692,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "tars-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2716,7 +2716,7 @@ dependencies = [
 
 [[package]]
 name = "tars-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2738,7 +2738,7 @@ dependencies = [
 
 [[package]]
 name = "tars-storage"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2756,7 +2756,7 @@ dependencies = [
 
 [[package]]
 name = "tars-tools"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -2771,7 +2771,7 @@ dependencies = [
 
 [[package]]
 name = "tars-types"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "reqwest",

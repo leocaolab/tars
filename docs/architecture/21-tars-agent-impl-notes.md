@@ -1,9 +1,10 @@
 # Doc 21 — Native agent implementation notes + open decisions
 
 > Working notes from implementing the native `Agent` (the LLM-backed
-> implementer of `tars_model::Agent`). Records a real fork in tars's tool
-> machinery that has to be resolved before the tars agent is clean.
-> Captured for the team to decide — see §3.
+> implementer of `tars_model::Agent`). The native agent now exists
+> (`TarsAgent` + `EnsembleAgent`, §1); what remains are the cleanups it
+> surfaced in tars's tool machinery (§2) and the follow-ons in §5. The
+> §3 loop decision is **resolved** — see below.
 
 ## 1. What's done
 
@@ -12,6 +13,31 @@
   Pure, depends only on `tars-types`. Committed (`e66a73c`).
 - `tars-tools` coding builtins — `fs.write_file` / `fs.edit_file` /
   `bash.run`, all reading `ToolContext::cwd`. Committed (`3784992`).
+- **cwd seam** (§4) — `AgentContext` gained `cwd: Option<PathBuf>`; the
+  WorkerAgent tar-tools loop builds each `ToolContext` from it
+  (`worker.rs:403`) instead of hardcoded `None`. Committed (`767bd8c`,
+  CLI site `8e63232`).
+- **`TarsAgent`** (`tars-runtime/tars_agent.rs`) — the LLM-backed
+  implementer of `tars_model::Agent`. Hand it a `Task`; it renders the
+  task into a single instruction and drives the existing **WorkerAgent**
+  tars-tools loop over a pure-inference provider, threading `ctx.cwd` so
+  tools act on the worktree. Swapping the provider is what makes it a
+  "gemini agent" vs a "claude_cli agent". This is **option A** of §3 —
+  reuse the WorkerAgent loop via a synthetic one-step `Plan`. Committed
+  (`73fefd1`; renamed `NativeAgent → TarsAgent` in `1ab096b`).
+- **`EnsembleAgent`** (`tars-runtime/ensemble_agent.rs`) — agent-level
+  hedging: runs one `Task` on N candidate `Agent`s concurrently, returns
+  the first success, cancels the rest. Composes over the `Agent` trait, so
+  it's blind to native vs user candidates. Committed (`653abd8`).
+- **Permission enforcement** at tool dispatch (`3d6a79f`) — see §5.
+- Test support: `MockProvider::with_responses` queues per-call replies so
+  a multi-turn agent loop can be driven deterministically in tests
+  (`a769f32`).
+
+> ⚠️ Known limitation of the option-A reuse: `WorkerAgent` parses the
+> model's FINAL turn as a `{summary, confidence}` worker result, so a
+> `TarsAgent`'s last message must be that shape. Fine for "do X and
+> report"; a freer output contract is a follow-on (§5).
 
 ## 2. The blocker: TWO tool systems named `ToolRegistry`
 
@@ -58,21 +84,24 @@ Three options:
   WorkerAgent/Session plumbing. Fastest to a WORKING native coding agent;
   cost = a third loop unless we later collapse A/B into it.
 
-**Recommendation: C now, B eventually.** C gets a working, cwd-aware,
-provider-agnostic native coding agent quickly without the messy fit (A) or
-the big refactor (B), and it's the natural shape the `Agent::run(task)`
-contract wants. Then fold Session's tools onto tars-tools (B) and, if it
-makes sense, have Session reuse C's loop — converging on one tool system +
-one loop. **This needs a yes before building C** (it adds a third loop
-temporarily); flagged here rather than committed.
+**RESOLVED — shipped option A (`TarsAgent`, `73fefd1`).** Rather than add
+a third loop (C) or take the big Session refactor (B) up front, `TarsAgent`
+reuses the existing WorkerAgent tars-tools loop by shaping the `Task` into a
+synthetic one-step `Plan`. This got a working, cwd-aware, provider-agnostic
+native coding agent fastest, with zero new loop. The cost is the
+awkward-fit noted above (the `{summary, confidence}` final-turn contract
+leaks from WorkerAgent) and the still-open two-`ToolRegistry` fork (§2).
+**B remains the eventual end state**: unify Session's tools onto tars-tools,
+retire the second registry, and collapse onto one loop. Tracked in §5.
 
-## 4. The cwd seam (independent of the above, clearly correct)
+## 4. The cwd seam (independent of the above, clearly correct) — ✅ DONE
 
 Regardless of A/B/C, the WorkerAgent tar-tools loop should be able to act
-on a worktree. The bounded fix: add `cwd: Option<PathBuf>` to
-`WorkerContext` and use it at `worker.rs:384` instead of `None`. This is
-additive + safe and unblocks ANY tars-tools-based agent loop from acting on
-a scoped tree. (Doing this next.)
+on a worktree. The bounded fix landed (`767bd8c`): `AgentContext` carries
+`cwd: Option<PathBuf>` and the loop builds each `ToolContext` from it
+(`worker.rs:403`) instead of `None`. Additive + safe — `run_plan` sites
+pass `None` (unchanged behaviour), and any tars-tools-based agent loop can
+now act on a scoped tree. This is what `TarsAgent` threads through.
 
 ## 5. Open questions (status)
 

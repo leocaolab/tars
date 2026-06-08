@@ -220,7 +220,7 @@ intent — not a `ChatRequest`; turning a task into LLM calls is a *native*
 agent's internal job, so an agent that uses no LLM stays first-class.
 
 Two implementers, one interface (tars is an adaptor over both):
-- **`NativeAgent`** (`tars-runtime`) — LLM-backed: turns the task into a
+- **`TarsAgent`** (`tars-runtime`) — LLM-backed: turns the task into a
   prompt and drives a white-box tool loop over a *pure-inference* provider.
   Swap the provider and the same agent is a "gemini agent" or a
   "claude_cli agent" — tars owns the loop, tools, and `cwd`, not the CLI's
