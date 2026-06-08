@@ -16,6 +16,7 @@ use tars_types::{
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
+use std::collections::VecDeque;
 
 /// A canned response for the mock to replay.
 #[derive(Clone, Debug)]
@@ -51,6 +52,10 @@ pub struct MockHistory {
 #[derive(Debug)]
 struct MockState {
     response: CannedResponse,
+    /// Per-call responses popped front-to-back (one per `stream()` call) —
+    /// drives a multi-turn agent (a tool-call turn then a final turn). Empty →
+    /// every call gets `response`.
+    queue: VecDeque<CannedResponse>,
     history: MockHistory,
 }
 
@@ -67,6 +72,27 @@ impl MockProvider {
             capabilities: Capabilities::text_only_baseline(Pricing::default()),
             state: Mutex::new(MockState {
                 response,
+                queue: VecDeque::new(),
+                history: MockHistory::default(),
+            }),
+        })
+    }
+
+    /// A multi-turn mock: `responses` are returned one per `stream()` call,
+    /// front-to-back; once exhausted, every further call repeats the last.
+    /// Drives a tool-using agent loop (a tool-call turn → a final turn) without
+    /// the test poking `set_response` between turns.
+    pub fn with_responses(id: impl Into<ProviderId>, responses: Vec<CannedResponse>) -> Arc<Self> {
+        let fallback = responses
+            .last()
+            .cloned()
+            .unwrap_or_else(|| CannedResponse::text(""));
+        Arc::new(Self {
+            id: id.into(),
+            capabilities: Capabilities::text_only_baseline(Pricing::default()),
+            state: Mutex::new(MockState {
+                response: fallback,
+                queue: responses.into(),
                 history: MockHistory::default(),
             }),
         })
@@ -143,7 +169,7 @@ impl LlmProvider for MockProvider {
                 .lock()
                 .map_err(|e| ProviderError::Internal(format!("mock state poisoned: {e}")))?;
             state.history.requests.push(req.clone());
-            state.response.clone()
+            state.queue.pop_front().unwrap_or_else(|| state.response.clone())
         };
         match response {
             CannedResponse::Error(msg) => Err(ProviderError::Internal(msg)),
