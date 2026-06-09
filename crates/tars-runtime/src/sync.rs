@@ -60,37 +60,46 @@ pub fn shared_runtime() -> &'static Runtime {
 ///
 /// Returns the same `ProviderError` shape as a direct async call,
 /// including `ValidationFailed` (always `ErrorClass::Permanent`).
+pub async fn complete_async(
+    svc: Arc<dyn LlmService>,
+    req: ChatRequest,
+    ctx: RequestContext,
+) -> Result<ChatResponse, ProviderError> {
+    let outcome_handle = ctx.validation_outcome.clone();
+    let mut stream = svc.call(req, ctx).await?;
+    let mut builder = ChatResponseBuilder::new();
+    while let Some(ev) = stream.next().await {
+        builder.apply(ev?);
+    }
+    let mut response = builder.finish();
+    // The validation-outcome side channel is security-critical: it
+    // carries the post-Filter response that must REPLACE the raw
+    // stream. A poisoned lock means a panic happened while a writer
+    // held it — we can't prove filtering ran, so fail closed rather
+    // than silently return an unvalidated response.
+    let rec = outcome_handle.lock().map_err(|_| {
+        ProviderError::Internal(
+            "validation_outcome lock poisoned; cannot confirm output filtering ran".into(),
+        )
+    })?;
+    if let Some(filtered) = rec.filtered_response.as_ref() {
+        response = filtered.clone();
+    } else {
+        response.validation_summary = rec.summary.clone();
+    }
+    drop(rec);
+    Ok(response)
+}
+
+/// Block-on wrapper over [`complete_async`] for SYNC call sites: drives it to
+/// completion on the shared runtime. Callers already on a runtime should await
+/// [`complete_async`] directly instead — no nested runtime, no block_on.
 pub fn complete_sync(
     svc: Arc<dyn LlmService>,
     req: ChatRequest,
     ctx: RequestContext,
 ) -> Result<ChatResponse, ProviderError> {
-    shared_runtime().block_on(async move {
-        let outcome_handle = ctx.validation_outcome.clone();
-        let mut stream = svc.call(req, ctx).await?;
-        let mut builder = ChatResponseBuilder::new();
-        while let Some(ev) = stream.next().await {
-            builder.apply(ev?);
-        }
-        let mut response = builder.finish();
-        // The validation-outcome side channel is security-critical: it
-        // carries the post-Filter response that must REPLACE the raw
-        // stream. A poisoned lock means a panic happened while a writer
-        // held it — we can't prove filtering ran, so fail closed rather
-        // than silently return an unvalidated response.
-        let rec = outcome_handle.lock().map_err(|_| {
-            ProviderError::Internal(
-                "validation_outcome lock poisoned; cannot confirm output filtering ran".into(),
-            )
-        })?;
-        if let Some(filtered) = rec.filtered_response.as_ref() {
-            response = filtered.clone();
-        } else {
-            response.validation_summary = rec.summary.clone();
-        }
-        drop(rec);
-        Ok(response)
-    })
+    shared_runtime().block_on(complete_async(svc, req, ctx))
 }
 
 #[cfg(test)]
