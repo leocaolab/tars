@@ -23,14 +23,14 @@ original language alongside the English translation:
 ## Authoritative version
 
 For day-to-day use, the **English version under
-[`docs/architecture/`](../) is authoritative**. If the two ever
-diverge, prefer the English version (it gets cross-referenced from
-code doc-comments, README, CHANGELOG, etc.). The Chinese files here
-stay frozen as the historical source.
+[`docs/architecture/`](../) is canonical** — it's what code
+doc-comments, README, and CHANGELOG cross-reference, so prefer it if
+the two ever diverge. The Chinese files here are **maintained in sync**
+(kept current, not frozen); fixes that change facts should land in both.
 
 ## File mapping
 
 Every `NN-name.md` here has a sibling at
-[`../NN-name.md`](..) with the same name. Doc 17
-(`17-pipeline-event-store.md`) was originally written in English, so
-it doesn't appear in this directory.
+[`../NN-name.md`](..) with the same name. Docs 17–18 and 20–21 were
+written in English only, so they don't appear in this directory (the
+zh Doc 00 index links to the English originals for those).

@@ -135,6 +135,13 @@ Rust trait 是真理之源,HTTP API / gRPC / Python / TypeScript 等是其投影
 | [11](./11-performance-capacity.md) | 性能与容量 | SLO 定义;瓶颈分析;Cache ROI;压测方法论 | 性能工程师 + SRE |
 | [12](./12-api-specification.md) | API 规范 | Rust / HTTP / gRPC / Python(PyO3) / TS(napi-rs) / WASM | SDK 开发者 |
 | [13](./13-operational-runbook.md) | 运维 Runbook | On-call playbook;12 个故障场景;备份恢复;应急沟通 | SRE / On-call |
+| [14](./14-implementation-path.md) | 实施路径 | M0–M14 里程碑;crate workspace;依赖选型 | 维护者 / 规划 |
+| [15](./15-output-validation.md) | 输出校验 | 校验器链;Pass / Reject / Filter / Annotate 结果 | Pipeline 开发者 |
+| [16](./16-evaluation-framework.md) | 评测框架 | 每次调用产出多维度分数;在线 + 离线 | 评测开发者 |
+| [17](../17-pipeline-event-store.md) | Pipeline 事件存储 *(英文)* | 每次调用一条事件;CAS bodies;`tars events` | 可观测 / 评测 |
+| [18](../18-agent-testing.md) | Agent & LLM 测试 *(英文)* | 行为 diff;5 种测试模式;原生 LLM judge | 测试 / 迁移 prompt 的人 |
+| [20](../20-agent-abstraction.md) | Agent 抽象 *(英文)* | 用户视角的 Agent 契约:把 Task 交给 SkillSet | SDK 作者 |
+| [21](../21-tars-agent-impl-notes.md) | TarsAgent 实现笔记 *(英文)* | 原生 agent 构建笔记;两个 ToolRegistry 的统一 | 维护者 |
 
 ---
 
@@ -303,32 +310,44 @@ Day 7: 13 (Runbook) + Q&A
 
 > 本节是动态的,实施推进中持续更新。
 
-### 8.1 当前状态 (2026-05)
+### 8.1 当前状态 (2026-06-10)
 
 ```
-[█░░░░░░░░░░░░░░░░░░░] 5%
+[██████████████░░░░░░] ~70%
 
-完成:
-- ✅ 13 篇设计文档 (00-13)
-- ✅ 项目骨架 (Cargo workspace)
-- ✅ 早期 prototype (interview_app, ube_core, ube_project) - 探索性
+已完成:
+- ✅ 22 篇设计文档 (00-21)
+- ✅ Cargo workspace 14 个 crate (~158 个 .rs 文件)
+- ✅ 核心 trait 定义 (LlmProvider, LlmService, Middleware, BudgetStore, BatchSubmitter, Tool, Agent, …)
+- ✅ 7 个 HTTP provider 后端 (openai / anthropic / gemini / deepseek / vllm / mlx / llamacpp)
+- ✅ 3 个订阅制 CLI 后端 (claude_cli / gemini_cli / codex_cli)
+- ✅ 测试用 MockProvider (含 per-call 响应队列)
+- ✅ Pipeline 中间件栈: telemetry, cache, per-call/tenant budget, fallback, retry, routing, circuit_breaker, event_emitter, validation
+- ✅ Cache registry (L1 内存 + L2 SQLite)
+- ✅ Agent runtime: Trajectory + AgentEvent + Orchestrator/Worker/Critic
+- ✅ Agent 抽象 (tars-model): trait Agent + Task/SkillSet/Permissions;TarsAgent (LLM 驱动) + EnsembleAgent (任务级 hedge)
+- ✅ 工具 registry + builtins (read / list_dir / write_file / edit_file / bash,cwd 隔离) + 分发时权限检查
+- ✅ Pipeline 事件存储 (SQLite events + CAS bodies.db)
+- ✅ 输出校验器框架 + 4 个 builtin
+- ✅ 批处理模式 (Anthropic + OpenAI;Gemini 延后 stub)
+- ✅ tars-cli: run / plan / run-task / probe / bench / trajectory / events / init
+- ✅ tars-py PyO3 wheel + Python API
+- ✅ tars-node napi-rs 原生插件 (Node / TypeScript 绑定)
+- ✅ tars-server: 个人模式 HTTP/REST (complete + 流式)
 
-进行中:
-- ⏳ 核心 trait 定义 (tars-types, tars-runtime)
+部分:
+- ⏳ M4: tool registry 完成;MCP stdio 尚未
+- ⏳ M5: 丰富的 tars-cli 完成;TUI 尚未
+- ⏳ M7: 个人模式 HTTP server 完成;SPA 面板 + 多租户控制面尚未
+- ⏳ M9: telemetry 中间件完成;OTel exporter 可组合但未接入 CLI;压测尚未
 
 未开始:
-- ⬜ Provider 实现 (任意一家)
-- ⬜ Pipeline 框架
-- ⬜ Cache Registry
-- ⬜ 完整 Agent Runtime
-- ⬜ Storage 层
-- ⬜ Frontend Adapters
-- ⬜ FFI bindings
+- ⬜ M6: Postgres schema, IAM engine, Team 模式
 ```
 
 ### 8.2 实施 Milestones (建议)
 
-> 这是参考路径,实际可调
+> 这是参考路径,实际可调。当前进度:**M0–M3、M8 已完成 ✅**;M4 / M5 / M7 / M9 部分完成;M6 未开始。
 
 **M0: Foundation (3-4 周)**
 - tars-types: 共享类型定义
@@ -430,6 +449,7 @@ Day 7: 13 (Runbook) + Q&A
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | 0.1 | 2026-05 | 13 篇设计文档完成,实施未开始 |
+| 0.4.0 | 2026-06 | 22 篇设计文档;M0–M8 发布(types→tools→Python/Node 绑定)+ Agent 抽象层(tars-model + TarsAgent / EnsembleAgent) |
 
 ---
 
