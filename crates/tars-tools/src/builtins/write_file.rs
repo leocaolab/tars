@@ -221,6 +221,7 @@ mod tests {
         ToolContext {
             cancel: CancellationToken::new(),
             cwd,
+            ..Default::default()
         }
     }
 

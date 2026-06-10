@@ -380,27 +380,25 @@ impl WorkerAgent {
             req.messages.push(assistant_msg);
 
             let mut errors_this_iter = 0usize;
+            // The permission gate now lives in `ToolRegistry::dispatch`
+            // (Doc 23): adapt this agent's `Permissions` into a leaf-level
+            // `PermissionView` closure once, and let dispatch enforce it
+            // (Deny/Ask → is_error result, never runs). No approval channel
+            // here ⇒ `Ask` fails closed (== Deny), as before.
+            let permission: std::sync::Arc<dyn tars_tools::PermissionView> = {
+                let perms = ctx.permissions.clone();
+                std::sync::Arc::new(move |name: &str| match perms.decide(name) {
+                    tars_model::Decision::Allow => tars_tools::ToolDecision::Allow,
+                    tars_model::Decision::Deny => tars_tools::ToolDecision::Deny,
+                    tars_model::Decision::Ask => tars_tools::ToolDecision::Ask,
+                })
+            };
             for call in &response.tool_calls {
-                // Permission gate: a Deny/Ask skill never reaches the tool.
-                // Feed the refusal back as an is_error result so the model
-                // adapts (picks an allowed path) rather than the call
-                // silently running. `Ask` is treated as a refusal until a
-                // human-prompt channel exists (tracked in Doc 21).
-                if !ctx.permissions.is_allowed(&call.name) {
-                    errors_this_iter += 1;
-                    req.messages.push(Message::Tool {
-                        tool_call_id: call.id.clone(),
-                        content: vec![ContentBlock::text(format!(
-                            "permission denied: `{}` is not allowed for this agent",
-                            call.name
-                        ))],
-                        is_error: true,
-                    });
-                    continue;
-                }
                 let tool_ctx = ToolContext {
                     cancel: ctx.cancel.clone(),
                     cwd: ctx.cwd.clone(),
+                    permission: Some(permission.clone()),
+                    ..Default::default()
                 };
                 let tool_msg = registry.dispatch(call, tool_ctx).await;
                 if matches!(&tool_msg, Message::Tool { is_error: true, .. }) {

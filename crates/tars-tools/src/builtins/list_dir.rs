@@ -491,7 +491,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let ctx = ToolContext { cancel, cwd: None };
+        let ctx = ToolContext {
+            cancel,
+            cwd: None,
+            ..Default::default()
+        };
 
         let tool: Arc<dyn Tool> = Arc::new(ListDirTool::new());
         let err = tool

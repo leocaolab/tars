@@ -51,10 +51,16 @@
 //!   - `shell.exec` — biggest blast radius; ships last with explicit
 //!     allowlist + jail.
 
+mod approval;
+mod permission;
 mod registry;
+mod sandbox;
 mod tool;
 
 pub mod builtins;
 
+pub use approval::{ApprovalDecision, ApprovalRequest, ApprovalSink, DenyAllSink};
+pub use permission::{PermissionView, ToolDecision};
 pub use registry::{ToolRegistry, ToolRegistryError};
+pub use sandbox::SandboxPolicy;
 pub use tool::{Tool, ToolContext, ToolError, ToolResult};

@@ -462,7 +462,11 @@ mod tests {
 
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let ctx = ToolContext { cancel, cwd: None };
+        let ctx = ToolContext {
+            cancel,
+            cwd: None,
+            ..Default::default()
+        };
 
         let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::new());
         let err = tool
