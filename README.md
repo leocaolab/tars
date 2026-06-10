@@ -4,19 +4,7 @@
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](./rust-toolchain.toml)
 
-**Rust-first agent runtime supporting 8+ LLM providers, with PyO3 Python bindings, a 10-layer middleware pipeline, and observability by construction.**
-
-> **⚠️ Pre-1.0 Preview**
->
-> Public for transparency, code review, and design feedback — not for broader adoption yet. **No community campaign, no announcement, no roadshow** has happened or is planned before v1.0; star and fork counts are intentionally low at this stage. The only way someone is reading this README right now is targeted (peer review, hiring evaluation, or curiosity from an adjacent project), not organic discovery.
->
-> Track the [Releases page](../../releases) for the v1.0 announcement, which will include a stability commitment, migration guide, and a proper README rewrite for a broader audience. Until then, expect breaking API changes between minor versions, and don't put TARS on a critical production path unless you're prepared to follow `main` closely.
-
-> **How this came together**
->
-> TARS landed as a focused Pre-1.0 sprint — the goal was to establish a complete architectural baseline (8 providers, middleware pipeline, output validation, per-call observability, multi-turn session, agent runtime) and validate it against a real downstream consumer (dogfooded in production) before any broader announcement. **Documentation is design-ahead in places** — the 17 design docs describe the full target shape; the [Status block below](#tars--multi-agent-llm-runtime) and [CHANGELOG.md](./CHANGELOG.md) are authoritative for what's actually shipped vs. designed. If you spot a doc that describes a layer not yet in `crates/`, that's expected — design first, then build, then `<unreleased>` → release.
-
-> **Status (2026-05, v0.2.0):** M0–M7 shipped (types / config / provider / pipeline / cache / runtime / tools). M8 (`tars-py`) in progress — `Provider`, `Pipeline`, `Session`, `CapabilityRequirements`, `CompatibilityResult`, and Python output validators (Pass / Reject / FilterText / Annotate) all exposed. Workspace builds clean on stable Rust 1.85+ with `cargo clippy -Dwarnings` green. See [CHANGELOG.md](./CHANGELOG.md) for per-milestone shipped detail.
+**Rust-first agent runtime: 10+ LLM providers behind one trait, a composable middleware pipeline, an Agent abstraction you hand tasks to, and Python + Node bindings — observability built in.**
 
 ---
 
@@ -39,7 +27,7 @@ See [docs/comparison.md](./docs/comparison.md) for head-to-head positioning.
 ### Install
 
 ```bash
-# Python (M8 in progress)
+# Python
 git clone https://github.com/leocaolab/tars.git
 cd tars/crates/tars-py
 maturin develop --release
@@ -231,7 +219,7 @@ Compose them: **`EnsembleAgent`** runs one task on N agents concurrently and
 takes the first success (tail-latency hedge at *task* granularity, above
 the pipeline's completion-level ensemble).
 
-For a guided tour by role (consumerhitect / SDK author / SRE / security), see [docs/architecture/00-overview.md](./docs/architecture/00-overview.md).
+For a guided tour by role (architect / SDK author / SRE / security), see [docs/architecture/00-overview.md](./docs/architecture/00-overview.md).
 
 ---
 
@@ -245,33 +233,12 @@ For a guided tour by role (consumerhitect / SDK author / SRE / security), see [d
 | Claude CLI  | ✅        | ✅    | ✅     | ✅       | subscription| shipped  |
 | Gemini CLI  | ✅        | ✅    | ✅     | —        | subscription| shipped  |
 | Codex CLI   | ✅        | ✅    | —      | —        | subscription| shipped  |
+| DeepSeek    | ✅        | ✅    | —      | ✅       | API key     | shipped  |
 | vLLM        | ✅        | ✅    | varies | varies   | optional    | shipped  |
 | MLX        | ✅        | varies| —      | varies   | none        | shipped  |
 | llama.cpp  | ✅        | varies| —      | —        | none        | shipped  |
 
-CLI providers (`claude_cli` / `gemini_cli` / `codex_cli`) reuse the user's existing subscription session via the vendor's official CLI, so users on Claude Pro / ChatGPT Plus don't need a separate API key. Documented in [docs/architecture/01-llm-provider.md §6](./docs/architecture/01-llm-provider.md).
-
----
-
-## Key design choices
-
-**Every choice has a "why"; the [docs](./docs/) are where they live. Headlines:**
-
-1. **Layered, not monolithic.** Each layer is single-responsibility. Replace any one layer without touching the rest. Provider trait → can swap OpenAI to vLLM. Cache trait → can swap mem to Redis. Storage trait → SQLite to Postgres.
-
-2. **Plan as DAG, execute as state machine.** Agent orchestration plans express as DAG; runtime executes as event-sourced state machine with backtrack, retry, and recovery. The two are not mixed. ([Doc 04](./docs/architecture/zh/04-agent-runtime.md))
-
-3. **Tenant isolation is sacred.** Cross-tenant leakage of data, compute, or side effects is a P0 bug. No optimization (cache sharing, model warmup, batch fusing) is allowed to cross a tenant boundary. ([Doc 06](./docs/architecture/zh/06-config-multitenancy.md))
-
-4. **Fail closed.** Every safety layer (auth, IAM, cache lookup, budget, schema validation) defaults to denying when it errors. No "open by default for now."
-
-5. **Observable by construction.** MELT (Metrics / Events / Logs / Traces) is not a layer you add later — every component emits typed signals from day 1, with cardinality control and PII redaction enforced at the layer ([Doc 08](./docs/architecture/zh/08-melt-observability.md)).
-
-6. **Trust nothing you didn't compute.** LLM output, user input, tool returns, MCP server responses — all are external and pass through explicit validators before influencing system state.
-
-7. **Cost is a first-class concern.** LLM calls dominate (~95%) production cost. Cache, routing, model tier, budget enforcement are co-designed.
-
-8. **Single source of truth.** The Rust trait is canonical. HTTP / gRPC / Python (PyO3) / TypeScript (napi-rs) are projections of it. No binding is allowed to drift from the core.
+CLI providers (`claude_cli` / `gemini_cli` / `codex_cli`) reuse the user's existing subscription session via the vendor's official CLI, so users on Claude Pro / ChatGPT Plus don't need a separate API key. Documented in [docs/architecture/01-llm-provider.md §6](./docs/architecture/01-llm-provider.md). DeepSeek ships as a built-in `openai_compat` provider — available with just `DEEPSEEK_API_KEY`.
 
 ---
 
@@ -334,52 +301,6 @@ Class hierarchy: `TarsError` → `TarsConfigError` / `TarsProviderError` / `Tars
 
 ---
 
-## What's shipped vs. designed
-
-This repo is **design-ahead**. Some docs describe systems that don't fully exist yet — that's deliberate. We write the doc first to align on what we're building, then build it. We don't try to keep every doc current with every commit; deferred surfaces are tagged in [TODO.md §D-1..D-13](./TODO.md).
-
-| Surface              | Status                          |
-|----------------------|---------------------------------|
-| Type system          | Shipped (`tars-types`)          |
-| Config + multi-layer | Shipped (`tars-config`)         |
-| Provider trait + 8+ backends | Shipped (`tars-provider`) |
-| Middleware pipeline  | Shipped (`tars-pipeline` — Telemetry / Cache / Retry / Routing) |
-| L1 in-memory cache   | Shipped (`tars-cache`)          |
-| Agent runtime core   | Shipped (`tars-runtime` — Session, Trajectory, Events) |
-| Tools + MCP          | Shipped (`tars-tools` — built-ins + MCP integration) |
-| CLI (`tars init`, `tars probe`, `tars bench`) | Shipped (`tars-cli`) |
-| Python bindings      | **In progress** (`tars-py` M8 — Provider/Pipeline/Session live; output validators live; routing/capability surface live) |
-| TypeScript bindings  | Designed only (Doc 12 §6)       |
-| HTTP / gRPC service  | Designed only (Doc 12 §3, §5)   |
-| Postgres + Redis storage | Designed only (Doc 09)      |
-| Multi-tenant runtime | Partial (sketches in Doc 06)    |
-| Web / TUI dashboards | Designed only (Doc 07)          |
-
----
-
-## Engineering practice
-
-Two things you'll notice if you spend time in the repo:
-
-### Trigger-or-delete contracts
-
-Scaffolds and speculative abstractions are tracked in [TODO.md §O-1..O-10](./TODO.md). Each entry has:
-
-- **Where it lives** (file path)
-- **Why deferred** (the ergonomic or scope reason)
-- **Trigger to commit** (condition that justifies the abstraction)
-- **Trigger to delete** (condition where it should be ripped out)
-
-Carry-cost vs. removal-cost is explicit. Nothing is "we keep it just in case" — it's "we keep it until X or Y, then act."
-
-### Audit-driven evolution
-
-The 2026-05-03 downstream-consumer self-review surfaced ~330 issues across three rounds. Critical + error tier was triaged and shipped (commits `9683ce8` / `67de40d` / `cf1605e` / `af2d8f1`). Non-critical residue lives in [TODO.md §A-1..A-6](./TODO.md) with revisit triggers, not "we'll fix it eventually."
-
-The B-31 capability pre-flight feature went through five review passes (v1 → v5), each adding a structured improvement: typed enum, `#[non_exhaustive]`, context-window check, PyO3 expose, structured tracing fields, dedicated exception subclass, typed config-time API. Each pass is in CHANGELOG with rationale.
-
----
-
 ## Documentation
 
 Three entry points for three audiences (see [docs/README.md](./docs/README.md) for the full map):
@@ -388,7 +309,7 @@ Three entry points for three audiences (see [docs/README.md](./docs/README.md) f
 - **[Comparison](./docs/comparison.md)** — TARS vs LangChain / LiteLLM / Letta / AutoGen / NVIDIA NIM
 - **Architecture docs** (below) — design rationale and trade-off discussion
 
-> **Translation status**: Doc 00 + Doc 17 are in English; Doc 01–16 are currently Chinese-only at `docs/architecture/zh/` (English translation deferred). Architectural cross-refs and code identifiers are language-agnostic; the design discussions are readable via machine translation if needed.
+> **Translation status**: Doc 00, 17, and 18–21 are in English; Doc 01–16 are currently Chinese-only at `docs/architecture/zh/` (English translation deferred). Architectural cross-refs and code identifiers are language-agnostic; the design discussions are readable via machine translation if needed.
 
 | Doc | Topic |
 |---|---|
@@ -410,6 +331,10 @@ Three entry points for three audiences (see [docs/README.md](./docs/README.md) f
 | [15 — Output Validation](./docs/architecture/zh/15-output-validation.md) [zh] | JSON Schema enforcement; loose vs strict mode |
 | [16 — Evaluation Framework](./docs/architecture/zh/16-evaluation-framework.md) [zh] | Agent benchmarks; metrics; regression detection |
 | [17 — Pipeline Event Store](./docs/architecture/17-pipeline-event-store.md) | Append-only event log feeding evaluation, replay, and audit |
+| [18 — Agent Testing](./docs/architecture/18-agent-testing.md) | Deterministic agent tests; mock provider; metamorphic checks |
+| [19 — Arc-Fixer Unification](./docs/architecture/19-arc-fixer-unification.md) | Routing/ensemble lifted to the Agent layer; the converged design |
+| [20 — Agent Abstraction](./docs/architecture/20-agent-abstraction.md) | The Agent contract from the user's view: hand a Task to a SkillSet |
+| [21 — TarsAgent Impl Notes](./docs/architecture/21-tars-agent-impl-notes.md) | Native-agent build notes; the two-`ToolRegistry` unification |
 
 ---
 
@@ -419,18 +344,21 @@ Three entry points for three audiences (see [docs/README.md](./docs/README.md) f
 crates/
 ├── tars-types/        Core types (ChatRequest, Capabilities, Errors, ...)
 ├── tars-config/       5-layer config + secret refs + provider builtins
-├── tars-provider/     Provider trait + 9 backends + HTTP base + auth
+├── tars-provider/     Provider trait + 10 providers + HTTP base + auth
 ├── tars-pipeline/     Middleware stack (Telemetry / Cache / Retry / Routing)
 ├── tars-cache/        Cache registry trait + L1 in-mem + content-addressed keys
-├── tars-runtime/      Agent runtime (Session, Trajectory, Worker, Critic, ...)
+├── tars-model/        The Agent contract (trait Agent + Task / SkillSet)
+├── tars-runtime/      Agent runtime (Session, Trajectory, TarsAgent, EnsembleAgent, ...)
 ├── tars-tools/        Built-in tools + MCP integration
 ├── tars-melt/         MELT observability primitives
-├── tars-storage/      Storage trait (sketched; SQLite / Postgres backends incoming)
+├── tars-storage/      Storage trait + SQLite event store (Postgres incoming)
+├── tars-server/       Personal-mode HTTP/REST shell (complete + streaming)
 ├── tars-cli/          `tars` binary (init / probe / bench)
-└── tars-py/           PyO3 + maturin wheel (M8, in progress)
+├── tars-py/           PyO3 + maturin wheel (Python bindings)
+└── tars-node/         napi-rs native addon (Node / TypeScript bindings)
 ```
 
-23k+ LOC. Workspace builds clean on stable Rust 1.85+. CI: `cargo test --workspace --all-features` + clippy `-Dwarnings`.
+63k+ LOC. Workspace builds clean on stable Rust 1.85+. CI: `cargo test --workspace --all-features` + clippy `-Dwarnings`.
 
 ---
 
