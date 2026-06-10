@@ -34,6 +34,7 @@
 //!   is a derived projection we'll add when something consumes it).
 
 mod agent;
+mod bind;
 pub mod check;
 mod critic;
 mod ensemble_agent;
@@ -59,6 +60,7 @@ mod worker;
 pub use agent::{
     Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult, SingleShotAgent,
 };
+pub use bind::{BindError, bind};
 pub use check::{CheckResult, CheckRunner, Invariant, MembershipInvariant, ValidatorInvariant};
 pub use critic::{CriticAgent, CriticError, PartialResultRef};
 pub use error::RuntimeError;
