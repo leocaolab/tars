@@ -84,9 +84,13 @@ pub use prompt::PromptBuilder;
 pub use run_report::build_run_report;
 pub use runtime::{AgentExecutionError, LocalRuntime, Runtime, execute_agent_step};
 pub use session::{Budget, Session, SessionError, SessionOptions, Tokenizer, Turn};
-// Tools live in `tars-tools` now (Doc 23). Re-export the contract so callers
-// that build Sessions can name it without a second dependency line.
 pub use sync::{complete_async, complete_sync, shared_runtime};
-pub use tars_tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+// Tools live in `tars-tools` now (Doc 23). Re-export the whole contract —
+// including the gate/approval/sandbox seams — so callers that build gated
+// Sessions (e.g. the Codex-TUI backend, Doc 22) name it from one place.
+pub use tars_tools::{
+    ApprovalDecision, ApprovalRequest, ApprovalSink, DenyAllSink, PermissionView, SandboxPolicy,
+    Tool, ToolContext, ToolDecision, ToolError, ToolRegistry, ToolResult,
+};
 pub use task::{RunTaskConfig, RunTaskError, StepOutcome, TaskOutcome, run_task};
 pub use worker::{WorkerAgent, WorkerError};

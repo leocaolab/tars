@@ -45,3 +45,20 @@ impl ApprovalSink for DenyAllSink {
         ApprovalDecision::Deny
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn deny_all_sink_denies_everything() {
+        let d = DenyAllSink
+            .request(ApprovalRequest {
+                tool: "bash.run".into(),
+                summary: "rm -rf /".into(),
+                args: serde_json::json!({"cmd": "rm -rf /"}),
+            })
+            .await;
+        assert_eq!(d, ApprovalDecision::Deny);
+    }
+}

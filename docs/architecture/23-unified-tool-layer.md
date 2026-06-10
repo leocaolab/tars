@@ -356,3 +356,22 @@ Verified the shipped code (M0–M3) against this design. Every ✅ cites evidenc
 
 **Verdict: conformant.** All FR/NFR met with test evidence; the divergences
 are documented improvements, not drift.
+
+**Post-review hardening (after a "did you actually test the design?" pass):**
+
+- Added the gate-through-`Session` tests (above) — the registry-level tests
+  alone didn't prove the Session path is gated, which is the whole point.
+- **`tars-py` verified at the Python level**, not just `cargo check`:
+  `maturin develop` builds the wheel and the 69-test Python suite passes
+  post-PyTool-migration.
+- `DenyAllSink` now has a test (`deny_all_sink_denies_everything`); the new
+  tool-layer types are re-exported from `tars-runtime` so a gated-Session
+  consumer (Doc 22) imports them from one place.
+
+**Known coverage gap (honest):** `PyTool::execute` — the Python-callback
+invocation path — has no *dedicated* test, because there is no Python-level
+mock provider that emits tool calls (a faithful round-trip needs a live model
+or a tool-loop harness that doesn't exist yet). It is covered indirectly (the
+binding builds + imports + the 69-test suite passes) and by the Rust-side
+`PyTool`-equivalent path (E2E-1). Building the Python tool-loop harness is its
+own task, tracked for when the TUI (Doc 22) needs Python tools.
