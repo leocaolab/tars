@@ -5,6 +5,9 @@
 //! for supply-chain trust) and draw one frame, proving the dependency
 //! foundation builds before Codex's view layer is vendored + adapted.
 
+#[allow(clippy::all, dead_code)]
+mod view;
+
 use std::io::stdout;
 
 use crossterm::ExecutableCommand;
@@ -20,14 +23,36 @@ fn main() -> anyhow::Result<()> {
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
+    const SAMPLE_MD: &str = "\
+# tars-tui
+
+Codex's markdown renderer, **vendored** and running on *upstream* ratatui.
+
+- bullet one
+- bullet two with `inline code`
+
+```rust
+fn hello() { println!(\"from TARS\"); }
+```
+
+Press **q** to quit.";
+
     loop {
         terminal.draw(|f| {
+            let area = f.area();
+            // Render markdown through the vendored Codex pipeline — this is
+            // "the look" the whole port is for.
+            let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
+            view::markdown::append_markdown(
+                SAMPLE_MD,
+                Some(area.width.saturating_sub(2) as usize),
+                &mut lines,
+            );
             let block = Block::default()
-                .title(" tars-tui (M0 probe) ")
+                .title(" tars-tui (M0a — Codex renderer on upstream ratatui) ")
                 .borders(Borders::ALL);
-            let body =
-                Paragraph::new("Codex view layer not vendored yet — press q to quit.").block(block);
-            f.render_widget(body, f.area());
+            let body = Paragraph::new(ratatui::text::Text::from(lines)).block(block);
+            f.render_widget(body, area);
         })?;
 
         if let Event::Key(k) = event::read()? {
