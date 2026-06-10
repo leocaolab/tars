@@ -1,7 +1,10 @@
 # Doc 17 — Pipeline Event Store
 
-**Status**: design (2026-05-08). Implementation lives behind W3 enabler;
-the present doc is the contract that enabler will materialise.
+**Status**: shipped. Designed 2026-05-08; implemented via the B-20 W3
+enabler — `pipeline_events.db` + `bodies.db` (CAS) + `EventEmitterMiddleware`,
+queryable through `tars events`. This doc remains the design contract;
+see [`observability.md`](../observability.md) for usage and
+[CHANGELOG.md](../../CHANGELOG.md) for the shipped slices.
 
 **Companion**: [Doc 16 — Evaluation Framework](./16-evaluation-framework.md)
 defines `Evaluator` / `OnlineEvaluatorRunner` / scoring semantics; this
