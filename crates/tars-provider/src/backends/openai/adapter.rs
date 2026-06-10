@@ -289,7 +289,10 @@ impl HttpAdapter for OpenAiAdapter {
                 "type": "json_schema",
                 "json_schema": {
                     "name": schema.name.clone().unwrap_or_else(|| "Response".to_string()),
-                    "schema": schema.schema,
+                    "schema": crate::schema_adapt::adapt_schema(
+                        &schema.schema,
+                        crate::schema_adapt::SchemaDialect::OpenAi,
+                    ),
                     "strict": schema.strict,
                 }
             });

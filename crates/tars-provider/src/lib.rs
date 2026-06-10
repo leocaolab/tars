@@ -23,6 +23,7 @@ pub mod batch;
 pub mod http_base;
 pub mod provider;
 pub mod registry;
+pub mod schema_adapt;
 pub mod subprocess_diagnostics;
 pub mod tool_buffer;
 // Audit `tars-provider-src-transport-1` + TODO O-1: the `transport`
@@ -37,6 +38,7 @@ pub use batch::{BatchSubmitter, MockBatchSubmitter};
 pub use http_base::{HttpAdapter, HttpProviderBase, HttpProviderConfig};
 pub use provider::{LlmEventStream, LlmProvider};
 pub use registry::{ProviderRegistry, RegistryError};
+pub use schema_adapt::{SchemaDialect, adapt_schema};
 pub use subprocess_diagnostics::{
     SubprocessDiagnostics, diagnose_child_exit, find_claude_session_log,
     summarise_claude_session_log, worktree_diff_summary,

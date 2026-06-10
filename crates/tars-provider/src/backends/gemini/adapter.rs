@@ -276,7 +276,10 @@ impl HttpAdapter for GeminiAdapter {
 
         if let Some(schema) = &req.structured_output {
             config["responseMimeType"] = json!("application/json");
-            config["responseSchema"] = schema.schema.clone();
+            config["responseSchema"] = crate::schema_adapt::adapt_schema(
+                &schema.schema,
+                crate::schema_adapt::SchemaDialect::Gemini,
+            );
         }
 
         // Thinking config (Gemini 2.5+ family).
