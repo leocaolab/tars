@@ -2688,6 +2688,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.11.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3836,7 +3848,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4475,7 +4487,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tars-cache"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "dirs 5.0.1",
@@ -4493,7 +4505,7 @@ dependencies = [
 
 [[package]]
 name = "tars-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4520,7 +4532,7 @@ dependencies = [
 
 [[package]]
 name = "tars-config"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "dirs 5.0.1",
  "figment",
@@ -4535,7 +4547,7 @@ dependencies = [
 
 [[package]]
 name = "tars-desktop"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -4555,7 +4567,7 @@ dependencies = [
 
 [[package]]
 name = "tars-desktop-app"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -4569,7 +4581,7 @@ dependencies = [
 
 [[package]]
 name = "tars-melt"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
@@ -4585,7 +4597,7 @@ dependencies = [
 
 [[package]]
 name = "tars-model"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -4598,7 +4610,7 @@ dependencies = [
 
 [[package]]
 name = "tars-node"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "futures",
  "napi",
@@ -4620,7 +4632,7 @@ dependencies = [
 
 [[package]]
 name = "tars-pipeline"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4645,7 +4657,7 @@ dependencies = [
 
 [[package]]
 name = "tars-provider"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4653,6 +4665,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "httpdate",
+ "nix",
  "pin-project-lite",
  "reqwest 0.12.28",
  "serde",
@@ -4670,7 +4683,7 @@ dependencies = [
 
 [[package]]
 name = "tars-py"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -4691,7 +4704,7 @@ dependencies = [
 
 [[package]]
 name = "tars-runtime"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4715,7 +4728,7 @@ dependencies = [
 
 [[package]]
 name = "tars-server"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4737,7 +4750,7 @@ dependencies = [
 
 [[package]]
 name = "tars-storage"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4755,7 +4768,7 @@ dependencies = [
 
 [[package]]
 name = "tars-tools"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -4770,7 +4783,7 @@ dependencies = [
 
 [[package]]
 name = "tars-types"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",

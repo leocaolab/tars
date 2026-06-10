@@ -20,6 +20,7 @@ mod builder_macros;
 pub mod auth;
 pub mod backends;
 pub mod batch;
+pub mod child_reaper;
 pub mod http_base;
 pub mod provider;
 pub mod registry;
@@ -35,6 +36,7 @@ pub mod tool_buffer;
 
 pub use auth::{Auth, AuthError, AuthResolver, BasicAuthResolver, ResolvedAuth, basic};
 pub use batch::{BatchSubmitter, MockBatchSubmitter};
+pub use child_reaper::{deregister, kill_all_spawned, register};
 pub use http_base::{HttpAdapter, HttpProviderBase, HttpProviderConfig};
 pub use provider::{LlmEventStream, LlmProvider};
 pub use registry::{ProviderRegistry, RegistryError};

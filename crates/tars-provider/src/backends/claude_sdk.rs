@@ -356,8 +356,8 @@ impl ClaudeSdkProvider {
             ))
         })?;
 
-        let mut child = Command::new(&self.executable)
-            .args([script, "--stdio"])
+        let mut cmd = Command::new(&self.executable);
+        cmd.args([script, "--stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Pass child stderr through so `claude-daemon stdio ready`
@@ -366,14 +366,26 @@ impl ClaudeSdkProvider {
             .stderr(Stdio::inherit())
             // Reap when this provider is dropped; without this, the
             // child outlives tars on `panic!` / `process::exit`.
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                ProviderError::Internal(format!(
-                    "claude_sdk: spawn {:?} {:?}: {e}",
-                    self.executable, script
-                ))
-            })?;
+            .kill_on_drop(true);
+        // Put the daemon in its OWN process group so the signal-time reaper
+        // can SIGKILL the daemon AND the claude children it spawns as a unit
+        // (negative-PID group kill). kill_on_drop only covers the graceful
+        // Drop path; a SIGINT/SIGTERM to tars never unwinds, so without this
+        // the daemon + its claude children orphan.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = cmd.spawn().map_err(|e| {
+            ProviderError::Internal(format!(
+                "claude_sdk: spawn {:?} {:?}: {e}",
+                self.executable, script
+            ))
+        })?;
+
+        // Register the daemon PID so the host's SIGINT/SIGTERM handler can
+        // reap it (and its process group) on signal-death. The graceful
+        // path is handled by the `ReaperGuard` stored on the `Session`,
+        // which deregisters on `Session` drop alongside kill_on_drop.
+        let reaper_guard = child.id().map(crate::child_reaper::ReaperGuard::new);
 
         let stdin = child.stdin.take().ok_or_else(|| {
             ProviderError::Internal("claude_sdk: child stdin pipe missing".into())
@@ -430,6 +442,7 @@ impl ClaudeSdkProvider {
             pending,
             next_id: AtomicU64::new(0),
             _child: Mutex::new(Some(child)),
+            _reaper_guard: reaper_guard,
         })
     }
 }
@@ -476,6 +489,11 @@ struct Session {
     /// the session is dropped. Never read otherwise — the mutex is
     /// only there to satisfy `Sync` without a Cell wrapper.
     _child: Mutex<Option<tokio::process::Child>>,
+    /// Deregisters the daemon PID from the signal-time reaper registry on
+    /// `Session` drop (the graceful path), parallel to `_child`'s
+    /// kill_on_drop. `None` only if the OS didn't hand back a PID. Never
+    /// read — held purely for its `Drop`.
+    _reaper_guard: Option<crate::child_reaper::ReaperGuard>,
 }
 
 /// Resolve a default `server.mjs` location when the user omits

@@ -36,6 +36,13 @@ httpdate = "1"
 thiserror.workspace = true
 tracing.workspace = true
 
+# Signal-time child reaper: SIGKILL the spawned claude process groups when
+# the host is terminated by SIGINT/SIGTERM (kill_on_drop only covers the
+# graceful path). See `child_reaper`. `nix` gives a SAFE `killpg` wrapper so
+# we don't need an `unsafe` FFI block (the workspace forbids `unsafe_code`).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 wiremock.workspace = true

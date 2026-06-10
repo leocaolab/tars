@@ -10,6 +10,8 @@ use tokio::process::Command;
 
 use tars_types::{ProviderError, Usage};
 
+use crate::child_reaper::ReaperGuard;
+
 use super::argv::{SubprocessInvocation, SubprocessRunner, build_argv_with, streaming_enabled};
 use super::streaming::run_streaming;
 
@@ -44,6 +46,13 @@ impl SubprocessRunner for RealSubprocessRunner {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
+        // Put the child in its OWN process group (becomes group leader) so
+        // the signal-time reaper can SIGKILL the whole subtree as a unit
+        // (claude may itself fork helpers). kill_on_drop still covers the
+        // graceful path; the process group covers the signal path.
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         let mut child = cmd.spawn().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => ProviderError::CliSubprocessDied {
                 exit_code: None,
@@ -58,6 +67,12 @@ impl SubprocessRunner for RealSubprocessRunner {
                 stderr: format!("spawn failed: {e}"),
             },
         })?;
+
+        // Register the PID so a SIGINT/SIGTERM reaper in the host can
+        // SIGKILL this child's process group. The guard deregisters on
+        // EVERY exit path of this function (early `?`, timeout, success),
+        // mirroring kill_on_drop's graceful coverage.
+        let _reaper_guard = child.id().map(ReaperGuard::new);
 
         // Write the prompt on stdin and close it. stdin must be present
         // (Stdio::piped above); if it isn't, fail loudly rather than
