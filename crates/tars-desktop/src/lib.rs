@@ -10,12 +10,15 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use serde::Serialize;
 use tars_config::Config;
+use tars_pipeline::RequestContext;
 use tars_runtime::{Budget, Session, SessionOptions};
 use tars_server::AppState;
 use tars_types::{
-    Capabilities, ChatResponse, ModelHint, Pricing, StopReason, TelemetryAccumulator,
+    Capabilities, ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, ModelHint, Pricing,
+    SharedTelemetry, StopReason, TelemetryAccumulator, TraceId, new_shared_telemetry,
 };
 
 /// A configured provider, for the model picker.
@@ -116,6 +119,48 @@ impl Backend {
             metrics: metrics_from(&resp, &telemetry),
         })
     }
+
+    /// Like [`send_once`](Self::send_once) but **streams**: it drives the
+    /// pipeline directly and calls `on_delta` for each text increment as it
+    /// arrives, returning the finalized turn (text + metrics) once the stream
+    /// ends. The Tauri command passes an `on_delta` that emits a Tauri event;
+    /// tests pass one that collects. (M1: single-turn; multi-turn streaming is
+    /// a follow-on.)
+    pub async fn stream_chat<F: FnMut(&str)>(
+        &self,
+        provider: Option<&str>,
+        model: Option<&str>,
+        params: &ChatParams,
+        user_text: &str,
+        mut on_delta: F,
+    ) -> anyhow::Result<ChatTurn> {
+        let (llm, model) = self.state.llm_for(provider, model)?;
+        let req = ChatRequest {
+            system: params.system.clone(),
+            max_output_tokens: params.max_output_tokens,
+            ..ChatRequest::user(ModelHint::Explicit(model), user_text)
+        };
+        let telemetry: SharedTelemetry = new_shared_telemetry();
+        let mut ctx = RequestContext::personal(TraceId::new(uuid::Uuid::new_v4().to_string()));
+        ctx.telemetry = telemetry.clone();
+
+        let mut stream = llm.call(req, ctx).await?;
+        let mut builder = ChatResponseBuilder::new();
+        while let Some(ev) = stream.next().await {
+            let ev = ev?;
+            if let ChatEvent::Delta { text } = &ev {
+                on_delta(text);
+            }
+            builder.apply(ev);
+        }
+        let resp = builder.finish();
+        let tel = telemetry.lock().map(|g| g.clone()).unwrap_or_default();
+        Ok(ChatTurn {
+            text: resp.text.clone(),
+            thinking: resp.thinking.clone(),
+            metrics: metrics_from(&resp, &tel),
+        })
+    }
 }
 
 fn metrics_from(resp: &ChatResponse, tel: &TelemetryAccumulator) -> TurnMetrics {
@@ -175,5 +220,22 @@ mod tests {
             turn.metrics.stop_reason.is_some(),
             "metrics should be populated (stop_reason)"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_chat_drains_and_finalizes() {
+        let config = ConfigManager::load_from_str("[providers.mock]\ntype = \"mock\"\n").unwrap();
+        let backend = Backend::from_config(&config).unwrap();
+
+        // Collect streamed deltas via the callback; assert the finalized turn.
+        let mut streamed = String::new();
+        let turn = backend
+            .stream_chat(Some("mock"), None, &ChatParams::default(), "hi", |d| {
+                streamed.push_str(d)
+            })
+            .await
+            .unwrap();
+        assert!(!turn.text.is_empty(), "streamed turn has final text");
+        assert!(turn.metrics.stop_reason.is_some(), "metrics populated");
     }
 }

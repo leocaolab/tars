@@ -4538,6 +4538,7 @@ name = "tars-desktop"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "futures",
  "serde",
  "serde_json",
  "tars-config",
@@ -4546,6 +4547,7 @@ dependencies = [
  "tars-server",
  "tars-types",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

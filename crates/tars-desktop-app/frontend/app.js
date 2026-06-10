@@ -3,6 +3,7 @@
 // vanilla converter; KaTeX / a real markdown lib come with a later milestone.
 
 const invoke = window.__TAURI__.core.invoke;
+const listen = window.__TAURI__.event.listen;
 
 const $ = (id) => document.getElementById(id);
 const providerSel = $("provider");
@@ -106,6 +107,16 @@ function setBusy(busy) {
   sendBtn.textContent = busy ? "…" : "Send";
 }
 
+// An empty assistant bubble we stream tokens into.
+function startAssistantMessage() {
+  if (empty) empty.style.display = "none";
+  const msg = document.createElement("div");
+  msg.className = "msg assistant";
+  msg.innerHTML = `<div class="role">Assistant</div><div class="bubble"></div>`;
+  transcript.appendChild(msg);
+  return { msg, bubble: msg.querySelector(".bubble") };
+}
+
 async function send() {
   const text = input.value.trim();
   if (!text || sendBtn.disabled) return;
@@ -113,18 +124,29 @@ async function send() {
   input.value = "";
   input.style.height = "auto";
   setBusy(true);
+
+  const { msg, bubble } = startAssistantMessage();
+  let acc = "";
+  // Live tokens arrive as `chat-delta` events while the command runs.
+  const unlisten = await listen("chat-delta", (e) => {
+    acc += e.payload;
+    bubble.innerHTML = renderMarkdown(acc);
+    transcript.scrollTop = transcript.scrollHeight;
+  });
   try {
-    const turn = await invoke("send_chat", {
+    const turn = await invoke("send_chat_stream", {
       provider: providerSel.value || null,
       model: null,
       system: systemInput.value || null,
       maxOutputTokens: maxtokInput.value ? parseInt(maxtokInput.value, 10) : null,
       userText: text,
     });
-    appendMessage("assistant", turn.text, turn.metrics);
+    bubble.innerHTML = renderMarkdown(turn.text); // normalize to the final text
+    msg.appendChild(metricsRow(turn.metrics));
   } catch (e) {
-    appendMessage("error", String(e));
+    bubble.innerHTML = `<div style="color: var(--error)">${escapeHtml(String(e))}</div>`;
   } finally {
+    unlisten();
     setBusy(false);
   }
 }
