@@ -1,14 +1,15 @@
 # Doc 23 — Unified tool layer (design)
 
-> Status: design, 2026-06-10. Implements the tool-layer half of
+> Status: **✅ implemented 2026-06-10** (M0–M3: `ad21e44`, `ec90f4d`,
+> `08d5447`). Implements the tool-layer half of
 > [Doc 22](./22-codex-tui-port.md) (T1–T3) and pays down the
 > two-`ToolRegistry` fork + `skills()→tools` gap from
-> [Doc 21 §2/§5](./21-tars-agent-impl-notes.md). Reuses the tool contract
-> from [Doc 05](./05-tools-mcp-skills.md) and the permission model from
-> [Doc 20](./20-agent-abstraction.md).
+> [Doc 21 §2/§5](./21-tars-agent-impl-notes.md) (both now resolved). Reuses
+> the tool contract from [Doc 05](./05-tools-mcp-skills.md) and the
+> permission model from [Doc 20](./20-agent-abstraction.md).
 >
 > *(Generated via the `design` skill — grounded in the codebase; every
-> reuse is cited `file:line`.)*
+> reuse is cited `file:line`. Conformance check at the end.)*
 
 ## 1. Overview & goal
 
@@ -299,3 +300,43 @@ keeps the trait stable when the lift lands); `bind()` (closes the
 Sequencing rationale: M0 is pure-additive (safe to land immediately); M1
 adds enforcement behind the seam; M2 is the risky unification, done early
 while context is fresh; M3 is the cleanup that the TUI/agent layer wants.
+
+---
+
+## Conformance check (post-implementation, 2026-06-10)
+
+Verified the shipped code (M0–M3) against this design. Every ✅ cites evidence.
+
+| Item | Status | Evidence |
+|---|---|---|
+| **FR-1** one `Tool`/`ToolContext`/`ToolRegistry`; session's removed | ✅ | session-local `Tool`/`ToolRegistry` deleted; `session.rs` imports `tars_tools::{Tool, ToolContext, ToolRegistry}`; `lib.rs` re-exports them. E2E-1. |
+| **FR-2** gate before execute; Deny→is_error | ✅ | `registry.rs:105` gate ahead of `execute`. Test `deny_never_runs_the_tool`. |
+| **FR-3** Ask→approval; no sink ⇒ fail closed | ✅ | `registry.rs` Ask branch + `select!` on cancel. Tests `ask_respects_approval_decision`, `ask_without_sink_fails_closed`. |
+| **FR-4** no regression on the Allow path | ✅ | Session wire shape preserved (`{tool_use_id,result}`); 52-suite CI run green. |
+| **FR-5** `sandbox`/`approval` fields, inert default | ✅ | `tool.rs` `ToolContext`; `tool_sees_sandbox_policy`. |
+| **FR-6** `bind()` errors on unbacked skill | ✅ | `bind.rs`; `rejects_an_advertised_skill_with_no_tool` (E2E-5). |
+| **NFR-1** gate overhead < 5µs (no Ask) | ✅ (by inspection) | Allow path adds one `Option::map` + match, no alloc (`registry.rs:111`). Criterion bench deferred (NFR-1 note). |
+| **NFR-2** fail-closed for Ask w/o sink | ✅ | `ask_without_sink_fails_closed` asserts the tool never ran. |
+| **NFR-3** existing suites green | ✅ | `cargo test --workspace --exclude tars-py`: 52 suites ok; `tars-py` `cargo check` clean. |
+| **NFR-4** approval cancel-safe | ✅ | `tokio::select!` vs `ctx.cancel`; `cancel_during_approval_aborts_cleanly`. |
+| **E2E-1…E2E-6** | ✅ | E2E-1 `session_worker_tool_parity.rs`; E2E-2/3/4/6 in `registry.rs` tests; E2E-5 in `bind.rs`. |
+| Doc 21 §2 (two-registry) / §5 (skills→tools) resolved | ✅ | Doc 21 §2/§5 marked RESOLVED. |
+
+**Divergences from the design (all intentional, design honored):**
+
+1. **Worker inline gate removed in M1, not M2.** Doc 23 §6/roadmap put the
+   `worker.rs:389` gate removal in M2; it shipped in M1 (same commit as the
+   dispatch gate) to avoid a transient double-gate window. *(Doc updated to
+   match — the better sequencing.)*
+2. **Session error semantics changed (improvement).** The retired session
+   `Tool::call` aborted the turn on `Err`; the unified path returns an
+   `is_error` result the model adapts to (matching WorkerAgent), with a new
+   consecutive-all-error backstop (`MAX_CONSECUTIVE_ALL_ERROR_ITERS`). Not in
+   the original §8 but consistent with FR-4 (Allow path unchanged) and the
+   "model adapts" contract.
+3. **NFR-1 criterion bench not run.** Judged unnecessary — the Allow path is
+   provably one map+match with no allocation. Flagged here rather than
+   silently skipped.
+
+**Verdict: conformant.** All FR/NFR met with test evidence; the divergences
+are documented improvements, not drift.

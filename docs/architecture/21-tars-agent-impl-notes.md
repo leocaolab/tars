@@ -39,7 +39,11 @@
 > `TarsAgent`'s last message must be that shape. Fine for "do X and
 > report"; a freer output contract is a follow-on (§5).
 
-## 2. The blocker: TWO tool systems named `ToolRegistry`
+## 2. The blocker: TWO tool systems named `ToolRegistry` — ✅ RESOLVED (Doc 23 M2)
+
+> The fork below is **gone**: the Session-local `Tool`/`ToolRegistry` were
+> deleted and `Session` now dispatches through `tars_tools::ToolRegistry`
+> (Doc 23, `ec90f4d`). The history is kept for context.
 
 A native coding agent needs to run a multi-turn LLM↔tool loop whose tools
 act on the agent's worktree (`AgentContext::cwd`). tars has TWO tool-loop
@@ -109,13 +113,18 @@ now act on a scoped tree. This is what `TarsAgent` threads through.
   loop checks `ctx.permissions.is_allowed(tool)` before dispatch; a
   Deny/Ask skill yields an `is_error` result, never running. (`Ask` is
   treated as a refusal until a human-prompt channel exists.)
-- ⬜ The two-`ToolRegistry` fork (§2) — long-term plan is to unify on
-  `tars_tools::ToolRegistry` (Session's `.call` registry is the odd one
-  out). Not started; it's the lever to retire option A for a clean loop.
-- ⬜ `skills() → tools` binding: a tars agent's `SkillSet` is advertised
-  separately from the concrete `tars_tools` it's built with. A registry
-  from skill-name → Tool (so skills and tools can't drift) is a follow-on.
-- ⬜ `Ask` permission: needs a human-prompt channel; currently == Deny.
+- ✅ The two-`ToolRegistry` fork (§2) — **RESOLVED** (Doc 23 M2, `ec90f4d`).
+  The Session-local `Tool`/`ToolRegistry` are deleted; `Session` dispatches
+  through `tars_tools::ToolRegistry::dispatch`, the same gated path the
+  WorkerAgent uses.
+- ✅ `skills() → tools` binding — **RESOLVED** (Doc 23 M3, `08d5447`).
+  `tars_runtime::bind(&SkillSet, tools)` builds the registry and rejects any
+  advertised skill with no backing tool (`BindError::Unbacked`), so skills
+  and tools can't drift.
+- ✅ `Ask` permission — **RESOLVED** (Doc 23 M0/M1, `ad21e44`). The dispatch
+  gate consults a `ToolContext::approval` sink for `Ask` (allow/deny, races
+  `cancel`); with no sink it fails closed (== Deny, as before). The TUI's
+  approval widget is the sink (Doc 22).
 - ⬜ `AgentRole` / `trait Agent` duplication: `tars-model::AgentRole` vs the
   one in `tars-runtime/agent.rs` (the single-call thing). Unify by having
   runtime re-export the model's, and rename runtime's `trait Agent` →
