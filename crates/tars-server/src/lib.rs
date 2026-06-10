@@ -131,6 +131,41 @@ impl AppState {
             })?;
         Ok((entry.pipeline.clone(), model))
     }
+
+    // ── Public reuse seam (Doc 22: tars-desktop drives this in-process) ──
+
+    /// The pipeline-wrapped [`LlmService`] + resolved model for a provider —
+    /// the same resolution the HTTP handlers use, exposed for in-process
+    /// consumers (the Tauri desktop GUI) that build a `Session` over it.
+    /// `provider`/`model` `None` fall back to the configured defaults.
+    pub fn llm_for(
+        &self,
+        provider: Option<&str>,
+        model: Option<&str>,
+    ) -> anyhow::Result<(Arc<dyn LlmService>, String)> {
+        self.resolve(provider, model)
+            .map_err(|e| anyhow::anyhow!("{}", e.message))
+    }
+
+    /// Sorted ids of the configured providers — for a model/provider picker.
+    pub fn provider_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.providers.keys().cloned().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The default provider (set iff exactly one is configured or named at
+    /// startup), if any.
+    pub fn default_provider(&self) -> Option<&str> {
+        self.default_provider.as_deref()
+    }
+
+    /// The configured `default_model` for a provider id, if known.
+    pub fn default_model_for(&self, provider: &str) -> Option<&str> {
+        self.providers
+            .get(provider)
+            .and_then(|e| e.default_model.as_deref())
+    }
 }
 
 /// Build the router for `state`.

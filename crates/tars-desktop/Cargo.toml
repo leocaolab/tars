@@ -1,0 +1,29 @@
+[package]
+name = "tars-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LM-Studio-style desktop debug/playground GUI over TARS (Doc 22). Tauri shell over a TARS-native backend. M0: the testable backend core."
+
+[lints]
+workspace = true
+
+# M0a: a pure-Rust, CI-testable backend core (no Tauri/webview yet). The Tauri
+# bin + frontend land next and will move this crate out of CI's default build
+# (webview libs aren't on the Linux runner).
+
+[dependencies]
+tars-server = { path = "../tars-server" }
+tars-runtime = { path = "../tars-runtime" }
+tars-config = { path = "../tars-config" }
+tars-pipeline = { path = "../tars-pipeline" }
+tars-types = { path = "../tars-types" }
+
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
