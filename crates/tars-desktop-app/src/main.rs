@@ -9,7 +9,9 @@
 // On Windows, hide the console window for a release build.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tars_desktop::{Backend, ChatMsgView, ChatTurn, ConversationMeta, ProviderInfo};
+use tars_desktop::{
+    Backend, ChatMsgView, ChatTurn, ConversationMeta, EventRecord, ProviderInfo, TrajectorySummary,
+};
 use tauri::Emitter;
 
 /// Managed Tauri state: the one backend the whole app drives.
@@ -70,6 +72,21 @@ async fn send_message(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn list_trajectories(
+    backend: tauri::State<'_, AppBackend>,
+) -> Result<Vec<TrajectorySummary>, String> {
+    Ok(backend.0.list_trajectories().await)
+}
+
+#[tauri::command]
+async fn trajectory_events(
+    backend: tauri::State<'_, AppBackend>,
+    id: String,
+) -> Result<Vec<EventRecord>, String> {
+    Ok(backend.0.trajectory_events(&id).await)
+}
+
 /// Load `~/.tars/config.toml` if present, else the built-in provider defaults.
 fn load_backend() -> anyhow::Result<Backend> {
     let config = match tars_config::default_config_path() {
@@ -88,7 +105,9 @@ fn main() {
             new_conversation,
             list_conversations,
             conversation_messages,
-            send_message
+            send_message,
+            list_trajectories,
+            trajectory_events
         ])
         .run(tauri::generate_context!())
         .expect("error while running tars-desktop");

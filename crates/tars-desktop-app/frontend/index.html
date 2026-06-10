@@ -9,7 +9,10 @@
   <body>
     <aside class="sidebar">
       <div class="sidebar-head">
-        <span class="sidebar-title">Chats</span>
+        <div class="tabs">
+          <button id="tab-chats" class="tab active">Chats</button>
+          <button id="tab-traces" class="tab" title="Trajectories from the shared store (incl. arc runs)">Traces</button>
+        </div>
         <button id="newchat" class="newchat" title="New chat">＋</button>
       </div>
       <div id="convlist" class="convlist"></div>

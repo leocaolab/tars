@@ -18,7 +18,9 @@ tars-server = { path = "../tars-server" }
 tars-runtime = { path = "../tars-runtime" }
 tars-config = { path = "../tars-config" }
 tars-pipeline = { path = "../tars-pipeline" }
+tars-storage = { path = "../tars-storage" }
 tars-types = { path = "../tars-types" }
+dirs = { workspace = true }
 
 anyhow.workspace = true
 serde = { workspace = true }
@@ -29,3 +31,4 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

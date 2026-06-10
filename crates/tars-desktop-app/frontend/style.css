@@ -233,3 +233,52 @@ body {
   opacity: 0.5;
   cursor: default;
 }
+
+/* ── Sidebar tabs ─────────────────────────────────────── */
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+.tab {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.tab.active {
+  color: var(--accent);
+  background: #e3e3e8;
+}
+
+/* ── Trace (trajectory) view ──────────────────────────── */
+.event {
+  max-width: 820px;
+  margin: 0 auto 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.event-head {
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.event-head .seq {
+  color: var(--muted);
+  margin-right: 8px;
+  font-weight: 400;
+}
+.event-json {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--code-bg);
+  font-size: 12px;
+  overflow-x: auto;
+  max-height: 320px;
+}

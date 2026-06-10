@@ -20,9 +20,11 @@ use tars_config::Config;
 use tars_pipeline::RequestContext;
 use tars_runtime::{Budget, Session, SessionOptions};
 use tars_server::AppState;
+pub use tars_storage::EventRecord;
+use tars_storage::{EventStore, open_event_store_at_path};
 use tars_types::{
     Capabilities, ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, ContentBlock, Message,
-    ModelHint, Pricing, SharedTelemetry, StopReason, TelemetryAccumulator, TraceId,
+    ModelHint, Pricing, SharedTelemetry, StopReason, TelemetryAccumulator, TraceId, TrajectoryId,
     new_shared_telemetry,
 };
 
@@ -87,20 +89,45 @@ struct Conversation {
     messages: Vec<Message>,
 }
 
+/// One trajectory in the trace sidebar (an agent run — e.g. an arc fix round).
+#[derive(Debug, Clone, Serialize)]
+pub struct TrajectorySummary {
+    pub id: String,
+    pub event_count: u64,
+}
+
 /// The TARS-native backend the Tauri commands drive.
 pub struct Backend {
     state: Arc<AppState>,
     conversations: Mutex<HashMap<String, Conversation>>,
     counter: AtomicU64,
+    /// The shared trajectory event store (`events.sqlite`) — what `tars run` /
+    /// agents (incl. arc) write their decision trees to. `None` if it can't be
+    /// opened; the trace view is then simply empty.
+    trajectory_store: Option<Arc<dyn EventStore>>,
 }
 
 impl Backend {
     /// Build from a loaded config — reuses tars-server's per-provider pipelines.
+    /// Opens the shared trajectory store at its default location for the trace
+    /// view (best-effort: `None` if it can't be opened).
     pub fn from_config(config: &Config) -> anyhow::Result<Self> {
+        let trajectory_store = default_trajectory_store_path()
+            .and_then(|p| open_event_store_at_path(&p).ok())
+            .map(|s| s as Arc<dyn EventStore>);
+        Self::with_trajectory_store(config, trajectory_store)
+    }
+
+    /// Build with an explicit (or no) trajectory store — used by tests.
+    pub fn with_trajectory_store(
+        config: &Config,
+        trajectory_store: Option<Arc<dyn EventStore>>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             state: AppState::from_config(config, None)?,
             conversations: Mutex::new(HashMap::new()),
             counter: AtomicU64::new(0),
+            trajectory_store,
         })
     }
 
@@ -307,6 +334,41 @@ impl Backend {
             metrics: metrics_from(&resp, &tel),
         })
     }
+
+    // ── Trajectories (the trace view — arc writes its runs here too) ─────
+
+    /// List trajectories in the shared store (an agent run each). Order is
+    /// store-unspecified; the GUI can sort.
+    pub async fn list_trajectories(&self) -> Vec<TrajectorySummary> {
+        let Some(store) = &self.trajectory_store else {
+            return Vec::new();
+        };
+        let ids = store.list_trajectories().await.unwrap_or_default();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            let event_count = store.high_water(&id).await.unwrap_or(0);
+            out.push(TrajectorySummary {
+                id: id.to_string(),
+                event_count,
+            });
+        }
+        out
+    }
+
+    /// Every event of a trajectory, in `sequence_no` order — the decision tree.
+    pub async fn trajectory_events(&self, id: &str) -> Vec<EventRecord> {
+        let Some(store) = &self.trajectory_store else {
+            return Vec::new();
+        };
+        store
+            .read_all(&TrajectoryId::new(id))
+            .await
+            .unwrap_or_default()
+    }
+}
+
+fn default_trajectory_store_path() -> Option<std::path::PathBuf> {
+    dirs::data_dir().map(|d| d.join("tars").join("events.sqlite"))
 }
 
 fn title_from(s: &str) -> String {
@@ -457,5 +519,36 @@ mod tests {
             .unwrap()
             .title;
         assert_eq!(title, "first");
+    }
+
+    #[tokio::test]
+    async fn trajectory_view_lists_and_reads() {
+        // A temp trajectory store with one trajectory + two events.
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_event_store_at_path(&dir.path().join("events.sqlite")).unwrap();
+        let tid = TrajectoryId::new("traj-1");
+        store
+            .append(
+                &tid,
+                &[
+                    serde_json::json!({ "type": "started" }),
+                    serde_json::json!({ "type": "step_completed" }),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let config = ConfigManager::load_from_str("[providers.mock]\ntype = \"mock\"\n").unwrap();
+        let backend =
+            Backend::with_trajectory_store(&config, Some(store as Arc<dyn EventStore>)).unwrap();
+
+        let trajs = backend.list_trajectories().await;
+        assert!(
+            trajs.iter().any(|t| t.id == "traj-1" && t.event_count == 2),
+            "trajectory listed with its event count"
+        );
+        let events = backend.trajectory_events("traj-1").await;
+        assert_eq!(events.len(), 2, "both events read back in order");
+        assert_eq!(events[0].sequence_no, 1);
     }
 }

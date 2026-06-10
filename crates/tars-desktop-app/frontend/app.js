@@ -14,8 +14,12 @@ const input = $("input");
 const sendBtn = $("send");
 const convList = $("convlist");
 const newChatBtn = $("newchat");
+const tabChats = $("tab-chats");
+const tabTraces = $("tab-traces");
+const composer = document.querySelector(".composer");
 
 let currentConvId = null;
+let view = "chats"; // "chats" | "traces"
 
 // ── Minimal, safe markdown → HTML ───────────────────────────────────────
 function escapeHtml(s) {
@@ -161,6 +165,71 @@ async function switchConv(id) {
   await refreshConvList();
 }
 
+// ── Traces (trajectories — incl. arc runs) ──────────────────────────────
+async function refreshTraceList() {
+  const trajs = await invoke("list_trajectories");
+  convList.innerHTML = "";
+  if (!trajs.length) {
+    convList.innerHTML =
+      '<div class="conv" style="color: var(--muted); cursor: default">No trajectories yet. Run an agent (or arc).</div>';
+    return;
+  }
+  for (const t of trajs) {
+    const el = document.createElement("div");
+    el.className = "conv";
+    el.textContent = t.id;
+    el.title = `${t.id} · ${t.event_count} events`;
+    el.addEventListener("click", () => showTrajectory(t.id, el));
+    convList.appendChild(el);
+  }
+}
+
+function eventSummary(p) {
+  if (p && typeof p === "object" && !Array.isArray(p)) {
+    if (typeof p.type === "string") return p.type;
+    const keys = Object.keys(p);
+    if (keys.length === 1) return keys[0];
+  }
+  return "event";
+}
+
+async function showTrajectory(id, el) {
+  if (el) {
+    document.querySelectorAll(".conv.active").forEach((e) => e.classList.remove("active"));
+    el.classList.add("active");
+  }
+  const events = await invoke("trajectory_events", { id });
+  transcript.innerHTML = "";
+  if (!events.length) {
+    showEmpty();
+    return;
+  }
+  for (const ev of events) {
+    const card = document.createElement("div");
+    card.className = "event";
+    card.innerHTML =
+      `<div class="event-head"><span class="seq">#${ev.sequence_no}</span>${escapeHtml(eventSummary(ev.payload))}</div>` +
+      `<pre class="event-json">${escapeHtml(JSON.stringify(ev.payload, null, 2))}</pre>`;
+    transcript.appendChild(card);
+  }
+}
+
+function setView(v) {
+  view = v;
+  tabChats.classList.toggle("active", v === "chats");
+  tabTraces.classList.toggle("active", v === "traces");
+  newChatBtn.style.display = v === "chats" ? "" : "none";
+  composer.style.display = v === "chats" ? "" : "none";
+  if (v === "chats") {
+    refreshConvList();
+    if (currentConvId) switchConv(currentConvId);
+    else showEmpty();
+  } else {
+    showEmpty();
+    refreshTraceList();
+  }
+}
+
 // ── Send ────────────────────────────────────────────────────────────────
 function setBusy(busy) {
   sendBtn.disabled = busy;
@@ -201,6 +270,8 @@ async function send() {
 // ── Wiring ──────────────────────────────────────────────────────────────
 sendBtn.addEventListener("click", send);
 newChatBtn.addEventListener("click", newChat);
+tabChats.addEventListener("click", () => setView("chats"));
+tabTraces.addEventListener("click", () => setView("traces"));
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
