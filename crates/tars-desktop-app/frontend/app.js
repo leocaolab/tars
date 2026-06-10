@@ -1,6 +1,6 @@
-// tars-desktop frontend (M0). Talks to the Rust backend via Tauri's global
-// invoke (no npm — `withGlobalTauri: true`). Markdown is rendered with a tiny
-// vanilla converter; KaTeX / a real markdown lib come with a later milestone.
+// tars-desktop frontend (M1). Talks to the Rust backend via Tauri's global
+// invoke (no npm — `withGlobalTauri: true`). Conversations live in the backend;
+// this is a view. Tokens stream live via the `chat-delta` event.
 
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
@@ -10,16 +10,16 @@ const providerSel = $("provider");
 const systemInput = $("system");
 const maxtokInput = $("maxtok");
 const transcript = $("transcript");
-const empty = $("empty");
 const input = $("input");
 const sendBtn = $("send");
+const convList = $("convlist");
+const newChatBtn = $("newchat");
+
+let currentConvId = null;
 
 // ── Minimal, safe markdown → HTML ───────────────────────────────────────
 function escapeHtml(s) {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function renderMarkdown(src) {
@@ -27,20 +27,18 @@ function renderMarkdown(src) {
   let html = "";
   blocks.forEach((block, i) => {
     if (i % 2 === 1) {
-      // fenced code block — drop an optional language line
       const body = block.replace(/^[^\n]*\n/, "");
       html += `<pre><code>${escapeHtml(body.replace(/\n$/, ""))}</code></pre>`;
       return;
     }
-    for (let line of block.split("\n")) {
+    for (const line of block.split("\n")) {
       let h = escapeHtml(line);
       h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
       h = h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
       h = h.replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
       const head = line.match(/^(#{1,3})\s+(.*)$/);
       if (head) {
-        const lvl = head[1].length;
-        html += `<h${lvl}>${escapeHtml(head[2])}</h${lvl}>`;
+        html += `<h${head[1].length}>${escapeHtml(head[2])}</h${head[1].length}>`;
       } else if (/^\s*[-*]\s+/.test(line)) {
         html += `<div>• ${h.replace(/^\s*[-*]\s+/, "")}</div>`;
       } else if (line.trim() === "") {
@@ -54,8 +52,13 @@ function renderMarkdown(src) {
 }
 
 // ── Transcript ──────────────────────────────────────────────────────────
+function dropEmpty() {
+  const e = transcript.querySelector(".empty");
+  if (e) e.remove();
+}
+
 function appendMessage(role, text, metrics) {
-  if (empty) empty.style.display = "none";
+  dropEmpty();
   const msg = document.createElement("div");
   msg.className = `msg ${role}`;
   const label = role === "user" ? "You" : role === "error" ? "Error" : "Assistant";
@@ -65,6 +68,7 @@ function appendMessage(role, text, metrics) {
   if (metrics) msg.appendChild(metricsRow(metrics));
   transcript.appendChild(msg);
   transcript.scrollTop = transcript.scrollHeight;
+  return msg;
 }
 
 function metricsRow(m) {
@@ -84,7 +88,31 @@ function metricsRow(m) {
   return row;
 }
 
-// ── Providers ───────────────────────────────────────────────────────────
+const CURSOR = '<span class="cursor">▌</span>';
+function startAssistantMessage() {
+  dropEmpty();
+  const msg = document.createElement("div");
+  msg.className = "msg assistant";
+  msg.innerHTML = `<div class="role">Assistant</div><div class="bubble">${CURSOR}</div>`;
+  transcript.appendChild(msg);
+  transcript.scrollTop = transcript.scrollHeight;
+  return { msg, bubble: msg.querySelector(".bubble") };
+}
+
+function showEmpty() {
+  transcript.innerHTML = '<div class="empty">Send a message to start.</div>';
+}
+
+function renderTranscript(messages) {
+  transcript.innerHTML = "";
+  if (!messages.length) {
+    showEmpty();
+    return;
+  }
+  for (const m of messages) appendMessage(m.role, m.text);
+}
+
+// ── Providers + conversations ───────────────────────────────────────────
 async function loadProviders() {
   try {
     const providers = await invoke("list_providers");
@@ -101,25 +129,47 @@ async function loadProviders() {
   }
 }
 
+async function refreshConvList() {
+  const convs = await invoke("list_conversations");
+  convList.innerHTML = "";
+  for (const c of convs) {
+    const el = document.createElement("div");
+    el.className = "conv" + (c.id === currentConvId ? " active" : "");
+    el.textContent = c.title || "New chat";
+    el.title = c.provider ? `${c.title} · ${c.provider}` : c.title;
+    el.addEventListener("click", () => switchConv(c.id));
+    convList.appendChild(el);
+  }
+}
+
+async function newChat() {
+  const meta = await invoke("new_conversation", {
+    provider: providerSel.value || null,
+    model: null,
+    system: systemInput.value || null,
+    maxOutputTokens: maxtokInput.value ? parseInt(maxtokInput.value, 10) : null,
+  });
+  currentConvId = meta.id;
+  showEmpty();
+  await refreshConvList();
+}
+
+async function switchConv(id) {
+  currentConvId = id;
+  const msgs = await invoke("conversation_messages", { id });
+  renderTranscript(msgs);
+  await refreshConvList();
+}
+
 // ── Send ────────────────────────────────────────────────────────────────
 function setBusy(busy) {
   sendBtn.disabled = busy;
   sendBtn.textContent = busy ? "…" : "Send";
 }
 
-// An empty assistant bubble we stream tokens into.
-function startAssistantMessage() {
-  if (empty) empty.style.display = "none";
-  const msg = document.createElement("div");
-  msg.className = "msg assistant";
-  msg.innerHTML = `<div class="role">Assistant</div><div class="bubble"></div>`;
-  transcript.appendChild(msg);
-  return { msg, bubble: msg.querySelector(".bubble") };
-}
-
 async function send() {
   const text = input.value.trim();
-  if (!text || sendBtn.disabled) return;
+  if (!text || sendBtn.disabled || !currentConvId) return;
   appendMessage("user", text);
   input.value = "";
   input.style.height = "auto";
@@ -127,22 +177,19 @@ async function send() {
 
   const { msg, bubble } = startAssistantMessage();
   let acc = "";
-  // Live tokens arrive as `chat-delta` events while the command runs.
   const unlisten = await listen("chat-delta", (e) => {
     acc += e.payload;
-    bubble.innerHTML = renderMarkdown(acc);
+    bubble.innerHTML = renderMarkdown(acc) + CURSOR;
     transcript.scrollTop = transcript.scrollHeight;
   });
   try {
-    const turn = await invoke("send_chat_stream", {
-      provider: providerSel.value || null,
-      model: null,
-      system: systemInput.value || null,
-      maxOutputTokens: maxtokInput.value ? parseInt(maxtokInput.value, 10) : null,
+    const turn = await invoke("send_message", {
+      conversationId: currentConvId,
       userText: text,
     });
-    bubble.innerHTML = renderMarkdown(turn.text); // normalize to the final text
+    bubble.innerHTML = renderMarkdown(turn.text);
     msg.appendChild(metricsRow(turn.metrics));
+    refreshConvList(); // the title may have been set from the first message
   } catch (e) {
     bubble.innerHTML = `<div style="color: var(--error)">${escapeHtml(String(e))}</div>`;
   } finally {
@@ -151,7 +198,9 @@ async function send() {
   }
 }
 
+// ── Wiring ──────────────────────────────────────────────────────────────
 sendBtn.addEventListener("click", send);
+newChatBtn.addEventListener("click", newChat);
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
@@ -163,4 +212,13 @@ input.addEventListener("input", () => {
   input.style.height = Math.min(input.scrollHeight, 180) + "px";
 });
 
-loadProviders();
+async function init() {
+  await loadProviders();
+  const convs = await invoke("list_conversations");
+  if (convs.length) {
+    await switchConv(convs[0].id);
+  } else {
+    await newChat();
+  }
+}
+init();

@@ -7,30 +7,39 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">TARS</div>
-      <select id="provider" class="select" title="Provider / model"></select>
-      <input id="system" class="system" placeholder="System prompt (optional)…" />
-      <div class="spacer"></div>
-      <label class="maxtok">
-        max tokens
-        <input id="maxtok" type="number" min="1" placeholder="default" />
-      </label>
-    </header>
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <span class="sidebar-title">Chats</span>
+        <button id="newchat" class="newchat" title="New chat">＋</button>
+      </div>
+      <div id="convlist" class="convlist"></div>
+    </aside>
 
-    <main id="transcript" class="transcript">
-      <div class="empty" id="empty">Pick a provider and send a message.</div>
-    </main>
+    <div class="main">
+      <header class="topbar">
+        <select id="provider" class="select" title="Provider / model"></select>
+        <input id="system" class="system" placeholder="System prompt (applies to new chats)…" />
+        <div class="spacer"></div>
+        <label class="maxtok">
+          max tokens
+          <input id="maxtok" type="number" min="1" placeholder="default" />
+        </label>
+      </header>
 
-    <footer class="composer">
-      <textarea
-        id="input"
-        class="input"
-        rows="1"
-        placeholder="Send a message to the model…  (⌘/Ctrl+Enter to send)"
-      ></textarea>
-      <button id="send" class="send">Send</button>
-    </footer>
+      <main id="transcript" class="transcript">
+        <div class="empty" id="empty">Send a message to start.</div>
+      </main>
+
+      <footer class="composer">
+        <textarea
+          id="input"
+          class="input"
+          rows="1"
+          placeholder="Send a message to the model…  (⌘/Ctrl+Enter to send)"
+        ></textarea>
+        <button id="send" class="send">Send</button>
+      </footer>
+    </div>
 
     <script src="app.js"></script>
   </body>

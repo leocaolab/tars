@@ -25,8 +25,76 @@ body {
 
 body {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-columns: 250px 1fr;
   height: 100vh;
+}
+
+.main {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-width: 0;
+}
+
+/* ── Sidebar ──────────────────────────────────────────── */
+.sidebar {
+  background: #f0f0f2;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  font-weight: 600;
+}
+.newchat {
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+.newchat:hover {
+  background: #e3e3e8;
+}
+.convlist {
+  overflow-y: auto;
+  padding: 4px 8px;
+}
+.conv {
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+}
+.conv:hover {
+  background: #e3e3e8;
+}
+.conv.active {
+  background: #dcdcf5;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.cursor {
+  color: var(--muted);
+  animation: blink 1s steps(2, start) infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
 }
 
 /* ── Top bar ─────────────────────────────────────────── */

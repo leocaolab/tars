@@ -1,15 +1,15 @@
 //! tars-desktop-app — the Tauri shell for the TARS debug GUI (Doc 22).
 //!
 //! Thin: it loads config, builds the TARS-native [`Backend`] (from the
-//! `tars-desktop` core crate), and exposes two commands the static frontend
-//! calls via `window.__TAURI__.core.invoke`. All the real work — pipelines,
-//! the chat `Session`, telemetry — lives in `tars-desktop` (which is unit
-//! tested in CI; this shell isn't, since it needs a system webview).
+//! `tars-desktop` core crate), and exposes commands the static frontend calls
+//! via `window.__TAURI__.core.invoke`. All real work — pipelines, conversation
+//! history, streaming, telemetry — lives in `tars-desktop` (unit tested in CI;
+//! this shell isn't, since it needs a system webview).
 
 // On Windows, hide the console window for a release build.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tars_desktop::{Backend, ChatParams, ChatTurn, ProviderInfo};
+use tars_desktop::{Backend, ChatMsgView, ChatTurn, ConversationMeta, ProviderInfo};
 use tauri::Emitter;
 
 /// Managed Tauri state: the one backend the whole app drives.
@@ -23,53 +23,49 @@ async fn list_providers(
 }
 
 #[tauri::command]
-async fn send_chat(
+async fn new_conversation(
     backend: tauri::State<'_, AppBackend>,
     provider: Option<String>,
     model: Option<String>,
     system: Option<String>,
     max_output_tokens: Option<u32>,
-    user_text: String,
-) -> Result<ChatTurn, String> {
-    let params = ChatParams {
-        system: system.filter(|s| !s.trim().is_empty()),
-        max_output_tokens,
-    };
-    backend
+) -> Result<ConversationMeta, String> {
+    Ok(backend
         .0
-        .send_once(provider.as_deref(), model.as_deref(), &params, &user_text)
-        .await
-        .map_err(|e| e.to_string())
+        .new_conversation(provider, model, system, max_output_tokens)
+        .await)
 }
 
-/// Streaming variant: emits a `chat-delta` event (the text increment) for each
-/// token as it arrives, then resolves with the finalized turn (text + metrics).
 #[tauri::command]
-async fn send_chat_stream(
+async fn list_conversations(
+    backend: tauri::State<'_, AppBackend>,
+) -> Result<Vec<ConversationMeta>, String> {
+    Ok(backend.0.list_conversations().await)
+}
+
+#[tauri::command]
+async fn conversation_messages(
+    backend: tauri::State<'_, AppBackend>,
+    id: String,
+) -> Result<Vec<ChatMsgView>, String> {
+    Ok(backend.0.conversation_messages(&id).await)
+}
+
+/// Send a turn into a conversation; streams the reply via `chat-delta` events
+/// and resolves with the finalized turn (text + metrics).
+#[tauri::command]
+async fn send_message(
     app: tauri::AppHandle,
     backend: tauri::State<'_, AppBackend>,
-    provider: Option<String>,
-    model: Option<String>,
-    system: Option<String>,
-    max_output_tokens: Option<u32>,
+    conversation_id: String,
     user_text: String,
 ) -> Result<ChatTurn, String> {
-    let params = ChatParams {
-        system: system.filter(|s| !s.trim().is_empty()),
-        max_output_tokens,
-    };
     let emitter = app.clone();
     backend
         .0
-        .stream_chat(
-            provider.as_deref(),
-            model.as_deref(),
-            &params,
-            &user_text,
-            move |delta| {
-                let _ = emitter.emit("chat-delta", delta.to_string());
-            },
-        )
+        .stream_in_conversation(&conversation_id, &user_text, move |delta| {
+            let _ = emitter.emit("chat-delta", delta.to_string());
+        })
         .await
         .map_err(|e| e.to_string())
 }
@@ -89,8 +85,10 @@ fn main() {
         .manage(AppBackend(backend))
         .invoke_handler(tauri::generate_handler![
             list_providers,
-            send_chat,
-            send_chat_stream
+            new_conversation,
+            list_conversations,
+            conversation_messages,
+            send_message
         ])
         .run(tauri::generate_context!())
         .expect("error while running tars-desktop");
