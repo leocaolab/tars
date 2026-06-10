@@ -1,12 +1,17 @@
-//! Doc 23 E2E-1: the **same** `Arc<dyn tars_tools::Tool>`, registered once,
-//! runs identically whether driven by `Session::send` or `WorkerAgent` — the
-//! payoff of the unified tool layer (both dispatch through
-//! `tars_tools::ToolRegistry::dispatch`, same gate, same `cwd`).
+//! Doc 23 E2E tests that exercise the unified tool layer **through
+//! `Session::send`** (the TUI backend path), not just the registry:
+//!
+//! - **E2E-1** — the same tool runs identically via `Session` and `WorkerAgent`.
+//! - **gate-through-Session** — a `Session` whose `tool_ctx` denies a tool
+//!   gates it (is_error, never runs) — the actual point of the change.
+//! - **E2E-4 (faithful)** — dropping the `Session::send` future mid-approval
+//!   runs nothing and doesn't panic.
 //!
 //! No live LLM: a small queueing provider feeds one canned event stream per
 //! call (tool call → final text), mirroring `worker_with_tools.rs`.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream;
@@ -14,7 +19,10 @@ use futures::stream;
 use tars_pipeline::{LlmService, Pipeline, ProviderService};
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{AgentContext, Budget, Session, SessionOptions, WorkerAgent};
-use tars_tools::{ToolRegistry, builtins::WriteFileTool};
+use tars_tools::{
+    ApprovalDecision, ApprovalRequest, ApprovalSink, PermissionView, ToolContext, ToolDecision,
+    ToolRegistry, builtins::WriteFileTool,
+};
 use tars_types::{
     AgentId, Capabilities, ChatEvent, ChatRequest, ModelHint, Pricing, ProviderError, ProviderId,
     RequestContext, StopReason, TrajectoryId, Usage,
@@ -180,4 +188,102 @@ async fn same_tool_runs_identically_via_session_and_worker() {
         "the same tool produced identical results under both drivers"
     );
     assert!(!session_reply.is_empty(), "session returned a final reply");
+}
+
+// ── Gate-through-Session tests (the actual point of Doc 23) ───────────
+
+/// Build a Session over the given canned-event sequences, tools jailed to
+/// `dir`, with the supplied `tool_ctx` (permission / approval / sandbox).
+fn session_with(
+    dir: &std::path::Path,
+    events: Vec<Vec<ChatEvent>>,
+    tool_ctx: ToolContext,
+) -> Session {
+    Session::new(
+        build_llm(EventQueueProvider::new(events)),
+        Capabilities::text_only_baseline(Pricing::default()),
+        SessionOptions {
+            system: "you write files".into(),
+            budget: Budget::Chars(usize::MAX / 2),
+            tools: Some(owned_registry(dir)),
+            tool_ctx,
+            default_max_output_tokens: None,
+            model: ModelHint::Explicit("any-model".into()),
+        },
+    )
+}
+
+/// Approval sink that never answers — for the drop-mid-approval test.
+struct PendingSink;
+#[async_trait]
+impl ApprovalSink for PendingSink {
+    async fn request(&self, _req: ApprovalRequest) -> ApprovalDecision {
+        std::future::pending::<()>().await;
+        ApprovalDecision::Allow
+    }
+}
+
+/// A `Session` whose permission view denies the write tool gates it *through
+/// `send`*: the call comes back is_error, the model continues, the file is
+/// never written. This is what the whole change is for — a gated Session path.
+#[tokio::test]
+async fn session_gates_a_denied_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.txt");
+    let deny_writes: Arc<dyn PermissionView> = Arc::new(|name: &str| {
+        if name == "fs.write_file" {
+            ToolDecision::Deny
+        } else {
+            ToolDecision::Allow
+        }
+    });
+    let mut session = session_with(
+        dir.path(),
+        vec![
+            write_call_events(path.to_str().unwrap(), "should not happen"),
+            final_text_events("ok, I won't"),
+        ],
+        ToolContext {
+            permission: Some(deny_writes),
+            ..Default::default()
+        },
+    );
+    let reply = session.send_text("write the file", None).await.unwrap();
+    assert!(!path.exists(), "denied tool must NOT have written the file");
+    assert_eq!(reply, "ok, I won't", "model continued past the refusal");
+}
+
+/// E2E-4 (faithful): dropping the `Session::send` future while it is blocked
+/// awaiting approval runs nothing and doesn't panic (TurnGuard rolls back).
+#[tokio::test]
+async fn dropping_session_send_during_approval_runs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.txt");
+    let ask: Arc<dyn PermissionView> = Arc::new(|_: &str| ToolDecision::Ask);
+    let mut session = session_with(
+        dir.path(),
+        vec![write_call_events(
+            path.to_str().unwrap(),
+            "should not happen",
+        )],
+        ToolContext {
+            permission: Some(ask),
+            approval: Some(Arc::new(PendingSink)),
+            ..Default::default()
+        },
+    );
+    // `send` blocks forever at the approval await; the timeout drops the
+    // future mid-flight — exactly the E2E-4 scenario.
+    let r =
+        tokio::time::timeout(Duration::from_millis(100), session.send_text("write", None)).await;
+    assert!(
+        r.is_err(),
+        "send must still be blocked on approval (timed out)"
+    );
+    assert!(
+        !path.exists(),
+        "dropping mid-approval must NOT have run the tool"
+    );
+    // Session survives the dropped turn (no panic, history rolled back).
+    assert_eq!(session.turns().len(), 0, "dropped turn rolled back");
 }

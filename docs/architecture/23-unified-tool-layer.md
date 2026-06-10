@@ -280,26 +280,41 @@ keeps the trait stable when the lift lands); `bind()` (closes the
 
 ## Roadmap
 
-- **M0 — `ToolContext` seam (additive, zero behavior change).** Add
-  `sandbox`/`approval` fields with `Default` = unrestricted/None; add
-  `ApprovalSink` + `DenyAllSink`; add `SandboxPolicy` stub. Delivers C1,C2(seam),F5.
-  Depends: —. Verified by: **E2E-6** + existing suites green (NFR-3).
-- **M1 — Gate inside dispatch.** Implement C3 (permission + Ask→approval +
-  cancel), thread a `PermissionView` via `ToolContext`. Delivers F2,F3,FR-2,FR-3.
-  Depends: M0. Verified by: **E2E-2, E2E-3, E2E-4**.
-- **M2 — Session rewire / retire the fork.** C4 + C5: Session dispatches via
-  `tars_tools::ToolRegistry`; delete `session.rs` `Tool`/`ToolRegistry`;
-  delete the inline `worker.rs:389` gate. Delivers F1,F4,FR-1,FR-4. **Highest
-  risk (touches the Session loop + every Session tool caller)** — sequenced
-  here, not last, per risk-up-front. Verified by: **E2E-1** + full suite (NFR-3).
-- **M3 — Skill binding.** C6 `bind()` + consistency check; resolve Doc 21 §5.
-  Delivers F6,FR-6. Depends: M2. Verified by: **E2E-5**.
-- **(downstream, Doc 22 T2/T3)** sandbox lift + TUI `ApprovalSink` plug into
-  the M0 seams — out of scope here, unblocked by it.
+Each milestone states a concrete **Deliverable** (the artifact that ships) and
+**Success criteria** (the measurable, test-backed condition that proves it
+done — not "it compiles"). Status carries the commit. Risk-front-loaded.
 
-Sequencing rationale: M0 is pure-additive (safe to land immediately); M1
-adds enforcement behind the seam; M2 is the risky unification, done early
-while context is fresh; M3 is the cleanup that the TUI/agent layer wants.
+### M0 — `ToolContext` seam (additive, zero behavior change) — ✅ `ad21e44`
+- **Deliverable:** `ToolContext` gains `permission` / `approval` / `sandbox`
+  (all inert by default); new `PermissionView` + `ToolDecision`,
+  `ApprovalSink` + `ApprovalRequest`/`ApprovalDecision` + `DenyAllSink`,
+  `SandboxPolicy`. (C1, C2-seam, F5.) Depends: —.
+- **Success criteria:** (a) a tool reads `ctx.sandbox` passed in — `tool_sees_sandbox_policy` (E2E-6) passes; (b) **no behavior change** — full existing `tars-tools` + `tars-runtime` suites stay green (NFR-3); (c) `ToolContext::default()` is fully inert.
+
+### M1 — Gate inside `dispatch` (+ Worker onto it) — ✅ `ad21e44`
+- **Deliverable:** permission + approval gate inside `ToolRegistry::dispatch`
+  (C3); `WorkerAgent` switched off its inline gate onto the dispatch gate.
+  (F2, F3, FR-2, FR-3.) Depends: M0.
+- **Success criteria:** Deny never runs the tool (`deny_never_runs_the_tool`); Ask honors operator allow/deny (`ask_respects_approval_decision`, E2E-2); Ask with no sink fails closed, tool never runs (`ask_without_sink_fails_closed`, E2E-3, NFR-2); approval is cancel-safe (`cancel_during_approval_aborts_cleanly`, E2E-4, NFR-4); Worker suite stays green.
+
+### M2 — Session rewire / retire the fork (highest risk) — ✅ `ec90f4d`
+- **Deliverable:** `Session` dispatches via `tars_tools::ToolRegistry`; the
+  session-local `Tool`/`ToolRegistry` deleted (Doc 21 §2); `PyTool` migrated;
+  Worker inline gate already removed in M1. (F1, F4, FR-1, FR-4.) Depends: M0, M1.
+- **Success criteria:** (a) the **same** tool runs identically via `Session::send` and `WorkerAgent` — `same_tool_runs_identically_via_session_and_worker` (E2E-1); (b) the gate works **through `Session::send`** — `session_gates_a_denied_tool` (a denied tool is is_error and never writes the file); (c) dropping the send future mid-approval runs nothing + rolls back — `dropping_session_send_during_approval_runs_nothing` (faithful E2E-4); (d) CI suite (workspace minus tars-py) green + `tars-py` `cargo check` clean (FR-4 / NFR-3).
+
+### M3 — Skill ↔ registry binding — ✅ `08d5447`
+- **Deliverable:** `tars_runtime::bind(&SkillSet, tools) -> Result<ToolRegistry, BindError>` (C6, F6, FR-6); resolves Doc 21 §5. Depends: M2.
+- **Success criteria:** an advertised skill with no backing tool is rejected at bind time — `rejects_an_advertised_skill_with_no_tool` (E2E-5); a fully-backed set binds and extra unadvertised tools are allowed (`binds_when_every_skill_has_a_backing_tool`, `extra_unadvertised_tools_are_allowed`).
+
+### Downstream (out of scope here, unblocked by M0)
+- **Doc 22 T2** — Seatbelt/Landlock sandbox lift plugs into `ToolContext.sandbox`.
+- **Doc 22 T3** — the Codex-TUI approval widget implements `ApprovalSink`.
+
+Sequencing rationale: M0 is pure-additive (safe to land immediately); M1 adds
+enforcement behind the seam (Worker moved in the same commit to avoid a
+double-gate); M2 is the risky unification, done early while context is fresh;
+M3 is the cleanup the TUI/agent layer wants.
 
 ---
 
@@ -320,6 +335,7 @@ Verified the shipped code (M0–M3) against this design. Every ✅ cites evidenc
 | **NFR-3** existing suites green | ✅ | `cargo test --workspace --exclude tars-py`: 52 suites ok; `tars-py` `cargo check` clean. |
 | **NFR-4** approval cancel-safe | ✅ | `tokio::select!` vs `ctx.cancel`; `cancel_during_approval_aborts_cleanly`. |
 | **E2E-1…E2E-6** | ✅ | E2E-1 `session_worker_tool_parity.rs`; E2E-2/3/4/6 in `registry.rs` tests; E2E-5 in `bind.rs`. |
+| **gate-through-`Session`** (CUJ-1/2 end-to-end, beyond the registry unit tests) | ✅ | `session_gates_a_denied_tool` (a denied tool is is_error and never writes through `Session::send`); `dropping_session_send_during_approval_runs_nothing` (faithful E2E-4 — drops the send future mid-approval, asserts no run + TurnGuard rollback). |
 | Doc 21 §2 (two-registry) / §5 (skills→tools) resolved | ✅ | Doc 21 §2/§5 marked RESOLVED. |
 
 **Divergences from the design (all intentional, design honored):**
