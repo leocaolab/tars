@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TARS Desktop</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">TARS</div>
+      <select id="provider" class="select" title="Provider / model"></select>
+      <input id="system" class="system" placeholder="System prompt (optional)…" />
+      <div class="spacer"></div>
+      <label class="maxtok">
+        max tokens
+        <input id="maxtok" type="number" min="1" placeholder="default" />
+      </label>
+    </header>
+
+    <main id="transcript" class="transcript">
+      <div class="empty" id="empty">Pick a provider and send a message.</div>
+    </main>
+
+    <footer class="composer">
+      <textarea
+        id="input"
+        class="input"
+        rows="1"
+        placeholder="Send a message to the model…  (⌘/Ctrl+Enter to send)"
+      ></textarea>
+      <button id="send" class="send">Send</button>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

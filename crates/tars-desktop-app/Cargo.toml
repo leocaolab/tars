@@ -1,0 +1,27 @@
+[package]
+name = "tars-desktop-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tauri desktop shell for the TARS debug GUI (Doc 22) — LM-Studio-style. CI-isolated (needs a system webview)."
+
+[lints]
+workspace = true
+
+# NOTE: excluded from `default-members` + CI — Tauri needs platform webview
+# libs (no webkitgtk on the Linux runner). The testable backend lives in the
+# pure-Rust `tars-desktop` crate (in CI). Build/run locally: `cargo run -p tars-desktop-app`.
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tars-desktop = { path = "../tars-desktop" }
+tars-config = { path = "../tars-config" }
+
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+anyhow.workspace = true

@@ -37,11 +37,13 @@ jobs:
       # Skip tars-py here — it links libpython at test time, which
       # this image doesn't satisfy without extra setup. Coverage
       # for tars-py lives in the dedicated `python` job below.
-      - name: cargo test (workspace minus tars-py)
-        run: cargo test --workspace --exclude tars-py --no-fail-fast
+      - name: cargo test (workspace minus tars-py, tars-desktop-app)
+        run: cargo test --workspace --exclude tars-py --exclude tars-desktop-app --no-fail-fast
 
       - name: cargo clippy (-D warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # tars-desktop-app is the Tauri shell — needs system webview libs
+        # (no webkitgtk on the runner); its testable logic lives in tars-desktop.
+        run: cargo clippy --workspace --exclude tars-desktop-app --all-targets -- -D warnings
 
       # The `otlp` feature is off by default (heavy tonic/grpc deps), so
       # the workspace gates above don't compile it. Check + test it

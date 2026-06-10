@@ -13,6 +13,7 @@ members = [
     "crates/tars-tools",
     "crates/tars-cli",
     "crates/tars-desktop",
+    "crates/tars-desktop-app",
     "crates/tars-server",
     "crates/tars-py",
     "crates/tars-node",
