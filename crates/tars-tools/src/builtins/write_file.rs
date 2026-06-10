@@ -244,7 +244,10 @@ mod tests {
             .await
             .unwrap();
         assert!(!r.is_error, "{}", r.content);
-        assert_eq!(std::fs::read_to_string(dir.join("sub/hello.txt")).unwrap(), "hi");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("sub/hello.txt")).unwrap(),
+            "hi"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

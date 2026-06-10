@@ -36,13 +36,13 @@
 mod agent;
 pub mod check;
 mod critic;
+mod ensemble_agent;
 mod error;
 mod event;
 mod executor;
 pub mod judge;
 mod llm_adapters;
 mod message;
-mod ensemble_agent;
 mod tars_agent;
 pub use ensemble_agent::EnsembleAgent;
 pub use tars_agent::TarsAgent;

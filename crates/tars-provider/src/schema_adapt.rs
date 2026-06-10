@@ -191,7 +191,11 @@ mod tests {
         let out = adapt_schema(&raw, SchemaDialect::Gemini);
         assert!(out.get("allOf").is_none(), "allOf removed: {out}");
         assert_eq!(out["type"], json!("string"), "type hoisted: {out}");
-        assert_eq!(out["enum"], json!(["open", "resolved"]), "enum hoisted: {out}");
+        assert_eq!(
+            out["enum"],
+            json!(["open", "resolved"]),
+            "enum hoisted: {out}"
+        );
     }
 
     #[test]
@@ -227,7 +231,10 @@ mod tests {
             "allOf": [{"type": "string"}, {"minLength": 1}]
         });
         let out = adapt_schema(&raw, SchemaDialect::OpenAi);
-        assert!(out.get("allOf").is_some(), "multi-element allOf preserved: {out}");
+        assert!(
+            out.get("allOf").is_some(),
+            "multi-element allOf preserved: {out}"
+        );
         assert_eq!(out["allOf"].as_array().unwrap().len(), 2);
     }
 
@@ -246,7 +253,10 @@ mod tests {
         let s = out.to_string();
         assert!(!s.contains("$schema"), "stripped $schema: {s}");
         assert!(!s.contains("$id"), "stripped $id: {s}");
-        assert!(!s.contains("additionalProperties"), "stripped additionalProperties: {s}");
+        assert!(
+            !s.contains("additionalProperties"),
+            "stripped additionalProperties: {s}"
+        );
         assert!(!s.contains("title"), "stripped title: {s}");
         assert!(!s.contains("description"), "stripped description: {s}");
         // Structure preserved.
@@ -267,9 +277,16 @@ mod tests {
         assert_eq!(out["type"], json!("array"), "converted to array: {out}");
         assert!(out["items"].is_object(), "items present: {out}");
         let props = &out["items"]["properties"];
-        assert_eq!(props["issue_id"]["type"], json!("string"), "issue_id injected: {out}");
+        assert_eq!(
+            props["issue_id"]["type"],
+            json!("string"),
+            "issue_id injected: {out}"
+        );
         assert!(props.get("x").is_some(), "original property kept: {out}");
-        assert!(!out.to_string().contains("additionalProperties"), "no additionalProperties: {out}");
+        assert!(
+            !out.to_string().contains("additionalProperties"),
+            "no additionalProperties: {out}"
+        );
     }
 
     #[test]
@@ -290,7 +307,10 @@ mod tests {
         });
         let out = adapt_schema(&raw, SchemaDialect::OpenAi);
         assert_eq!(out["additionalProperties"], json!(false));
-        assert_eq!(out["properties"]["nested"]["additionalProperties"], json!(false));
+        assert_eq!(
+            out["properties"]["nested"]["additionalProperties"],
+            json!(false)
+        );
     }
 
     #[test]
@@ -332,8 +352,15 @@ mod tests {
         });
         let out = adapt_schema(&raw, SchemaDialect::Gemini);
         let status = &out["properties"]["findings"]["items"]["properties"]["status"];
-        assert!(status.get("allOf").is_none(), "nested allOf flattened: {status}");
-        assert_eq!(status["type"], json!("string"), "nested type hoisted: {status}");
+        assert!(
+            status.get("allOf").is_none(),
+            "nested allOf flattened: {status}"
+        );
+        assert_eq!(
+            status["type"],
+            json!("string"),
+            "nested type hoisted: {status}"
+        );
         assert_eq!(
             status["enum"],
             json!(["open", "resolved", "acknowledged"]),

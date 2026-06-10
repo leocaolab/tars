@@ -66,7 +66,10 @@ impl Task {
 
     /// Look up an input by name.
     pub fn input(&self, name: &str) -> Option<&serde_json::Value> {
-        self.inputs.iter().find(|i| i.name == name).map(|i| &i.value)
+        self.inputs
+            .iter()
+            .find(|i| i.name == name)
+            .map(|i| &i.value)
     }
 }
 

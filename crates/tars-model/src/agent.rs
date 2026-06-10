@@ -135,11 +135,7 @@ mod tests {
         fn skills(&self) -> &SkillSet {
             &self.skills
         }
-        async fn run(
-            &self,
-            task: Task,
-            _ctx: AgentContext,
-        ) -> Result<AgentOutput, AgentError> {
+        async fn run(&self, task: Task, _ctx: AgentContext) -> Result<AgentOutput, AgentError> {
             Ok(AgentOutput::new(format!("did: {}", task.goal)))
         }
     }

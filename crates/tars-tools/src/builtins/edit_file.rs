@@ -125,7 +125,9 @@ impl Tool for EditFileTool {
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
         if parsed.old_string.is_empty() {
-            return Ok(ToolResult::error("old_string must not be empty (fs.edit_file)"));
+            return Ok(ToolResult::error(
+                "old_string must not be empty (fs.edit_file)",
+            ));
         }
 
         let resolved = match self.resolve(&parsed.path, ctx.cwd.as_deref()) {
@@ -180,7 +182,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn ctx(cwd: Option<PathBuf>) -> ToolContext {
-        ToolContext { cancel: CancellationToken::new(), cwd }
+        ToolContext {
+            cancel: CancellationToken::new(),
+            cwd,
+        }
     }
 
     #[tokio::test]
@@ -197,7 +202,10 @@ mod tests {
             .await
             .unwrap();
         assert!(!r.is_error, "{}", r.content);
-        assert_eq!(std::fs::read_to_string(dir.join("a.rs")).unwrap(), "let x = new();\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.rs")).unwrap(),
+            "let x = new();\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

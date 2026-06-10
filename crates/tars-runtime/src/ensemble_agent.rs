@@ -14,9 +14,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::future::{select_all, BoxFuture};
+use futures::future::{BoxFuture, select_all};
 
-use tars_model::{Agent, AgentContext, AgentError, AgentId, AgentOutput, AgentRole, SkillSet, Task};
+use tars_model::{
+    Agent, AgentContext, AgentError, AgentId, AgentOutput, AgentRole, SkillSet, Task,
+};
 
 /// Runs a Task on several candidate agents at once; first success wins.
 pub struct EnsembleAgent {
@@ -30,11 +32,7 @@ impl EnsembleAgent {
     /// Build an ensemble. `role` is the ensemble's own role (usually the
     /// shared role of its candidates); `skills` advertises the UNION of
     /// what the candidates can do.
-    pub fn new(
-        id: impl Into<String>,
-        role: AgentRole,
-        candidates: Vec<Arc<dyn Agent>>,
-    ) -> Self {
+    pub fn new(id: impl Into<String>, role: AgentRole, candidates: Vec<Arc<dyn Agent>>) -> Self {
         // Union the candidates' skills — the ensemble can do whatever any
         // member can.
         let mut skills = SkillSet::new();
@@ -200,10 +198,7 @@ mod tests {
         let ens = EnsembleAgent::new(
             "ens",
             AgentRole::worker("test"),
-            vec![
-                CannedAgent::fail("a", "x"),
-                CannedAgent::fail("b", "y"),
-            ],
+            vec![CannedAgent::fail("a", "x"), CannedAgent::fail("b", "y")],
         );
         assert!(ens.run(task(), AgentContext::new()).await.is_err());
     }

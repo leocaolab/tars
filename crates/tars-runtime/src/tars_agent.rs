@@ -21,7 +21,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use tars_model::{Agent, AgentContext, AgentError, AgentId, AgentOutput, AgentRole, SkillSet, Task};
+use tars_model::{
+    Agent, AgentContext, AgentError, AgentId, AgentOutput, AgentRole, SkillSet, Task,
+};
 use tars_pipeline::LlmService;
 use tars_tools::ToolRegistry;
 use tars_types::TrajectoryId;

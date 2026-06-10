@@ -137,7 +137,8 @@ impl Tool for BashTool {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let combined = format!(
             "exit: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
-            code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+            code.map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into()),
             stdout.trim_end(),
             stderr.trim_end(),
         );
@@ -148,7 +149,11 @@ impl Tool for BashTool {
             Ok(ToolResult::titled_success("ran command", body))
         } else {
             Ok(ToolResult::titled_error(
-                format!("command exited {}", code.map(|c| c.to_string()).unwrap_or_else(|| "by signal".into())),
+                format!(
+                    "command exited {}",
+                    code.map(|c| c.to_string())
+                        .unwrap_or_else(|| "by signal".into())
+                ),
                 body,
             ))
         }
@@ -163,7 +168,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn ctx(cwd: Option<PathBuf>) -> ToolContext {
-        ToolContext { cancel: CancellationToken::new(), cwd }
+        ToolContext {
+            cancel: CancellationToken::new(),
+            cwd,
+        }
     }
 
     #[tokio::test]
@@ -173,7 +181,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("marker.txt"), "x").unwrap();
         let r = BashTool::new()
-            .execute(json!({ "command": "ls marker.txt" }), ctx(Some(dir.clone())))
+            .execute(
+                json!({ "command": "ls marker.txt" }),
+                ctx(Some(dir.clone())),
+            )
             .await
             .unwrap();
         assert!(!r.is_error, "{}", r.content);

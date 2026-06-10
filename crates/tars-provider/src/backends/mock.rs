@@ -169,7 +169,10 @@ impl LlmProvider for MockProvider {
                 .lock()
                 .map_err(|e| ProviderError::Internal(format!("mock state poisoned: {e}")))?;
             state.history.requests.push(req.clone());
-            state.queue.pop_front().unwrap_or_else(|| state.response.clone())
+            state
+                .queue
+                .pop_front()
+                .unwrap_or_else(|| state.response.clone())
         };
         match response {
             CannedResponse::Error(msg) => Err(ProviderError::Internal(msg)),
