@@ -339,7 +339,7 @@ in `~/.tars/events/pipeline_events.db` and are queryable via
 
 ## See also
 
-- [`../roadmap.md`](../roadmap.md) — design rationale and what's NOT yet shipped (§5 batch mode)
+- [`../roadmap.md`](../roadmap.md) — design rationale; §5 batch mode (Anthropic/OpenAI shipped, Gemini deferred)
 - [`../USER-GUIDE.md`](../USER-GUIDE.md) — the calling shapes that these middlewares sit on top of
 - [`../observability.md`](../observability.md) — how to watch what your stack is actually doing
 - [`../providers/claude-cli.md`](../providers/claude-cli.md) — subscription backend caveat (no USD caps)

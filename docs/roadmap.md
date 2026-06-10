@@ -5,7 +5,7 @@
 > See [What's next](#whats-next-beyond-this-roadmap) for the next
 > set of larger gaps.
 >
-> Last updated 2026-05-20.
+> Last updated 2026-06-10.
 
 The features in this doc share one motivation: **make tars usable
 for safety-critical production agent serving at predictable cost**.
@@ -64,10 +64,6 @@ let job = submitter.submit(items).await?;
 > full stack live in [`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md)
 > and [`recipes/batch.md`](./recipes/batch.md). This file is the
 > **design** doc; those are the **usage** docs.
-
-> **Using these in practice**: copy-paste recipes for composing the
-> full stack live in [`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md).
-> This file is the **design** doc; that one is the **usage** doc.
 
 ---
 
@@ -524,7 +520,7 @@ each warrant their own scope discipline:
 | **Realtime / voice transport** | `Modality::Audio` reserved in the type system but **0** runtime support. Peter's Workflow 2 (in-meeting voice agent) blocked entirely. Whole new access pattern (WebSocket bidirectional audio) — doesn't fit `LlmEventStream` | 6+ weeks |
 | **LLM-as-judge eval runner** | `EvaluationScored` schema exists in `tars-types::pipeline_events`; doc-comment marks it "not yet emitted — Phase 2 / W3." Caller-side LLM-as-judge harnesses (like Peter's gold-standard comparison) currently can't emit through the pipeline event store | 2-3 weeks |
 | **RAG primitives / retrieval recipe** | tars stays out of vector-store land per `comparison.md` §LangChain. But Peter's "human-titled chunks beat generic similarity" finding is a recipe nobody can find today. Could ship as a `docs/recipes/retrieval.md` without owning a vector store | days (doc only) |
-| **Built-in tools library** | Today: only `ListDirTool` + `ReadFileTool`. Production agents reach for HTTP fetch, shell exec, SQL, web search before they reach for batch. | 1-2 weeks |
+| **Built-in tools library** | Today: filesystem (`ReadFileTool` / `ListDirTool` / `WriteFileTool` / `EditFileTool`) + `BashTool`, all cwd-scoped. Production agents still reach for HTTP fetch, SQL, and web search. | 1-2 weeks |
 | **Gemini batch (real impl)** | Phase 4 stub returns `InvalidRequest`. Needs GenAI batch API spec pinning + LRO polling. Vertex AI batch explicitly out of scope (different auth path) | 1-2 weeks |
 
 The first two appear to be the highest-leverage next moves. Voice
