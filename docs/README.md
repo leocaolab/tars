@@ -5,7 +5,7 @@ Three subtrees, three audiences:
 | Path | What's inside | Who reads it |
 |------|---------------|--------------|
 | [`USER-GUIDE.md`](./USER-GUIDE.md) | 5-minute getting-started, the three call shapes, when not to use TARS | Developers integrating tars into their app |
-| [`architecture/`](./architecture/) | 22 design docs (00-21). Per-layer rationale, trade-offs, milestone plan, the agent abstraction, audit pins. | Maintainers, contributors, peer reviewers, architects evaluating the design |
+| [`architecture/`](./architecture/) | 23 design docs (00–23, 19 retired). Per-layer rationale, trade-offs, milestone plan, the agent abstraction, the Codex-TUI port + tool layer, audit pins. | Maintainers, contributors, peer reviewers, architects evaluating the design |
 | [`audit-stories/`](./audit-stories/) | Field notes — moments where the system caught itself being wrong. Time-stamped, citation-heavy, written while context was fresh. | Engineers learning from concrete pre/post estimate-revision cases |
 | [`comparison.md`](./comparison.md) | Head-to-head positioning vs LangChain, LiteLLM, Letta, AutoGen, NVIDIA NIM | Anyone deciding "do I want this or X?" |
 

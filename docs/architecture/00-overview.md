@@ -142,6 +142,8 @@ The Rust trait is the source of truth; HTTP API / gRPC / Python / TypeScript and
 | [18](./18-agent-testing.md) | **Agent & LLM Testing** | Behavioral diff (not text); 5 test modes (invariant / metamorphic / mutation / golden / quality); paired stats (McNemar); native LLM judge via `claude_cli`; framework-vs-domain discipline | Anyone testing/migrating prompts, data, or models |
 | [20](./20-agent-abstraction.md) | **Agent Abstraction** | The `Agent` contract from the user's view: hand a `Task` to a `SkillSet`; native vs user agents | SDK authors / agent builders |
 | [21](./21-tars-agent-impl-notes.md) | **TarsAgent Impl Notes** | Native-agent build notes; the two-`ToolRegistry` unification; open decisions | Maintainers |
+| [22](./22-codex-tui-port.md) | **Codex TUI Port** | Fork Codex's Rust TUI onto the TARS runtime; how much of its tool layer ports | Maintainers / agent builders |
+| [23](./23-unified-tool-layer.md) | **Unified Tool Layer** | One `Tool` trait + gated dispatch + `ApprovalSink` + sandbox seam; retires the two-registry fork | Tool / runtime developers |
 
 ---
 
@@ -316,7 +318,7 @@ In alphabetical order:
 [██████████████░░░░░░] ~70%
 
 Done:
-- ✅ 22 design documents (00-21)
+- ✅ 23 design documents (00–23, 19 retired)
 - ✅ 14 crates in Cargo workspace (~158 .rs files in crates/*/src)
 - ✅ Core trait definitions (LlmProvider, LlmService, Middleware,
                             BudgetStore, BatchSubmitter, Tool, Agent, …)

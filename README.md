@@ -334,6 +334,8 @@ Three entry points for three audiences (see [docs/README.md](./docs/README.md) f
 | [18 — Agent Testing](./docs/architecture/18-agent-testing.md) | Deterministic agent tests; mock provider; metamorphic checks |
 | [20 — Agent Abstraction](./docs/architecture/20-agent-abstraction.md) | The Agent contract from the user's view: hand a Task to a SkillSet |
 | [21 — TarsAgent Impl Notes](./docs/architecture/21-tars-agent-impl-notes.md) | Native-agent build notes; the two-`ToolRegistry` unification |
+| [22 — Codex TUI Port](./docs/architecture/22-codex-tui-port.md) | Fork Codex's Rust TUI onto the TARS runtime; how much of its tool layer ports |
+| [23 — Unified Tool Layer](./docs/architecture/23-unified-tool-layer.md) | One `Tool` trait + gated dispatch + `ApprovalSink` + sandbox seam; retires the two-registry fork |
 
 ---
 

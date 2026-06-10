@@ -142,6 +142,8 @@ Rust trait 是真理之源,HTTP API / gRPC / Python / TypeScript 等是其投影
 | [18](../18-agent-testing.md) | Agent & LLM 测试 *(英文)* | 行为 diff;5 种测试模式;原生 LLM judge | 测试 / 迁移 prompt 的人 |
 | [20](../20-agent-abstraction.md) | Agent 抽象 *(英文)* | 用户视角的 Agent 契约:把 Task 交给 SkillSet | SDK 作者 |
 | [21](../21-tars-agent-impl-notes.md) | TarsAgent 实现笔记 *(英文)* | 原生 agent 构建笔记;两个 ToolRegistry 的统一 | 维护者 |
+| [22](../22-codex-tui-port.md) | Codex TUI 移植 *(英文)* | 把 Codex 的 Rust TUI 接到 TARS runtime;工具层能搬多少 | 维护者 / agent 构建者 |
+| [23](../23-unified-tool-layer.md) | 统一工具层 *(英文)* | 单一 Tool trait + 带闸 dispatch + ApprovalSink + 沙箱 seam;消除两个 registry 分叉 | 工具 / runtime 开发者 |
 
 ---
 
@@ -316,7 +318,7 @@ Day 7: 13 (Runbook) + Q&A
 [██████████████░░░░░░] ~70%
 
 已完成:
-- ✅ 22 篇设计文档 (00-21)
+- ✅ 23 篇设计文档 (00–23,19 已退役)
 - ✅ Cargo workspace 14 个 crate (~158 个 .rs 文件)
 - ✅ 核心 trait 定义 (LlmProvider, LlmService, Middleware, BudgetStore, BatchSubmitter, Tool, Agent, …)
 - ✅ 7 个 HTTP provider 后端 (openai / anthropic / gemini / deepseek / vllm / mlx / llamacpp)
@@ -449,7 +451,7 @@ Day 7: 13 (Runbook) + Q&A
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | 0.1 | 2026-05 | 13 篇设计文档完成,实施未开始 |
-| 0.4.0 | 2026-06 | 22 篇设计文档;M0–M8 发布(types→tools→Python/Node 绑定)+ Agent 抽象层(tars-model + TarsAgent / EnsembleAgent) |
+| 0.4.0 | 2026-06 | 23 篇设计文档;M0–M8 发布(types→tools→Python/Node 绑定)+ Agent 抽象层(tars-model + TarsAgent / EnsembleAgent) |
 
 ---
 
