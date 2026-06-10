@@ -1,15 +1,50 @@
-# Doc 22 — Codex TUI port + the TARS tool layer
+# Doc 22 — TARS desktop debug GUI (was: Codex TUI port)
 
-> **Status**: design, 2026-06-10. Decision captured: fork Codex's
-> Rust TUI as our frontend and drive it with the TARS runtime over a
-> direct Rust API (not an HTTP/OpenAI shim). This doc designs the port
-> and — the bigger half — assesses how much of Codex's **tool layer** we
-> lift versus build. Companion: [Doc 20](./20-agent-abstraction.md) (the
-> Agent contract), [Doc 21](./21-tars-agent-impl-notes.md) (the native
-> agent + the two-`ToolRegistry` debt this doc pays down), [Doc 05](./05-tools-mcp-skills.md)
-> (the tool/MCP/skill design, mostly unshipped).
+> **Status**: design, 2026-06-10. **PIVOTED** — see §0. The frontend is now an
+> **LM-Studio-style Tauri desktop debug/playground GUI** over the TARS runtime,
+> not a terminal. §1–§9 below are the **superseded** Codex-TUI exploration,
+> kept for history (the tool-layer half, §1–§2, did ship as Doc 23).
 
-## 1. Goal
+## 0. Pivot + open-source strategy (2026-06-10)
+
+**What changed.** The terminal `tars-tui` (vendored Codex's ratatui view, then
+removed) was the wrong modality: the user wants a **graphical desktop app** like
+LM Studio — chat + parameter tuning + per-call **observability** (tok/sec,
+tokens, latency, stop reason, cache hit, traces/logs). The Codex *app* GUI is
+**closed-source** (only its CLI/TUI is open), so the look is **reimplemented**,
+not vendored. Stack: **Tauri** (Rust backend in-process with `tars-runtime`, web
+frontend) — lighter than Electron, native to a Rust repo.
+
+**It's a means, not the product.** TARS the runtime is the product; this GUI
+exists to make TARS easy to **evaluate and debug**. Keep it lean.
+
+**Architecture.** Almost every UI element surfaces data TARS already produces:
+provider/model picker ← `tars-config`; chat ← `tars_runtime::Session`; metrics ←
+`ChatResponse` + `TelemetryAccumulator`; params ← `ChatRequest`; (later) trace
+view ← the pipeline event store (Doc 17). Split: a **backend core** (`tars-desktop`
+Rust lib — the TARS integration, CI-tested, frontend-agnostic) + a thin **Tauri
+shell** (`tars-desktop-app`, commands + static frontend, CI-isolated since the
+Linux runner has no webview libs).
+
+**Open-source strategy (decided).**
+- **Open-source it, free, now.** Pre-1.0 the priority is *adoption*, and an open
+  local debug UI is both an adoption driver and a differentiation wedge:
+  **"open Rust runtime + open local debug/observability UI, no license key, no
+  SaaS"** — more open than LangChain, whose good debugger (LangGraph Studio /
+  LangSmith) is paywalled (self-host needs an Enterprise license). The OSS
+  observability wave (Langfuse, Laminar, Aegra) confirms the demand.
+- **Monorepo + CI-isolated now → separate repo post-1.0.** Keep the backend core
+  in the monorepo (reused by any frontend); exclude the Tauri shell from CI like
+  `tars-py`. Split to a same-org repo once crates are published (pre-1.0 cross-repo
+  path deps hurt).
+- **Monetize the *hosted/team* layer later, never the local debugger** (the
+  inverse of LangSmith's mistake): the single-user local UI stays free/open; any
+  future commercial product is hosted/team/collaborative observability, built on
+  the same open backend core + event store.
+
+---
+
+## 1. Goal *(superseded — Codex-TUI exploration below; the tool-layer half shipped as Doc 23)*
 
 Reuse Codex's polished, fast Ratatui TUI as the interactive shell, but
 replace its **brain** (model client + agent loop) with TARS, so that:
