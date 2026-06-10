@@ -89,6 +89,34 @@ build TARS agents" (the thread's direction), **B or C** — and **C avoids
 owning a 37.6k-LOC fork** that drifts from a weekly-moving upstream (§9). **A**
 only makes sense if the goal is "keep Codex's agent, just use TARS providers".
 
+## 3b. DECISION (2026-06-10): copy the view, own the controller (a C/B hybrid)
+
+Chosen direction: **own the implementation (TARS is the brain, users build TARS
+agents) but copy Codex's UI verbatim** — don't reinvent the look, don't fork
+the whole agent. The recon makes this clean:
+
+- **`codex-tui` splits ~69 / 31 along exactly the right line.** 62 of 90 files
+  (**~19.6k LOC**) are **pure view — zero `codex_core`** (ratatui only): the
+  input composer (`bottom_pane/chat_composer.rs` 3.5k, `textarea.rs`),
+  markdown rendering (`markdown_render*.rs`, `wrapping.rs`, `text_formatting.rs`),
+  the bottom pane (footer, list-selection), the render harness
+  (`custom_terminal.rs`, `tui.rs`, `insert_history.rs`), `exec_cell/render.rs`.
+  → **copy these ~verbatim** (Apache-2.0; keep NOTICE). This IS "Codex's look".
+- The 28 core-coupled files (**~18k LOC**) are the **controller**:
+  `chatwidget.rs` (event→cell driver), `app.rs`/`lib.rs` (wires
+  `ConversationManager`/`Config`/`AuthManager`), `history_cell.rs` /
+  `diff_render.rs` (keep the rendering, swap the `codex_core` data types for
+  TARS ones), and OpenAI-only features (`onboarding/auth.rs`, `resume_picker.rs`,
+  cloud/login) → **rewrite the few that matter, drop the rest.**
+
+**Shape:** a new `tars-tui` crate = Codex's copied view layer + a thin
+controller that drives `tars-runtime::Session` (map `ChatEvent` /
+`ToolCallStart/End` / approval → the view's transcript cells; input box →
+`Session::send`; the approval modal → an `ApprovalSink` from Doc 23). No
+`codex-core`, no `ConversationManager`, no 37.6k-LOC fork — just the view +
+a small TARS-native brain. The Doc 23 tool layer (gated dispatch + `ApprovalSink`
++ cwd) is exactly what this controller needs. Detailed M0 plan: separate.
+
 - **Port** `tui/` + `protocol/`: the UI and the `Op`/`EventMsg` contract
   between TUI and core. The TUI never learns about TARS — it speaks
   protocol.
