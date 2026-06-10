@@ -6,10 +6,9 @@ This doc answers two questions about tars's eval framework:
 2. **How do you compare two runs** correctly — and what's the
    statistical research behind the comparison?
 
-It's the methodology companion to the tooling described in
-[`eval-and-arc-llm-roadmap.md`](./eval-and-arc-llm-roadmap.md) (§1.1
-RunReport, §1.2 Judge, §1.3 corpus replay) and the usage recipes in
-[`recipes/`](./recipes/).
+It's the methodology companion to the eval framework
+([Doc 16](./architecture/16-evaluation-framework.md) — RunReport, Judge,
+corpus replay) and the usage recipes in [`recipes/`](./recipes/).
 
 > **Scope note**: this is *paired offline evaluation*, **not**
 > production A/B testing. We run the **same fixed corpus** through two
@@ -303,7 +302,7 @@ equivalent. Borrowed straight from property-based testing (QuickCheck:
 |---|---|
 | paraphrase invariance | reword the prompt → semantically same answer |
 | order invariance | reorder independent list items → same findings |
-| rename invariance | rename a variable in code → arc's critic flags the *same* bug |
+| rename invariance | rename a variable in code → a code critic flags the *same* bug |
 | typo robustness | inject typos → answer unchanged |
 | determinism | same input twice at temp 0 → byte-identical output |
 
@@ -430,7 +429,7 @@ Established work:
   measure stability" answer — published in Nature, so about as
   validated as it gets.
 
-The arc connection: a critic that finds different bugs each run on the
+The connection: a critic that finds different bugs each run on the
 *same code* (or on a paraphrased rubric) has high semantic entropy —
 measurable, no gold standard needed.
 
@@ -438,7 +437,7 @@ measurable, no gold standard needed.
 
 The idea: hold the task fixed, **vary how much context you stuff in**
 (and *where* the relevant bit sits), measure accuracy. This is exactly
-the "does giving arc's critic a bigger file make it miss more bugs?"
+the "does giving a code critic a bigger file make it miss more bugs?"
 question.
 
 The research is unambiguous that **more context is not free**:
@@ -460,8 +459,8 @@ The research is unambiguous that **more context is not free**:
   The "needle" *is* the oracle, so this gives a clean accuracy curve
   vs. (length, position).
 
-**Direct implication for arc**: arc feeds the critic a whole file. If
-the file is large and a real bug sits in the middle, "lost in the
+**Direct implication for a code critic**: feed the critic a whole file,
+and if the file is large and a real bug sits in the middle, "lost in the
 middle" predicts the critic misses it — not because the rubric is
 wrong but because of context position. The metamorphic test writes
 itself:
@@ -472,7 +471,7 @@ itself:
 > your critic — and tells you to chunk the file rather than feed it
 > whole.
 
-This is the highest-value oracle-free test for arc specifically,
+This is the highest-value oracle-free test for a code critic specifically,
 because the needle (planted bug) gives you ground truth for free, and
 the failure mode it surfaces (context-position blindness) is one
 precision-on-natural-corpus would never isolate.
@@ -602,6 +601,5 @@ biases are real (per Zheng 2023) and stay the caller's responsibility
 ## See also
 
 - [`architecture/18-agent-testing.md`](./architecture/18-agent-testing.md) — the **architecture** chapter this methodology underpins (5 test modes, Check trait family, native judge, framework-vs-domain discipline). This doc is the *stats + research*; that one is the *design*.
-- [`eval-and-arc-llm-roadmap.md`](./eval-and-arc-llm-roadmap.md) — the eval framework plan + arc_llm collapse
 - [`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md) — the middleware stack eval runs against
 - [`observability.md`](./observability.md) — the event stores eval reads from

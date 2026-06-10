@@ -962,7 +962,7 @@ impl ClaudeCliProviderBuilder {
 }
 ```
 
-Config-driven users (TOML / `tars-py` / `arc`) get the same surface through `ProviderConfig::ClaudeCli` and `default_claude_cli()`:
+Config-driven users (TOML / `tars-py`) get the same surface through `ProviderConfig::ClaudeCli` and `default_claude_cli()`:
 
 ```toml
 [providers.claude_cli]

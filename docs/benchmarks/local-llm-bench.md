@@ -190,8 +190,8 @@ So this is a *knob with a per-backend cost*, not a prohibition.
 ```
 
 Real result on **this box (llama.cpp via LM Studio)**, §7.1.1: free
-decode ≈ **2×** the tok/s of a *moderate* schema; the ARC critic's
-*complex* schema + 16k-token budget was **~6×** slower — slow enough a
+decode ≈ **2×** the tok/s of a *moderate* schema; a *complex* critic
+schema + 16k-token budget was **~6×** slower — slow enough a
 30B model didn't finish inside a 600 s timeout (→ 0 tokens). Don't
 generalize the magnitude to other backends; re-run the script.
 
@@ -200,8 +200,8 @@ don't hardcode "no json_schema". Expose structured-output strategy
 **per provider** so the caller picks grammar-constrained vs prompt-JSON
 based on *their* backend's measured cost, and document the cost so the
 choice is informed. On a llama.cpp backend, prompt-JSON + a
-fence-tolerant parser is usually the better default (ARC's
-`ARC_CRITIC_RESPONSE_SCHEMA=0`); on vLLM the schema may be free enough
+fence-tolerant parser is usually the better default (disable the
+response schema); on vLLM the schema may be free enough
 to prefer. Tier B (§5) verifies prompt-JSON actually parses.
 
 ---
@@ -274,8 +274,7 @@ tars eval judge eval-runs/qwen-coder eval-runs/gemma-31b \
   --judge-provider anthropic --judge-model claude-sonnet-4-7
 ```
 
-See `eval-and-arc-llm-roadmap.md §1.2` for judge design; treat its
-output as a tiebreaker signal, not a primary metric.
+Treat judge output as a tiebreaker signal, not a primary metric.
 
 ---
 
@@ -318,7 +317,7 @@ Reads:
 | B — `json_schema` (moderate) | ~16 s | ~95 | **~5.9** |
 
 Constrained decode is **~2.1× slower per token** on a *moderate*
-schema, and produced *fewer* tokens in *more* wall-clock. ARC's
+schema, and produced *fewer* tokens in *more* wall-clock. A
 *complex* critic schema + 16k budget measured ~6× — past the point a
 30B finishes inside a 600 s timeout (→ 0-token timeouts). **Don't send
 `json_schema` to local providers; use prompt JSON.** (`tools/schema-penalty.sh`)
@@ -348,8 +347,8 @@ array) spent **1697 output tokens / 172 s** thinking before answering.
 Three distinct integration lessons — **none is a "bad model"**:
 1. **Reasoning budget (Qwen):** thinking eats the budget before the
    answer. Fix: `--max-output-tokens ≥ 2–4k` for reasoning models, or
-   disable thinking (`/no_think`). Same root cause as the ARC timeout —
-   reasoning + complex schema = never reaches the answer. Trade-off:
+   disable thinking (`/no_think`). Same root cause as the complex-schema
+   timeout — reasoning + complex schema = never reaches the answer. Trade-off:
    correct but slow + token-hungry.
 2. **Markdown fences (Gemma):** JSON is correct but wrapped — a strict
    parser rejects it, a fence-stripping tolerant parser accepts it.

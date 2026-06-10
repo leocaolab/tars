@@ -1,15 +1,14 @@
 # tars observability — how to see what's happening
 
-Four surfaces, ordered from highest level (agent decisions) to lowest
+Three surfaces, ordered from highest level (agent decisions) to lowest
 (raw tracing). Pick the one that matches the question you're trying
-to answer; you don't usually need all four at once.
+to answer; you don't usually need all three at once.
 
 | Surface | Granularity | Storage | When to use |
 |---|---|---|---|
 | **Trajectory** | Agent decision tree (steps, retries, branches) | SQLite, XDG data dir | "What did the agent decide to do, in what order, and how did it end?" |
 | **Pipeline events DB** | One row per LLM call | `~/.tars/events/pipeline_events.db` (+ `bodies.db`) | "Which calls were slow? Which model? Cache hit? What did the prompt/response actually look like?" |
 | **tracing stream** | Live events to stderr as they happen | stderr (RAM) | "I'm running it now, what's the latency on this call?" |
-| **`arc.log.jsonl`** | arc-specific (if you also run arc) | Project root JSONL file | arc-side debugging — separate from tars |
 
 Don't confuse the trajectory store and the pipeline events DB. They
 share an SQLite-flavored vibe but answer different questions and live
@@ -302,25 +301,6 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
 
 ---
 
-## 4. `arc.log.jsonl` — arc-specific (if you also use arc)
-
-If your project is driven by [arc](https://github.com/leocaolab/arc),
-arc writes its own JSONL log next to the project — typically
-`./arc.log.jsonl`. This is **arc's** structured event stream, not
-tars's; it covers what arc decided to do (fix rounds, scan results,
-patch attempts) and which sessions it spawned.
-
-```bash
-# What did arc do in this run?
-jq -r 'select(.event|test("fix_round|scan|patch|claude_invoke"))
-       | [.timestamp, .event, .turn // "-"] | @tsv' \
-  ./arc.log.jsonl | head
-```
-
-If you're not using arc, ignore this file — tars doesn't write to it.
-
----
-
 ## How the layers relate
 
 ```
@@ -334,7 +314,6 @@ trajectory                                ← tars trajectory show
   └─ step_completed
 
 (throughout: tracing events on stderr — controlled by RUST_LOG / -v)
-(externally: arc.log.jsonl — if arc is the driver)
 ```
 
 A trajectory references LLM calls by id; calls reference trajectories

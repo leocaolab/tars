@@ -2,8 +2,7 @@
 
 > **Status**: design chapter, 2026-05-21. Supersedes the per-call
 > deterministic-scoring framing of [Doc 16](./16-evaluation-framework.md)
-> §7.1 (see [`eval-and-arc-llm-roadmap.md`](../eval-and-arc-llm-roadmap.md)
-> for why that shape was wrong). Statistical details + research
+> §7.1. Statistical details + research
 > citations live in [`eval-methodology.md`](../eval-methodology.md);
 > this chapter is the architecture.
 
@@ -384,9 +383,9 @@ DB, endpoint path in source), hallucination = `output ∉ set` — a
 `HashSet` lookup, no judge. The cheapest, most reliable hallucination
 test there is, and it recurs across Zapier / RAG / Sincera.
 
-### Context-size needle — arc's problem (lost-in-the-middle)
+### Context-size needle — the code-critic problem (lost-in-the-middle)
 
-arc feeds the critic a whole file. Plant the **same** known bug, vary
+A code critic feeds the model a whole file. Plant the **same** known bug, vary
 (file size, bug position), measure detection rate. A curve that sags
 in the middle / collapses past some length is the lost-in-the-middle
 effect (Liu 2024; RULER) biting the critic — telling you to chunk the
@@ -430,8 +429,6 @@ Each step ships independently and is useful on its own.
   + verified research citations (McNemar/Dietterich, Koehn bootstrap,
   Wilson, Zheng MT-Bench, Panickssery self-preference, CheckList,
   Structure-Invariant Testing, semantic entropy, Lost-in-the-Middle).
-- [`../eval-and-arc-llm-roadmap.md`](../eval-and-arc-llm-roadmap.md) —
-  the plan + the arc_llm collapse this rides on.
 - [`16-evaluation-framework.md`](./16-evaluation-framework.md) —
   superseded for §7.1 (per-call deterministic scoring); its event/
   channel plumbing concepts remain valid.

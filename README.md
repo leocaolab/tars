@@ -332,7 +332,6 @@ Three entry points for three audiences (see [docs/README.md](./docs/README.md) f
 | [16 — Evaluation Framework](./docs/architecture/zh/16-evaluation-framework.md) [zh] | Agent benchmarks; metrics; regression detection |
 | [17 — Pipeline Event Store](./docs/architecture/17-pipeline-event-store.md) | Append-only event log feeding evaluation, replay, and audit |
 | [18 — Agent Testing](./docs/architecture/18-agent-testing.md) | Deterministic agent tests; mock provider; metamorphic checks |
-| [19 — Arc-Fixer Unification](./docs/architecture/19-arc-fixer-unification.md) | Routing/ensemble lifted to the Agent layer; the converged design |
 | [20 — Agent Abstraction](./docs/architecture/20-agent-abstraction.md) | The Agent contract from the user's view: hand a Task to a SkillSet |
 | [21 — TarsAgent Impl Notes](./docs/architecture/21-tars-agent-impl-notes.md) | Native-agent build notes; the two-`ToolRegistry` unification |
 
