@@ -14,10 +14,10 @@ tool. For *why* tars is shaped this way, jump to
 ## What tars is
 
 A Rust-first multi-provider LLM runtime: one trait + one middleware
-stack covers Anthropic, OpenAI, Gemini, vLLM, MLX, llama.cpp, and three
-CLI-based subscription providers (`claude_cli`, `gemini_cli`,
-`codex_cli`). Python bindings ship as a wheel; you can also use it
-directly from Rust.
+stack covers Anthropic, OpenAI, Gemini, DeepSeek, vLLM, MLX, llama.cpp,
+and three CLI-based subscription providers (`claude_cli`, `gemini_cli`,
+`codex_cli`). Python bindings ship as a wheel and Node/TypeScript
+bindings as a native addon; you can also use it directly from Rust.
 
 What you get without writing it yourself:
 
@@ -25,6 +25,8 @@ What you get without writing it yourself:
 - **Middleware pipeline** — telemetry, cache, retry, output validation,
   pipeline event store, all engaged automatically by the default
   `Pipeline`
+- **Agent abstraction** — hand a `Task` to a capability set (`TarsAgent`
+  drives the tool loop; `EnsembleAgent` hedges one task across N agents)
 - **Capability pre-flight** — verify a provider supports your request
   shape (tools, thinking, structured output, context window) before
   burning a network call
@@ -94,9 +96,9 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-tars-pipeline = { git = "https://github.com/leocaolab/tars.git", tag = "v0.2.0" }
-tars-provider = { git = "https://github.com/leocaolab/tars.git", tag = "v0.2.0" }
-tars-types    = { git = "https://github.com/leocaolab/tars.git", tag = "v0.2.0" }
+tars-pipeline = { git = "https://github.com/leocaolab/tars.git", tag = "v0.4.0" }
+tars-provider = { git = "https://github.com/leocaolab/tars.git", tag = "v0.4.0" }
+tars-types    = { git = "https://github.com/leocaolab/tars.git", tag = "v0.4.0" }
 ```
 
 (Pre-1.0: pin to a specific tag. Each minor version may break.)

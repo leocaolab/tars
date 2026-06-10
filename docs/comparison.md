@@ -1,6 +1,6 @@
 # TARS vs the agent-runtime ecosystem
 
-> One-page positioning. Where TARS differs, where it deliberately doesn't compete, and when it's the wrong tool. Last updated 2026-05.
+> One-page positioning. Where TARS differs, where it deliberately doesn't compete, and when it's the wrong tool. Last updated 2026-06.
 
 The agent-runtime space is crowded. Each system optimizes for a different point in the design space. This doc maps the space honestly — including cases where TARS is the worse choice — so you know whether to adopt TARS, contribute back, or pick another tool.
 
@@ -47,7 +47,7 @@ TARS is the right pick when you want to **run agents like a database**: bounded 
 
 **LiteLLM's scope choice**: deliberately *not* an agent framework. No tool loop, no session state, no multi-agent.
 
-**TARS overlap with LiteLLM**: the `tars-provider` crate's responsibility *is* what LiteLLM does. We support fewer providers (8+ vs 100+) but with stronger guarantees:
+**TARS overlap with LiteLLM**: the `tars-provider` crate's responsibility *is* what LiteLLM does. We support fewer providers (10 vs 100+) but with stronger guarantees:
 
 - Typed error class (LiteLLM uses subclass-of-OpenAIError; we use class hierarchy with retry-class as a first-class field).
 - Streaming protocol normalized — we test against wiremock fixtures of each provider's actual SSE behavior, not a single OpenAI-compatible facade.
@@ -156,7 +156,7 @@ TARS Provider       ← provider abstraction layer
 |---|---|---|---|---|---|---|
 | **Primary language** | Rust + PyO3 | Python | Python | Python | Python | C++ + Python (Colang) |
 | **Concurrency model** | Tokio multi-thread | sync + asyncio | asyncio | asyncio | asyncio | thread-pool |
-| **Provider count** | 9 (curated) | 100+ | 100+ | ~30 | ~10 | NVIDIA stack |
+| **Provider count** | 10 (curated) | 100+ | 100+ | ~30 | ~10 | NVIDIA stack |
 | **Streaming** | typed events, builder | varies | yes | yes | yes | yes |
 | **Tool calling** | typed loop + auto-dispatch | varies | partial | yes | yes | n/a |
 | **Multi-tenant primitive** | sacred (Doc 06) | none | partial (proxy) | none | none | n/a |
@@ -168,7 +168,7 @@ TARS Provider       ← provider abstraction layer
 | **Cost tracking** | per-call telemetry | callbacks (BYO) | yes (proxy) | partial | partial | n/a |
 | **Memory subsystem** | n/a (planned) | partial | n/a | first-class | partial | n/a |
 | **Persistence** | event-sourced (designed) | varies | n/a | first-class | partial | n/a |
-| **Multi-agent** | Trajectory tree (designed) | yes | n/a | n/a | first-class | n/a |
+| **Multi-agent** | Agent layer + Ensemble (shipped); Trajectory tree (designed) | yes | n/a | n/a | first-class | n/a |
 | **Guardrails / policy** | Guard middleware | external | n/a | none | partial | first-class |
 | **GPU inference serving** | n/a (consumer) | n/a (consumer) | n/a (consumer) | n/a | n/a | first-class |
 
@@ -210,15 +210,15 @@ If three of those apply, TARS is in your shortlist.
 
 ## Honest current state
 
-TARS is real code, not vapor — 23k+ Rust LOC across 11 crates, M0–M7 shipped, M8 (Python bindings) actively landing. But:
+TARS is real code, not vapor — 63k+ Rust LOC across 14 crates, M0–M8 shipped (types → tools → Python bindings), plus the Agent abstraction layer (`tars-model` + `TarsAgent` / `EnsembleAgent`) and Node/TypeScript bindings. But:
 
 - **Not yet a Cargo registry'd crate**. Use git dependencies for now.
-- **No PyPI release yet**. Build wheels via maturin from source.
+- **No PyPI / npm release yet**. Build the Python wheel via maturin and the Node addon via napi from source.
 - **No managed service**. You self-host.
-- **TypeScript bindings designed only**. Rust + Python are real today.
+- **HTTP server is personal-mode only**. `tars-server` exposes `complete` + streaming; the multi-tenant control plane is still designed.
 - **Docs are design-ahead.** Don't trust every word in Doc 09–13 to match what's implemented; check [CHANGELOG.md](../CHANGELOG.md) and [TODO.md](../TODO.md) for the gap.
 
-We'd rather ship 8 deeply-thought providers and one solid pipeline than 100 shallow integrations. The roadmap (Doc 14) has milestones M9-M14 spelled out — Postgres/Redis storage, multi-tenant runtime, Web dashboard, distributed control plane.
+We'd rather ship 10 deeply-thought providers and one solid pipeline than 100 shallow integrations. The roadmap (Doc 14) has milestones M9-M14 spelled out — Postgres/Redis storage, multi-tenant runtime, Web dashboard, distributed control plane.
 
 If you're evaluating TARS for adoption: start with `tars init` + a single-provider test, then graduate to Pipeline with cache + retry, then add tools, then look at multi-tenant. Don't try to absorb the whole architecture from Doc 00 in one read — most users only need M0–M4 + M8.
 

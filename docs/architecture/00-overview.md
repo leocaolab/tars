@@ -140,6 +140,8 @@ The Rust trait is the source of truth; HTTP API / gRPC / Python / TypeScript and
 | [16](./16-evaluation-framework.md) | Evaluation Framework | Event-channel + metrics-sink plumbing. **§7.1 per-call deterministic scoring superseded by Doc 18** | Eval developers |
 | [17](./17-pipeline-event-store.md) | Pipeline Event Store | Per-call observability DB; CAS bodies; `tars events` | Observability / eval |
 | [18](./18-agent-testing.md) | **Agent & LLM Testing** | Behavioral diff (not text); 5 test modes (invariant / metamorphic / mutation / golden / quality); paired stats (McNemar); native LLM judge via `claude_cli`; framework-vs-domain discipline | Anyone testing/migrating prompts, data, or models |
+| [20](./20-agent-abstraction.md) | **Agent Abstraction** | The `Agent` contract from the user's view: hand a `Task` to a `SkillSet`; native vs user agents | SDK authors / agent builders |
+| [21](./21-tars-agent-impl-notes.md) | **TarsAgent Impl Notes** | Native-agent build notes; the two-`ToolRegistry` unification; open decisions | Maintainers |
 
 ---
 
@@ -308,27 +310,29 @@ In alphabetical order:
 
 > This section is dynamic and updated continuously as implementation progresses.
 
-### 8.1 Current Status (2026-05-20)
+### 8.1 Current Status (2026-06-10)
 
 ```
-[████████████░░░░░░░░] ~60-65%
+[██████████████░░░░░░] ~70%
 
 Done:
-- ✅ 18 design documents (00-17)
-- ✅ 11 crates in Cargo workspace (~110 .rs files in crates/*/src)
-- ✅ ~520 unit + integration tests across the workspace
+- ✅ 22 design documents (00-21)
+- ✅ 14 crates in Cargo workspace (~158 .rs files in crates/*/src)
 - ✅ Core trait definitions (LlmProvider, LlmService, Middleware,
-                            BudgetStore, BatchSubmitter, Tool, …)
-- ✅ 6 HTTP provider backends (openai / anthropic / gemini /
+                            BudgetStore, BatchSubmitter, Tool, Agent, …)
+- ✅ 7 HTTP provider backends (openai / anthropic / gemini / deepseek /
                                vllm / mlx / llamacpp)
 - ✅ 3 subscription CLI backends (claude_cli / gemini_cli / codex_cli)
-- ✅ MockProvider for tests
+- ✅ MockProvider for tests (incl. per-call response queue)
 - ✅ Pipeline middleware stack:
      telemetry, cache, per-call/tenant budget, fallback, retry,
      routing, circuit_breaker, event_emitter, validation
 - ✅ Cache registry (L1 in-memory + L2 SQLite)
 - ✅ Agent runtime: Trajectory + AgentEvent + Orchestrator/Worker/Critic
-- ✅ Tool registry + Read/ListDir builtins
+- ✅ Agent abstraction (tars-model): trait Agent + Task/SkillSet/
+     Permissions; TarsAgent (LLM-backed) + EnsembleAgent (task hedge)
+- ✅ Tool registry + builtins (read/list_dir/write_file/edit_file/bash,
+     cwd-scoped) + permission enforcement at dispatch
 - ✅ Pipeline event store (SQLite events + CAS bodies.db)
 - ✅ Output validators framework + 4 builtins
 - ✅ Cost & reliability features (roadmap.md §1-§5)
@@ -337,27 +341,31 @@ Done:
      shared_runtime, complete_sync (commit 7ef7f34)
 - ✅ tars-cli with run/plan/run-task/probe/bench/trajectory/events/init
 - ✅ tars-py PyO3 wheel + Python API surface
+- ✅ tars-node napi-rs native addon (Node / TypeScript bindings)
+- ✅ tars-server: personal-mode HTTP/REST shell (complete + streaming)
 - ✅ User-facing docs: USER-GUIDE, observability, providers/,
-     recipes/, roadmap, eval-and-arc-llm-roadmap
+     recipes/, roadmap
 
 Partial:
 - ⏳ M4: tools registry done; MCP stdio support NOT yet
 - ⏳ M5: rich tars-cli done; TUI NOT yet
-- ⏳ M8: PyO3 done; napi-rs NOT yet
+- ⏳ M7: personal-mode HTTP server (tars-server) done; SPA dashboard
+       + multi-tenant control plane NOT yet
 - ⏳ M9: telemetry middleware done; OTel exporter composable
        but not wired in CLI; load testing NOT yet
 
 Not started:
 - ⬜ M6: Postgres schema, IAM engine, Team mode
-- ⬜ M7: HTTP API (axum) + SPA dashboard
 - ⬜ Voice / Realtime transport (Modality::Audio reserved, 0 runtime)
 - ⬜ LLM-as-judge eval runner (EvaluationScored schema exists;
-                              see eval-and-arc-llm-roadmap.md)
+                              see Doc 16)
 ```
 
 **Reality check vs the v1.0 target**: M0-M3 are substantively complete
-(and then some — 6 HTTP backends instead of 1). M4-M5 are partial.
-M6-M7 are the largest remaining chunks before v1.0. M8-M9 are partial.
+(and then some — 7 HTTP backends instead of 1). M8 (FFI bindings) is now
+complete (PyO3 + napi-rs). M4-M5 and M7 (personal-mode server done, SPA +
+multi-tenant control plane pending) are partial. M6 is the largest
+remaining chunk before v1.0; M9 is partial.
 
 A lot of work that wasn't in the original milestone list also landed:
 output validators (Doc 15), pipeline event store (Doc 17), the three
@@ -369,14 +377,14 @@ batch mode — all visible in `docs/roadmap.md` and `docs/recipes/`.
 | # | Milestone | Status | Notes |
 |---|---|---|---|
 | **M0** | Foundation | ✅ | tars-types / config / storage / melt all shipped |
-| **M1** | Single Provider, Single Path | ✅ | Shipped 6 HTTP backends, not just 1 |
+| **M1** | Single Provider, Single Path | ✅ | Shipped 7 HTTP backends, not just 1 |
 | **M2** | Multi-Provider + Routing | ✅ | StaticPolicy/TierPolicy + CircuitBreaker + ErrorClass |
 | **M3** | Agent Runtime Core | ✅ | Trajectory + AgentEvent + Worker + Critic in tars-runtime |
 | **M4** | Tools + MCP | ⚠️ partial | Registry + builtins done; **MCP stdio NOT yet** |
 | **M5** | CLI + TUI | ⚠️ partial | Rich `tars` CLI shipped; **TUI NOT yet** |
 | **M6** | Multi-tenant + Postgres | ❌ | Only SQLite; IAM enforcement NOT yet |
-| **M7** | Web Dashboard | ❌ | No axum / tonic / SPA |
-| **M8** | FFI Bindings | ⚠️ partial | PyO3 ✅ / napi-rs ❌ |
+| **M7** | Web Dashboard | ⚠️ partial | Personal-mode HTTP server (tars-server) ✅ / SPA + tonic NOT yet |
+| **M8** | FFI Bindings | ✅ | PyO3 ✅ / napi-rs ✅ |
 | **M9** | Production Readiness | ⚠️ partial | Telemetry + event store ✅ / OTel exporter composable / load test ❌ |
 
 **Above and beyond the milestones** (added as need emerged, all shipped):
@@ -399,16 +407,7 @@ Two living roadmap docs supplement the milestone view above:
   reliability features (§1-§5). All shipped except the Gemini batch
   real impl. The "What's next" section there enumerates the bigger
   gaps (voice, eval, RAG recipe, built-in tools).
-- [`docs/eval-and-arc-llm-roadmap.md`](../eval-and-arc-llm-roadmap.md)
-  — open. Captures the 2026-05-20 decision that **Doc 16 §7.1's
-  per-call deterministic-scoring eval framework is the wrong shape**;
-  arc's production experience says per-run aggregation + offline
-  LLM-as-judge phase + corpus replay is what's actually needed.
-  Also drives the planned `arc_llm` crate collapse (~1180 lines
-  deleted once tars exposes the API surface — most of which has now
-  landed in commit 7ef7f34).
-
-Anything not in either roadmap and not in §8.1's "Done" list is, as
+Anything not in the roadmap and not in §8.1's "Done" list is, as
 far as the project is concerned, **not yet planned**.
 
 ### 8.4 Out of Scope for v1.0
