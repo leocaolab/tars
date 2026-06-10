@@ -12,6 +12,7 @@ members = [
     "crates/tars-runtime",
     "crates/tars-tools",
     "crates/tars-cli",
+    "crates/tars-tui",
     "crates/tars-server",
     "crates/tars-py",
     "crates/tars-node",
@@ -40,6 +41,7 @@ default-members = [
     "crates/tars-runtime",
     "crates/tars-tools",
     "crates/tars-cli",
+    "crates/tars-tui",
     "crates/tars-node",
 ]
 
@@ -106,6 +108,20 @@ rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 wiremock = "0.6"
 tokio-test = "0.4"
 mockall = "0.13"
+
+# TUI (tars-tui — vendored Codex view layer, Doc 22). Codex pins patched
+# nornagon forks of ratatui/crossterm; we deliberately use UPSTREAM
+# crates.io ratatui 0.29 / crossterm 0.28 for supply-chain trust and adapt
+# the copied widgets where they reach for fork-only APIs.
+ratatui = { version = "0.29.0", features = ["scrolling-regions", "unstable-backend-writer", "unstable-rendered-line-info", "unstable-widget-ref"] }
+ratatui-macros = "0.6.0"
+crossterm = { version = "0.28.1", features = ["bracketed-paste", "event-stream"] }
+ansi-to-tui = "7.0.0"
+pulldown-cmark = "0.10"
+textwrap = "0.16.2"
+unicode-segmentation = "1.12.0"
+unicode-width = "0.2"
+derive_more = { version = "2", features = ["full"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

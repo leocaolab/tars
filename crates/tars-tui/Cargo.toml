@@ -1,0 +1,33 @@
+[package]
+name = "tars-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Codex-look coding TUI driven by the TARS runtime (Doc 22). View layer vendored from openai/codex (Apache-2.0); controller is TARS-native."
+
+# NOTE: deliberately does NOT inherit `[lints] workspace = true` — the view
+# modules are vendored from codex-rs and carry their own style; gating them on
+# TARS's clippy config would be noise. Our own code (controller) stays clean.
+
+[[bin]]
+name = "tars-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Vendored Codex view layer (Doc 22 §3b)
+ratatui.workspace = true
+ratatui-macros.workspace = true
+crossterm.workspace = true
+ansi-to-tui.workspace = true
+pulldown-cmark.workspace = true
+textwrap.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+derive_more.workspace = true
+
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
