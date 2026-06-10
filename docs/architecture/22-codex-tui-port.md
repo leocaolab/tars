@@ -49,14 +49,45 @@ and funds — the unification Doc 21 left open.
 
 ## 3. Strategy: port the shell + the mechanism, replace the brain
 
-codex-rs is a ~80-crate workspace. Its layering is clean enough to cut at
-two seams:
+> **⚠️ Reality check (2026-06-10 recon of `openai/codex@rust-v0.57.0`).** The
+> clean two-seam picture below was written from docs; the source is heavier:
+>
+> - **The conversation seam is real and clean** ✅ — `CodexConversation`
+>   (`core/src/codex_conversation.rs`) is exactly `submit(op: Op) -> Result<String>`
+>   + `next_event() -> Result<Event>`. A TARS-backed conversation only has to
+>   satisfy that pair, and the TUI drives it.
+> - **But `codex-tui` is NOT cleanly separable** ✗ — it's **37.6k LOC / 90
+>   files** and depends on `codex-core` for much more than protocol:
+>   `config::Config` (16 uses), `ConversationManager`, `AuthManager`,
+>   `get_platform_sandbox`, plus `login` / `ollama` / `file-search` /
+>   `app-server-protocol`. You cannot vendor "tui + protocol" alone.
+> - **The `protocol` crate isn't leaf** — it pulls `codex-git`,
+>   `codex-utils-image`, `mcp-types`, `icu_*`, `ts-rs`, `schemars`, `strum`.
+> - Workspace is **43 crates** (not ~80).
+>
+> Net: "port tui+protocol, replace core" understates it. Three realistic
+> paths, see §3a — the choice changes whether **TARS or Codex is the brain**.
+
+codex-rs is a 43-crate workspace. The *intended* seams (optimistic version):
 
 ```
   tui  ──(protocol: Op / EventMsg)──  core ──  client(OpenAI)
   └ PORT ──────────┘                  └ REPLACE w/ TARS ┘   └ DELETE ┘
   sandboxing · apply-patch · exec · mcp   ← LIFT (model-agnostic mechanism)
 ```
+
+## 3a. Three realistic paths (post-recon)
+
+| Path | What you vendor / build | Brain | Cost | End state |
+|---|---|---|---|---|
+| **A — swap core's client** | tui + core + protocol (+ util deps); replace only codex-core's model-call layer with one calling `tars-pipeline` | **Codex's** loop | Lowest to "runs"; you keep ~all of codex-rs as a fork | Codex TUI routed through TARS *providers* (cache/retry/routing). TARS Agent layer unused. |
+| **B — reimpl the conversation surface** | tui + protocol; build `tars-codex-core` that implements `CodexConversation` (`submit`/`next_event`) over `tars-runtime::Session` + maps `ChatEvent`→`EventMsg`; provide compat `Config`/auth shims | **TARS's** | High — must satisfy the Config/ConversationManager/auth surface 37.6k LOC of tui assumes | Codex's polished TUI, TARS as the brain; users run TARS agents. The stated goal. |
+| **C — bespoke TUI over TARS** | a small new ratatui frontend (no codex fork); drive `tars-runtime::Session` directly | **TARS's** | Medium build, but small surface you *own* (no 37.6k-LOC fork, no upstream divergence) | TARS-native coding TUI; less polished than Codex, fully ours. |
+
+Recommendation hinges on intent: if the goal is "Codex UX, TARS brain, users
+build TARS agents" (the thread's direction), **B or C** — and **C avoids
+owning a 37.6k-LOC fork** that drifts from a weekly-moving upstream (§9). **A**
+only makes sense if the goal is "keep Codex's agent, just use TARS providers".
 
 - **Port** `tui/` + `protocol/`: the UI and the `Op`/`EventMsg` contract
   between TUI and core. The TUI never learns about TARS — it speaks
