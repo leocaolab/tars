@@ -41,8 +41,8 @@ use std::sync::{
 };
 
 use futures::StreamExt;
-use serde_json::Value as JsonValue;
 use tars_pipeline::{LlmService, RequestContext};
+use tars_tools::{Tool, ToolContext, ToolRegistry};
 use tars_types::{
     Capabilities, ChatRequest, ChatResponseBuilder, ContentBlock, Message, ModelHint,
     SharedTelemetry, TelemetryAccumulator, ToolChoice, ToolSpec, error::ProviderError,
@@ -123,63 +123,12 @@ impl Budget {
     }
 }
 
-// ── Tool registry ─────────────────────────────────────────────────────
-
-/// A function the model can call during a Session turn.
-///
-/// Implementors do whatever (HTTP fetch, file read, shell out, in-process
-/// query) and return a JSON value. The Session serializes the result
-/// into the next turn's tool_result message automatically.
-pub trait Tool: Send + Sync {
-    /// Tool name as the model sees it. Must match the [`ToolSpec`]
-    /// `name` field registered for this tool.
-    fn name(&self) -> &str;
-
-    /// Execute the tool with the model-supplied arguments. Returning
-    /// `Err` aborts the entire turn (atomic rollback) and surfaces the
-    /// error to the caller. Tools that want to convey a recoverable
-    /// problem to the model should return `Ok(json!({"error": ...}))`
-    /// instead — the model receives that as a normal tool_result and
-    /// can choose to retry / give up / route around.
-    fn call(
-        &self,
-        arguments: JsonValue,
-    ) -> futures::future::BoxFuture<'_, Result<JsonValue, SessionError>>;
-
-    /// The schema we send to the model so it knows how to call us.
-    fn spec(&self) -> ToolSpec;
-}
-
-/// Bundle of registered tools. Lookups are O(1) by name.
-#[derive(Default)]
-pub struct ToolRegistry {
-    by_name: std::collections::HashMap<String, Arc<dyn Tool>>,
-}
-
-impl ToolRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        let name = tool.name().to_string();
-        self.by_name.insert(name, tool);
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
-        self.by_name.get(name)
-    }
-
-    /// All registered specs — sent to the model with each request so it
-    /// knows what's available.
-    pub fn specs(&self) -> Vec<ToolSpec> {
-        self.by_name.values().map(|t| t.spec()).collect()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
-    }
-}
+// Tools live in `tars-tools` now: [`Tool`], [`ToolContext`], and
+// [`ToolRegistry`] are imported at the top. The Session-local `Tool` /
+// `ToolRegistry` were retired in Doc 23 (the two-registry unification,
+// Doc 21 §2) so `Session` and `WorkerAgent` dispatch through one gated
+// registry. `Session` builds a [`ToolContext`] (cwd / cancel / permission /
+// approval / sandbox) from its options and threads it into every dispatch.
 
 // ── Turn ──────────────────────────────────────────────────────────────
 
@@ -318,6 +267,11 @@ pub struct SessionOptions {
     pub system: String,
     pub budget: Budget,
     pub tools: Option<ToolRegistry>,
+    /// Template environment threaded into every tool dispatch — `cwd`,
+    /// `cancel`, the permission view, the approval sink, and the sandbox
+    /// policy. Default = inert (no cwd, allow-all, no approval, unrestricted),
+    /// so a Session built without it behaves exactly as before.
+    pub tool_ctx: ToolContext,
     /// `max_output_tokens` to use when `send()` is called without an
     /// explicit value. `None` defers to the provider default.
     pub default_max_output_tokens: Option<u32>,
@@ -344,6 +298,9 @@ pub struct Session {
     turns: Vec<Turn>,
     budget: Budget,
     tools: Option<ToolRegistry>,
+    /// Template `ToolContext` (cwd / cancel / permission / approval /
+    /// sandbox) cloned into each tool dispatch. See `SessionOptions::tool_ctx`.
+    tool_ctx: ToolContext,
     default_max_output_tokens: Option<u32>,
     /// Counts in-turn budget exceedances for log dedup. See the Drop
     /// summary on the impl below.
@@ -388,6 +345,7 @@ impl Session {
             turns: Vec::new(),
             budget: opts.budget,
             tools: opts.tools,
+            tool_ctx: opts.tool_ctx,
             default_max_output_tokens: opts.default_max_output_tokens,
             budget_warning_count: 0,
             history_version: 0,
@@ -434,7 +392,11 @@ impl Session {
     /// subsequent `send()` calls. Existing in-flight calls are not
     /// retroactively affected.
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
-        self.tools
+        // Duplicate-name registration is ignored (keep-first) so the
+        // infallible signature is preserved; `tars_tools::register` errors
+        // on a dup, which we treat as a no-op here.
+        let _ = self
+            .tools
             .get_or_insert_with(ToolRegistry::new)
             .register(tool);
     }
@@ -459,12 +421,10 @@ impl Session {
             model: self.model.clone(),
             turns: self.turns.clone(),
             budget: self.budget.clone(),
-            // ToolRegistry isn't Clone (Arc<dyn Tool> entries are, but
-            // HashMap<String, Arc<dyn Tool>> is). We re-build the map;
-            // tools themselves are cheap to share via Arc.
-            tools: self.tools.as_ref().map(|tr| ToolRegistry {
-                by_name: tr.by_name.clone(),
-            }),
+            // `tars_tools::ToolRegistry` is `Clone` (Arc<dyn Tool> entries
+            // share cheaply); the fork sees the same tools.
+            tools: self.tools.clone(),
+            tool_ctx: self.tool_ctx.clone(),
             default_max_output_tokens: self.default_max_output_tokens,
             budget_warning_count: 0,
             // Preserve parent's history_version so the cache layer can
@@ -529,7 +489,12 @@ impl Session {
         let model = self.model.clone();
         let max_out = max_output_tokens.or(self.default_max_output_tokens);
         let system = self.system.clone();
-        let tools_specs = self.tools.as_ref().map(|tr| tr.specs()).unwrap_or_default();
+        let tools_specs = self
+            .tools
+            .as_ref()
+            .map(|tr| tr.to_tool_specs())
+            .unwrap_or_default();
+        let tool_ctx = self.tool_ctx.clone();
 
         // Pre-create one telemetry handle and reuse across every
         // pipeline.call() inside the auto-loop, so caller sees a
@@ -544,6 +509,7 @@ impl Session {
             system,
             tools_specs,
             self.tools.as_ref(),
+            tool_ctx,
             max_out,
             telemetry.clone(),
         )
@@ -648,9 +614,16 @@ async fn loop_until_text(
     system: String,
     tool_specs: Vec<ToolSpec>,
     tools: Option<&ToolRegistry>,
+    tool_ctx: ToolContext,
     max_output_tokens: Option<u32>,
     telemetry: SharedTelemetry,
 ) -> Result<tars_types::ChatResponse, SessionError> {
+    // Tool errors now come back as `is_error` results (the model adapts)
+    // rather than aborting the turn — matching `WorkerAgent`. Guard against a
+    // model stuck calling a failing tool forever: abort if every tool call
+    // errors for this many consecutive iterations.
+    const MAX_CONSECUTIVE_ALL_ERROR_ITERS: usize = 3;
+    let mut consecutive_all_error = 0usize;
     loop {
         let prev_turn_count = turns.len();
 
@@ -757,27 +730,39 @@ async fn loop_until_text(
             .expect("turn was opened in send()")
             .push(assistant_msg);
 
-        // Dispatch all tool_calls. Parallel calls share a single
-        // user-message tool_result back (Anthropic requirement).
+        // Dispatch all tool_calls through the unified, gated registry.
+        // Parallel calls share a single user-message tool_result back
+        // (Anthropic requirement). A denied / failed / unapproved call comes
+        // back as an `is_error` result the model can adapt to — it does NOT
+        // abort the turn (Doc 23: matches WorkerAgent).
         let mut result_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_calls.len());
+        let mut errors_this_iter = 0usize;
         for tc in &tool_calls {
-            let tool = registry.get(&tc.name).ok_or_else(|| {
-                SessionError::Provider(ProviderError::UnknownTool {
-                    name: tc.name.clone(),
-                })
-            })?;
-            let result = tool.call(tc.arguments.clone()).await?;
-            // Embed the result as a text block tagged with tool_use_id
-            // by serializing JSON. Provider adapters that want the
-            // structured `tool_result` content-block emit it from this
-            // text payload; the keepalive path here stays provider-
-            // agnostic.
-            result_blocks.push(ContentBlock::Text {
-                text: format!(
-                    "{{\"tool_use_id\":\"{}\",\"result\":{}}}",
-                    tc.id,
-                    serde_json::to_string(&result).unwrap_or_else(|_| "null".into()),
+            let tool_msg = registry.dispatch(tc, tool_ctx.clone()).await;
+            let (content, is_error) = match &tool_msg {
+                Message::Tool {
+                    content, is_error, ..
+                } => (
+                    content
+                        .first()
+                        .and_then(|b| b.as_text())
+                        .unwrap_or("")
+                        .to_string(),
+                    *is_error,
                 ),
+                _ => (String::new(), true),
+            };
+            if is_error {
+                errors_this_iter += 1;
+            }
+            // Keep the session's `{tool_use_id, result}` text-block wire shape.
+            // Parse the tool's content back to JSON when it is valid JSON
+            // (e.g. a Python tool's dict), else embed it as a JSON string
+            // (e.g. a builtin's plain-text output).
+            let result_json = serde_json::from_str::<serde_json::Value>(&content)
+                .unwrap_or(serde_json::Value::String(content));
+            result_blocks.push(ContentBlock::Text {
+                text: format!("{{\"tool_use_id\":\"{}\",\"result\":{result_json}}}", tc.id),
             });
         }
         // One user message with all parallel results.
@@ -787,6 +772,22 @@ async fn loop_until_text(
             .push(Message::User {
                 content: result_blocks,
             });
+
+        // Abort a model stuck calling only-failing tools (no turn-abort on a
+        // single error means we need this backstop).
+        if errors_this_iter == tool_calls.len() {
+            consecutive_all_error += 1;
+            if consecutive_all_error >= MAX_CONSECUTIVE_ALL_ERROR_ITERS {
+                return Err(SessionError::Internal(format!(
+                    "tool loop aborted: every tool call errored for \
+                     {consecutive_all_error} consecutive iterations \
+                     (last: {errors_this_iter}/{} calls) — broken tooling or stuck model",
+                    tool_calls.len(),
+                )));
+            }
+        } else {
+            consecutive_all_error = 0;
+        }
 
         // Loop again — assert turn count unchanged so far. If it did
         // change, somebody trimmed mid-loop (forbidden).

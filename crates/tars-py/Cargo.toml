@@ -29,6 +29,7 @@ tars-storage = { path = "../tars-storage" }
 tars-runtime = { path = "../tars-runtime" }
 serde_json.workspace = true
 uuid = { workspace = true }
+async-trait.workspace = true
 
 # Async — process-wide tokio runtime owned by tars-py for blocking
 # Python `complete()` calls onto async LlmService.call.

@@ -35,7 +35,7 @@ pub enum ToolRegistryError {
     Duplicate(String),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
 }

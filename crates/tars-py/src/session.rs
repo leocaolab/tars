@@ -21,13 +21,14 @@
 
 use std::sync::Arc;
 
-use futures::future::FutureExt;
+use async_trait::async_trait;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use serde_json::Value as JsonValue;
 
 use tars_runtime::{
-    Budget as RsBudget, Session as RsSession, SessionError, SessionOptions, Tool, ToolRegistry,
+    Budget as RsBudget, Session as RsSession, SessionError, SessionOptions, Tool, ToolContext,
+    ToolError, ToolRegistry, ToolResult,
 };
 use tars_types::{JsonSchema, ModelHint, ToolSpec};
 
@@ -100,6 +101,7 @@ impl Session {
             system,
             budget,
             tools: Some(ToolRegistry::new()),
+            tool_ctx: ToolContext::default(),
             default_max_output_tokens,
             model: ModelHint::Explicit(model),
         };
@@ -302,57 +304,46 @@ struct PyTool {
     callback: Py<PyAny>,
 }
 
+#[async_trait]
 impl Tool for PyTool {
     fn name(&self) -> &str {
         &self.name
     }
 
-    fn spec(&self) -> ToolSpec {
-        self.spec.clone()
+    fn description(&self) -> &str {
+        &self.spec.description
     }
 
-    fn call(
-        &self,
-        arguments: JsonValue,
-    ) -> futures::future::BoxFuture<'_, Result<JsonValue, SessionError>> {
+    fn input_schema(&self) -> &JsonSchema {
+        &self.spec.input_schema
+    }
+
+    async fn execute(&self, args: JsonValue, _ctx: ToolContext) -> Result<ToolResult, ToolError> {
         let name = self.name.clone();
-        // Async block borrows `&self` for the future's lifetime. The
-        // body does no real `await` — the GIL block is synchronous —
-        // but we wrap as a future so it satisfies the `Tool::call`
-        // signature. Avoid `assume_gil_acquired` (forbidden by
-        // workspace lints): bind the callback inside `with_gil` instead
-        // of cloning the handle out.
-        async move {
-            Python::with_gil(|py| {
-                let json_mod = py
-                    .import("json")
-                    .map_err(|e| SessionError::Internal(e.to_string()))?;
-                let arg_str = serde_json::to_string(&arguments)
-                    .map_err(|e| SessionError::Internal(e.to_string()))?;
-                let arg_obj = json_mod.call_method1("loads", (arg_str,)).map_err(|e| {
-                    SessionError::ToolFailed {
-                        name: name.clone(),
-                        message: format!("arg deserialize: {e}"),
-                    }
-                })?;
-                let cb_bound = self.callback.bind(py);
-                let result = cb_bound
-                    .call1((arg_obj,))
-                    .map_err(|e| SessionError::ToolFailed {
-                        name: name.clone(),
-                        message: e.to_string(),
-                    })?;
-                let dumped: String = json_mod
-                    .call_method1("dumps", (result,))
-                    .and_then(|s| s.extract())
-                    .map_err(|e| SessionError::ToolFailed {
-                        name: name.clone(),
-                        message: format!("result serialize: {e}"),
-                    })?;
-                serde_json::from_str(&dumped).map_err(|e| SessionError::Internal(e.to_string()))
-            })
-        }
-        .boxed()
+        // The GIL block is synchronous (no real await), so run it inline.
+        // Bind the callback inside `with_gil` (workspace lints forbid
+        // `assume_gil_acquired`). The Python callback returns a dict/str;
+        // we hand the dispatcher its JSON-stringified form as the tool
+        // result content (the Session parses it back to JSON for the model).
+        Python::with_gil(|py| {
+            let json_mod = py
+                .import("json")
+                .map_err(|e| ToolError::Execute(e.to_string()))?;
+            let arg_str = serde_json::to_string(&args)
+                .map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+            let arg_obj = json_mod
+                .call_method1("loads", (arg_str,))
+                .map_err(|e| ToolError::InvalidArguments(format!("arg deserialize: {e}")))?;
+            let cb_bound = self.callback.bind(py);
+            let result = cb_bound
+                .call1((arg_obj,))
+                .map_err(|e| ToolError::Execute(format!("tool `{name}` raised: {e}")))?;
+            let dumped: String = json_mod
+                .call_method1("dumps", (result,))
+                .and_then(|s| s.extract())
+                .map_err(|e| ToolError::Execute(format!("result serialize: {e}")))?;
+            Ok(ToolResult::success(dumped))
+        })
     }
 }
 
