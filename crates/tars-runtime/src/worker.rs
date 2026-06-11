@@ -65,7 +65,7 @@ use crate::prompt::PromptBuilder;
 /// to chain a handful of file reads / git lookups / etc., and small
 /// enough that a confused model can't burn through the budget by
 /// looping on the same call indefinitely.
-pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 8;
+pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 25;
 
 /// LLM-driven Worker — the agent that actually does the work for one
 /// plan step. See module docs for stub-vs-tool flavours.
@@ -243,12 +243,23 @@ impl WorkerAgent {
             .map(|r| r.to_tool_specs())
             .unwrap_or_default();
 
-        PromptBuilder::new(self.model.clone(), user_text)
+        let has_tools = !tool_specs.is_empty();
+        let mut pb = PromptBuilder::new(self.model.clone(), user_text)
             .system(system_prompt)
-            .structured_output("WorkerResult", worker_json_schema())
             .tools(tool_specs)
-            .deterministic()
-            .build()
+            .deterministic();
+        // Provider-side structured output (response_format / json_schema) ONLY
+        // when this worker isn't tool-using: many providers (DeepSeek and other
+        // openai_compat endpoints) reject `response_format` combined with
+        // `tools` ("response_format type is unavailable"). The final WorkerResult
+        // is parsed from the model's text by `parse_worker_response` regardless,
+        // so dropping the provider hint for tool agents costs nothing — and
+        // matches the drive-loop's existing "don't re-impose structured_output
+        // mid tool-loop" contract.
+        if !has_tools {
+            pb = pb.structured_output("WorkerResult", worker_json_schema());
+        }
+        pb.build()
     }
 
     /// Lower-level: parse the JSON the model emitted into a typed
@@ -260,22 +271,29 @@ impl WorkerAgent {
         from_agent: &AgentId,
         step_id: Option<&str>,
     ) -> Result<AgentMessage, WorkerError> {
-        let raw: RawWorkerResult = serde_json::from_str(json_text).map_err(WorkerError::Decode)?;
-        if raw.summary.trim().is_empty() {
-            return Err(WorkerError::InvalidResult("summary is empty".into()));
-        }
-        // `f32::clamp` passes NaN through unchanged (it only orders
-        // against finite bounds), so map NaN → 0.0 ("no idea") before
-        // clamping the finite range.
-        let confidence = if raw.confidence.is_nan() {
-            0.0
-        } else {
-            raw.confidence.clamp(0.0, 1.0)
+        // Tolerant parse: a TOOL-using worker's real product is the side
+        // effects of its tool calls (arc's fixer = the worktree diff), not the
+        // summary. DeepSeek ("the API may occasionally return empty content")
+        // and any model that ends its turn on a tool call hand back an empty or
+        // non-JSON final turn — treat that as "done, no narrative" instead of a
+        // hard decode failure, so the work already performed isn't discarded.
+        // `f32::clamp` passes NaN through (it only orders against finite
+        // bounds), so map NaN → 0.0 ("no idea") before clamping.
+        let trimmed = json_text.trim();
+        let (summary, confidence) = match serde_json::from_str::<RawWorkerResult>(trimmed) {
+            Ok(raw) if !raw.summary.trim().is_empty() => {
+                let c = if raw.confidence.is_nan() { 0.0 } else { raw.confidence.clamp(0.0, 1.0) };
+                (raw.summary, c)
+            }
+            // Empty / non-JSON / empty-summary final turn → keep the raw text
+            // (or a placeholder) as the summary with zero confidence.
+            _ if trimmed.is_empty() => ("(worker produced no final summary)".to_string(), 0.0),
+            _ => (trimmed.to_string(), 0.0),
         };
         Ok(AgentMessage::PartialResult {
             from_agent: from_agent.clone(),
             step_id: step_id.map(str::to_string),
-            summary: raw.summary,
+            summary,
             confidence,
         })
     }

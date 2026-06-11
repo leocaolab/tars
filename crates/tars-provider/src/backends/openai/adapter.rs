@@ -80,7 +80,9 @@ impl OpenAiAdapter {
                                 "id": tc.id,
                                 "type": "function",
                                 "function": {
-                                    "name": tc.name,
+                                    // OpenAI's tool-name pattern forbids '.'; map
+                                    // dots→hyphens (reversed when parsing the reply).
+                                    "name": tc.name.replace(".", "-"),
                                     "arguments": args_str,
                                 }
                             })
@@ -155,7 +157,10 @@ impl OpenAiAdapter {
                 json!({
                     "type": "function",
                     "function": {
-                        "name": t.name,
+                        // OpenAI's tool-name pattern `^[a-zA-Z0-9_-]+$` forbids
+                        // '.'; send dots as hyphens (reversed on the reply path),
+                        // so tars tools like `fs.read_file` / `bash.run` are valid.
+                        "name": t.name.replace(".", "-"),
                         "description": t.description,
                         "parameters": t.input_schema.schema,
                         "strict": t.input_schema.strict,
@@ -276,7 +281,8 @@ impl HttpAdapter for OpenAiAdapter {
                 tars_types::ToolChoice::Required => json!("required"),
                 tars_types::ToolChoice::Specific(name) => json!({
                     "type": "function",
-                    "function": {"name": name},
+                    // Same '.'→'-' sanitization as the tool spec above.
+                    "function": {"name": name.replace(".", "-")},
                 }),
             };
             if req.tools.iter().any(|t| t.input_schema.strict) {
@@ -454,7 +460,10 @@ impl HttpAdapter for OpenAiAdapter {
                         .and_then(|f| f.get("name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
-                        .to_string();
+                        // Reverse the send-side '.'→'-' sanitization (OpenAI's
+                        // tool-name pattern `^[a-zA-Z0-9_-]+$` forbids '.'), so
+                        // the dispatcher sees the real name, e.g. `fs.read_file`.
+                        .replace("-", ".");
 
                     // OpenAI sends id+name exactly once per tool_calls
                     // entry (the start chunk); subsequent chunks for
