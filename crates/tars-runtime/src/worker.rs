@@ -60,12 +60,15 @@ use crate::message::AgentMessage;
 use crate::orchestrator::{Plan, PlanStep};
 use crate::prompt::PromptBuilder;
 
-/// Default safety cap on Worker tool-loop iterations. 8 round-trips
-/// (each LLM call + tool dispatch) is enough headroom for a Worker
-/// to chain a handful of file reads / git lookups / etc., and small
-/// enough that a confused model can't burn through the budget by
-/// looping on the same call indefinitely.
-pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 25;
+/// Default safety cap on Worker tool-loop iterations (each = one LLM call +
+/// tool dispatch). Headroom for a real coding task — read, locate a symbol,
+/// edit, build, test, verify — and, when a chunk carries SEVERAL co-located
+/// findings, to do that for each. 25 was tuned when the model burned iterations
+/// flailing for things it couldn't reach (no cwd, no dep lookup); with those
+/// gaps closed those loops are gone, so the cap is now a genuine work budget,
+/// not a flail-limiter — hence the larger value. Still bounded so a truly stuck
+/// model can't run forever.
+pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 50;
 
 /// LLM-driven Worker — the agent that actually does the work for one
 /// plan step. See module docs for stub-vs-tool flavours.
