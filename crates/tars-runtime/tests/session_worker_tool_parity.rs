@@ -88,6 +88,7 @@ fn write_call_events(path: &str, content: &str) -> Vec<ChatEvent> {
             index: 0,
             id: "call_1".into(),
             parsed_args: serde_json::json!({ "path": path, "content": content }),
+            thought_signature: None,
         },
         ChatEvent::Finished {
             stop_reason: StopReason::ToolUse,
@@ -173,6 +174,7 @@ async fn same_tool_runs_identically_via_session_and_worker() {
         cancel: CancellationToken::new(),
         cwd: None,
         permissions: Default::default(),
+        readable_roots: Vec::new(),
     };
     worker
         .execute_step(ctx, &plan, &plan.steps[0], &[])

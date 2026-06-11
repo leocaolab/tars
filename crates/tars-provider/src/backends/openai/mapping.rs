@@ -281,6 +281,7 @@ pub(super) fn drain_buffer_into(
                     index: i,
                     id,
                     parsed_args: parsed,
+                    thought_signature: None,
                 });
             }
             Err(ProviderError::Parse(msg)) if msg.contains("not started") => {

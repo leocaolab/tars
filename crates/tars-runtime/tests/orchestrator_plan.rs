@@ -35,6 +35,7 @@ fn ctx(llm: Arc<dyn LlmService>) -> AgentContext {
         cancel: CancellationToken::new(),
         cwd: None,
         permissions: Default::default(),
+        readable_roots: Vec::new(),
     }
 }
 

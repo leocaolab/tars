@@ -80,6 +80,7 @@ impl ChatResponse {
                 index,
                 id: tc.id,
                 parsed_args: tc.arguments,
+                thought_signature: tc.thought_signature,
             });
         }
         // A cached response that lacks a stop_reason is incoherent (we
@@ -170,6 +171,7 @@ impl ChatResponseBuilder {
                 index,
                 id,
                 parsed_args,
+                thought_signature,
             } => {
                 // Prefer the provider's parsed value. Correlate against
                 // the buffered Start: a missing Start or an id mismatch
@@ -199,7 +201,7 @@ impl ChatResponseBuilder {
                 };
                 self.inner
                     .tool_calls
-                    .push(ToolCall::new(id, name, parsed_args));
+                    .push(ToolCall::new(id, name, parsed_args).with_thought_signature(thought_signature));
             }
             ChatEvent::UsageProgress { partial } => {
                 // Don't overwrite — we'll get the authoritative figure
@@ -391,6 +393,7 @@ mod tests {
             index: 0,
             id: "c1".into(),
             parsed_args: json!({"q": "rust"}),
+            thought_signature: None,
         });
         b.apply(ChatEvent::Finished {
             stop_reason: StopReason::ToolUse,

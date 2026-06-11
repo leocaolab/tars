@@ -132,12 +132,18 @@ impl GeminiAdapter {
             } => {
                 let mut parts: Vec<Value> = content.iter().map(Self::translate_part).collect();
                 for tc in tool_calls {
-                    parts.push(json!({
+                    let mut part = json!({
                         "functionCall": {
                             "name": tc.name,
                             "args": tc.arguments,
                         }
-                    }));
+                    });
+                    // Echo the opaque thinking signature the model returned with
+                    // this call — thinking models reject the replay without it.
+                    if let Some(sig) = &tc.thought_signature {
+                        part["thoughtSignature"] = json!(sig);
+                    }
+                    parts.push(part);
                 }
                 Ok(json!({"role": "model", "parts": parts}))
             }
@@ -446,6 +452,14 @@ impl HttpAdapter for GeminiAdapter {
                 }
                 if let Some(fc) = part.get("functionCall") {
                     had_function_call = true;
+                    // Thinking models attach an opaque `thoughtSignature` to the
+                    // part; it MUST be echoed when this call is replayed in the
+                    // next request (`translate_message`), or Gemini rejects the
+                    // follow-up ("Function call is missing a thought_signature").
+                    let thought_signature = part
+                        .get("thoughtSignature")
+                        .and_then(|s| s.as_str())
+                        .map(str::to_string);
                     let name = fc
                         .get("name")
                         .and_then(|s| s.as_str())
@@ -480,6 +494,7 @@ impl HttpAdapter for GeminiAdapter {
                         index: idx,
                         id,
                         parsed_args: parsed,
+                        thought_signature,
                     });
                 }
             }
@@ -576,6 +591,31 @@ mod tests {
         let v = GeminiAdapter::translate_message(&m).unwrap();
         assert_eq!(v["role"], "model");
         assert_eq!(v["parts"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn assistant_tool_call_echoes_thought_signature_on_replay() {
+        // A thinking model's functionCall must carry its thoughtSignature back
+        // on the next turn, or Gemini rejects it ("missing a thought_signature").
+        let tc = tars_types::ToolCall::new("id@1", "fs.read_file", serde_json::json!({"path": "a"}))
+            .with_thought_signature(Some("SIG-abc".to_string()));
+        let m = tars_types::Message::Assistant {
+            content: vec![],
+            tool_calls: vec![tc],
+        };
+        let v = GeminiAdapter::translate_message(&m).unwrap();
+        let part = &v["parts"][0];
+        assert_eq!(part["functionCall"]["name"], "fs.read_file");
+        assert_eq!(part["thoughtSignature"], "SIG-abc");
+
+        // A call WITHOUT a signature must not emit the key at all.
+        let plain = tars_types::ToolCall::new("id@2", "fs.read_file", serde_json::json!({"path": "a"}));
+        let mv = GeminiAdapter::translate_message(&tars_types::Message::Assistant {
+            content: vec![],
+            tool_calls: vec![plain],
+        })
+        .unwrap();
+        assert!(mv["parts"][0].get("thoughtSignature").is_none());
     }
 
     #[test]

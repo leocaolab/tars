@@ -78,6 +78,7 @@ fn tool_call_events(call_id: &str, tool: &str, args: serde_json::Value) -> Vec<C
             index: 0,
             id: call_id.to_string(),
             parsed_args: args,
+            thought_signature: None,
         },
         ChatEvent::Finished {
             stop_reason: StopReason::ToolUse,

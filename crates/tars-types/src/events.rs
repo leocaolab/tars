@@ -42,6 +42,10 @@ pub enum ChatEvent {
         index: usize,
         id: String,
         parsed_args: serde_json::Value,
+        /// Opaque provider token to echo on replay (Gemini `thoughtSignature`);
+        /// `None` for providers that don't use it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
 
     /// Mid-stream usage snapshot (some providers send these periodically).
@@ -138,6 +142,7 @@ mod tests {
                 index: 0,
                 id: "call_1".into(),
                 parsed_args: serde_json::json!({"q": "rust"}),
+                thought_signature: None,
             },
             ChatEvent::UsageProgress {
                 partial: PartialUsage {

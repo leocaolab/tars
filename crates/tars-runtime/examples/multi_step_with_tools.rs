@@ -118,6 +118,7 @@ fn tool_stream(call_id: &str, name: &str, args: serde_json::Value) -> Vec<ChatEv
             index: 0,
             id: call_id.to_string(),
             parsed_args: args,
+            thought_signature: None,
         },
         ChatEvent::Finished {
             stop_reason: StopReason::ToolUse,

@@ -87,6 +87,13 @@ pub struct ToolCall {
     pub name: String,
     /// Always a parsed object (`Value::Object`) — never a string.
     pub arguments: serde_json::Value,
+    /// Opaque provider token that MUST be echoed back when this call is
+    /// replayed in a follow-up request. Gemini's thinking models return a
+    /// `thoughtSignature` on each functionCall and reject the next turn if it's
+    /// missing ("Function call is missing a thought_signature"). `None` for
+    /// providers that don't use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for ToolCall {
@@ -105,6 +112,8 @@ impl<'de> Deserialize<'de> for ToolCall {
             id: String,
             name: String,
             arguments: serde_json::Value,
+            #[serde(default)]
+            thought_signature: Option<String>,
         }
         let raw = Raw::deserialize(deserializer)?;
         if !raw.arguments.is_object() {
@@ -116,6 +125,7 @@ impl<'de> Deserialize<'de> for ToolCall {
             id: raw.id,
             name: raw.name,
             arguments: raw.arguments,
+            thought_signature: raw.thought_signature,
         })
     }
 }
@@ -148,7 +158,15 @@ impl ToolCall {
             id: id.into(),
             name: name.into(),
             arguments,
+            thought_signature: None,
         }
+    }
+
+    /// Attach an opaque provider [`Self::thought_signature`] to echo on replay.
+    /// Chainable; `None` is a no-op for providers that don't use it.
+    pub fn with_thought_signature(mut self, sig: Option<String>) -> Self {
+        self.thought_signature = sig;
+        self
     }
 
     /// True iff `arguments` matches the documented invariant.

@@ -89,6 +89,7 @@ fn ctx(llm: Arc<dyn LlmService>) -> AgentContext {
         cancel: CancellationToken::new(),
         cwd: None,
         permissions: Default::default(),
+        readable_roots: Vec::new(),
     }
 }
 
@@ -120,6 +121,7 @@ fn tool_call_events(call_id: &str, tool_name: &str, args: serde_json::Value) -> 
             index: 0,
             id: call_id.to_string(),
             parsed_args: args,
+            thought_signature: None,
         },
         ChatEvent::Finished {
             stop_reason: StopReason::ToolUse,

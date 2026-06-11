@@ -516,6 +516,7 @@ impl HttpAdapter for AnthropicAdapter {
                             index,
                             id,
                             parsed_args: parsed,
+                            thought_signature: None,
                         });
                     }
                     Err(e) if was_tool => return Err(e),
