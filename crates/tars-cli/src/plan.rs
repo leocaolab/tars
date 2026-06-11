@@ -159,6 +159,7 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
             cancel,
             cwd: None,
             permissions: Default::default(),
+            readable_roots: Vec::new(),
         };
         agent
             .plan(ctx, &goal)
