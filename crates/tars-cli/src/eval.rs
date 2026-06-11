@@ -213,7 +213,7 @@ pub struct EvalRunArgs {
 
     /// Built-in invariant checks to run against each output (repeatable).
     /// Recognized: `non-empty`, `valid-json`, `max-length:<N>`, and
-    /// `trajectory-match[:<exact|ordered|set>[:<threshold>]]` — scores the
+    /// `trajectory-match[:<exact|ordered|set|args>[:<threshold>]]` — scores the
     /// tools the model selected against each case's `expected_tools.json`
     /// (Doc 26). Custom invariants are a Rust-API feature (Doc 18 §4.1).
     #[arg(long = "check")]
@@ -238,7 +238,7 @@ fn build_invariant(spec: &str) -> Result<Arc<dyn Invariant>> {
         }
         other => anyhow::bail!(
             "unknown --check `{other}`. Recognized: non-empty, valid-json, max-length:<N>, \
-             trajectory-match[:<exact|ordered|set>[:<threshold>]]"
+             trajectory-match[:<exact|ordered|set|args>[:<threshold>]]"
         ),
     };
     Ok(inv)
@@ -276,7 +276,7 @@ impl TrajectorySpec {
         } else {
             MatchMode::parse(mode_tok).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown trajectory-match mode `{mode_tok}`. Recognized: exact, ordered, set"
+                    "unknown trajectory-match mode `{mode_tok}`. Recognized: exact, ordered, set, args"
                 )
             })?
         };
@@ -835,7 +835,7 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
     let traj_diff = if args.trajectory {
         let mode = MatchMode::parse(&args.trajectory_mode).ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown --trajectory-mode `{}`. Recognized: exact, ordered, set",
+                "unknown --trajectory-mode `{}`. Recognized: exact, ordered, set, args",
                 args.trajectory_mode
             )
         })?;
@@ -1692,6 +1692,26 @@ mod tests {
         // reason names both want and got — not a bare failure
         let detail = r.detail().unwrap();
         assert!(detail.contains("search") && detail.contains("fetch"), "detail={detail}");
+    }
+
+    #[test]
+    fn trajectory_eval_case_args_mode_checks_arguments() {
+        let spec = TrajectorySpec::parse("trajectory-match:args").unwrap().unwrap();
+        let s = |n: &str, a: serde_json::Value| ToolStep { name: n.into(), args: a };
+        let expected = vec![s("search", serde_json::json!({"q": "x"}))];
+        // same name + same args → pass
+        assert!(
+            spec.eval_case(&[s("search", serde_json::json!({"q": "x"}))], Some(&expected))
+                .unwrap()
+                .passed()
+        );
+        // same name, WRONG args → fail (what args mode adds over exact)
+        assert!(
+            !spec
+                .eval_case(&[s("search", serde_json::json!({"q": "y"}))], Some(&expected))
+                .unwrap()
+                .passed()
+        );
     }
 
     #[test]

@@ -63,7 +63,9 @@ pub enum TrajectoryCommand {
         /// `@path.json` for a JSON array (`["search",…]` or `[{"name":…}]`).
         #[arg(long)]
         expected: String,
-        /// Match mode: `exact` | `ordered` | `set`. Default `ordered`.
+        /// Match mode: `exact` | `ordered` | `set` | `args`. Default
+        /// `ordered`. (`args` has no effect here — recorded trajectories
+        /// store tool names only, so it degrades to `exact`.)
         #[arg(long, default_value = "ordered")]
         mode: String,
         /// Pass threshold on the score (default 1.0 = strict).
@@ -100,7 +102,7 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
             json,
         } => {
             let m = MatchMode::parse(&mode).ok_or_else(|| {
-                anyhow::anyhow!("unknown --mode `{mode}`. Recognized: exact, ordered, set")
+                anyhow::anyhow!("unknown --mode `{mode}`. Recognized: exact, ordered, set, args")
             })?;
             let exp = parse_expected(&expected)?;
             let passed = score(

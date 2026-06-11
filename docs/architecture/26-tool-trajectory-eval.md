@@ -332,6 +332,13 @@ final-state checks).
   cwd (read-only tools only — no `bash`/write side effects from corpus cases),
   captures the trajectory, and feeds its `tool_sequence` to the trajectory-match
   check. The heavy, security-sensitive part; deferred. Depends: M2, M2'.
-- **M3 — args / judge modes (P3).** Scope: F7 (`args` exact + LLM-judged arg
-  equivalence) + first-class `ToolDispatched` event (actual dispatch + result
-  class, not just requested). Delivers: stricter matching. Depends: M2.
+- **M3 — args mode (P3). ✅ shipped (deterministic half).** `MatchMode::Args`
+  scores the full `(name, args)` sequence (strict ADK trajectory incl.
+  arguments); works on the reference check (`trajectory-match:args`) where
+  `ChatResponse` carries real `ToolCall.arguments`. Degrades to exact-names on
+  the recorded-trajectory path (names only). Verified by
+  `args_mode_compares_arguments_*` + `trajectory_eval_case_args_mode_*`.
+  **Deferred (M3'):** LLM-judged arg *equivalence* (semantically-equal but
+  not byte-equal args), and a first-class `ToolDispatched` event (actual
+  dispatch + result class + persisted args, vs just the requested names).
+  Depends: M2.

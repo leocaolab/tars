@@ -18,7 +18,8 @@ pub struct ToolStep {
     pub args: Value,
 }
 
-/// How two tool-name sequences are compared.
+/// How two tool sequences are compared. `Exact`/`Ordered`/`Set` look at
+/// tool *names* only; `Args` additionally requires matching arguments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatchMode {
     /// 1.0 iff the name sequences are identical, else 0.0 (ADK semantics).
@@ -29,6 +30,12 @@ pub enum MatchMode {
     /// Jaccard over the tool-name *multiset* — order-insensitive
     /// ("did they reach for the same tools, regardless of order").
     Set,
+    /// 1.0 iff the full `(name, args)` sequence is identical — the strict
+    /// ADK trajectory match including arguments. Needs arguments on both
+    /// sides (a names-only recorded sequence won't match an args-bearing
+    /// reference), so it's for the reference path where `ChatResponse`
+    /// carries real `ToolCall.arguments`.
+    Args,
 }
 
 impl MatchMode {
@@ -38,6 +45,7 @@ impl MatchMode {
             "exact" => Some(Self::Exact),
             "ordered" => Some(Self::Ordered),
             "set" => Some(Self::Set),
+            "args" => Some(Self::Args),
             _ => None,
         }
     }
@@ -47,6 +55,7 @@ impl MatchMode {
             Self::Exact => "exact",
             Self::Ordered => "ordered",
             Self::Set => "set",
+            Self::Args => "args",
         }
     }
 }
@@ -65,6 +74,15 @@ pub fn from_tool_calls(calls: &[tars_types::ToolCall]) -> Vec<ToolStep> {
 /// Score `actual` against `expected` under `mode`. Always in `[0.0, 1.0]`;
 /// 1.0 = perfect agreement. Total: never panics, empty-vs-empty = 1.0.
 pub fn score(actual: &[ToolStep], expected: &[ToolStep], mode: MatchMode) -> f64 {
+    if let MatchMode::Args = mode {
+        // Strict (name, args) match — exact sequence including arguments.
+        let same = actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(expected)
+                .all(|(x, y)| x.name == y.name && x.args == y.args);
+        return if same { 1.0 } else { 0.0 };
+    }
     let a: Vec<&str> = actual.iter().map(|s| s.name.as_str()).collect();
     let b: Vec<&str> = expected.iter().map(|s| s.name.as_str()).collect();
     score_names(&a, &b, mode)
@@ -72,10 +90,11 @@ pub fn score(actual: &[ToolStep], expected: &[ToolStep], mode: MatchMode) -> f64
 
 /// Score two tool-name sequences directly — used by the head-to-head
 /// `eval diff --trajectory` path over the persisted `tool_trajectory`
-/// (names), where there are no `ToolStep`s to rebuild.
+/// (names), where there are no `ToolStep`s to rebuild. `Args` has no
+/// argument data here, so it degrades to `Exact` on names.
 pub fn score_names(a: &[&str], b: &[&str], mode: MatchMode) -> f64 {
     match mode {
-        MatchMode::Exact => {
+        MatchMode::Exact | MatchMode::Args => {
             if a == b {
                 1.0
             } else {
@@ -200,9 +219,41 @@ mod tests {
 
     #[test]
     fn mode_parse_roundtrips_and_rejects_unknown() {
-        for m in [MatchMode::Exact, MatchMode::Ordered, MatchMode::Set] {
+        for m in [
+            MatchMode::Exact,
+            MatchMode::Ordered,
+            MatchMode::Set,
+            MatchMode::Args,
+        ] {
             assert_eq!(MatchMode::parse(m.as_str()), Some(m));
         }
         assert_eq!(MatchMode::parse("fuzzy"), None);
+    }
+
+    #[test]
+    fn args_mode_compares_arguments_not_just_names() {
+        let step = |name: &str, args: serde_json::Value| ToolStep {
+            name: name.to_string(),
+            args,
+        };
+        // same names + same args → match
+        let a = vec![step("search", json!({"q": "ducks"}))];
+        let b = vec![step("search", json!({"q": "ducks"}))];
+        assert_eq!(score(&a, &b, MatchMode::Args), 1.0);
+        // same name, DIFFERENT args → no match under Args (but 1.0 under Exact)
+        let c = vec![step("search", json!({"q": "geese"}))];
+        assert_eq!(score(&a, &c, MatchMode::Args), 0.0);
+        assert_eq!(score(&a, &c, MatchMode::Exact), 1.0);
+        // arg object key order doesn't matter (serde_json::Value map equality)
+        let d = vec![step("f", json!({"x": 1, "y": 2}))];
+        let e = vec![step("f", json!({"y": 2, "x": 1}))];
+        assert_eq!(score(&d, &e, MatchMode::Args), 1.0);
+    }
+
+    #[test]
+    fn args_mode_degrades_to_exact_names_without_arg_data() {
+        // score_names has no args, so Args behaves like Exact on names.
+        assert_eq!(score_names(&["a", "b"], &["a", "b"], MatchMode::Args), 1.0);
+        assert_eq!(score_names(&["a"], &["b"], MatchMode::Args), 0.0);
     }
 }
