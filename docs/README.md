@@ -5,7 +5,8 @@ Three subtrees, three audiences:
 | Path | What's inside | Who reads it |
 |------|---------------|--------------|
 | [`USER-GUIDE.md`](./USER-GUIDE.md) | 5-minute getting-started, the three call shapes, when not to use TARS | Developers integrating tars into their app |
-| [`architecture/`](./architecture/) | 23 design docs (00–23, 19 retired). Per-layer rationale, trade-offs, milestone plan, the agent abstraction, the Codex-TUI port + tool layer, audit pins. | Maintainers, contributors, peer reviewers, architects evaluating the design |
+| [`architecture/`](./architecture/) | 26 design docs (00–25). Per-layer rationale, trade-offs, milestone plan, the agent abstraction, the Codex-TUI port + tool layer, the blackboard pipeline + its investigation/testing duals, audit pins. | Maintainers, contributors, peer reviewers, architects evaluating the design |
+| Operational guides — [`observability.md`](./observability.md), [`testing-agents.md`](./testing-agents.md), [`blackboard-investigation.md`](./blackboard-investigation.md) | How to *see* what a run did (3 grains), *test* an agent/DAG offline (mock + golden LLM), and *debug* the durable state a pipeline wrote. | Developers building & debugging pipelines on tars |
 | [`audit-stories/`](./audit-stories/) | Field notes — moments where the system caught itself being wrong. Time-stamped, citation-heavy, written while context was fresh. | Engineers learning from concrete pre/post estimate-revision cases |
 | [`comparison.md`](./comparison.md) | Head-to-head positioning vs LangChain, LiteLLM, Letta, AutoGen, NVIDIA NIM | Anyone deciding "do I want this or X?" |
 
