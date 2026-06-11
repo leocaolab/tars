@@ -77,7 +77,9 @@ impl Tool for BashTool {
     fn description(&self) -> &str {
         "Run a shell command (via `sh -c`) in the working directory and \
          return its combined stdout/stderr + exit code. Use for build, \
-         test, grep, git, and other actions on the tree."
+         test, git, and other actions on the tree. To SEARCH code, prefer \
+         fs.grep (contents) and fs.glob (file names) — they are faster and \
+         scoped to the workspace; avoid `grep`/`find` here."
     }
 
     fn input_schema(&self) -> &JsonSchema {

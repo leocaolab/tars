@@ -13,9 +13,17 @@ workspace = true
 tars-types = { path = "../tars-types" }
 
 # Async
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["fs", "rt"] }
 tokio-util.workspace = true
 async-trait.workspace = true
+
+# Native code search — the engines behind ripgrep + fd, linked in (NOT
+# shelling out to `rg`/`fd`, so there's no install dependency on the host).
+# `grep` = ripgrep's matcher+searcher; `ignore` = ripgrep/fd's parallel
+# .gitignore-respecting walker; `globset` = fast glob matching.
+grep = "0.3"
+ignore = "0.4"
+globset = "0.4"
 
 # Serialization
 serde.workspace = true
