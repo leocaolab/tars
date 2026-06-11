@@ -13,7 +13,7 @@ use url::Url;
 
 use tars_types::{
     ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason,
-    StructuredOutputMode, Usage,
+    StructuredOutputMode, ThinkingMode, Usage,
 };
 
 use crate::auth::ResolvedAuth;
@@ -344,6 +344,21 @@ impl HttpAdapter for OpenAiAdapter {
         // let the server's chat-template default decide."
         if let Some(enable) = req.enable_chat_template_thinking {
             body["chat_template_kwargs"] = json!({"enable_thinking": enable});
+        }
+
+        // DeepSeek's thinking toggle is its OWN openai-compat extension: a
+        // top-level `thinking: {"type": "enabled"|"disabled"}` (what the openai
+        // client merges from `extra_body`) — NOT the vLLM/Qwen
+        // `chat_template_kwargs.enable_thinking` above. Map the generic
+        // `req.thinking` so deepseek-v4-flash (thinking-off by default) can be
+        // flipped on for a benchmark and -pro turned off. Gated on the DeepSeek
+        // host so a stray `thinking` field never reaches OpenAI proper.
+        if self.base_url.contains("deepseek") {
+            let mode = match req.thinking {
+                ThinkingMode::Off => "disabled",
+                ThinkingMode::Auto | ThinkingMode::Budget(_) => "enabled",
+            };
+            body["thinking"] = json!({ "type": mode });
         }
 
         Ok(body)
@@ -738,6 +753,48 @@ mod tests {
             .translate_request(&req(None))
             .unwrap();
         assert!(bare.get("response_format").is_none());
+    }
+
+    #[test]
+    fn deepseek_thinking_toggle_maps_to_a_top_level_thinking_field() {
+        let req = |t: ThinkingMode| ChatRequest {
+            model: tars_types::ModelHint::Explicit("deepseek-v4-flash".into()),
+            system: None,
+            messages: vec![Message::user_text("hi")],
+            tools: vec![],
+            tool_choice: Default::default(),
+            structured_output: None,
+            max_output_tokens: None,
+            temperature: None,
+            stop_sequences: vec![],
+            seed: None,
+            cache_directives: vec![],
+            thinking: t,
+            enable_chat_template_thinking: None,
+        };
+        let ds = |t| {
+            OpenAiAdapter::new(
+                "https://api.deepseek.com".into(),
+                HttpProviderExtras::default(),
+                StructuredOutputMode::JsonObjectMode,
+            )
+            .translate_request(&req(t))
+            .unwrap()
+        };
+        // DeepSeek host: Auto/Budget → enabled, Off → disabled.
+        assert_eq!(ds(ThinkingMode::Auto)["thinking"]["type"], "enabled");
+        assert_eq!(ds(ThinkingMode::Budget(1024))["thinking"]["type"], "enabled");
+        assert_eq!(ds(ThinkingMode::Off)["thinking"]["type"], "disabled");
+
+        // Non-DeepSeek host: no `thinking` field leaks (would break OpenAI proper).
+        let openai = OpenAiAdapter::new(
+            DEFAULT_BASE_URL.into(),
+            HttpProviderExtras::default(),
+            StructuredOutputMode::StrictSchema,
+        )
+        .translate_request(&req(ThinkingMode::Auto))
+        .unwrap();
+        assert!(openai.get("thinking").is_none());
     }
 
     #[test]
