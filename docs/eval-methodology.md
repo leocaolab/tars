@@ -118,7 +118,7 @@ fit. A paired-bootstrap path is a clean extension if/when scored
 ## 3. What `tars eval diff` produces (target shape)
 
 ```
-$ tars eval diff eval-runs/baseline/ eval-runs/candidate/
+$ tars eval diff benchmarks/baselines/eval/<model>/ benchmarks/runs/eval/<timestamp>/
 
 operational:
   cases:        50 → 50

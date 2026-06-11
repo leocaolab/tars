@@ -29,7 +29,7 @@
 //! ## Output layout
 //!
 //! ```text
-//! eval-runs/<timestamp>/
+//! benchmarks/runs/eval/<timestamp>/   (gitignored scratch; promote a keeper to benchmarks/baselines/eval/)
 //!   manifest.json           — EvalRunManifest (case_count, totals)
 //!   case_001/
 //!     output.txt            — the agent's response text
@@ -193,7 +193,7 @@ pub struct EvalRunArgs {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Output directory. Default: `./eval-runs/<timestamp>/`.
+    /// Output directory. Default: `./benchmarks/runs/eval/<timestamp>/`.
     #[arg(long, short = 'o')]
     pub output: Option<PathBuf>,
 
@@ -916,7 +916,7 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
     // 4. Output directory.
     let output_dir = match args.output.clone() {
         Some(p) => p,
-        None => PathBuf::from(format!("eval-runs/{}", utc_now_stamp())),
+        None => PathBuf::from(format!("benchmarks/runs/eval/{}", utc_now_stamp())),
     };
     ensure_dir(&output_dir)?;
 

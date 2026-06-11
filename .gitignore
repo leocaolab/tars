@@ -256,3 +256,8 @@ config.local.toml
 
 # Per-run log dumps emitted by downstream consumers
 *.log.jsonl
+
+# Benchmark/eval scratch output. `tars eval` and benchmarks/scripts/bench-local.sh
+# write here by default; it's regenerable. Curated keepers are promoted by hand
+# into benchmarks/baselines/ (which IS tracked). See benchmarks/README.md.
+benchmarks/runs/

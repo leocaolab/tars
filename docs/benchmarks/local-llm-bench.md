@@ -128,17 +128,17 @@ clean:
 
 ### Driver script
 
-`tools/bench-local.sh` (below) loops the matrix, swapping one model at
-a time, and tees each summary into `bench-runs/<date>/`:
+`benchmarks/scripts/bench-local.sh` (below) loops the matrix, swapping one model at
+a time, and tees each summary into `benchmarks/runs/speed/<date>/`:
 
 ```bash
 #!/usr/bin/env bash
-# Usage: tools/bench-local.sh [provider] [max_tokens] [repeat]
+# Usage: benchmarks/scripts/bench-local.sh [provider] [max_tokens] [repeat]
 set -euo pipefail
 PROVIDER="${1:-qwen_coder_local}"
 MAXTOK="${2:-256}"
 REPEAT="${3:-8}"
-OUT="bench-runs/$(date +%Y%m%d-%H%M%S)"
+OUT="benchmarks/runs/speed/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUT"
 MODELS=(
   qwen/qwen3.5-9b            google/gemma-4-e4b
@@ -185,7 +185,7 @@ So this is a *knob with a per-backend cost*, not a prohibition.
 `curl` — same prompt, same model, with/without `response_format`:
 
 ```bash
-# see tools/schema-penalty.sh — times A (free) vs B (json_schema) and
+# see benchmarks/scripts/schema-penalty.sh — times A (free) vs B (json_schema) and
 # prints tok/s for each. Run against the same warm model.
 ```
 
@@ -222,7 +222,7 @@ instead, does the output actually parse?" is exactly what `--check
 valid-json` answers.
 
 ```text
-bench-corpus/
+benchmarks/corpus/
   config_json/  input.txt  "…server config with keys host/port/tls … Return ONLY the JSON."
   user_json/    input.txt  "Extract the person as JSON {name, age} … Return ONLY the JSON."
   langs_json/   input.txt  "…array of {name, year, paradigm} … Return ONLY the JSON."
@@ -243,13 +243,13 @@ set is meaningful (all-JSON cases → `--check valid-json`).
 # replay the corpus through one model, write per-case outputs + manifest.
 # Budget HIGH (4096): reasoning models (qwen3.6-27b) spend most of the
 # budget thinking before the answer — 512 left them empty (§7.2).
-tars eval run --corpus bench-corpus --provider qwen_coder_local \
+tars eval run --corpus benchmarks/corpus --provider qwen_coder_local \
   --model qwen/qwen3-coder-30b --check non-empty --check valid-json \
-  --max-output-tokens 4096 --output eval-runs/qwen-coder
+  --max-output-tokens 4096 --output benchmarks/runs/eval/qwen-coder
 
-tars eval run --corpus bench-corpus --provider gemma_local \
+tars eval run --corpus benchmarks/corpus --provider gemma_local \
   --model google/gemma-4-31b  --check non-empty --check valid-json \
-  --max-output-tokens 4096 --output eval-runs/gemma-31b
+  --max-output-tokens 4096 --output benchmarks/runs/eval/gemma-31b
 ```
 
 The per-case `report.json` carries per-check pass/fail plus usage and
@@ -270,7 +270,7 @@ clarity). Use a cloud model as judge — costs tokens, introduces
 subjectivity, so it is deliberately off by default:
 
 ```bash
-tars eval judge eval-runs/qwen-coder eval-runs/gemma-31b \
+tars eval judge benchmarks/runs/eval/qwen-coder benchmarks/runs/eval/gemma-31b \
   --judge-provider anthropic --judge-model claude-sonnet-4-7
 ```
 
@@ -281,7 +281,7 @@ Treat judge output as a tiebreaker signal, not a primary metric.
 ## 7. Results
 
 > Filled from real runs on **2026-06-01/02, M5 Pro 48 GB, LM Studio**.
-> Re-run `tools/bench-local.sh` after any model swap. **Numbers are
+> Re-run `benchmarks/scripts/bench-local.sh` after any model swap. **Numbers are
 > hardware- and quant-specific — do not port them off this box.**
 
 ### 7.1 Tier A — speed (max_tokens=128, warmup 2–3, repeat 5)
@@ -320,7 +320,7 @@ Constrained decode is **~2.1× slower per token** on a *moderate*
 schema, and produced *fewer* tokens in *more* wall-clock. A
 *complex* critic schema + 16k budget measured ~6× — past the point a
 30B finishes inside a 600 s timeout (→ 0-token timeouts). **Don't send
-`json_schema` to local providers; use prompt JSON.** (`tools/schema-penalty.sh`)
+`json_schema` to local providers; use prompt JSON.** (`benchmarks/scripts/schema-penalty.sh`)
 
 #### 7.1.2 Memory guardrail — 48 GB ceiling
 
@@ -383,8 +383,8 @@ your own backend.
 ```bash
 cargo build --release -p tars-cli          # binary with `bench` + `eval`
 curl -s http://127.0.0.1:1234/v1/models | jq '.data[].id'   # confirm LM Studio up + model ids
-tools/bench-local.sh qwen_coder_local 256 8 # Tier A across the matrix
-# Tier B: create bench-corpus/ as in §5, then `tars eval run ...` per model
+benchmarks/scripts/bench-local.sh qwen_coder_local 256 8 # Tier A across the matrix
+# Tier B: create benchmarks/corpus/ as in §5, then `tars eval run ...` per model
 ```
 
 Pitfalls: a model still loading returns `out=0` iters (auto-excluded —

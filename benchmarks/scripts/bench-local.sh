@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # bench-local.sh — Tier A speed sweep across the local model matrix.
 # Swaps one model at a time (48 GB can't co-reside large 8-bit models),
-# tees each `tars bench` summary into bench-runs/<ts>/.
+# tees each `tars bench` summary into benchmarks/runs/speed/<ts>/.
 #
-# Usage: tools/bench-local.sh [provider] [max_tokens] [repeat]
+# Usage: benchmarks/scripts/bench-local.sh [provider] [max_tokens] [repeat]
+# Run from the repo root. Outputs are gitignored scratch; promote a keeper
+# into benchmarks/baselines/speed/ to track it.
 set -euo pipefail
 PROVIDER="${1:-qwen_coder_local}"
 MAXTOK="${2:-128}"
 REPEAT="${3:-5}"
-OUT="bench-runs/$(date +%Y%m%d-%H%M%S)"
+OUT="benchmarks/runs/speed/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$OUT"
 TARS=./target/release/tars
 CFG="$HOME/.tars/config.toml"

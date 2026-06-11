@@ -6,7 +6,7 @@
 # (B) with response_format=json_schema, and reports tok/s for each.
 # tars bench can't do this (it never sends a schema), hence raw curl.
 #
-# Usage: tools/schema-penalty.sh [model] [base_url]
+# Usage: benchmarks/scripts/schema-penalty.sh [model] [base_url]
 set -euo pipefail
 M="${1:-qwen/qwen3-coder-30b}"
 URL="${2:-http://127.0.0.1:1234/v1}/chat/completions"
