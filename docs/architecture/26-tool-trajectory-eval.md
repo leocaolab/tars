@@ -327,11 +327,15 @@ final-state checks).
   the loop for any agent run (`tars run-task` etc.) without eval changes.
   Verified by `score_passes_on_matching_cross_call_sequence_*` +
   `parse_expected_*` in `trajectory.rs`.
-- **M2'' — eval drives a tool-using agent loop.** Remaining half of CUJ-4:
-  `eval run` runs each case through a `WorkerAgent::with_tools` in a sandboxed
-  cwd (read-only tools only — no `bash`/write side effects from corpus cases),
-  captures the trajectory, and feeds its `tool_sequence` to the trajectory-match
-  check. The heavy, security-sensitive part; deferred. Depends: M2, M2'.
+- **M2'' — eval drives a tool-using agent loop. ✅ shipped (P1).** `eval run
+  --agent [--tool …] [--agent-max-iterations N]` runs each case through a
+  `WorkerAgent::with_tools` over a **read-only registry** (`read_file`/`grep`/
+  `glob`/`list_dir`, allow-listed, `::with_root`-jailed to the case dir — never
+  `bash`/write), and feeds the worker's cross-call `tool_calls` (M2) to the
+  trajectory-match check. Design + security boundary in §15. Verified by
+  `agent_registry_allows_*` / `agent_registry_refuses_dangerous_*`. Deferred to
+  P2: a writable worktree sandbox (so write-tools could be evaluated) and args
+  in agent mode (names only today). Depends: M2, M2'.
 - **M3 — args mode (P3). ✅ shipped (deterministic half).** `MatchMode::Args`
   scores the full `(name, args)` sequence (strict ADK trajectory incl.
   arguments); works on the reference check (`trajectory-match:args`) where
@@ -342,3 +346,74 @@ final-state checks).
   not byte-equal args), and a first-class `ToolDispatched` event (actual
   dispatch + result class + persisted args, vs just the requested names).
   Depends: M2.
+
+---
+
+## 15. M2'' design — `eval run --agent` (tool-using agent loop)
+
+> Status: design + P1 impl, 2026-06-11. The remaining half of CUJ-4: make eval
+> cases *produce* multi-call tool trajectories by running a real tool-using
+> agent, then score them. The crux is the **security boundary** — corpus cases
+> are untrusted text that now drives tool execution.
+
+### 15.1 Goal & non-goals
+Run each case through a `WorkerAgent::with_tools` loop instead of a single
+completion; score the worker's cross-call `AgentStepResult.tool_calls` (M2) with
+the existing `trajectory-match` check.
+**Non-goals (P1):** no `bash`, no `fs.edit_file`/`fs.write_file` — **read-only
+tools only**; no writable worktree/copy; no per-tool approval prompts; args not
+persisted in agent mode (names only → `args` mode degrades to exact-names).
+
+### 15.2 The security boundary (the reason this is its own milestone)
+A corpus case's `input.txt` is untrusted and now reaches a tool dispatcher.
+Three hard guards:
+1. **Allow-list registry.** `--tool` resolves against a fixed map of *read-only*
+   builtins only: `read_file`, `grep`, `glob`, `list_dir`. `bash` / `edit_file`
+   / `write_file` are **not in the map** — requesting one is a hard error. The
+   model cannot call a tool that isn't registered (`ToolRegistry` only holds the
+   allow-listed ones).
+2. **Path jail.** Every tool is constructed `::with_root(sandbox)` where
+   `sandbox` = the case dir, AND `ctx.cwd = Some(sandbox)`. The reviewed
+   `canonicalize + starts_with` jail in `read_file`/`grep`/`glob`/`list_dir`
+   means no read escapes the case dir (symlinks resolved, no `find /`).
+3. **No side effects.** Read-only tools can't mutate; the corpus dir is exposed
+   read-only in effect. `permissions = allow_all` is safe *because* the registry
+   contains only safe tools.
+
+### 15.3 Components & reuse
+| Piece | Reuses (`file:line`) | New |
+|---|---|---|
+| read-only registry | `tars_tools::{ReadFileTool,GrepTool,GlobTool,ListDirTool}::with_root`, `ToolRegistry::{new,register}` | `build_agent_registry(tools, sandbox)` allow-list in `eval.rs` |
+| run the loop | `WorkerAgent::with_tools` + `execute` (`worker.rs:342`), `Pipeline` as `LlmService` (`middleware.rs:214`), `AgentContext` | agent branch in `run_one_case` |
+| tool sequence | `AgentStepResult.tool_calls` (M2) | names → `ToolStep`s for the check |
+| scoring / checks / manifest / diff | M0–M3 machinery, `CheckRunner` over a synthesized `ChatResponse` | — |
+
+### 15.4 Algorithm (run_one_case, agent mode)
+```
+sandbox = corpus/<case.id>
+registry = build_agent_registry(tools, sandbox)        # allow-list + ::with_root jail
+req = ChatRequest::user(model, case.input) (+ system)
+req.tools = registry.to_tool_specs()                   # drive_with_tools does NOT inject
+worker = WorkerAgent::with_tools(model, "eval", Arc::new(registry))[.max_iters]
+result = worker.execute(ctx{ llm=pipeline, cwd=Some(sandbox), perms=allow_all, … }, req)
+tool_steps = result.tool_calls → ToolStep{ name, args: Null }   # cross-call sequence (M2)
+resp = synth ChatResponse{ text: result.output text, tool_calls: [], usage }
+→ run invariants on resp; run trajectory-match on tool_steps; same report shape
+```
+Edge cases: a worker error → case `status=Error` (same as a failed completion);
+`max_tool_iterations` hit → the worker's `AgentError` surfaces as a case error.
+
+### 15.5 CLI
+```
+tars eval run --corpus tasks/ --provider P --agent \
+  [--tool read_file --tool grep ...]   # default: all 4 read-only
+  [--agent-max-iterations N]
+  --check trajectory-match:ordered
+```
+
+### 15.6 Verification
+- `build_agent_registry` rejects `bash`/`edit_file`/`write_file` and unknown
+  names; accepts the 4 read-only; jails to the sandbox.
+- (integration, behind a live/mock provider) a case whose input asks the model
+  to read a planted file yields `result.tool_calls` containing `read_file`,
+  scored by `trajectory-match`.

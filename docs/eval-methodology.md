@@ -163,9 +163,24 @@ tars eval diff runs/A runs/B
 ```
 
 Modes: `exact` (= ADK's `tool_trajectory_avg_score`, all-or-nothing),
-`ordered` (LCS partial credit), `set` (order-insensitive). A pass
-threshold is appendable: `trajectory-match:ordered:0.8`. A case with no
-`expected_tools.json` is *skipped*, not silently passed.
+`ordered` (LCS partial credit), `set` (order-insensitive), `args` (strict
+match including arguments). A pass threshold is appendable:
+`trajectory-match:ordered:0.8`. A case with no `expected_tools.json` is
+*skipped*, not silently passed.
+
+**Multi-step tool trajectories (`--agent`).** By default a case is a single
+completion, so `trajectory-match` scores the tools *requested in one turn*. To
+score a real multi-step tool loop, run the case through a sandboxed agent:
+
+```bash
+tars eval run --corpus tasks/ --provider P --agent \
+  --check trajectory-match:ordered          # default tools: read_file, grep, glob, list_dir
+```
+
+Agent mode runs a `WorkerAgent` with **read-only tools jailed to the case dir**
+(never `bash`/write — corpus cases are untrusted; see Doc 26 §15), and scores
+the cross-call tool sequence the agent actually ran. `--tool <name>` narrows the
+tool set; `--agent-max-iterations N` caps the loop.
 
 **No-oracle head-to-head.** Even without `expected_tools`, you can A/B *how
 differently* two configs pick tools — `--trajectory` pairs cases by id and

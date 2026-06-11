@@ -105,13 +105,18 @@ fn list_dir(path: &Path) -> Result<fs::ReadDir> {
 }
 
 use tars_pipeline::{
-    JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, Pipeline, PipelineOpts,
+    JsonShapeValidator, LlmService, MaxLengthValidator, NotEmptyValidator, Pipeline, PipelineOpts,
 };
-use tars_runtime::{CheckRunner, Invariant, ValidatorInvariant};
 use tars_runtime::trajectory_match::{self, MatchMode, ToolStep};
-use tars_types::{
-    ChatRequest, ChatResponse, ChatResponseBuilder, ModelHint, RequestContext, Usage,
+use tars_runtime::{
+    Agent, AgentContext, AgentOutput, CheckRunner, Invariant, ValidatorInvariant, WorkerAgent,
 };
+use tars_tools::builtins::{GlobTool, GrepTool, ListDirTool, ReadFileTool};
+use tars_tools::{Tool, ToolRegistry};
+use tars_types::{
+    ChatRequest, ChatResponse, ChatResponseBuilder, ModelHint, RequestContext, TrajectoryId, Usage,
+};
+use tokio_util::sync::CancellationToken;
 
 use crate::config_loader;
 use crate::dispatch::{build_registry_with_breaker, pick_provider};
@@ -218,6 +223,28 @@ pub struct EvalRunArgs {
     /// (Doc 26). Custom invariants are a Rust-API feature (Doc 18 §4.1).
     #[arg(long = "check")]
     pub checks: Vec<String>,
+
+    /// Run each case through a tool-using agent loop instead of a single
+    /// completion, so multi-step tool trajectories are produced (Doc 26 M2'').
+    /// SAFETY: only read-only tools are available and they're jailed to the
+    /// case dir — never `bash` / write tools.
+    #[arg(long)]
+    pub agent: bool,
+
+    /// In `--agent` mode, which read-only tools to expose (repeatable).
+    /// Allowed: `read_file`, `grep`, `glob`, `list_dir`. Default: all four.
+    #[arg(long = "tool")]
+    pub tools: Vec<String>,
+
+    /// In `--agent` mode, cap the tool-loop iterations per case.
+    #[arg(long)]
+    pub agent_max_iterations: Option<u32>,
+}
+
+/// Resolved `--agent` configuration (the read-only tool set + iteration cap).
+struct AgentMode {
+    tools: Vec<String>,
+    max_iterations: Option<u32>,
 }
 
 /// Map a `--check` spec to a built-in invariant. Returns an error for
@@ -1182,6 +1209,20 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
     let mut check_names: Vec<String> = check_runner.names().iter().map(|s| s.to_string()).collect();
     check_names.extend(traj_specs.iter().map(|t| t.name().to_string()));
 
+    // 2c. Agent mode (Doc 26 M2''): run each case through a read-only,
+    //     sandboxed tool-using agent instead of a single completion.
+    let agent_mode = if args.agent {
+        Some(AgentMode {
+            tools: args.tools.clone(),
+            max_iterations: args.agent_max_iterations,
+        })
+    } else {
+        if !args.tools.is_empty() || args.agent_max_iterations.is_some() {
+            anyhow::bail!("--tool / --agent-max-iterations require --agent");
+        }
+        None
+    };
+
     // 3. Discover cases.
     let cases = load_corpus(&args.corpus)
         .with_context(|| format!("loading corpus from {}", args.corpus.display()))?;
@@ -1219,13 +1260,17 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         eprint!("── {} ... ", case.id);
         let case_out_dir = output_dir.join(&case.id);
         ensure_dir(&case_out_dir)?;
+        // Agent-mode sandbox = the case's INPUT dir (read-only tools jail here).
+        let case_dir = args.corpus.join(&case.id);
         let report = run_one_case(
             pipeline.clone(),
             case,
+            &case_dir,
             args.model.as_deref(),
             args.max_output_tokens,
             &check_runner,
             &traj_specs,
+            agent_mode.as_ref(),
         )
         .await;
         // Persist response text + per-case report regardless of outcome.
@@ -1389,40 +1434,38 @@ struct CaseOutcome {
     output_text: String,
 }
 
-async fn run_one_case(
-    pipeline: Arc<Pipeline>,
-    case: &Case,
-    model: Option<&str>,
-    max_output_tokens: Option<u32>,
-    checks: &CheckRunner,
-    traj_specs: &[TrajectorySpec],
-) -> CaseOutcome {
-    let started = Instant::now();
-    let mut req = ChatRequest::user(
-        match model {
-            Some(m) => ModelHint::Explicit(m.into()),
-            None => ModelHint::Explicit("".into()), // forces provider to use its capability's
-                                                    // default; explicit-empty is fine for many
-                                                    // backends and avoids the "model required"
-                                                    // path the CLI providers hit
-        },
-        case.input.clone(),
-    );
+/// Resolve the model hint for a case request (explicit, or provider default).
+fn case_model_hint(model: Option<&str>) -> ModelHint {
+    match model {
+        Some(m) => ModelHint::Explicit(m.into()),
+        // Empty forces the provider's capability default; fine for most
+        // backends and avoids the CLI providers' "model required" path.
+        None => ModelHint::Explicit("".into()),
+    }
+}
+
+/// Build the base request for a case (shared by both execution modes).
+fn build_case_request(case: &Case, model: Option<&str>, max_output_tokens: Option<u32>) -> ChatRequest {
+    let mut req = ChatRequest::user(case_model_hint(model), case.input.clone());
     if let Some(sys) = &case.system {
         req = req.with_system(sys.clone());
     }
     if let Some(cap) = max_output_tokens {
         req.max_output_tokens = Some(cap);
     }
+    req
+}
 
-    // Keep a copy of the request — invariants need it (and `call`
-    // consumes the original).
-    let req_for_checks = req.clone();
+/// Single-completion execution (the default mode). Returns the response, the
+/// tool steps the model requested (full args), and any error.
+async fn run_completion_case(
+    pipeline: Arc<Pipeline>,
+    req: ChatRequest,
+) -> (ChatResponse, Vec<ToolStep>, Option<String>) {
     let ctx = RequestContext::test_default();
-    let stream_result = pipeline.clone().call(req, ctx).await;
+    let stream_result = pipeline.call(req, ctx).await;
     let mut acc = ChatResponseBuilder::new();
     let mut error: Option<String> = None;
-
     match stream_result {
         Ok(mut stream) => {
             while let Some(event) = stream.next().await {
@@ -1437,8 +1480,139 @@ async fn run_one_case(
         }
         Err(e) => error = Some(truncate(&format!("{e}"), 500)),
     }
+    let response = acc.finish();
+    let tool_steps = trajectory_match::from_tool_calls(&response.tool_calls);
+    (response, tool_steps, error)
+}
 
-    let response: ChatResponse = acc.finish();
+/// Build the read-only, sandboxed tool registry for `--agent` mode (Doc 26
+/// §15.2). Only the allow-listed read-only builtins, each jailed to `sandbox`;
+/// `bash`/`edit_file`/`write_file` are refused.
+fn build_agent_registry(tools: &[String], sandbox: &Path) -> Result<ToolRegistry> {
+    let mut reg = ToolRegistry::new();
+    let names: Vec<&str> = if tools.is_empty() {
+        vec!["read_file", "grep", "glob", "list_dir"]
+    } else {
+        tools.iter().map(String::as_str).collect()
+    };
+    for name in names {
+        let jail_err =
+            || anyhow::anyhow!("cannot jail `{name}` to sandbox `{}`", sandbox.display());
+        let tool: Arc<dyn Tool> = match name {
+            "read_file" => Arc::new(ReadFileTool::with_root(sandbox).ok_or_else(jail_err)?),
+            "grep" => Arc::new(GrepTool::with_root(sandbox).ok_or_else(jail_err)?),
+            "glob" => Arc::new(GlobTool::with_root(sandbox).ok_or_else(jail_err)?),
+            "list_dir" => Arc::new(ListDirTool::with_root(sandbox).ok_or_else(jail_err)?),
+            "bash" | "edit_file" | "write_file" => anyhow::bail!(
+                "--tool `{name}` is refused in eval: only READ-ONLY tools may run \
+                 against untrusted corpus cases (Doc 26 §15.2)"
+            ),
+            other => anyhow::bail!(
+                "unknown --tool `{other}`. Allowed (read-only): read_file, grep, glob, list_dir"
+            ),
+        };
+        reg.register(tool)
+            .map_err(|e| anyhow::anyhow!("registering tool `{name}`: {e}"))?;
+    }
+    Ok(reg)
+}
+
+/// Synthesize a minimal `ChatResponse` from an agent run's final text, so the
+/// invariant checks (which read `resp.text`) work in agent mode too.
+fn synth_response(text: String, usage: Usage) -> ChatResponse {
+    ChatResponse {
+        actual_model: String::new(),
+        text,
+        thinking: String::new(),
+        tool_calls: Vec::new(),
+        stop_reason: None,
+        usage,
+        cache_hit: Default::default(),
+        validation_summary: Default::default(),
+    }
+}
+
+/// Tool-using agent-loop execution (`--agent`). Runs a `WorkerAgent::with_tools`
+/// over a read-only sandbox; returns a synthesized response (final text), the
+/// cross-call tool steps (names only — M2), and any error.
+async fn run_worker_case(
+    pipeline: Arc<Pipeline>,
+    mut req: ChatRequest,
+    model: Option<&str>,
+    sandbox: &Path,
+    agent: &AgentMode,
+) -> (ChatResponse, Vec<ToolStep>, Option<String>) {
+    let registry = match build_agent_registry(&agent.tools, sandbox) {
+        Ok(r) => r,
+        Err(e) => return (synth_response(String::new(), Usage::default()), Vec::new(), Some(truncate(&format!("{e}"), 500))),
+    };
+    req.tools = registry.to_tool_specs();
+
+    let mut worker = WorkerAgent::with_tools(
+        "eval-worker",
+        model.unwrap_or(""),
+        "eval",
+        Arc::new(registry),
+    );
+    if let Some(n) = agent.max_iterations {
+        worker = worker.with_max_tool_iterations(n);
+    }
+    let ctx = AgentContext {
+        trajectory_id: TrajectoryId::new("eval-agent"),
+        step_seq: 1,
+        llm: pipeline as Arc<dyn LlmService>,
+        cancel: CancellationToken::new(),
+        cwd: Some(sandbox.to_path_buf()),
+        permissions: Default::default(),
+        readable_roots: Vec::new(),
+    };
+    match worker.execute(ctx, req).await {
+        Ok(result) => {
+            let text = match &result.output {
+                AgentOutput::Text { text } | AgentOutput::Mixed { text, .. } => text.clone(),
+                AgentOutput::ToolCalls { .. } => String::new(),
+            };
+            // Cross-call tool sequence (M2): names only in agent mode.
+            let tool_steps: Vec<ToolStep> = result
+                .tool_calls
+                .iter()
+                .map(|n| ToolStep {
+                    name: n.clone(),
+                    args: serde_json::Value::Null,
+                })
+                .collect();
+            (synth_response(text, result.usage), tool_steps, None)
+        }
+        Err(e) => (
+            synth_response(String::new(), Usage::default()),
+            Vec::new(),
+            Some(truncate(&format!("{e}"), 500)),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // each arg is a distinct per-case input; a
+// struct would just move the same fields elsewhere without clarifying anything.
+async fn run_one_case(
+    pipeline: Arc<Pipeline>,
+    case: &Case,
+    case_dir: &Path,
+    model: Option<&str>,
+    max_output_tokens: Option<u32>,
+    checks: &CheckRunner,
+    traj_specs: &[TrajectorySpec],
+    agent: Option<&AgentMode>,
+) -> CaseOutcome {
+    let started = Instant::now();
+    let req = build_case_request(case, model, max_output_tokens);
+    // Keep a copy for the invariants (execution consumes the original).
+    let req_for_checks = req.clone();
+
+    let (response, tool_steps, error) = match agent {
+        Some(am) => run_worker_case(pipeline.clone(), req, model, case_dir, am).await,
+        None => run_completion_case(pipeline.clone(), req).await,
+    };
+
     let output_text = response.text.clone();
     let status = if error.is_some() {
         EvalCaseStatus::Error
@@ -1446,10 +1620,9 @@ async fn run_one_case(
         EvalCaseStatus::Ok
     };
 
-    // The tools the model selected this turn, in call order — recorded
-    // regardless of whether a trajectory check was requested (cheap, and
-    // lets `eval diff --trajectory` work later without re-inferring).
-    let tool_steps = trajectory_match::from_tool_calls(&response.tool_calls);
+    // Tool names the model selected, in call order — recorded regardless of
+    // whether a trajectory check was requested (lets `eval diff --trajectory`
+    // work without re-inferring).
     let tool_trajectory: Vec<String> = tool_steps.iter().map(|s| s.name.clone()).collect();
 
     // Run checks only on successful cases — an errored call has no real
@@ -1692,6 +1865,38 @@ mod tests {
         // reason names both want and got — not a bare failure
         let detail = r.detail().unwrap();
         assert!(detail.contains("search") && detail.contains("fetch"), "detail={detail}");
+    }
+
+    // ── agent mode registry (Doc 26 M2'' §15.2 security boundary) ─────
+
+    #[test]
+    fn agent_registry_allows_readonly_tools_jailed_to_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        // default (empty) → all four read-only tools
+        let reg = build_agent_registry(&[], dir.path()).unwrap();
+        assert_eq!(reg.to_tool_specs().len(), 4);
+        // explicit subset
+        let reg2 =
+            build_agent_registry(&["read_file".into(), "grep".into()], dir.path()).unwrap();
+        assert_eq!(reg2.to_tool_specs().len(), 2);
+    }
+
+    #[test]
+    fn agent_registry_refuses_dangerous_and_unknown_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["bash", "edit_file", "write_file"] {
+            // `.err().unwrap()` (not `unwrap_err`) — ToolRegistry isn't Debug.
+            let e = build_agent_registry(&[bad.to_string()], dir.path())
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(
+                e.contains("refused") || e.contains("READ-ONLY"),
+                "tool `{bad}` must be refused: {e}"
+            );
+        }
+        // unknown tool name
+        assert!(build_agent_registry(&["frobnicate".into()], dir.path()).is_err());
     }
 
     #[test]
