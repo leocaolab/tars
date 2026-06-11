@@ -1,0 +1,4 @@
+# Demo deps. `tars` itself is the Rust binding — build it once with
+# `maturin develop --release` from crates/tars-py (see README), it is not on PyPI.
+pydantic>=2.0
+rich>=13.0

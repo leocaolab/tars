@@ -1,22 +1,46 @@
-"""后台考官 Agent：纯函数，只读黑板 + 用户发言 → 吐 JSON Patch，绝不和用户说话"""
+"""后台考官 Agent：纯函数，只读黑板 + 用户发言 → 吐 JSON Patch，绝不和用户说话。
+
+Redesigned on tars — this is where the redesign pays off most. The old version:
+  1. dumped `EvaluatorPatch.model_json_schema()` INTO the system prompt as a hint,
+  2. called the model, then
+  3. stripped ```json fences off the reply, then
+  4. `model_validate_json`'d it and hoped.
+
+tars does (1)+(3) natively: pass the schema as `response_schema=` and the
+provider is steered to emit exactly that JSON. We just validate the typed result.
+"""
 
 import json
 from typing import List
 
-from pydantic import ValidationError
-
-from .llm import LLMClient
-from .llm.errors import LLMClientError
 from .models import Blackboard, EvaluatorPatch, RubricDimension
+from .runtime import LlmRole
 
 
 class EvaluatorAgent:
+    """The back-stage examiner. Reads the blackboard slice it owns + the latest
+    utterance, emits a structured `EvaluatorPatch`. Never speaks to the user."""
 
-    def __init__(self, client: LLMClient, target_dimensions: List[RubricDimension]):
-        self._client = client
+    def __init__(self, role: LlmRole, target_dimensions: List[RubricDimension]):
+        self._role = role
         self.target_dimensions = target_dimensions
 
     def evaluate(self, board: Blackboard, user_input: str) -> EvaluatorPatch:
+        system_prompt, user_prompt = self._build_prompt(board, user_input)
+
+        # tars steers the provider to the EvaluatorPatch shape and (loose mode)
+        # tolerates local GBNF servers. No schema-in-prompt, no fence-stripping.
+        raw = self._role.complete(
+            system=system_prompt,
+            user=user_prompt,
+            response_schema=EvaluatorPatch.model_json_schema(),
+            max_output_tokens=4096,
+        )
+        # The reply is already schema-shaped; a malformed one would have surfaced
+        # as a typed error inside the role. Validate to the typed model and go.
+        return EvaluatorPatch.model_validate_json(raw)
+
+    def _build_prompt(self, board: Blackboard, user_input: str) -> tuple[str, str]:
         # 切片：捞取负责的考点运行时状态
         target_ids = [d.node_id for d in self.target_dimensions]
         slice_state = {
@@ -31,14 +55,10 @@ class EvaluatorAgent:
             for d in self.target_dimensions
         )
 
-        # JSON schema 提示，让所有 provider 都能返回正确结构
-        schema_hint = json.dumps(
-            EvaluatorPatch.model_json_schema(), ensure_ascii=False, indent=2
-        )
-
         system_prompt = (
-            "你是一位严苛的系统设计考官。你只输出 JSON，绝不输出任何其他内容。\n"
-            f"请严格按照以下 JSON Schema 返回：\n{schema_hint}"
+            "你是一位严苛的系统设计考官。你的唯一职责是依据能力维度的评判规则，"
+            "把候选人本轮发言转化为一份结构化评估补丁（EvaluatorPatch）。"
+            "只评估、不与候选人对话。"
         )
 
         user_prompt = (
@@ -67,24 +87,6 @@ class EvaluatorAgent:
             "- probe_suggestions: 当状态为 NEEDS_PROBING 时，给出尖锐的追问建议\n\n"
             "注意：不要因为候选人提到了某个技术名词就给 SATISFIED，"
             "要看他是否展现了该维度要求的思维能力。"
-            "信号应该是具体的观察，不是空泛的评语。\n\n"
-            "只返回纯 JSON，不要 markdown 代码块。"
+            "信号应该是具体的观察，不是空泛的评语。"
         )
-
-        try:
-            raw = self._client.chat(system=system_prompt, user=user_prompt)
-        except Exception as e:
-            raise LLMClientError(f"考官评估调用失败: {e}") from e
-
-        # 清理可能的 markdown 包裹
-        text = raw.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-
-        try:
-            return EvaluatorPatch.model_validate_json(text)
-        except ValidationError as e:
-            raise LLMClientError(f"考官返回的 JSON 不符合 EvaluatorPatch 结构: {e}") from e
+        return system_prompt, user_prompt

@@ -1,22 +1,34 @@
+"""Entry point — wires the blackboard + three agents over a tars Pipeline.
+
+Run:
+    export TARS_PROVIDER=anthropic          # any provider in ~/.tars/config.toml
+    export TARS_MODEL=claude-sonnet-4-5
+    python -m interview_sim.main             # human candidate (you type)
+    python -m interview_sim.main --auto       # self-play: AI candidate vs AI interviewer
+    python -m interview_sim.main --auto --turns=8
+"""
+
 import json
 import sys
 from pathlib import Path
+
 from pydantic import ValidationError
-from .config import settings
-from .llm import create_client
-from .session_factory import SessionFactory, load_rubric, load_blueprint
-from .evaluator import EvaluatorAgent
+
 from .actor import ActorAgent
 from .candidate import CandidateAgent
-from .engine import run_loop, run_auto, save_log
+from .engine import run_auto, run_loop, save_log
+from .evaluator import EvaluatorAgent
+from .runtime import build_role
+from .session_factory import SessionFactory, load_blueprint, load_rubric
 
 BLUEPRINTS_DIR = Path(__file__).parent / "blueprints"
 
 
-def main():
-    auto_mode = "--auto" in sys.argv
+def _parse_args(argv: list[str]) -> tuple[bool, int, str | None]:
+    auto_mode = "--auto" in argv
     max_turns = 5
-    for arg in sys.argv:
+    model: str | None = None
+    for arg in argv:
         if arg.startswith("--turns="):
             raw = arg.split("=", 1)[1]
             try:
@@ -24,18 +36,24 @@ def main():
             except ValueError:
                 print(f"错误：--turns 需要一个整数，收到 {raw!r}。", file=sys.stderr)
                 sys.exit(2)
+        elif arg.startswith("--model="):
+            model = arg.split("=", 1)[1]
+    return auto_mode, max_turns, model
 
-    # 1. 创建 LLM 客户端
+
+def main():
+    auto_mode, max_turns, model = _parse_args(sys.argv[1:])
+
+    # 1. tars 角色（替代旧的 llm/ factory + 各家 client）
     try:
-        client = create_client(
-            provider=settings.llm_provider,
-            api_key=settings.llm_api_key.get_secret_value(),
-            model=settings.llm_model,
-        )
-    except (ValueError, ImportError) as e:
+        role = build_role(model=model)
+    except SystemExit:
+        raise
+    except Exception as e:
         print(
-            f"错误：无法创建 LLM 客户端（provider={settings.llm_provider!r}）：{e}\n"
-            "请检查 llm_provider 配置并确认对应 SDK 已安装。",
+            f"错误：无法创建 tars Pipeline：{e}\n"
+            "请先运行 `tars init` 并在 ~/.tars/config.toml 配置好 "
+            "$TARS_PROVIDER，并设置好对应的 API key 环境变量。",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -58,18 +76,19 @@ def main():
         )
         sys.exit(1)
 
-    # 3. 创世
+    # 3. 创世：静态蓝图 + 考纲 → 动态初始黑板
     factory = SessionFactory(rubric)
     board = factory.create(blueprint)
 
-    # 4. 注册 Agents
-    evaluator = EvaluatorAgent(client=client, target_dimensions=board.rubric)
-    actor = ActorAgent(client=client)
+    # 4. 注册 Agents（三者共用同一个 tars 角色；想给考官配更强的模型，
+    #    可在这里 build_role(model=...) 单独构造一个评估角色）
+    evaluator = EvaluatorAgent(role=role, target_dimensions=board.rubric)
+    actor = ActorAgent(role=role)
 
-    # 5. 启动（包裹异常处理：崩溃时仍落盘日志，便于事后排查）
+    # 5. 启动（崩溃时仍落盘日志，便于事后排查）
     try:
         if auto_mode:
-            candidate = CandidateAgent(client=client)
+            candidate = CandidateAgent(role=role)
             run_auto(board, evaluator, actor, candidate, max_turns=max_turns)
         else:
             run_loop(board, evaluator, actor)

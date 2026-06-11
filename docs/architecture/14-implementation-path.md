@@ -49,7 +49,7 @@
 - interview_app/ — Python prototype
 - interview_app_en/ — English version of prototype
 - ube_core/ — early core code (language?)
-- ube_project/ — early project abstraction
+- ube_project/ — early project abstraction (since redesigned on tars as the demo at `examples/python/interview-sim/`)
 - example.py — demo script
 - blackboard_5rounds.json — blackboard mode data sample
 - selfplay_5rounds.txt — self-play log

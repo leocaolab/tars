@@ -1,18 +1,25 @@
-"""AI 候选人 Agent：故意带破绽的系统设计候选人，用于 Self-Play 对抗"""
+"""AI 候选人 Agent：故意带破绽的系统设计候选人，用于 Self-Play 对抗。
 
-from .llm import LLMClient
-from .llm.errors import LLMClientError
+Redesigned on tars: a single `complete()` call against a tars role. The persona
+goes in `system=`; the interviewer's latest question in `user=`.
+"""
+
 from .models import Blackboard
+from .runtime import LlmRole
 
 
 class CandidateAgent:
+    """The self-play candidate — confident, buzzword-happy, occasionally blind
+    to physical bottlenecks. Used only in `--auto` mode."""
 
-    def __init__(self, client: LLMClient):
-        self._client = client
+    def __init__(self, role: LlmRole):
+        self._role = role
 
     def answer(self, board: Blackboard) -> str:
         # 拿到面试官刚刚提的问题
-        interviewer_question = board.history[-1].get("content", "") if board.history else ""
+        interviewer_question = (
+            board.history[-1].get("content", "") if board.history else ""
+        )
 
         system_prompt = (
             f"你现在是一个正在参加大厂 {board.interview_level} 级别系统设计面试的候选人。\n"
@@ -28,10 +35,7 @@ class CandidateAgent:
             "- 直接回答，不要说「好的」「这个问题很好」之类的废话"
         )
 
-        try:
-            return self._client.chat(
-                system=system_prompt,
-                user=f"面试官的提问：{interviewer_question}",
-            )
-        except Exception as e:
-            raise LLMClientError(f"候选人生成回答失败: {e}") from e
+        return self._role.complete(
+            system=system_prompt,
+            user=f"面试官的提问：{interviewer_question}",
+        )
