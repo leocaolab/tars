@@ -392,6 +392,10 @@ impl WorkerAgent {
         // the streak.
         const MAX_CONSECUTIVE_ALL_ERROR_ITERS: u32 = 3;
         let mut consecutive_all_error: u32 = 0;
+        // Cross-call tool trajectory (Doc 26 M2): tool names in dispatch
+        // order across every iteration, surfaced on the step result so the
+        // executor can stamp the step's `LlmCallCaptured` event.
+        let mut tool_names: Vec<String> = Vec::new();
         for iteration in 0..self.max_tool_iterations {
             // One LLM round-trip — same cancel-aware drain shape as
             // `agent::drive_llm_call`.
@@ -413,8 +417,11 @@ impl WorkerAgent {
                 return Ok(AgentStepResult {
                     output,
                     usage: total_usage,
+                    tool_calls: tool_names,
                 });
             }
+            // Record this iteration's tool calls before dispatching them.
+            tool_names.extend(response.tool_calls.iter().map(|c| c.name.clone()));
 
             // Tool calls present. Build the next request: append the
             // assistant's tool-call message, then one Tool message

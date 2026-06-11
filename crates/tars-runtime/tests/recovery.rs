@@ -61,6 +61,7 @@ async fn trajectory_survives_runtime_restart() {
                     ..Default::default()
                 },
                 system_prompt_hash: None,
+                tool_calls: Vec::new(),
             },
         )
         .await

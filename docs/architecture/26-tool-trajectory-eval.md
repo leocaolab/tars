@@ -308,10 +308,18 @@ final-state checks).
   `tool_trajectory`. Verified by: E2E-6 (`compute_traj_diff_*` tests). Note: no
   new McNemar written — reused the judge A/B's `tars_types::mcnemar` so both A/B
   axes share one statistic.
-- **M2 — cross-call grain (P2/P3).** Scope: enrich `LlmCallCaptured` with
-  `tool_calls` (additive, `system_prompt_hash` precedent at `event.rs:221`) +
-  eval optionally drives an agent loop; extraction reads the trajectory.
-  Delivers: FR-11 (CUJ-4). Depends: M0.
+- **M2 — cross-call capture + extraction (P2). ✅ shipped (foundation).** Scope:
+  `LlmCallCaptured` gains `tool_calls: Vec<String>` (additive, `#[serde(default)]`,
+  `system_prompt_hash` precedent); the worker accumulates tool names across its
+  loop and surfaces them on `AgentStepResult.tool_calls` (`agent.rs`), which the
+  executor stamps onto the event (`runtime.rs`); `tool_sequence(events)` in
+  `event.rs` concatenates them in step order. So any `run_task`/Session
+  trajectory now records its cross-call tool use, queryable + scorable with
+  `trajectory_match`. Verified by `tool_sequence_concats_*` + no worker
+  regression. **Remaining for full CUJ-4:** `eval run` driving an actual agent
+  loop (so eval cases *produce* multi-call trajectories) and scoring a recorded
+  trajectory against `expected_tools` — that's a larger "eval runs tool-using
+  agents" surface, tracked as M2'. Depends: M0.
 - **M3 — args / judge modes (P3).** Scope: F7 (`args` exact + LLM-judged arg
   equivalence) + first-class `ToolDispatched` event (actual dispatch + result
   class, not just requested). Delivers: stricter matching. Depends: M2.

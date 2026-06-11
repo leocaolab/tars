@@ -230,6 +230,12 @@ pub enum AgentEvent {
         /// rows (before this field existed) continue to read.
         #[serde(default)]
         system_prompt_hash: Option<String>,
+        /// Tool names the step's agent invoked, in call order, across
+        /// every internal LLM call of the step (Doc 26 M2 — the
+        /// cross-call tool trajectory). Empty for steps that called no
+        /// tools. `#[serde(default)]` keeps older event rows readable.
+        #[serde(default)]
+        tool_calls: Vec<String>,
     },
 }
 
@@ -260,6 +266,23 @@ impl AgentEvent {
             Self::TrajectoryCompleted { .. } | Self::TrajectoryAbandoned { .. }
         )
     }
+}
+
+/// The cross-call tool trajectory of a recorded run: the tool names from
+/// every `LlmCallCaptured` event, concatenated in event (step) order
+/// (Doc 26 M2). Feed the result to
+/// [`crate::trajectory_match`] to score a multi-call agent's tool use.
+///
+/// Events come from the trajectory store in append order, which is step
+/// order, so no sort is needed; non-LLM events are skipped.
+pub fn tool_sequence(events: &[AgentEvent]) -> Vec<String> {
+    let mut out = Vec::new();
+    for ev in events {
+        if let AgentEvent::LlmCallCaptured { tool_calls, .. } = ev {
+            out.extend(tool_calls.iter().cloned());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -384,6 +407,37 @@ mod tests {
     }
 
     #[test]
+    fn tool_sequence_concats_llm_calls_in_order_and_skips_others() {
+        let cap = |seq: u32, tools: &[&str]| AgentEvent::LlmCallCaptured {
+            traj: t(),
+            step_seq: seq,
+            provider: ProviderId::new("p"),
+            prompt_summary: "x".into(),
+            response_summary: "y".into(),
+            usage: Usage::default(),
+            system_prompt_hash: None,
+            tool_calls: tools.iter().map(|s| s.to_string()).collect(),
+        };
+        let events = vec![
+            AgentEvent::TrajectoryStarted {
+                traj: t(),
+                parent: None,
+                reason: "root".into(),
+            },
+            cap(1, &["search", "read_file"]), // a worker step that made 2 calls
+            cap(2, &[]),                       // a step with no tool calls
+            cap(3, &["edit_file"]),
+        ];
+        // Cross-call sequence = every LlmCallCaptured's tools, in order.
+        assert_eq!(
+            tool_sequence(&events),
+            vec!["search", "read_file", "edit_file"]
+        );
+        // No LLM events → empty.
+        assert!(tool_sequence(&events[..1]).is_empty());
+    }
+
+    #[test]
     fn llm_call_captured_with_hash_round_trips_through_json() {
         let ev = AgentEvent::LlmCallCaptured {
             traj: t(),
@@ -393,6 +447,7 @@ mod tests {
             response_summary: "y".into(),
             usage: Usage::default(),
             system_prompt_hash: hash_system_prompt(Some("you are a planner")),
+            tool_calls: Vec::new(),
         };
         let v = serde_json::to_value(&ev).unwrap();
         // Field is present + populated on serialize.
@@ -494,6 +549,7 @@ mod tests {
                 response_summary: "y".into(),
                 usage: Usage::default(),
                 system_prompt_hash: None,
+                tool_calls: Vec::new(),
             },
         ];
         for ev in cases {
@@ -574,6 +630,7 @@ mod tests {
                     response_summary: "y".into(),
                     usage: Usage::default(),
                     system_prompt_hash: None,
+                    tool_calls: Vec::new(),
                 },
                 "llm_call_captured",
             ),
