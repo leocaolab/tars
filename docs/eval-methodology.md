@@ -165,10 +165,26 @@ tars eval diff runs/A runs/B
 Modes: `exact` (= ADK's `tool_trajectory_avg_score`, all-or-nothing),
 `ordered` (LCS partial credit), `set` (order-insensitive). A pass
 threshold is appendable: `trajectory-match:ordered:0.8`. A case with no
-`expected_tools.json` is *skipped*, not silently passed. P1 scores a
-single completion's tool selection; the multi-call agent-loop trajectory
-and the no-oracle head-to-head `--trajectory` diff are P2 — full design
-in [`architecture/26-tool-trajectory-eval.md`](./architecture/26-tool-trajectory-eval.md).
+`expected_tools.json` is *skipped*, not silently passed.
+
+**No-oracle head-to-head.** Even without `expected_tools`, you can A/B *how
+differently* two configs pick tools — `--trajectory` pairs cases by id and
+diffs the persisted `tool_trajectory` directly:
+
+```bash
+tars eval diff runs/A runs/B --trajectory --trajectory-mode ordered
+#   trajectory (mode=ordered):
+#     paired cases:   39 (a-only 0, b-only 0)
+#     divergence:     30.8%  (12/39 cases differ)   mean similarity 0.81
+#     diverging:      case_003, case_011, case_022, …
+#     McNemar (trajectory-match:ordered): regressed b=2 improved c=7 χ²=2.78 → NOT significant at α=0.05
+```
+
+The divergence line needs no oracle; the McNemar line appears when both runs
+ran a `trajectory-match` check (it reuses `tars_types::mcnemar` — the same
+significance test as the judge A/B above). Multi-call agent-loop trajectories
+are the remaining phase (M2). Full design:
+[`architecture/26-tool-trajectory-eval.md`](./architecture/26-tool-trajectory-eval.md).
 
 ---
 

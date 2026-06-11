@@ -67,6 +67,13 @@ pub fn from_tool_calls(calls: &[tars_types::ToolCall]) -> Vec<ToolStep> {
 pub fn score(actual: &[ToolStep], expected: &[ToolStep], mode: MatchMode) -> f64 {
     let a: Vec<&str> = actual.iter().map(|s| s.name.as_str()).collect();
     let b: Vec<&str> = expected.iter().map(|s| s.name.as_str()).collect();
+    score_names(&a, &b, mode)
+}
+
+/// Score two tool-name sequences directly — used by the head-to-head
+/// `eval diff --trajectory` path over the persisted `tool_trajectory`
+/// (names), where there are no `ToolStep`s to rebuild.
+pub fn score_names(a: &[&str], b: &[&str], mode: MatchMode) -> f64 {
     match mode {
         MatchMode::Exact => {
             if a == b {
@@ -75,12 +82,12 @@ pub fn score(actual: &[ToolStep], expected: &[ToolStep], mode: MatchMode) -> f64
                 0.0
             }
         }
-        MatchMode::Set => jaccard_multiset(&a, &b),
+        MatchMode::Set => jaccard_multiset(a, b),
         MatchMode::Ordered => {
             if a.is_empty() && b.is_empty() {
                 return 1.0;
             }
-            let l = lcs_len(&a, &b);
+            let l = lcs_len(a, b);
             (2.0 * l as f64) / (a.len() + b.len()) as f64
         }
     }

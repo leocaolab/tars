@@ -176,6 +176,15 @@ pub struct EvalDiffArgs {
     /// Emit the diff as a single JSON object on stdout.
     #[arg(long)]
     pub json: bool,
+    /// Add a tool-trajectory section: head-to-head divergence of the tools
+    /// each run's model selected (paired by case id, from the persisted
+    /// `tool_trajectory`), plus McNemar on any `trajectory-match` check both
+    /// runs share. No oracle needed for the divergence. (Doc 26 P2.)
+    #[arg(long)]
+    pub trajectory: bool,
+    /// Similarity mode for the head-to-head divergence: exact | ordered | set.
+    #[arg(long = "trajectory-mode", default_value = "ordered")]
+    pub trajectory_mode: String,
 }
 
 #[derive(Args, Debug)]
@@ -731,9 +740,109 @@ fn p50(mut v: Vec<u64>) -> u64 {
     v[v.len() / 2]
 }
 
+/// Head-to-head tool-trajectory comparison of two runs (Doc 26 P2).
+struct TrajDiff {
+    paired: u32,
+    a_only: u32,
+    b_only: u32,
+    divergent: u32,
+    mean_similarity: f64,
+    diverging_ids: Vec<String>,
+    /// McNemar per `trajectory-match*` check both runs ran.
+    mcnemar: Vec<(String, tars_types::McNemarResult)>,
+}
+
+/// case_id → did this run's `check_name` pass? (only cases that ran it).
+fn case_check_passmap(
+    m: &EvalRunManifest,
+    check_name: &str,
+) -> std::collections::BTreeMap<String, bool> {
+    m.cases
+        .iter()
+        .filter_map(|c| {
+            c.checks
+                .iter()
+                .find(|cc| cc.name() == check_name)
+                .map(|cc| (c.case_id.clone(), cc.passed()))
+        })
+        .collect()
+}
+
+fn compute_traj_diff(a: &EvalRunManifest, b: &EvalRunManifest, mode: MatchMode) -> TrajDiff {
+    use std::collections::{BTreeMap, BTreeSet};
+    let amap: BTreeMap<&str, &EvalCaseReport> =
+        a.cases.iter().map(|c| (c.case_id.as_str(), c)).collect();
+    let bmap: BTreeMap<&str, &EvalCaseReport> =
+        b.cases.iter().map(|c| (c.case_id.as_str(), c)).collect();
+
+    let (mut paired, mut divergent, mut sum_sim) = (0u32, 0u32, 0.0f64);
+    let mut diverging_ids = Vec::new();
+    for (id, ca) in &amap {
+        let Some(cb) = bmap.get(id) else { continue };
+        paired += 1;
+        let an: Vec<&str> = ca.tool_trajectory.iter().map(String::as_str).collect();
+        let bn: Vec<&str> = cb.tool_trajectory.iter().map(String::as_str).collect();
+        let sim = trajectory_match::score_names(&an, &bn, mode);
+        sum_sim += sim;
+        if sim < 1.0 {
+            divergent += 1;
+            diverging_ids.push((*id).to_string());
+        }
+    }
+    let a_only = amap.keys().filter(|k| !bmap.contains_key(*k)).count() as u32;
+    let b_only = bmap.keys().filter(|k| !amap.contains_key(*k)).count() as u32;
+    let mean_similarity = if paired == 0 { 1.0 } else { sum_sim / paired as f64 };
+
+    // McNemar on every trajectory-match check both runs share.
+    let a_traj: BTreeSet<&str> = a
+        .checks
+        .iter()
+        .map(|c| c.name.as_str())
+        .filter(|n| n.starts_with("trajectory-match"))
+        .collect();
+    let shared: Vec<String> = b
+        .checks
+        .iter()
+        .map(|c| c.name.as_str())
+        .filter(|n| n.starts_with("trajectory-match") && a_traj.contains(n))
+        .map(str::to_string)
+        .collect();
+    let mcnemar = shared
+        .into_iter()
+        .map(|name| {
+            let r = tars_types::mcnemar(&case_check_passmap(a, &name), &case_check_passmap(b, &name));
+            (name, r)
+        })
+        .collect();
+
+    TrajDiff {
+        paired,
+        a_only,
+        b_only,
+        divergent,
+        mean_similarity,
+        diverging_ids,
+        mcnemar,
+    }
+}
+
 fn run_diff(args: EvalDiffArgs) -> Result<()> {
     let a = load_manifest(&args.baseline)?;
     let b = load_manifest(&args.candidate)?;
+
+    // Tool-trajectory section is opt-in (--trajectory). Parse the mode early so
+    // a bad value fails before any output.
+    let traj_diff = if args.trajectory {
+        let mode = MatchMode::parse(&args.trajectory_mode).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown --trajectory-mode `{}`. Recognized: exact, ordered, set",
+                args.trajectory_mode
+            )
+        })?;
+        Some((mode, compute_traj_diff(&a, &b, mode)))
+    } else {
+        None
+    };
 
     // Operational metrics.
     let a_lat = p50(a.cases.iter().map(|c| c.wall_clock_ms).collect());
@@ -754,7 +863,7 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
                 })
             })
             .collect();
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "baseline": args.baseline.display().to_string(),
             "candidate": args.candidate.display().to_string(),
             "operational": {
@@ -766,6 +875,26 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
             },
             "checks": check_deltas,
         });
+        if let Some((mode, td)) = &traj_diff {
+            out["trajectory"] = serde_json::json!({
+                "mode": mode.as_str(),
+                "paired": td.paired,
+                "a_only": td.a_only,
+                "b_only": td.b_only,
+                "divergent": td.divergent,
+                "divergence_rate": if td.paired == 0 { 0.0 } else { td.divergent as f64 / td.paired as f64 },
+                "mean_similarity": td.mean_similarity,
+                "diverging_ids": td.diverging_ids,
+                "mcnemar": td.mcnemar.iter().map(|(name, r)| serde_json::json!({
+                    "check": name,
+                    "regressed_b": r.b,
+                    "improved_c": r.c,
+                    "chi_squared": r.chi_squared,
+                    "significant_at_05": r.significant_at_05,
+                    "significant_at_01": r.significant_at_01,
+                })).collect::<Vec<_>>(),
+            });
+        }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -851,6 +980,60 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
                 (None, None) => "—".into(),
             };
             println!("  {name:<24} {arrow}");
+        }
+    }
+
+    // Tool-trajectory tier — opt-in via --trajectory.
+    if let Some((mode, td)) = &traj_diff {
+        println!();
+        println!("trajectory (mode={}):", mode.as_str());
+        println!(
+            "  paired cases:   {} (a-only {}, b-only {})",
+            td.paired, td.a_only, td.b_only
+        );
+        let rate = if td.paired == 0 {
+            0.0
+        } else {
+            td.divergent as f64 / td.paired as f64
+        };
+        println!(
+            "  divergence:     {:>5.1}%  ({}/{} cases differ)   mean similarity {:.2}",
+            rate * 100.0,
+            td.divergent,
+            td.paired,
+            td.mean_similarity
+        );
+        if !td.diverging_ids.is_empty() {
+            const CAP: usize = 12;
+            let shown: Vec<&str> = td.diverging_ids.iter().take(CAP).map(String::as_str).collect();
+            let more = td.diverging_ids.len().saturating_sub(CAP);
+            let suffix = if more > 0 { format!(", +{more} more") } else { String::new() };
+            println!("  diverging:      {}{}", shown.join(", "), suffix);
+        }
+        if td.mcnemar.is_empty() {
+            println!(
+                "  McNemar:        (no shared trajectory-match check — run both with \
+                 --check trajectory-match:<mode> for significance)"
+            );
+        }
+        for (name, r) in &td.mcnemar {
+            match r.chi_squared {
+                None => println!("  McNemar ({name}): no discordant pairs (runs agree)"),
+                Some(chi2) => {
+                    let verdict = if r.significant_at_01 {
+                        "significant at α=0.01"
+                    } else if r.significant_at_05 {
+                        "significant at α=0.05"
+                    } else {
+                        "NOT significant at α=0.05"
+                    };
+                    // b = base-pass/cand-fail (regressed), c = base-fail/cand-pass (improved)
+                    println!(
+                        "  McNemar ({name}): regressed b={} improved c={} χ²={chi2:.2} → {verdict}",
+                        r.b, r.c
+                    );
+                }
+            }
         }
     }
 
@@ -1556,6 +1739,100 @@ mod tests {
         let bad = dir.path().join("bad.json");
         write(&bad, "{ not an array");
         assert!(read_expected_tools(&bad).is_err());
+    }
+
+    // ── head-to-head eval diff --trajectory (Doc 26 E2E-6) ───────────
+
+    fn ecase(id: &str, traj: &[&str], check: Option<(&str, bool)>) -> EvalCaseReport {
+        let checks = match check {
+            Some((name, true)) => vec![CaseCheckResult::Passed { name: name.into(), note: None }],
+            Some((name, false)) => {
+                vec![CaseCheckResult::Failed { name: name.into(), reason: "x".into() }]
+            }
+            None => vec![],
+        };
+        EvalCaseReport {
+            case_id: id.into(),
+            status: EvalCaseStatus::Ok,
+            wall_clock_ms: 0,
+            usage: Usage::default(),
+            output_chars: 0,
+            error: None,
+            checks,
+            tool_trajectory: traj.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn emanifest(cases: Vec<EvalCaseReport>, check_names: &[&str]) -> EvalRunManifest {
+        EvalRunManifest {
+            corpus_path: String::new(),
+            provider_id: String::new(),
+            model: String::new(),
+            started_at_ms: 0,
+            ended_at_ms: 0,
+            case_count: cases.len() as u32,
+            success_count: cases.len() as u32,
+            error_count: 0,
+            total_usage: Usage::default(),
+            checks: check_names
+                .iter()
+                .map(|n| CheckSummary {
+                    name: (*n).into(),
+                    evaluated: 0,
+                    violations: 0,
+                    violation_rate: 0.0,
+                })
+                .collect(),
+            cases,
+        }
+    }
+
+    #[test]
+    fn compute_traj_diff_counts_divergence_and_mcnemar() {
+        let cn = "trajectory-match:exact";
+        let a = emanifest(
+            vec![
+                ecase("c1", &["s"], Some((cn, true))),
+                ecase("c2", &["s"], Some((cn, true))),
+                ecase("c3", &["s"], Some((cn, false))),
+                ecase("c4", &["s"], Some((cn, false))),
+            ],
+            &[cn],
+        );
+        let b = emanifest(
+            vec![
+                ecase("c1", &["s"], Some((cn, true))),  // same traj; A✓ B✓
+                ecase("c2", &["x"], Some((cn, false))), // differ; A✓ B✗ → b
+                ecase("c3", &["x"], Some((cn, true))),  // differ; A✗ B✓ → c
+                ecase("c4", &["s"], Some((cn, false))), // same traj; A✗ B✗
+            ],
+            &[cn],
+        );
+        let td = compute_traj_diff(&a, &b, MatchMode::Exact);
+        assert_eq!(td.paired, 4);
+        assert_eq!(td.divergent, 2);
+        assert_eq!(td.diverging_ids, vec!["c2", "c3"]);
+        assert_eq!(td.a_only, 0);
+        assert_eq!(td.b_only, 0);
+        assert_eq!(td.mcnemar.len(), 1);
+        let (name, r) = &td.mcnemar[0];
+        assert_eq!(name, cn);
+        assert_eq!(r.b, 1); // regressed: c2 (A pass, B fail)
+        assert_eq!(r.c, 1); // improved:  c3 (A fail, B pass)
+    }
+
+    #[test]
+    fn compute_traj_diff_reports_unpaired_cases_and_no_shared_check() {
+        // a has c1,c2; b has c2,c3 → 1 paired, 1 a-only, 1 b-only.
+        // No trajectory-match check anywhere → empty mcnemar (graceful).
+        let a = emanifest(vec![ecase("c1", &["s"], None), ecase("c2", &["s"], None)], &[]);
+        let b = emanifest(vec![ecase("c2", &["s"], None), ecase("c3", &["s"], None)], &[]);
+        let td = compute_traj_diff(&a, &b, MatchMode::Ordered);
+        assert_eq!(td.paired, 1);
+        assert_eq!(td.a_only, 1);
+        assert_eq!(td.b_only, 1);
+        assert_eq!(td.divergent, 0); // the one paired case (c2) matches
+        assert!(td.mcnemar.is_empty());
     }
 
     #[test]

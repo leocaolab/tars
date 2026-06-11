@@ -100,7 +100,7 @@ event. The richer the grain, the later the phase.
 | NFR-1 | Scorer is allocation-light and O(n·m) for `ordered` (LCS), n,m = seq lengths. | < 50µs/case at n,m ≤ 32 | F1 |
 | NFR-2 | P1 adds zero live LLM calls beyond what `eval run` already makes. | 0 extra calls | F3 |
 | NFR-3 | P1 adds zero new persisted-event schema fields. | 0 event changes | F3,F4 |
-| NFR-4 | McNemar uses the exact binomial for discordant n<25, χ² with continuity correction otherwise. | correct test selection | F5 |
+| NFR-4 | McNemar **reuses** the repo's existing `tars_types::mcnemar` (χ² with continuity correction, significant at χ²>3.841/α=0.05) so the trajectory A/B uses the *same* statistic as the judge A/B. Exact-binomial small-n refinement deferred. | consistent w/ judge A/B | F5 |
 
 ## 5. Infra
 
@@ -167,13 +167,17 @@ event. The richer the grain, the later the phase.
 - **New:** `EvalCaseReport.tool_trajectory: Vec<ToolStepRef>` (`#[serde(default)]`,
   back-compatible).
 
-### C5 — head-to-head diff axis + McNemar (new, P2)
-- **Responsibility:** `eval diff --trajectory`: pair cases by id, score A-vs-B,
-  McNemar over the discordant pairs.
-- **Reuses:** `eval.rs::run_diff` (`EvalDiffArgs` at `eval.rs:170`), C1 scorer,
-  C4's persisted `tool_trajectory`.
-- **New:** `--trajectory` / `--trajectory-mode` flags + `fn mcnemar(b: u32, c:
-  u32) -> f64`.
+### C5 — head-to-head diff axis + McNemar (M1, shipped)
+- **Responsibility:** `eval diff --trajectory`: pair cases by id; (a) **no-oracle
+  divergence** — score A-vs-B persisted `tool_trajectory` with `score_names`,
+  report divergence rate + diverging ids; (b) **McNemar** over any shared
+  `trajectory-match*` check's per-case pass/fail (the oracle is baked into each
+  run's check result, so no expected_tools needed at diff time).
+- **Reuses:** `eval.rs::run_diff`, `tars_types::mcnemar` (`tars-types/src/judge.rs:204`,
+  the same fn the judge A/B uses) + `McNemarResult`, `trajectory_match::score_names`
+  (new in C1), C4's persisted `tool_trajectory`.
+- **New:** `--trajectory` / `--trajectory-mode` flags; `compute_traj_diff` +
+  `case_check_passmap` in `eval.rs`. **No new McNemar** — reused.
 
 ## 7. Interfaces with other modules
 
@@ -209,16 +213,21 @@ sequence (CUJ-4) requires either (a) eval driving a `Session`/`run_task` loop, o
 (b) reading the trajectory store — both P2, because both need the tool calls
 persisted, which today they are not (`LlmCallCaptured` has no `tool_calls`).
 
-### McNemar (P2)
+### McNemar (M1, shipped — reuses `tars_types::mcnemar`)
+Two distinct signals, deliberately separated:
 ```
-1. For each paired case: classify (A correct?, B correct?)  [reference]
-                      or (A==B sequence?)                    [head-to-head]
-2. b = #(A yes, B no); c = #(A no, B yes)   # discordant pairs
-3. if (b+c) < 25: two-sided exact binomial on min(b,c) ~ Binomial(b+c, 0.5)
-   else:          χ² = (|b-c|-1)² / (b+c), p from χ²(df=1)
+divergence (no oracle):  per paired case, differ := score_names(A_traj, B_traj, mode) < 1.0
+                         divergence_rate = #differ / #paired
+McNemar (needs the check): pair each run's `trajectory-match*` per-case pass/fail
+                         b = #(A pass, B fail);  c = #(A fail, B pass)
+                         χ² = (|b-c|-1)² / (b+c)   [tars_types::mcnemar, continuity-corrected]
+                         significant at χ²>3.841 (α=0.05) / >6.635 (α=0.01)
 ```
-Invariant: only discordant pairs carry signal (concordant cancel). Edge: b+c==0
-→ p=1.0 (no difference observable).
+The divergence number needs **no oracle** (it only asks "did A and B pick
+differently"). McNemar needs a per-run notion of *correct*, which the
+`trajectory-match` check already supplies — so McNemar runs only when both runs
+ran that check. Invariant: only discordant pairs carry signal. Edge: b+c==0 →
+`chi_squared = None` (runs agree; nothing to test).
 
 ## 9. Integration / E2E tests
 
@@ -277,7 +286,9 @@ abstraction.
 | `run_diff` | `tars-cli/src/eval.rs` (`EvalDiffArgs` `:170`) | reference-mode A/B, free; P2 adds `--trajectory` |
 | `load_corpus` / `Case` | `tars-cli/src/eval.rs` | add `expected_tools` read |
 | `CheckResult` vocabulary | `tars-runtime/src/check.rs:33` | pass/fail shape the scorer result maps to |
-| `LlmCallCaptured` | `tars-runtime/src/event.rs:221` | P2 enrichment target (add `tool_calls`) |
+| `tars_types::mcnemar` / `McNemarResult` | `tars-types/src/judge.rs:204` | the A/B significance test — reused verbatim (same fn the judge A/B uses) |
+| `trajectory_match::score_names` | `tars-runtime/src/trajectory_match.rs` | head-to-head similarity over persisted name sequences |
+| `LlmCallCaptured` | `tars-runtime/src/event.rs:221` | M2 enrichment target (add `tool_calls`) |
 
 **New abstractions:** `ToolStep` + `MatchMode` + `score()` (justified: the
 scorer is pure and reused across 3 phases and the Doc 24/25 replay paths);
@@ -292,8 +303,11 @@ final-state checks).
   (F2), C4 persist trajectory (F4). Delivers: FR-1…FR-9. Depends: —. Verified by:
   E2E-1,2,3,4,5. Risk-up-front: the scorer DP + the case-parameterized wiring
   (the one place that doesn't fit the global `Invariant` model) land first.
-- **M1 — head-to-head axis + McNemar (P2).** Scope: C5 (F5), `mcnemar`. Delivers:
-  FR-10. Depends: M0's persisted `tool_trajectory`. Verified by: E2E-6.
+- **M1 — head-to-head axis + McNemar (P2). ✅ shipped.** Scope: C5 (F5),
+  reusing `tars_types::mcnemar`. Delivers: FR-10. Depends: M0's persisted
+  `tool_trajectory`. Verified by: E2E-6 (`compute_traj_diff_*` tests). Note: no
+  new McNemar written — reused the judge A/B's `tars_types::mcnemar` so both A/B
+  axes share one statistic.
 - **M2 — cross-call grain (P2/P3).** Scope: enrich `LlmCallCaptured` with
   `tool_calls` (additive, `system_prompt_hash` precedent at `event.rs:221`) +
   eval optionally drives an agent loop; extraction reads the trajectory.
