@@ -299,7 +299,6 @@ impl WorkerAgent {
     }
 }
 
-#[async_trait]
 /// Prepend the agent's absolute working directory to its system prompt so a
 /// tool-using model is grounded: the tools run in `cwd`, but nothing else tells
 /// the model where that is, so a weaker model hallucinates a path (e.g.
@@ -324,6 +323,7 @@ fn ground_system_with_cwd(
     })
 }
 
+#[async_trait]
 impl Agent for WorkerAgent {
     fn id(&self) -> &AgentId {
         &self.id
