@@ -75,7 +75,11 @@ impl OpenAiProviderBuilder {
         let caps = self
             .capabilities
             .unwrap_or_else(default_openai_capabilities);
-        let adapter = Arc::new(OpenAiAdapter::new(self.base_url, self.extras));
+        let adapter = Arc::new(OpenAiAdapter::new(
+            self.base_url,
+            self.extras,
+            caps.supports_structured_output,
+        ));
         Arc::new(OpenAiProvider {
             id: self.id,
             http,

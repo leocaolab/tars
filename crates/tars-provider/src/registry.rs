@@ -179,11 +179,19 @@ fn build_one(
             let mut builder = OpenAiProviderBuilder::new(id, auth.clone())
                 .base_url(base_url.clone())
                 .extras(extras.clone());
-            if !capabilities.is_empty() {
-                let mut caps = crate::backends::openai::default_openai_capabilities();
-                capabilities.apply_to(&mut caps);
-                builder = builder.capabilities(caps);
-            }
+            // openai_compat endpoints (DeepSeek, Qwen, vLLM, local …) speak the
+            // OpenAI wire format but generally DON'T implement OpenAI's strict
+            // `response_format: json_schema` — they support `json_object` (or
+            // nothing). Inheriting StrictSchema (the OpenAI-proper default) made
+            // every structured request fail with "This response_format type is
+            // unavailable now" (DeepSeek as an arc scan critic / structured
+            // worker). Downgrade the default to JsonObjectMode here; an explicit
+            // `[capabilities]` override still wins via apply_to.
+            let mut caps = crate::backends::openai::default_openai_capabilities();
+            caps.supports_structured_output =
+                tars_types::StructuredOutputMode::JsonObjectMode;
+            capabilities.apply_to(&mut caps);
+            builder = builder.capabilities(caps);
             builder.build(http, auth_resolver)
         }
 

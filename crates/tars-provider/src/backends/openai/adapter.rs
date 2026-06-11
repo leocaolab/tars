@@ -11,7 +11,10 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use url::Url;
 
-use tars_types::{ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason, Usage};
+use tars_types::{
+    ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason,
+    StructuredOutputMode, Usage,
+};
 
 use crate::auth::ResolvedAuth;
 use crate::http_base::{HttpAdapter, HttpProviderExtras, SseEvent, truncate};
@@ -27,11 +30,21 @@ const NEW_TOKENS_PARAM_PREFIXES: &[&str] = &["gpt-5", "o1", "o3", "o4"];
 pub struct OpenAiAdapter {
     base_url: String,
     extras: HttpProviderExtras,
+    /// How this provider expresses structured output. OpenAI proper does
+    /// strict `response_format: json_schema`; openai_compat endpoints
+    /// (DeepSeek, Qwen, vLLM, …) only do `json_object` (or nothing) and reject
+    /// json_schema with "This response_format type is unavailable now". The
+    /// adapter must emit the form THIS provider accepts, not always json_schema.
+    structured_mode: StructuredOutputMode,
 }
 
 impl OpenAiAdapter {
-    pub(super) fn new(base_url: String, extras: HttpProviderExtras) -> Self {
-        Self { base_url, extras }
+    pub(super) fn new(
+        base_url: String,
+        extras: HttpProviderExtras,
+        structured_mode: StructuredOutputMode,
+    ) -> Self {
+        Self { base_url, extras, structured_mode }
     }
 
     /// Decide which "max tokens" parameter the model accepts.
@@ -291,17 +304,35 @@ impl HttpAdapter for OpenAiAdapter {
         }
 
         if let Some(schema) = &req.structured_output {
-            body["response_format"] = json!({
-                "type": "json_schema",
-                "json_schema": {
-                    "name": schema.name.clone().unwrap_or_else(|| "Response".to_string()),
-                    "schema": crate::schema_adapt::adapt_schema(
-                        &schema.schema,
-                        crate::schema_adapt::SchemaDialect::OpenAi,
-                    ),
-                    "strict": schema.strict,
+            // Emit the response_format form THIS provider accepts (see
+            // `structured_mode`). Always-json_schema broke every openai_compat
+            // provider (DeepSeek as an arc scan critic: "This response_format
+            // type is unavailable now").
+            match self.structured_mode {
+                StructuredOutputMode::StrictSchema => {
+                    body["response_format"] = json!({
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": schema.name.clone().unwrap_or_else(|| "Response".to_string()),
+                            "schema": crate::schema_adapt::adapt_schema(
+                                &schema.schema,
+                                crate::schema_adapt::SchemaDialect::OpenAi,
+                            ),
+                            "strict": schema.strict,
+                        }
+                    });
                 }
-            });
+                StructuredOutputMode::JsonObjectMode => {
+                    // openai_compat only offers `json_object` (no decode-side
+                    // schema enforcement). The caller's prompt carries the shape
+                    // + the literal word "json" so the model still emits valid
+                    // JSON of the right shape.
+                    body["response_format"] = json!({ "type": "json_object" });
+                }
+                // None / Anthropic-style (forced tool_choice) → no
+                // response_format; the prompt alone steers the output.
+                _ => {}
+            }
         }
 
         // Per-request thinking control via the OpenAI-compat
@@ -648,11 +679,73 @@ mod tests {
     }
 
     #[test]
+    fn structured_output_response_format_follows_provider_mode() {
+        // Regression: the adapter ALWAYS emitted `response_format: json_schema`,
+        // which openai_compat providers (DeepSeek) reject with "This
+        // response_format type is unavailable now" — it broke DeepSeek as an arc
+        // scan critic. It must emit the form THIS provider's mode accepts.
+        let schema = tars_types::JsonSchema {
+            schema: json!({"type": "object",
+                           "properties": {"findings": {"type": "array"}}}),
+            strict: true,
+            name: Some("Findings".into()),
+        };
+        let req = |s: Option<tars_types::JsonSchema>| ChatRequest {
+            model: tars_types::ModelHint::Explicit("deepseek-v4-flash".into()),
+            system: None,
+            messages: vec![Message::user_text("scan this; output json")],
+            tools: vec![],
+            tool_choice: Default::default(),
+            structured_output: s,
+            max_output_tokens: None,
+            temperature: None,
+            stop_sequences: vec![],
+            seed: None,
+            cache_directives: vec![],
+            thinking: Default::default(),
+            enable_chat_template_thinking: None,
+        };
+        let mk = |mode| {
+            OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), mode)
+        };
+
+        // StrictSchema (OpenAI proper) → json_schema.
+        let strict = mk(StructuredOutputMode::StrictSchema)
+            .translate_request(&req(Some(schema.clone())))
+            .unwrap();
+        assert_eq!(strict["response_format"]["type"], "json_schema");
+
+        // JsonObjectMode (DeepSeek / openai_compat) → json_object, NOT json_schema.
+        let jobj = mk(StructuredOutputMode::JsonObjectMode)
+            .translate_request(&req(Some(schema.clone())))
+            .unwrap();
+        assert_eq!(
+            jobj["response_format"]["type"], "json_object",
+            "openai_compat must get json_object, never the rejected json_schema",
+        );
+
+        // None → no response_format at all.
+        let none = mk(StructuredOutputMode::None)
+            .translate_request(&req(Some(schema.clone())))
+            .unwrap();
+        assert!(
+            none.get("response_format").is_none(),
+            "mode=None emits no response_format",
+        );
+
+        // No structured_output requested → no response_format regardless of mode.
+        let bare = mk(StructuredOutputMode::StrictSchema)
+            .translate_request(&req(None))
+            .unwrap();
+        assert!(bare.get("response_format").is_none());
+    }
+
+    #[test]
     fn translate_request_dedups_system_when_req_system_set() {
         // Audit `tars-provider-src-backends-openai-9`: caller set
         // both req.system AND an inline System message → 2 system
         // blocks were emitted. Now the inline System is skipped.
-        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default());
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let req = ChatRequest {
             model: tars_types::ModelHint::Explicit("gpt-4o".into()),
             system: Some("explicit system".into()),
@@ -686,7 +779,7 @@ mod tests {
 
     #[test]
     fn classify_401_is_auth() {
-        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default());
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let err = a.classify_error(
             StatusCode::UNAUTHORIZED,
             &empty_headers(),
@@ -697,7 +790,7 @@ mod tests {
 
     #[test]
     fn classify_429_is_rate_limited() {
-        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default());
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &empty_headers(), "");
         assert!(matches!(
             err,
@@ -707,7 +800,7 @@ mod tests {
 
     #[test]
     fn classify_429_with_retry_after_seconds_populates_field() {
-        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default());
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::RETRY_AFTER, "42".parse().unwrap());
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &headers, "");
@@ -721,7 +814,7 @@ mod tests {
 
     #[test]
     fn classify_400_context_length_is_typed() {
-        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default());
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let body = r#"{"error":{"message":"context_length_exceeded: too many tokens"}}"#;
         let err = a.classify_error(StatusCode::BAD_REQUEST, &empty_headers(), body);
         assert!(matches!(err, ProviderError::ContextTooLong { .. }));
