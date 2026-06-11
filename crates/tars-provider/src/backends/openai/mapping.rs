@@ -214,7 +214,17 @@ fn openai_chat_completion_to_chat_response(body: &Value) -> Result<ChatResponse,
         output_tokens: usage_u64("completion_tokens"),
         cached_input_tokens: cached,
         cache_creation_tokens: 0,
-        thinking_tokens: 0,
+        // o1 / DeepSeek-R1 / deepseek-v4 report the reasoning portion under
+        // `completion_tokens_details.reasoning_tokens` (a SUBSET of
+        // completion_tokens, already billed as output). Surface it so the
+        // thinking channel is instrumented — hardcoding 0 is why a
+        // thinking-mode DeepSeek call showed thinking_tokens=0 despite
+        // returning reasoning_content.
+        thinking_tokens: u
+            .get("completion_tokens_details")
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0),
     };
     acc.apply(ChatEvent::Finished { stop_reason, usage });
     Ok(acc.finish())
@@ -234,12 +244,19 @@ pub(super) fn parse_openai_usage(usage: &serde_json::Map<String, Value>) -> Usag
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    // Reasoning portion (o1 / DeepSeek-R1 / deepseek-v4 thinking mode), a
+    // SUBSET of completion_tokens. Surface for instrumentation.
+    let reasoning = usage
+        .get("completion_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     Usage {
         input_tokens: prompt,
         output_tokens: completion,
         cached_input_tokens: cached,
         cache_creation_tokens: 0,
-        thinking_tokens: 0,
+        thinking_tokens: reasoning,
     }
 }
 
@@ -273,4 +290,31 @@ pub(super) fn drain_buffer_into(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn parse_openai_usage_surfaces_reasoning_tokens() {
+        // DeepSeek / o1 thinking mode: reasoning_tokens nested under
+        // completion_tokens_details, a subset of completion_tokens.
+        let u = json!({
+            "prompt_tokens": 22,
+            "completion_tokens": 224,
+            "completion_tokens_details": { "reasoning_tokens": 130 },
+            "prompt_tokens_details": { "cached_tokens": 0 }
+        });
+        let usage = parse_openai_usage(u.as_object().unwrap());
+        assert_eq!(usage.output_tokens, 224, "output stays the full completion (billed)");
+        assert_eq!(usage.thinking_tokens, 130, "reasoning surfaced, not hardcoded 0");
+    }
+
+    #[test]
+    fn parse_openai_usage_no_reasoning_is_zero() {
+        let u = json!({ "prompt_tokens": 10, "completion_tokens": 5 });
+        let usage = parse_openai_usage(u.as_object().unwrap());
+        assert_eq!(usage.thinking_tokens, 0);
+    }
 }
