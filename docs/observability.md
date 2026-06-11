@@ -37,6 +37,10 @@ ID                                 EVENTS  STATUS
 ```bash
 # Dump every event for one trajectory as JSON lines.
 tars trajectory show 6ae96718ef7e4a32802e6fb8bd37bea2
+
+# Score the tools the agent actually called against an expected sequence
+# (exits non-zero below --threshold, so it works as a CI gate). See Doc 26.
+tars trajectory score 6ae96718… --expected search,read_file,edit_file --mode ordered
 ```
 
 The events are typed (`AgentEvent` in

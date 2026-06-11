@@ -319,7 +319,19 @@ final-state checks).
   regression. **Remaining for full CUJ-4:** `eval run` driving an actual agent
   loop (so eval cases *produce* multi-call trajectories) and scoring a recorded
   trajectory against `expected_tools` — that's a larger "eval runs tool-using
-  agents" surface, tracked as M2'. Depends: M0.
+  agents" surface, split below. Depends: M0.
+- **M2' — score a recorded trajectory. ✅ shipped.** `tars trajectory score <id>
+  --expected <names|@file.json> [--mode] [--threshold] [--json]` replays a
+  trajectory, extracts its cross-call `tool_sequence` (M2), scores it with
+  `score_names` (M1), and exits non-zero below threshold (CI gate). This closes
+  the loop for any agent run (`tars run-task` etc.) without eval changes.
+  Verified by `score_passes_on_matching_cross_call_sequence_*` +
+  `parse_expected_*` in `trajectory.rs`.
+- **M2'' — eval drives a tool-using agent loop.** Remaining half of CUJ-4:
+  `eval run` runs each case through a `WorkerAgent::with_tools` in a sandboxed
+  cwd (read-only tools only — no `bash`/write side effects from corpus cases),
+  captures the trajectory, and feeds its `tool_sequence` to the trajectory-match
+  check. The heavy, security-sensitive part; deferred. Depends: M2, M2'.
 - **M3 — args / judge modes (P3).** Scope: F7 (`args` exact + LLM-judged arg
   equivalence) + first-class `ToolDispatched` event (actual dispatch + result
   class, not just requested). Delivers: stricter matching. Depends: M2.
