@@ -75,6 +75,15 @@ impl TarsAgent {
         }
     }
 
+    /// Set the thinking/reasoning mode the inner worker applies to every
+    /// request. Thread this from the provider config: a thinking-ONLY model
+    /// (gemini-3.x-pro) rejects the default 0 budget, so without it the agent
+    /// can't call such a model at all.
+    pub fn with_thinking(mut self, thinking: tars_types::ThinkingMode) -> Self {
+        self.worker = self.worker.clone().with_thinking(thinking);
+        self
+    }
+
     /// Render a [`Task`] into the single-step instruction the worker reads.
     /// Goal first, then any named inputs as a labelled block.
     fn instruction_for(task: &Task) -> String {

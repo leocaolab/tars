@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 use tars_pipeline::LlmService;
 use tars_tools::{ToolContext, ToolRegistry};
 use tars_types::{
-    AgentId, ChatRequest, ChatResponseBuilder, ContentBlock, Message, RequestContext,
+    AgentId, ChatRequest, ChatResponseBuilder, ContentBlock, Message, RequestContext, ThinkingMode,
 };
 use thiserror::Error;
 
@@ -87,6 +87,11 @@ pub struct WorkerAgent {
     /// Cap on tool round-trips per `execute` call. Only consulted
     /// when `tools.is_some()`. See [`DEFAULT_MAX_TOOL_ITERATIONS`].
     max_tool_iterations: u32,
+    /// Thinking/reasoning mode applied to every request this worker builds.
+    /// Default `Off`. A thinking-ONLY model (e.g. gemini-3.x-pro) rejects a 0
+    /// budget, so a caller wiring such a model MUST set this from its config —
+    /// see [`Self::with_thinking`].
+    thinking: ThinkingMode,
 }
 
 impl WorkerAgent {
@@ -104,6 +109,7 @@ impl WorkerAgent {
             domain: domain.into(),
             tools: None,
             max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
+            thinking: ThinkingMode::Off,
         })
     }
 
@@ -128,6 +134,7 @@ impl WorkerAgent {
             domain: domain.into(),
             tools: Some(tools),
             max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
+            thinking: ThinkingMode::Off,
         })
     }
 
@@ -140,6 +147,22 @@ impl WorkerAgent {
             domain: self.domain.clone(),
             tools: self.tools.clone(),
             max_tool_iterations: n,
+            thinking: self.thinking,
+        })
+    }
+
+    /// Set the thinking/reasoning mode applied to every request this worker
+    /// builds. Returns a fresh Arc. A caller serving a thinking-ONLY model
+    /// (gemini-3.x-pro) MUST set this from its provider config, or every call
+    /// sends a 0 budget the API rejects.
+    pub fn with_thinking(self: Arc<Self>, thinking: ThinkingMode) -> Arc<Self> {
+        Arc::new(Self {
+            id: self.id.clone(),
+            model: self.model.clone(),
+            domain: self.domain.clone(),
+            tools: self.tools.clone(),
+            max_tool_iterations: self.max_tool_iterations,
+            thinking,
         })
     }
 
@@ -262,7 +285,12 @@ impl WorkerAgent {
         if !has_tools {
             pb = pb.structured_output("WorkerResult", worker_json_schema());
         }
-        pb.build()
+        let mut req = pb.build();
+        // Apply the worker's configured thinking mode. PromptBuilder defaults to
+        // Off; a thinking-ONLY model (gemini-3.x-pro) rejects a 0 budget, so the
+        // mode must come from the caller's provider config, not the default.
+        req.thinking = self.thinking;
+        req
     }
 
     /// Lower-level: parse the JSON the model emitted into a typed
@@ -729,6 +757,27 @@ mod tests {
             .collect();
         assert!(required.contains(&"summary"));
         assert!(required.contains(&"confidence"));
+    }
+
+    #[test]
+    fn with_thinking_is_applied_to_every_request() {
+        // Default is Off (a 0 budget); a thinking-only model needs the caller's
+        // configured mode to reach the request, or the API rejects "Budget 0".
+        let plan = sample_plan();
+        let empty = std::collections::HashMap::new();
+        let off = WorkerAgent::new(AgentId::new("w"), "m", "d");
+        assert_eq!(
+            off.build_worker_request(&plan, &plan.steps[0], &[], &empty)
+                .thinking,
+            ThinkingMode::Off
+        );
+        let thinking = WorkerAgent::new(AgentId::new("w"), "m", "d").with_thinking(ThinkingMode::Auto);
+        assert_eq!(
+            thinking
+                .build_worker_request(&plan, &plan.steps[0], &[], &empty)
+                .thinking,
+            ThinkingMode::Auto
+        );
     }
 
     #[test]
