@@ -145,6 +145,31 @@ n=50 that's not yet distinguishable from luck. The named regression
 cases (`case_022`, `case_041`) are the actionable output — go read
 what got worse.
 
+### 3.1 Tool-trajectory checks (A/B which tools the agent picks)
+
+When the thing you're A/B-ing is *tool selection* — does config B reach
+for the same tools as A? — add a `trajectory-match` check. Each case dir
+declares the reference tools in `expected_tools.json`
+(`["search","fetch"]`, or `[{"name":"search","args":{…}}]`); the check
+scores the tools the model actually selected (`ChatResponse.tool_calls`)
+against it and rolls up as a normal `CheckSummary`, so `eval diff` shows
+the delta with no extra flags:
+
+```bash
+tars eval run --corpus tasks/ --provider A --check trajectory-match:ordered
+tars eval run --corpus tasks/ --provider B --check trajectory-match:ordered
+tars eval diff runs/A runs/B
+#   → trajectory-match  0.10 → 0.22  (+0.12)   ← B got worse at tool choice
+```
+
+Modes: `exact` (= ADK's `tool_trajectory_avg_score`, all-or-nothing),
+`ordered` (LCS partial credit), `set` (order-insensitive). A pass
+threshold is appendable: `trajectory-match:ordered:0.8`. A case with no
+`expected_tools.json` is *skipped*, not silently passed. P1 scores a
+single completion's tool selection; the multi-call agent-loop trajectory
+and the no-oracle head-to-head `--trajectory` diff are P2 — full design
+in [`architecture/26-tool-trajectory-eval.md`](./architecture/26-tool-trajectory-eval.md).
+
 ---
 
 ## 3.5 But how do you actually know which is *better*?

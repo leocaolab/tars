@@ -108,6 +108,7 @@ use tars_pipeline::{
     JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, Pipeline, PipelineOpts,
 };
 use tars_runtime::{CheckRunner, Invariant, ValidatorInvariant};
+use tars_runtime::trajectory_match::{self, MatchMode, ToolStep};
 use tars_types::{
     ChatRequest, ChatResponse, ChatResponseBuilder, ModelHint, RequestContext, Usage,
 };
@@ -202,8 +203,10 @@ pub struct EvalRunArgs {
     pub max_output_tokens: Option<u32>,
 
     /// Built-in invariant checks to run against each output (repeatable).
-    /// Recognized: `non-empty`, `valid-json`, `max-length:<N>`.
-    /// Custom invariants are a Rust-API feature (see Doc 18 §4.1).
+    /// Recognized: `non-empty`, `valid-json`, `max-length:<N>`, and
+    /// `trajectory-match[:<exact|ordered|set>[:<threshold>]]` — scores the
+    /// tools the model selected against each case's `expected_tools.json`
+    /// (Doc 26). Custom invariants are a Rust-API feature (Doc 18 §4.1).
     #[arg(long = "check")]
     pub checks: Vec<String>,
 }
@@ -225,10 +228,93 @@ fn build_invariant(spec: &str) -> Result<Arc<dyn Invariant>> {
             )))
         }
         other => anyhow::bail!(
-            "unknown --check `{other}`. Recognized: non-empty, valid-json, max-length:<N>"
+            "unknown --check `{other}`. Recognized: non-empty, valid-json, max-length:<N>, \
+             trajectory-match[:<exact|ordered|set>[:<threshold>]]"
         ),
     };
     Ok(inv)
+}
+
+/// A `trajectory-match` check (Doc 26). Unlike an [`Invariant`], it needs
+/// **per-case** reference data (`expected_tools`) that the `(req, resp)`
+/// signature can't carry, so it's evaluated in `run_eval`'s case loop rather
+/// than through the global `CheckRunner`.
+struct TrajectorySpec {
+    /// The full `--check` spec string — used as the check name so two runs
+    /// with the same spec align under `eval diff`.
+    raw: String,
+    mode: MatchMode,
+    /// Per-case pass threshold on the score (default 1.0 = strict).
+    threshold: f64,
+}
+
+impl TrajectorySpec {
+    /// Parse `trajectory-match`, `trajectory-match:<mode>`, or
+    /// `trajectory-match:<mode>:<threshold>`. Returns `Ok(None)` when `spec`
+    /// is not a trajectory-match spec (so the caller falls back to
+    /// [`build_invariant`]).
+    fn parse(spec: &str) -> Result<Option<Self>> {
+        let rest = match spec.strip_prefix("trajectory-match") {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        // rest is "" | ":<mode>" | ":<mode>:<thresh>"
+        let rest = rest.strip_prefix(':').unwrap_or(rest);
+        let mut it = rest.splitn(2, ':');
+        let mode_tok = it.next().unwrap_or("");
+        let mode = if mode_tok.is_empty() {
+            MatchMode::Ordered // bare `trajectory-match` → ordered
+        } else {
+            MatchMode::parse(mode_tok).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown trajectory-match mode `{mode_tok}`. Recognized: exact, ordered, set"
+                )
+            })?
+        };
+        let threshold = match it.next() {
+            Some(t) => t
+                .parse::<f64>()
+                .with_context(|| format!("bad trajectory-match threshold: {t}"))?,
+            None => 1.0,
+        };
+        Ok(Some(Self {
+            raw: spec.to_string(),
+            mode,
+            threshold,
+        }))
+    }
+
+    fn name(&self) -> &str {
+        &self.raw
+    }
+
+    /// Score one case. `None` = the case has no `expected_tools` and is
+    /// skipped (excluded from the check's `evaluated` count).
+    fn eval_case(
+        &self,
+        actual: &[ToolStep],
+        expected: Option<&[ToolStep]>,
+    ) -> Option<CaseCheckResult> {
+        let expected = expected?;
+        let s = trajectory_match::score(actual, expected, self.mode);
+        let got: Vec<&str> = actual.iter().map(|x| x.name.as_str()).collect();
+        if s >= self.threshold {
+            Some(CaseCheckResult::Passed {
+                name: self.raw.clone(),
+                note: Some(format!("score={s:.3} ({}) got={got:?}", self.mode.as_str())),
+            })
+        } else {
+            let want: Vec<&str> = expected.iter().map(|x| x.name.as_str()).collect();
+            Some(CaseCheckResult::Failed {
+                name: self.raw.clone(),
+                reason: format!(
+                    "score={s:.3} < {:.3} ({}); want={want:?} got={got:?}",
+                    self.threshold,
+                    self.mode.as_str()
+                ),
+            })
+        }
+    }
 }
 
 /// Manifest written to `<output>/manifest.json`. Stable schema so
@@ -288,6 +374,13 @@ pub struct EvalCaseReport {
     /// Per-invariant results for this case. Empty if no checks ran.
     #[serde(default)]
     pub checks: Vec<CaseCheckResult>,
+    /// Tool names the model selected, in call order (from
+    /// `ChatResponse.tool_calls`). Persisted so `eval diff --trajectory`
+    /// (Doc 26 P2) can compare runs without re-inferring. Empty when the
+    /// case made no tool calls. `#[serde(default)]` keeps older reports
+    /// readable.
+    #[serde(default)]
+    pub tool_trajectory: Vec<String>,
 }
 
 /// One invariant check's outcome for one eval case.
@@ -889,13 +982,22 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
     let pipeline = Pipeline::default_chain(provider, PipelineOpts::new(provider_id.clone()));
     let pipeline = Arc::new(pipeline);
 
-    // 2b. Build the invariant check runner from --check specs.
+    // 2b. Build checks from --check specs. trajectory-match:* specs are
+    //     case-parameterized (need per-case expected_tools), so they're split
+    //     out from the global invariant CheckRunner and evaluated in the loop.
     let mut invariants: Vec<Arc<dyn Invariant>> = Vec::with_capacity(args.checks.len());
+    let mut traj_specs: Vec<TrajectorySpec> = Vec::new();
     for spec in &args.checks {
-        invariants.push(build_invariant(spec)?);
+        if let Some(ts) = TrajectorySpec::parse(spec)? {
+            traj_specs.push(ts);
+        } else {
+            invariants.push(build_invariant(spec)?);
+        }
     }
     let check_runner = CheckRunner::new(invariants);
-    let check_names: Vec<String> = check_runner.names().iter().map(|s| s.to_string()).collect();
+    // Aggregation rolls up every check name — invariants AND trajectory checks.
+    let mut check_names: Vec<String> = check_runner.names().iter().map(|s| s.to_string()).collect();
+    check_names.extend(traj_specs.iter().map(|t| t.name().to_string()));
 
     // 3. Discover cases.
     let cases = load_corpus(&args.corpus)
@@ -940,6 +1042,7 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
             args.model.as_deref(),
             args.max_output_tokens,
             &check_runner,
+            &traj_specs,
         )
         .await;
         // Persist response text + per-case report regardless of outcome.
@@ -1056,6 +1159,46 @@ struct Case {
     system: Option<String>,
     #[allow(dead_code)]
     expected: Option<String>,
+    /// Reference tool trajectory for `--check trajectory-match:*` (Doc 26).
+    /// `None` when the case carries no `expected_tools.json` → the check is
+    /// skipped for this case (never a silent pass).
+    expected_tools: Option<Vec<ToolStep>>,
+}
+
+/// One entry of `expected_tools.json` — either a bare tool name or a
+/// `{name, args}` object. Args are accepted for forward-compat (Doc 26 P3
+/// `args` mode) but unused by P1's name-only scoring.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ExpectedToolEntry {
+    Name(String),
+    Step {
+        name: String,
+        #[serde(default)]
+        args: serde_json::Value,
+    },
+}
+
+/// Read `expected_tools.json` if present. Malformed JSON is a hard error
+/// (fail-closed, names the file) — never a silent skip.
+fn read_expected_tools(path: &Path) -> Result<Option<Vec<ToolStep>>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = read_text(path)?;
+    let entries: Vec<ExpectedToolEntry> = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing {} (expect a JSON array of tool names or {{name,args}})", path.display()))?;
+    let steps = entries
+        .into_iter()
+        .map(|e| match e {
+            ExpectedToolEntry::Name(name) => ToolStep {
+                name,
+                args: serde_json::Value::Null,
+            },
+            ExpectedToolEntry::Step { name, args } => ToolStep { name, args },
+        })
+        .collect();
+    Ok(Some(steps))
 }
 
 struct CaseOutcome {
@@ -1069,6 +1212,7 @@ async fn run_one_case(
     model: Option<&str>,
     max_output_tokens: Option<u32>,
     checks: &CheckRunner,
+    traj_specs: &[TrajectorySpec],
 ) -> CaseOutcome {
     let started = Instant::now();
     let mut req = ChatRequest::user(
@@ -1119,9 +1263,16 @@ async fn run_one_case(
         EvalCaseStatus::Ok
     };
 
-    // Run invariants only on successful cases — an errored call has no
-    // real output to check.
-    let case_checks: Vec<CaseCheckResult> = if status == EvalCaseStatus::Ok && !checks.is_empty() {
+    // The tools the model selected this turn, in call order — recorded
+    // regardless of whether a trajectory check was requested (cheap, and
+    // lets `eval diff --trajectory` work later without re-inferring).
+    let tool_steps = trajectory_match::from_tool_calls(&response.tool_calls);
+    let tool_trajectory: Vec<String> = tool_steps.iter().map(|s| s.name.clone()).collect();
+
+    // Run checks only on successful cases — an errored call has no real
+    // output to check.
+    let mut case_checks: Vec<CaseCheckResult> = if status == EvalCaseStatus::Ok && !checks.is_empty()
+    {
         checks
             .run(&req_for_checks, &response)
             .into_iter()
@@ -1148,6 +1299,17 @@ async fn run_one_case(
         Vec::new()
     };
 
+    // Case-parameterized trajectory-match checks (Doc 26): each scores the
+    // selected tools against this case's expected_tools. A case with no
+    // expected_tools is skipped (eval_case → None), not failed.
+    if status == EvalCaseStatus::Ok {
+        for ts in traj_specs {
+            if let Some(r) = ts.eval_case(&tool_steps, case.expected_tools.as_deref()) {
+                case_checks.push(r);
+            }
+        }
+    }
+
     CaseOutcome {
         summary: EvalCaseReport {
             case_id: case.id.clone(),
@@ -1157,6 +1319,7 @@ async fn run_one_case(
             output_chars: output_text.chars().count() as u64,
             error,
             checks: case_checks,
+            tool_trajectory,
         },
         output_text,
     }
@@ -1191,11 +1354,13 @@ fn load_corpus(root: &Path) -> Result<Vec<Case>> {
         let input = read_text(&input_path)?;
         let system = read_optional_text(&path.join("system.txt"))?;
         let expected = read_optional_text(&path.join("expected.txt"))?;
+        let expected_tools = read_expected_tools(&path.join("expected_tools.json"))?;
         cases.push(Case {
             id,
             input,
             system,
             expected,
+            expected_tools,
         });
     }
     // Stable order — caller asks for case_001 < case_002 < case_010 to
@@ -1288,6 +1453,121 @@ mod tests {
         fs::write(p, body).unwrap();
     }
 
+    fn tsteps(names: &[&str]) -> Vec<ToolStep> {
+        names
+            .iter()
+            .map(|n| ToolStep {
+                name: (*n).to_string(),
+                args: serde_json::Value::Null,
+            })
+            .collect()
+    }
+
+    // ── trajectory-match: spec parsing (Doc 26 FR-6) ──────────────────
+
+    #[test]
+    fn trajectory_spec_parses_modes_threshold_and_bare() {
+        // non-trajectory spec → None (falls back to build_invariant)
+        assert!(TrajectorySpec::parse("valid-json").unwrap().is_none());
+
+        let bare = TrajectorySpec::parse("trajectory-match").unwrap().unwrap();
+        assert_eq!(bare.mode, MatchMode::Ordered); // bare defaults to ordered
+        assert_eq!(bare.threshold, 1.0);
+        assert_eq!(bare.name(), "trajectory-match");
+
+        let exact = TrajectorySpec::parse("trajectory-match:exact").unwrap().unwrap();
+        assert_eq!(exact.mode, MatchMode::Exact);
+
+        let thr = TrajectorySpec::parse("trajectory-match:ordered:0.8").unwrap().unwrap();
+        assert_eq!(thr.mode, MatchMode::Ordered);
+        assert!((thr.threshold - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn trajectory_spec_rejects_unknown_mode_and_bad_threshold() {
+        assert!(TrajectorySpec::parse("trajectory-match:fuzzy").is_err());
+        assert!(TrajectorySpec::parse("trajectory-match:exact:notanum").is_err());
+    }
+
+    // ── trajectory-match: per-case scoring (Doc 26 E2E-1/2/5) ─────────
+
+    #[test]
+    fn trajectory_eval_case_passes_on_match() {
+        let spec = TrajectorySpec::parse("trajectory-match:exact").unwrap().unwrap();
+        let expected = tsteps(&["search"]);
+        let r = spec.eval_case(&tsteps(&["search"]), Some(&expected)).unwrap();
+        assert!(r.passed());
+        assert_eq!(r.name(), "trajectory-match:exact");
+    }
+
+    #[test]
+    fn trajectory_eval_case_fails_on_mismatch_with_reason() {
+        let spec = TrajectorySpec::parse("trajectory-match:exact").unwrap().unwrap();
+        let expected = tsteps(&["search"]);
+        let r = spec.eval_case(&tsteps(&["fetch"]), Some(&expected)).unwrap();
+        assert!(!r.passed());
+        // reason names both want and got — not a bare failure
+        let detail = r.detail().unwrap();
+        assert!(detail.contains("search") && detail.contains("fetch"), "detail={detail}");
+    }
+
+    #[test]
+    fn trajectory_eval_case_skips_when_no_expected_tools() {
+        let spec = TrajectorySpec::parse("trajectory-match:ordered").unwrap().unwrap();
+        // None expected → skipped (not a silent pass)
+        assert!(spec.eval_case(&tsteps(&["search"]), None).is_none());
+    }
+
+    #[test]
+    fn trajectory_ordered_threshold_allows_partial_credit() {
+        // ordered score for [a,x] vs [a,y] is 0.5; threshold 0.5 passes, 0.6 fails
+        let pass = TrajectorySpec::parse("trajectory-match:ordered:0.5").unwrap().unwrap();
+        let fail = TrajectorySpec::parse("trajectory-match:ordered:0.6").unwrap().unwrap();
+        let expected = tsteps(&["a", "y"]);
+        assert!(pass.eval_case(&tsteps(&["a", "x"]), Some(&expected)).unwrap().passed());
+        assert!(!fail.eval_case(&tsteps(&["a", "x"]), Some(&expected)).unwrap().passed());
+    }
+
+    // ── corpus expected_tools.json (Doc 26 FR-5) ──────────────────────
+
+    #[test]
+    fn read_expected_tools_accepts_names_and_objects_and_missing() {
+        let dir = TempDir::new().unwrap();
+        // missing file → None
+        assert!(read_expected_tools(&dir.path().join("nope.json")).unwrap().is_none());
+
+        // bare names
+        let names = dir.path().join("names.json");
+        write(&names, r#"["search","fetch"]"#);
+        let got = read_expected_tools(&names).unwrap().unwrap();
+        assert_eq!(got.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["search", "fetch"]);
+
+        // {name,args} objects
+        let objs = dir.path().join("objs.json");
+        write(&objs, r#"[{"name":"search","args":{"q":"x"}}]"#);
+        let got = read_expected_tools(&objs).unwrap().unwrap();
+        assert_eq!(got[0].name, "search");
+        assert_eq!(got[0].args, serde_json::json!({"q":"x"}));
+    }
+
+    #[test]
+    fn read_expected_tools_fails_closed_on_malformed() {
+        let dir = TempDir::new().unwrap();
+        let bad = dir.path().join("bad.json");
+        write(&bad, "{ not an array");
+        assert!(read_expected_tools(&bad).is_err());
+    }
+
+    #[test]
+    fn load_corpus_reads_expected_tools_into_case() {
+        let dir = TempDir::new().unwrap();
+        write(&dir.path().join("c1").join("input.txt"), "hi");
+        write(&dir.path().join("c1").join("expected_tools.json"), r#"["search"]"#);
+        let cases = load_corpus(dir.path()).unwrap();
+        let et = cases[0].expected_tools.as_ref().unwrap();
+        assert_eq!(et[0].name, "search");
+    }
+
     #[test]
     fn load_corpus_reads_cases_in_lex_order() {
         let dir = TempDir::new().unwrap();
@@ -1373,6 +1653,7 @@ mod tests {
                     name: "non-empty".into(),
                     note: None,
                 }],
+                tool_trajectory: Vec::new(),
             }],
         };
         let v = serde_json::to_value(&m).unwrap();
