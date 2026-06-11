@@ -314,7 +314,9 @@ fn ground_system_with_cwd(
          Every tool (bash.run, fs.read_file, fs.edit_file, fs.write_file) runs \
          HERE, and relative paths resolve against it. To explore, use paths under \
          this directory or run `pwd` first — never assume `/home/user`, \
-         `/workspace`, or any other path.\n\n",
+         `/workspace`, or any other path. Your editable code is UNDER this \
+         directory: do NOT run filesystem-wide searches like `find /` (they time \
+         out), and don't try to read or edit dependency source that isn't here.\n\n",
         cwd.display()
     );
     Some(match system {

@@ -143,20 +143,20 @@ impl Tool for BashTool {
             stderr.trim_end(),
         );
         let body = truncate_tail(&combined, MAX_OUTPUT_BYTES);
-        // A non-zero exit is a logical failure the model should react to,
-        // not a tool error — surface it as an `is_error` result.
-        if code == Some(0) {
-            Ok(ToolResult::titled_success("ran command", body))
-        } else {
-            Ok(ToolResult::titled_error(
-                format!(
-                    "command exited {}",
-                    code.map(|c| c.to_string())
-                        .unwrap_or_else(|| "by signal".into())
-                ),
-                body,
-            ))
-        }
+        // The exit code is in `body` ("exit: N") for the model to react to. We
+        // deliberately DON'T flag a non-zero exit as `is_error`: that bool means
+        // "the tool failed to run" (missing file, spawn failure, timeout), which
+        // the drive-loop's consecutive-all-error abort treats as broken tooling.
+        // A command's OWN non-zero exit is a normal signal — `grep` with no match
+        // exits 1, a failing test/build exits non-zero — and an agent exploring
+        // with a few empty greps would otherwise be aborted as "stuck". Surface
+        // the exit code as DATA in the title, not as a tool error.
+        let title = match code {
+            Some(0) => "ran command".to_string(),
+            Some(c) => format!("ran command (exit {c})"),
+            None => "ran command (killed by signal)".to_string(),
+        };
+        Ok(ToolResult::titled_success(title, body))
     }
 }
 
@@ -194,12 +194,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonzero_exit_is_logical_error() {
+    async fn nonzero_exit_is_reported_in_body_not_flagged_as_tool_error() {
+        // A command's own non-zero exit (grep no-match, failing test/build) is a
+        // normal signal the model reads from the body — NOT a tool failure. If it
+        // were flagged `is_error`, a few empty exploratory greps would trip the
+        // drive-loop's consecutive-all-error abort and kill a working agent.
         let r = BashTool::new()
             .execute(json!({ "command": "exit 3" }), ctx(None))
             .await
             .unwrap();
-        assert!(r.is_error);
-        assert!(r.content.contains("exit: 3"));
+        assert!(!r.is_error, "non-zero exit is data, not a tool error");
+        assert!(r.content.contains("exit: 3"), "exit code stays in the body");
     }
 }
