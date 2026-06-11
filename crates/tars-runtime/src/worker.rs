@@ -833,22 +833,27 @@ mod tests {
         }
     }
 
+    // parse_worker_response is INTENTIONALLY lenient since c5d9413 (openai_compat
+    // tool agents): a tool-using model's final turn is often a bare summary or
+    // non-JSON, and hard-failing it loses a completed fix. So an empty summary or
+    // non-JSON text is wrapped into a tolerant PartialResult, not rejected. These
+    // tests pin that contract (they replace the old strict-rejection tests).
     #[test]
-    fn parse_worker_response_rejects_empty_summary() {
+    fn parse_worker_response_tolerates_empty_summary() {
         let id = AgentId::new("w");
         let json = r#"{"summary":"   ","confidence":0.5}"#;
-        match WorkerAgent::parse_worker_response(json, &id, Some("s1")) {
-            Err(WorkerError::InvalidResult(msg)) => assert!(msg.contains("summary")),
-            other => panic!("expected InvalidResult, got {other:?}"),
-        }
+        let r = WorkerAgent::parse_worker_response(json, &id, Some("s1"));
+        assert!(r.is_ok(), "empty summary is tolerated, not rejected; got {r:?}");
     }
 
     #[test]
-    fn parse_worker_response_surfaces_decode_error_on_bad_json() {
+    fn parse_worker_response_tolerates_non_json_text() {
         let id = AgentId::new("w");
         match WorkerAgent::parse_worker_response("not json", &id, None) {
-            Err(WorkerError::Decode(_)) => {}
-            other => panic!("expected Decode, got {other:?}"),
+            Ok(crate::message::AgentMessage::PartialResult { summary, .. }) => {
+                assert_eq!(summary, "not json", "raw text becomes the summary");
+            }
+            other => panic!("expected a tolerant PartialResult, got {other:?}"),
         }
     }
 
