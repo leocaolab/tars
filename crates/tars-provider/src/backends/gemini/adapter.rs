@@ -209,7 +209,16 @@ impl GeminiAdapter {
                 json!({
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.input_schema.schema,
+                    // A tool's input_schema is authored in standard JSON-Schema
+                    // (it carries `additionalProperties`, `$schema`, draft-07
+                    // keywords). Gemini's `function_declarations[].parameters`
+                    // rejects those outright ("Unknown name additionalProperties")
+                    // — the SAME dialect mismatch `responseSchema` already
+                    // adapts. Run tool params through the same Gemini transform.
+                    "parameters": crate::schema_adapt::adapt_schema(
+                        &t.input_schema.schema,
+                        crate::schema_adapt::SchemaDialect::Gemini,
+                    ),
                 })
             })
             .collect();
@@ -777,5 +786,37 @@ mod tests {
             body,
         );
         assert!(matches!(err, ProviderError::ContextTooLong { .. }));
+    }
+
+    #[test]
+    fn tool_parameters_drop_gemini_unsupported_schema_keys() {
+        // Regression: Gemini's function_declarations[].parameters rejects
+        // `additionalProperties` ("Unknown name additionalProperties") — every
+        // tool-using agent (the fixer) failed against gemini until tool params
+        // went through the Gemini schema transform like responseSchema does.
+        let spec = tars_types::ToolSpec::new(
+            "fs.read_file",
+            "read a file",
+            tars_types::JsonSchema::strict(
+                "Args",
+                serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }),
+            ),
+        )
+        .unwrap();
+        let out = GeminiAdapter::translate_tools(std::slice::from_ref(&spec));
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(
+            !text.contains("additionalProperties"),
+            "Gemini rejects additionalProperties in tool params: {text}"
+        );
+        assert!(!text.contains("$schema"), "draft meta must be stripped: {text}");
+        // The actual contract survives the transform.
+        assert!(text.contains("path"));
     }
 }
