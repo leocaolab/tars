@@ -71,7 +71,12 @@ impl GlobTool {
     /// Effective jail root = explicit `with_root`, else the per-call
     /// `ctx.cwd` (see [`super::grep`]'s resolve for the rationale — the
     /// structural fix for unbounded `find /` walks).
-    fn resolve(&self, input: Option<&str>, cwd: Option<&Path>) -> Result<PathBuf, ToolResult> {
+    fn resolve(
+        &self,
+        input: Option<&str>,
+        cwd: Option<&Path>,
+        readable_roots: &[PathBuf],
+    ) -> Result<PathBuf, ToolResult> {
         let raw = Path::new(input.unwrap_or("."));
         let combined = if raw.is_absolute() {
             raw.to_path_buf()
@@ -90,7 +95,14 @@ impl GlobTool {
         let canonical = std::fs::canonicalize(&combined).map_err(|e| {
             ToolResult::error(format!("cannot resolve path `{}`: {e}", combined.display()))
         })?;
-        if !canonical.starts_with(&jail) {
+        // Allowed under the (cwd / explicit-root) jail OR an extra READ-ONLY root
+        // (a dependency-source dir) — same rationale as grep's resolve.
+        let in_read_root = readable_roots.iter().any(|r| {
+            std::fs::canonicalize(r)
+                .map(|cr| canonical.starts_with(&cr))
+                .unwrap_or(false)
+        });
+        if !canonical.starts_with(&jail) && !in_read_root {
             return Err(ToolResult::error(format!(
                 "path `{}` resolves outside the allowed root `{}`",
                 canonical.display(),
@@ -147,7 +159,11 @@ impl Tool for GlobTool {
         let parsed: GlobArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        let search_root = match self.resolve(parsed.path.as_deref(), ctx.cwd.as_deref()) {
+        let search_root = match self.resolve(
+            parsed.path.as_deref(),
+            ctx.cwd.as_deref(),
+            &ctx.readable_roots,
+        ) {
             Ok(p) => p,
             Err(result) => return Ok(result),
         };

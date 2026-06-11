@@ -89,6 +89,10 @@ pub struct AgentContext {
     /// can adapt to, instead of running). Default `allow_all` keeps the
     /// historical behaviour: everything the model can call, it may.
     pub permissions: tars_model::Permissions,
+    /// Extra READ-ONLY roots threaded into the per-dispatch
+    /// [`tars_tools::ToolContext`] so search/read tools may reach a
+    /// dependency's source beyond `cwd` (write tools stay confined to `cwd`).
+    pub readable_roots: Vec<std::path::PathBuf>,
 }
 
 /// What an Agent returns from one execute() call.

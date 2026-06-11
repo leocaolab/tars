@@ -365,6 +365,7 @@ pub async fn execute_agent_step(
         // would flow in here once PlanStep carries one.
         cwd: None,
         permissions: Default::default(),
+        readable_roots: Vec::new(),
     };
     let result = agent.clone().execute(ctx, input).await;
 

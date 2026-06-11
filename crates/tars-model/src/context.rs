@@ -25,6 +25,11 @@ pub struct AgentContext {
     /// Opaque correlation id for observability (trajectory / run). The
     /// model doesn't interpret it; the runtime threads its events under it.
     pub trajectory_id: Option<String>,
+    /// Extra READ-ONLY roots the agent's search/read tools may reach beyond
+    /// `cwd` (e.g. a coding agent's dependency-source dirs, so it can inspect
+    /// a dependency type without escaping the workspace). Empty by default;
+    /// write tools ignore it. See [`Self::with_readable_roots`].
+    pub readable_roots: Vec<PathBuf>,
 }
 
 impl Default for AgentContext {
@@ -34,6 +39,7 @@ impl Default for AgentContext {
             cancel: CancellationToken::new(),
             permissions: Permissions::default(),
             trajectory_id: None,
+            readable_roots: Vec::new(),
         }
     }
 }
@@ -60,6 +66,14 @@ impl AgentContext {
 
     pub fn with_trajectory_id(mut self, id: impl Into<String>) -> Self {
         self.trajectory_id = Some(id.into());
+        self
+    }
+
+    /// Grant extra READ-ONLY roots (dependency-source dirs) the agent's
+    /// search/read tools may reach beyond `cwd`. Write tools stay confined
+    /// to `cwd` — this is "deps read-only, workspace read-write".
+    pub fn with_readable_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.readable_roots = roots.into_iter().collect();
         self
     }
 }

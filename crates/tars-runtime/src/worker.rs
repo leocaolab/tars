@@ -456,6 +456,7 @@ impl WorkerAgent {
                     cancel: ctx.cancel.clone(),
                     cwd: ctx.cwd.clone(),
                     permission: Some(permission.clone()),
+                    readable_roots: ctx.readable_roots.clone(),
                     ..Default::default()
                 };
                 let tool_msg = registry.dispatch(call, tool_ctx).await;

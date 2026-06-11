@@ -98,7 +98,12 @@ impl GrepTool {
     /// known per-call, not at agent-build time) gets a hard boundary the
     /// search can't escape — this is the structural fix for the `find /`
     /// full-disk-scan class. Only when BOTH are absent is there no jail.
-    fn resolve(&self, input: Option<&str>, cwd: Option<&Path>) -> Result<PathBuf, ToolResult> {
+    fn resolve(
+        &self,
+        input: Option<&str>,
+        cwd: Option<&Path>,
+        readable_roots: &[PathBuf],
+    ) -> Result<PathBuf, ToolResult> {
         let raw = Path::new(input.unwrap_or("."));
         let combined = if raw.is_absolute() {
             raw.to_path_buf()
@@ -117,7 +122,15 @@ impl GrepTool {
         let canonical = std::fs::canonicalize(&combined).map_err(|e| {
             ToolResult::error(format!("cannot resolve path `{}`: {e}", combined.display()))
         })?;
-        if !canonical.starts_with(&jail) {
+        // Allowed if under the (cwd / explicit-root) jail OR any extra READ-ONLY
+        // root the caller granted (e.g. a dependency-source dir). Search may READ
+        // those for reference; it still can't escape to the whole disk.
+        let in_read_root = readable_roots.iter().any(|r| {
+            std::fs::canonicalize(r)
+                .map(|cr| canonical.starts_with(&cr))
+                .unwrap_or(false)
+        });
+        if !canonical.starts_with(&jail) && !in_read_root {
             return Err(ToolResult::error(format!(
                 "path `{}` resolves outside the allowed root `{}`",
                 canonical.display(),
@@ -176,10 +189,11 @@ impl Tool for GrepTool {
         let parsed: GrepArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        let search_root = match self.resolve(parsed.path.as_deref(), ctx.cwd.as_deref()) {
-            Ok(p) => p,
-            Err(result) => return Ok(result),
-        };
+        let search_root =
+            match self.resolve(parsed.path.as_deref(), ctx.cwd.as_deref(), &ctx.readable_roots) {
+                Ok(p) => p,
+                Err(result) => return Ok(result),
+            };
 
         let pattern = parsed.pattern.clone();
         let glob = parsed.glob.clone();
@@ -502,6 +516,32 @@ mod tests {
             .unwrap();
         assert!(r.is_error, "absolute path outside cwd must be blocked");
         assert!(r.content.contains("outside the allowed root"));
+    }
+
+    #[tokio::test]
+    async fn readable_root_lets_search_reach_outside_cwd() {
+        // "deps read-only": a path under a granted readable_root (a dependency
+        // dir outside the worktree) is allowed — so a coding agent can grep a
+        // dependency type instead of looping in the worktree, while still being
+        // unable to escape to arbitrary paths.
+        let inside = tempfile::tempdir().unwrap();
+        let dep = tempfile::tempdir().unwrap();
+        write(dep.path(), "config.rs", "pub enum ConfigError { needle }\n");
+        let ctx = ToolContext {
+            cwd: Some(inside.path().to_path_buf()),
+            readable_roots: vec![dep.path().to_path_buf()],
+            ..Default::default()
+        };
+        let tool: Arc<dyn Tool> = Arc::new(GrepTool::new());
+        let r = tool
+            .execute(
+                json!({"pattern": "needle", "path": dep.path().to_str().unwrap()}),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!r.is_error, "granted readable_root must be searchable: {}", r.content);
+        assert!(r.content.contains("config.rs"));
     }
 
     #[tokio::test]

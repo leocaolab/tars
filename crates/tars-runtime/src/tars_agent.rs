@@ -135,6 +135,7 @@ impl Agent for TarsAgent {
             cancel: ctx.cancel.clone(),
             cwd: ctx.cwd.clone(),
             permissions: ctx.permissions.clone(),
+            readable_roots: ctx.readable_roots.clone(),
         };
 
         let msg = self

@@ -38,6 +38,13 @@ pub struct ToolContext {
     /// OS-confinement policy a sandboxed tool reads. Default = unrestricted
     /// (seam only today; the lift is Doc 22 T2).
     pub sandbox: SandboxPolicy,
+    /// Extra READ-ONLY roots a search/read tool may reach in addition to
+    /// `cwd`. Empty = reads are confined to `cwd` (the default). A coding
+    /// agent sets this to its project's dependency-source dirs so `fs.grep`
+    /// / `fs.glob` can inspect a dependency type (READ-only) without escaping
+    /// to the whole disk — "deps read-only, workspace read-write". Write
+    /// tools ignore this; they stay confined to `cwd`.
+    pub readable_roots: Vec<PathBuf>,
 }
 
 // Hand-written: `Arc<dyn Trait>` fields can't derive `Debug`. Render the trait
@@ -50,6 +57,7 @@ impl std::fmt::Debug for ToolContext {
             .field("permission", &self.permission.as_ref().map(|_| "<view>"))
             .field("approval", &self.approval.as_ref().map(|_| "<sink>"))
             .field("sandbox", &self.sandbox)
+            .field("readable_roots", &self.readable_roots)
             .finish()
     }
 }
