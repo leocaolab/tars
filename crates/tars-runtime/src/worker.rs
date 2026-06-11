@@ -311,12 +311,14 @@ fn ground_system_with_cwd(
     let Some(cwd) = cwd else { return system };
     let note = format!(
         "Working directory (absolute): {}\n\
-         Every tool (bash.run, fs.read_file, fs.edit_file, fs.write_file) runs \
-         HERE, and relative paths resolve against it. To explore, use paths under \
-         this directory or run `pwd` first — never assume `/home/user`, \
-         `/workspace`, or any other path. Your editable code is UNDER this \
-         directory: do NOT run filesystem-wide searches like `find /` (they time \
-         out), and don't try to read or edit dependency source that isn't here.\n\n",
+         This is your READ-WRITE workspace — the code you EDIT lives here, and \
+         relative paths resolve against it (run `pwd` to confirm; never assume \
+         `/home/user`, `/workspace`, or any other path). You MAY READ files OUTSIDE \
+         it (e.g. a dependency crate's source) as READ-ONLY reference via \
+         fs.read_file with an absolute path, but only EDIT/WRITE under this \
+         directory. Don't run filesystem-wide searches like `find /` (they time \
+         out); if you can't quickly locate an external file, reason from how it is \
+         USED in this tree instead of searching for it again and again.\n\n",
         cwd.display()
     );
     Some(match system {
