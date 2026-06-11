@@ -300,6 +300,30 @@ impl WorkerAgent {
 }
 
 #[async_trait]
+/// Prepend the agent's absolute working directory to its system prompt so a
+/// tool-using model is grounded: the tools run in `cwd`, but nothing else tells
+/// the model where that is, so a weaker model hallucinates a path (e.g.
+/// `/home/user/...`) and loops `cd`/`grep` until it burns the tool-iteration cap.
+/// `None` cwd = inherit the process cwd (no worktree) → leave the prompt as-is.
+fn ground_system_with_cwd(
+    system: Option<String>,
+    cwd: Option<&std::path::Path>,
+) -> Option<String> {
+    let Some(cwd) = cwd else { return system };
+    let note = format!(
+        "Working directory (absolute): {}\n\
+         Every tool (bash.run, fs.read_file, fs.edit_file, fs.write_file) runs \
+         HERE, and relative paths resolve against it. To explore, use paths under \
+         this directory or run `pwd` first — never assume `/home/user`, \
+         `/workspace`, or any other path.\n\n",
+        cwd.display()
+    );
+    Some(match system {
+        Some(s) => format!("{note}{s}"),
+        None => note,
+    })
+}
+
 impl Agent for WorkerAgent {
     fn id(&self) -> &AgentId {
         &self.id
@@ -349,6 +373,11 @@ impl WorkerAgent {
         registry: Arc<ToolRegistry>,
     ) -> Result<AgentStepResult, AgentError> {
         let mut req = initial_input;
+        // Ground the model in its ABSOLUTE working directory (see
+        // `ground_system_with_cwd`) so it doesn't guess and loop against a
+        // hallucinated path until it burns `max_tool_iterations`.
+        req.system = ground_system_with_cwd(req.system.take(), ctx.cwd.as_deref());
+
         let mut total_usage = tars_types::Usage::default();
         // Count consecutive iterations in which *every* dispatched tool
         // call returned an error. A tool result with `is_error` is fed
@@ -611,6 +640,30 @@ fn worker_json_schema() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cwd_is_grounded_into_the_system_prompt() {
+        use std::path::Path;
+        // cwd set → the absolute path + the anti-hallucination guidance are
+        // prepended, and the original system prompt is preserved after it.
+        let out = super::ground_system_with_cwd(
+            Some("ORIGINAL SYSTEM".into()),
+            Some(Path::new("/Users/x/.arc/worktrees/fix-abc")),
+        )
+        .unwrap();
+        assert!(out.contains("/Users/x/.arc/worktrees/fix-abc"));
+        assert!(out.contains("never assume `/home/user`"));
+        assert!(out.trim_end().ends_with("ORIGINAL SYSTEM"));
+
+        // No cwd → unchanged (historical no-worktree behaviour).
+        assert_eq!(
+            super::ground_system_with_cwd(Some("BASE".into()), None),
+            Some("BASE".into())
+        );
+        // cwd but no prior system → just the grounding note.
+        let only = super::ground_system_with_cwd(None, Some(Path::new("/wt"))).unwrap();
+        assert!(only.contains("Working directory (absolute): /wt"));
+    }
+
     use super::*;
     use serde_json::json;
 
