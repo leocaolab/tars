@@ -175,7 +175,7 @@ impl LlmProvider for ClaudeCliProvider {
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
-        _ctx: RequestContext,
+        ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let model = req
             .model
@@ -205,6 +205,10 @@ impl LlmProvider for ClaudeCliProvider {
             effort: self.effort,
             exclude_dynamic_sections: self.exclude_dynamic_sections,
             extra_args: self.extra_args.clone(),
+            // When `--tools default` lets claude run its own Read/Edit/Bash,
+            // those must operate in the request's working dir (the fix
+            // worktree), not arc's process cwd. `None` → inherit parent cwd.
+            cwd: ctx.cwd.clone(),
         };
 
         let payload = self.runner.run(invocation).await?;
@@ -623,6 +627,7 @@ mod tests {
             effort: None,
             exclude_dynamic_sections: true,
             extra_args: vec![],
+            cwd: None,
         };
         let argv = build_argv(&inv);
         let sp = idx(&argv, "--system-prompt");

@@ -11,6 +11,7 @@
 //! `tokio::process::Command` or a real `claude` binary.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -90,6 +91,11 @@ pub struct SubprocessInvocation {
     pub exclude_dynamic_sections: bool,
     /// Raw argv tokens appended at the very end. Escape hatch.
     pub extra_args: Vec<String>,
+    /// Working directory for the spawned subprocess. When the CLI runs its
+    /// OWN agent tools (`--tools default`), this is where its Read/Edit/Bash
+    /// operate — set it to the fix worktree so the agent edits the right
+    /// tree, not arc's process cwd. `None` = inherit the parent cwd.
+    pub cwd: Option<PathBuf>,
 }
 
 /// Abstraction for "run `claude` and get back its JSON payload".

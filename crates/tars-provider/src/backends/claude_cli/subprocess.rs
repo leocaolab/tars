@@ -33,6 +33,13 @@ impl SubprocessRunner for RealSubprocessRunner {
             cmd.arg(tok);
         }
 
+        // Run the child IN the request's working dir when set — this is what
+        // makes claude's own Read/Edit/Bash (`--tools default`) operate in the
+        // fix worktree instead of arc's process cwd. `None` inherits the parent.
+        if let Some(cwd) = &inv.cwd {
+            cmd.current_dir(cwd);
+        }
+
         // Strip the dangerous env vars CASE-INSENSITIVELY. Pass through everything else.
         cmd.env_clear();
         for (k, v) in std::env::vars() {

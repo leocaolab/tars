@@ -5,6 +5,7 @@
 //! providers only need IDs + cancel + deadline.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -54,6 +55,16 @@ pub struct RequestContext {
     /// new context with these set; usually called once at session /
     /// batch entry, propagated unchanged through the call.
     pub tags: Vec<String>,
+    /// Working directory for the request. Native-agent providers that
+    /// spawn a subprocess with its OWN tools (e.g. `claude_cli` running
+    /// `claude -p` with `--tools default`) set the subprocess
+    /// `current_dir` to this, so the agent's Read/Edit/Bash operate in
+    /// the intended tree (the fix worktree) rather than arc's process
+    /// cwd. `None` = inherit the parent process cwd.
+    ///
+    /// Set via [`RequestContext::with_cwd`]; threaded from the worker's
+    /// `AgentContext.cwd`.
+    pub cwd: Option<PathBuf>,
 }
 
 impl RequestContext {
@@ -75,6 +86,7 @@ impl RequestContext {
             telemetry: new_shared_telemetry(),
             validation_outcome: new_shared_validation_outcome(),
             tags: Vec::new(),
+            cwd: None,
         }
     }
 
@@ -92,7 +104,16 @@ impl RequestContext {
             telemetry: new_shared_telemetry(),
             validation_outcome: new_shared_validation_outcome(),
             tags: Vec::new(),
+            cwd: None,
         }
+    }
+
+    /// Consume `self` and return it with `cwd` set (builder-style move).
+    /// Native-agent providers spawn their subprocess with this as the
+    /// `current_dir`; threaded from the worker's `AgentContext.cwd`.
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
     }
 
     /// Consume `self` and return it with `tags` set (builder-style

@@ -544,6 +544,12 @@ async fn drain_one_call(
     // RequestContext and both this and `drive_llm_call` thread it.
     let mut req_ctx = RequestContext::test_default();
     req_ctx.cancel = ctx.cancel.clone();
+    // Native-agent providers (claude_cli `--tools default`, …) spawn a
+    // subprocess running their OWN Read/Edit/Bash; without this the
+    // subprocess inherits arc's process cwd, not the fix worktree, so the
+    // agent edits the wrong tree. Forward the agent's working dir so the
+    // provider can set the subprocess `current_dir`.
+    req_ctx.cwd = ctx.cwd.clone();
 
     let llm: Arc<dyn LlmService> = ctx.llm.clone();
 
