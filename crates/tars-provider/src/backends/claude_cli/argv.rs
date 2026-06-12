@@ -210,6 +210,19 @@ pub(super) fn build_argv_with(inv: &SubprocessInvocation, streaming: bool) -> Ve
         }
     }
 
+    // A tool-enabled CLI (`Default` / `Allow`) runs claude's OWN agent loop
+    // and EDITS files. In `-p` (non-interactive) mode the default per-action
+    // permission prompt can't be answered, so every Edit/Bash is silently
+    // refused ("don't-ask mode restrictions preventing file edits") and the
+    // agent reports "no code changes" despite having the tools. Bypass the
+    // prompt so the tools it was granted can actually run. `Disabled` is
+    // inference-only (no tools), so it needs — and gets — no grant. A user
+    // who wants a stricter mode can override via `extra_args` (appended last).
+    if !matches!(inv.tools, ClaudeCliTools::Disabled) {
+        argv.push("--permission-mode".into());
+        argv.push("bypassPermissions".into());
+    }
+
     if inv.bare {
         argv.push("--bare".into());
     }

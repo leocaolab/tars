@@ -498,6 +498,12 @@ mod tests {
         // Default effort = None → no --effort token.
         assert!(!argv.iter().any(|a| a == "--effort"));
 
+        // Disabled = inference-only → NO permission grant (nothing to permit).
+        assert!(
+            !argv.iter().any(|a| a == "--permission-mode"),
+            "tools=Disabled must not request a permission bypass — it has no tools to run"
+        );
+
         // Default exclude_dynamic_sections = true.
         assert!(
             argv.iter()
@@ -546,6 +552,14 @@ mod tests {
         assert!(
             !argv.iter().any(|a| a == "--tools"),
             "tools=Default must omit --tools entirely (lets CLI use its own default)"
+        );
+        // Tool-enabled → must bypass the non-interactive permission prompt, or
+        // every Edit/Bash the agent attempts is silently refused.
+        let pm = idx(&argv, "--permission-mode");
+        assert_eq!(
+            argv[pm + 1],
+            "bypassPermissions",
+            "tools=Default runs the agent loop and edits files — it must bypass the -p permission prompt"
         );
     }
 
