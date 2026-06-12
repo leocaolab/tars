@@ -65,7 +65,7 @@ pub use bind::{BindError, bind};
 pub use check::{CheckResult, CheckRunner, Invariant, MembershipInvariant, ValidatorInvariant};
 pub use critic::{CriticAgent, CriticError, PartialResultRef};
 pub use error::RuntimeError;
-pub use event::{AgentEvent, StepIdempotencyKey, tool_sequence};
+pub use event::{AgentEvent, StepIdempotencyKey, tool_sequence, tool_step_sequence};
 pub use executor::{
     Critic, CriticContext, InfraClass, InfraRetryPolicy, RunPlanConfig, RunPlanError, Worker,
     WorkerContext, WorkerOutput, WorkerRegistry, default_infra_classifier, emit_step_lifecycle,

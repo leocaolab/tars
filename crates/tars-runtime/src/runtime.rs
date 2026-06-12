@@ -384,6 +384,7 @@ pub async fn execute_agent_step(
                         usage: step_result.usage,
                         system_prompt_hash,
                         tool_calls: step_result.tool_calls.clone(),
+                        tool_call_args: step_result.tool_call_args.clone(),
                     },
                 )
                 .await
@@ -511,6 +512,7 @@ mod tests {
                 },
                 system_prompt_hash: None,
                 tool_calls: Vec::new(),
+                tool_call_args: Vec::new(),
             },
         )
         .await

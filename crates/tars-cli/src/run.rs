@@ -216,6 +216,7 @@ impl TrajectoryLogger {
                             // Single-call path: no agent tool-loop, so no
                             // cross-call tool trajectory to record (Doc 26 M2).
                             tool_calls: Vec::new(),
+                            tool_call_args: Vec::new(),
                         },
                     )
                     .await

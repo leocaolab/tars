@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use tars_runtime::{LocalRuntime, MatchMode, Runtime};
+use tars_runtime::{LocalRuntime, MatchMode, Runtime, ToolStep};
 use tars_storage::EventStore;
 use tars_types::TrajectoryId;
 
@@ -64,8 +64,8 @@ pub enum TrajectoryCommand {
         #[arg(long)]
         expected: String,
         /// Match mode: `exact` | `ordered` | `set` | `args`. Default
-        /// `ordered`. (`args` has no effect here — recorded trajectories
-        /// store tool names only, so it degrades to `exact`.)
+        /// `ordered`. `args` checks recorded tool arguments too (M3'),
+        /// against the `{name, args}` objects in an `@file` expected list.
         #[arg(long, default_value = "ordered")]
         mode: String,
         /// Pass threshold on the score (default 1.0 = strict).
@@ -130,9 +130,11 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the `--expected` spec into tool names: a comma list, or `@file`
-/// pointing at a JSON array of names / `{name,…}` objects.
-fn parse_expected(spec: &str) -> Result<Vec<String>> {
+/// Resolve the `--expected` spec into tool steps: a comma list of names
+/// (`search,read_file`), or `@file` pointing at a JSON array of names /
+/// `{name, args}` objects. Args (only present in the `@file` object form) are
+/// what `--mode args` compares; bare names get `Value::Null` args.
+fn parse_expected(spec: &str) -> Result<Vec<ToolStep>> {
     if let Some(path) = spec.strip_prefix('@') {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading expected-tools file `{path}`"))?;
@@ -140,12 +142,19 @@ fn parse_expected(spec: &str) -> Result<Vec<String>> {
             .with_context(|| format!("parsing `{path}` as a JSON array of tool names"))?;
         arr.iter()
             .map(|v| match v {
-                serde_json::Value::String(s) => Ok(s.clone()),
-                serde_json::Value::Object(o) => o
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .map(str::to_string)
-                    .ok_or_else(|| anyhow::anyhow!("array element missing string `name`: {v}")),
+                serde_json::Value::String(s) => Ok(ToolStep {
+                    name: s.clone(),
+                    args: serde_json::Value::Null,
+                }),
+                serde_json::Value::Object(o) => {
+                    let name = o
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("array element missing string `name`: {v}"))?
+                        .to_string();
+                    let args = o.get("args").cloned().unwrap_or(serde_json::Value::Null);
+                    Ok(ToolStep { name, args })
+                }
                 _ => Err(anyhow::anyhow!(
                     "array element must be a string or {{\"name\":…}}: {v}"
                 )),
@@ -156,18 +165,21 @@ fn parse_expected(spec: &str) -> Result<Vec<String>> {
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(str::to_string)
+            .map(|s| ToolStep {
+                name: s.to_string(),
+                args: serde_json::Value::Null,
+            })
             .collect())
     }
 }
 
 /// Score one trajectory's cross-call tool sequence against `expected`.
 /// Returns whether it passed the threshold. Writes the human/JSON report
-/// to `out`.
+/// to `out`. Uses the full `(name, args)` steps so `--mode args` works.
 async fn score(
     runtime: &LocalRuntime,
     id: &TrajectoryId,
-    expected: &[String],
+    expected: &[ToolStep],
     mode: MatchMode,
     threshold: f64,
     json: bool,
@@ -184,12 +196,12 @@ async fn score(
             id,
         );
     }
-    let actual = tars_runtime::tool_sequence(&events);
-    let a: Vec<&str> = actual.iter().map(String::as_str).collect();
-    let e: Vec<&str> = expected.iter().map(String::as_str).collect();
-    let s = tars_runtime::trajectory_match::score_names(&a, &e, mode);
+    let actual = tars_runtime::tool_step_sequence(&events);
+    let s = tars_runtime::trajectory_match::score(&actual, expected, mode);
     let passed = s >= threshold;
 
+    let actual_names: Vec<&str> = actual.iter().map(|t| t.name.as_str()).collect();
+    let expected_names: Vec<&str> = expected.iter().map(|t| t.name.as_str()).collect();
     if json {
         let v = serde_json::json!({
             "trajectory": id.as_str(),
@@ -197,8 +209,8 @@ async fn score(
             "threshold": threshold,
             "score": s,
             "passed": passed,
-            "actual": actual,
-            "expected": expected,
+            "actual": actual_names,
+            "expected": expected_names,
         });
         writeln!(out, "{}", serde_json::to_string(&v).context("encode score json")?)
             .context("stdout write")?;
@@ -212,8 +224,8 @@ async fn score(
             if passed { "PASS" } else { "FAIL" }
         )
         .context("stdout write")?;
-        writeln!(out, "  actual:    {actual:?}").context("stdout write")?;
-        writeln!(out, "  expected:  {expected:?}").context("stdout write")?;
+        writeln!(out, "  actual:    {actual_names:?}").context("stdout write")?;
+        writeln!(out, "  expected:  {expected_names:?}").context("stdout write")?;
     }
     Ok(passed)
 }
@@ -408,30 +420,43 @@ mod tests {
         assert!(msg.contains("definitely-not-a-real-id"));
     }
 
-    // ── trajectory score (Doc 26 M2') ────────────────────────────────
+    // ── trajectory score (Doc 26 M2' / M3') ──────────────────────────
+
+    /// A ToolStep with null args (the comma-list / bare-name form).
+    fn ns(name: &str) -> ToolStep {
+        ToolStep {
+            name: name.to_string(),
+            args: serde_json::Value::Null,
+        }
+    }
+
+    fn names(steps: &[ToolStep]) -> Vec<&str> {
+        steps.iter().map(|t| t.name.as_str()).collect()
+    }
 
     #[test]
     fn parse_expected_handles_comma_list_and_json_file() {
         assert_eq!(
-            parse_expected("search, read_file ,").unwrap(),
-            vec!["search".to_string(), "read_file".to_string()]
+            names(&parse_expected("search, read_file ,").unwrap()),
+            vec!["search", "read_file"]
         );
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("e.json");
-        std::fs::write(&p, r#"["a", {"name": "b"}]"#).unwrap();
-        assert_eq!(
-            parse_expected(&format!("@{}", p.display())).unwrap(),
-            vec!["a".to_string(), "b".to_string()]
-        );
+        // object form carries args (M3'); bare string has null args
+        std::fs::write(&p, r#"["a", {"name": "b", "args": {"q": "x"}}]"#).unwrap();
+        let parsed = parse_expected(&format!("@{}", p.display())).unwrap();
+        assert_eq!(names(&parsed), vec!["a", "b"]);
+        assert_eq!(parsed[1].args, serde_json::json!({"q": "x"}));
         // malformed JSON → fail-closed
         let bad = dir.path().join("bad.json");
         std::fs::write(&bad, "{not array").unwrap();
         assert!(parse_expected(&format!("@{}", bad.display())).is_err());
     }
 
-    async fn traj_with_tools(rt: &LocalRuntime, per_call: &[&[&str]]) -> TrajectoryId {
+    /// Append LLM calls, each with `(name, args)` tool calls.
+    async fn traj_with_steps(rt: &LocalRuntime, per_call: &[&[(&str, serde_json::Value)]]) -> TrajectoryId {
         let id = rt.create_trajectory(None, "scored").await.unwrap();
-        for (i, tools) in per_call.iter().enumerate() {
+        for (i, calls) in per_call.iter().enumerate() {
             rt.append(
                 &id,
                 AgentEvent::LlmCallCaptured {
@@ -442,7 +467,8 @@ mod tests {
                     response_summary: "y".into(),
                     usage: tars_types::Usage::default(),
                     system_prompt_hash: None,
-                    tool_calls: tools.iter().map(|s| s.to_string()).collect(),
+                    tool_calls: calls.iter().map(|(n, _)| n.to_string()).collect(),
+                    tool_call_args: calls.iter().map(|(_, a)| a.clone()).collect(),
                 },
             )
             .await
@@ -455,15 +481,15 @@ mod tests {
     async fn score_passes_on_matching_cross_call_sequence_and_fails_otherwise() {
         let dir = tempfile::tempdir().unwrap();
         let (_s, rt) = fixture(&dir).await;
-        // Two LLM calls: [search, read_file] then [edit_file] → cross-call
-        // sequence = [search, read_file, edit_file].
-        let id = traj_with_tools(&rt, &[&["search", "read_file"], &["edit_file"]]).await;
+        let n = serde_json::Value::Null;
+        // Two LLM calls → cross-call sequence [search, read_file, edit_file].
+        let id = traj_with_steps(
+            &rt,
+            &[&[("search", n.clone()), ("read_file", n.clone())], &[("edit_file", n.clone())]],
+        )
+        .await;
 
-        let expected = vec![
-            "search".to_string(),
-            "read_file".to_string(),
-            "edit_file".to_string(),
-        ];
+        let expected = vec![ns("search"), ns("read_file"), ns("edit_file")];
         let mut out = Vec::new();
         let passed = score(&rt, &id, &expected, MatchMode::Exact, 1.0, false, &mut out)
             .await
@@ -475,17 +501,38 @@ mod tests {
 
         // Wrong expected under exact → fail.
         let mut out2 = Vec::new();
-        let passed2 = score(
-            &rt,
-            &id,
-            &["search".to_string()],
-            MatchMode::Exact,
-            1.0,
-            false,
-            &mut out2,
-        )
-        .await
-        .unwrap();
+        let passed2 = score(&rt, &id, &[ns("search")], MatchMode::Exact, 1.0, false, &mut out2)
+            .await
+            .unwrap();
         assert!(!passed2);
+    }
+
+    #[tokio::test]
+    async fn score_args_mode_checks_recorded_arguments() {
+        // M3': args are persisted in the trajectory, so --mode args can check
+        // them — right tool, wrong args must FAIL where exact passes.
+        let dir = tempfile::tempdir().unwrap();
+        let (_s, rt) = fixture(&dir).await;
+        let id = traj_with_steps(&rt, &[&[("search", serde_json::json!({"q": "ducks"}))]]).await;
+
+        let want_right = vec![ToolStep {
+            name: "search".into(),
+            args: serde_json::json!({"q": "ducks"}),
+        }];
+        let want_wrong = vec![ToolStep {
+            name: "search".into(),
+            args: serde_json::json!({"q": "geese"}),
+        }];
+        let run = |exp: Vec<ToolStep>, mode| {
+            let rt = &rt;
+            let id = &id;
+            async move {
+                let mut o = Vec::new();
+                score(rt, id, &exp, mode, 1.0, false, &mut o).await.unwrap()
+            }
+        };
+        assert!(run(want_right.clone(), MatchMode::Args).await); // right args → pass
+        assert!(!run(want_wrong.clone(), MatchMode::Args).await); // wrong args → fail
+        assert!(run(want_wrong, MatchMode::Exact).await); // names match → exact passes
     }
 }

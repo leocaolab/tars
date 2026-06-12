@@ -168,6 +168,9 @@ pub struct AgentStepResult {
     /// for a single completion it's the final response's tool calls.
     /// Stamped onto the step's `LlmCallCaptured` event by the executor.
     pub tool_calls: Vec<String>,
+    /// Arguments for each call in `tool_calls`, positionally aligned
+    /// (Doc 26 M3'). Lets the recorded trajectory carry args, not just names.
+    pub tool_call_args: Vec<serde_json::Value>,
 }
 
 /// Errors an Agent itself can surface. Storage / event-log failures
@@ -323,11 +326,13 @@ pub(crate) async fn drive_llm_call(
     let response = builder.finish();
 
     let tool_calls = response.tool_calls.iter().map(|c| c.name.clone()).collect();
+    let tool_call_args = response.tool_calls.iter().map(|c| c.arguments.clone()).collect();
     let output = AgentOutput::from_response_parts(response.text, response.tool_calls);
     Ok(AgentStepResult {
         output,
         usage: response.usage,
         tool_calls,
+        tool_call_args,
     })
 }
 

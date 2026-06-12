@@ -236,6 +236,12 @@ pub enum AgentEvent {
         /// tools. `#[serde(default)]` keeps older event rows readable.
         #[serde(default)]
         tool_calls: Vec<String>,
+        /// The arguments for each call in `tool_calls`, positionally aligned
+        /// (Doc 26 M3'). Lets `trajectory-match:args` check arguments off the
+        /// recorded trajectory, not just names. `#[serde(default)]` →
+        /// pre-M3' rows read back with empty args.
+        #[serde(default)]
+        tool_call_args: Vec<serde_json::Value>,
     },
 }
 
@@ -280,6 +286,32 @@ pub fn tool_sequence(events: &[AgentEvent]) -> Vec<String> {
     for ev in events {
         if let AgentEvent::LlmCallCaptured { tool_calls, .. } = ev {
             out.extend(tool_calls.iter().cloned());
+        }
+    }
+    out
+}
+
+/// Like [`tool_sequence`] but pairs each tool name with its recorded
+/// arguments (Doc 26 M3'), so `trajectory_match`'s `Args` mode can compare
+/// arguments off a recorded trajectory. A call whose args weren't recorded
+/// (older rows, or a name without a positionally-aligned arg) gets
+/// `Value::Null`.
+pub fn tool_step_sequence(events: &[AgentEvent]) -> Vec<crate::trajectory_match::ToolStep> {
+    use crate::trajectory_match::ToolStep;
+    let mut out = Vec::new();
+    for ev in events {
+        if let AgentEvent::LlmCallCaptured {
+            tool_calls,
+            tool_call_args,
+            ..
+        } = ev
+        {
+            for (i, name) in tool_calls.iter().enumerate() {
+                out.push(ToolStep {
+                    name: name.clone(),
+                    args: tool_call_args.get(i).cloned().unwrap_or(serde_json::Value::Null),
+                });
+            }
         }
     }
     out
@@ -417,6 +449,7 @@ mod tests {
             usage: Usage::default(),
             system_prompt_hash: None,
             tool_calls: tools.iter().map(|s| s.to_string()).collect(),
+            tool_call_args: Vec::new(),
         };
         let events = vec![
             AgentEvent::TrajectoryStarted {
@@ -448,6 +481,7 @@ mod tests {
             usage: Usage::default(),
             system_prompt_hash: hash_system_prompt(Some("you are a planner")),
             tool_calls: Vec::new(),
+            tool_call_args: Vec::new(),
         };
         let v = serde_json::to_value(&ev).unwrap();
         // Field is present + populated on serialize.
@@ -550,6 +584,7 @@ mod tests {
                 usage: Usage::default(),
                 system_prompt_hash: None,
                 tool_calls: Vec::new(),
+                tool_call_args: Vec::new(),
             },
         ];
         for ev in cases {
@@ -631,6 +666,7 @@ mod tests {
                     usage: Usage::default(),
                     system_prompt_hash: None,
                     tool_calls: Vec::new(),
+                    tool_call_args: Vec::new(),
                 },
                 "llm_call_captured",
             ),

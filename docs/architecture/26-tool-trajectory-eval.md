@@ -342,10 +342,15 @@ final-state checks).
   `ChatResponse` carries real `ToolCall.arguments`. Degrades to exact-names on
   the recorded-trajectory path (names only). Verified by
   `args_mode_compares_arguments_*` + `trajectory_eval_case_args_mode_*`.
-  **Deferred (M3'):** LLM-judged arg *equivalence* (semantically-equal but
-  not byte-equal args), and a first-class `ToolDispatched` event (actual
-  dispatch + result class + persisted args, vs just the requested names).
-  Depends: M2.
+  **M3' part 1 — args everywhere. ✅ shipped.** `LlmCallCaptured` +
+  `AgentStepResult` gained `tool_call_args` (additive, `#[serde(default)]`),
+  threaded through the worker loop + single-shot + emit; `tool_step_sequence()`
+  pairs names with args. So `args` mode now works on `tars trajectory score`
+  (vs `{name,args}` in an `@file`) and `eval run --agent`, not just the
+  reference path. Verified by `score_args_mode_checks_recorded_arguments` +
+  `parse_expected_*`. **Deferred (M3' part 2):** LLM-judged arg *equivalence*
+  (semantically-equal but not byte-equal args) — wires `LlmJudge` into the
+  currently-deterministic scorer.
 
 ---
 

@@ -1572,13 +1572,18 @@ async fn run_worker_case(
                 AgentOutput::Text { text } | AgentOutput::Mixed { text, .. } => text.clone(),
                 AgentOutput::ToolCalls { .. } => String::new(),
             };
-            // Cross-call tool sequence (M2): names only in agent mode.
+            // Cross-call tool sequence with args (M2 names + M3' args).
             let tool_steps: Vec<ToolStep> = result
                 .tool_calls
                 .iter()
-                .map(|n| ToolStep {
+                .enumerate()
+                .map(|(i, n)| ToolStep {
                     name: n.clone(),
-                    args: serde_json::Value::Null,
+                    args: result
+                        .tool_call_args
+                        .get(i)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
                 })
                 .collect();
             (synth_response(text, result.usage), tool_steps, None)
