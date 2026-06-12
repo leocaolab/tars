@@ -47,6 +47,7 @@ mod message;
 mod tars_agent;
 pub use ensemble_agent::EnsembleAgent;
 pub use tars_agent::TarsAgent;
+pub mod arg_judge;
 pub mod metamorphic;
 pub mod trajectory_match;
 mod orchestrator;
@@ -81,6 +82,7 @@ pub use metamorphic::{
     MetamorphicRelation, Mutation, MutationVerdict, mutation_caught,
 };
 pub use orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep, StepCondition};
+pub use arg_judge::{ArgEquivalenceJudge, args_match_judged};
 pub use trajectory_match::{MatchMode, ToolStep};
 pub use prompt::PromptBuilder;
 pub use run_report::build_run_report;

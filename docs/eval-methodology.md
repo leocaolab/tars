@@ -164,9 +164,22 @@ tars eval diff runs/A runs/B
 
 Modes: `exact` (= ADK's `tool_trajectory_avg_score`, all-or-nothing),
 `ordered` (LCS partial credit), `set` (order-insensitive), `args` (strict
-match including arguments). A pass threshold is appendable:
-`trajectory-match:ordered:0.8`. A case with no `expected_tools.json` is
-*skipped*, not silently passed.
+match including arguments), and `args-judge` (like `args`, but an LLM decides
+whether byte-different arguments are *semantically* equivalent). A pass
+threshold is appendable: `trajectory-match:ordered:0.8`. A case with no
+`expected_tools.json` is *skipped*, not silently passed.
+
+`args-judge` needs a judge provider (distinct from the one under test —
+anti-incest):
+
+```bash
+tars eval run --corpus tasks/ --provider qwen_local \
+  --check trajectory-match:args-judge --judge-provider anthropic
+#   search("ducks") vs expected search("duck") → judged equivalent → PASS
+```
+
+Byte-equal arguments never call the judge; verdicts are cached per
+`(tool, a, b)`, so repeated arg pairs cost one call.
 
 **Multi-step tool trajectories (`--agent`).** By default a case is a single
 completion, so `trajectory-match` scores the tools *requested in one turn*. To

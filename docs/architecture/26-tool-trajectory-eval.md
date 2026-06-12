@@ -348,9 +348,19 @@ final-state checks).
   pairs names with args. So `args` mode now works on `tars trajectory score`
   (vs `{name,args}` in an `@file`) and `eval run --agent`, not just the
   reference path. Verified by `score_args_mode_checks_recorded_arguments` +
-  `parse_expected_*`. **Deferred (M3' part 2):** LLM-judged arg *equivalence*
-  (semantically-equal but not byte-equal args) — wires `LlmJudge` into the
-  currently-deterministic scorer.
+  `parse_expected_*`.
+- **M3' part 2 — LLM-judged arg equivalence. ✅ shipped.** `--check
+  trajectory-match:args-judge --judge-provider P [--judge-model M]`: like
+  `args`, but byte-different arguments (`search("ducks")` vs `search("duck")`)
+  are judged for *semantic* equivalence by an LLM. The scorer in
+  `trajectory_match` stays a **pure function**; the LLM call lives in the new
+  async `arg_judge::ArgEquivalenceJudge` + `args_match_judged`
+  (`tars-runtime/src/arg_judge.rs`), invoked at the eval call layer. Byte-equal
+  args short-circuit (no call); verdicts are cached symmetrically per
+  `(tool, a, b)`; the judge provider is `ensure_anti_incest`-checked against the
+  provider under test. Verified by `arg_judge::tests::*` (short-circuit / cache
+  / all-or-nothing / parse) + `trajectory_spec_args_judge_*`.
+  **This completes Doc 26.**
 
 ---
 

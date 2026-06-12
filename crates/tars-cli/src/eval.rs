@@ -109,12 +109,14 @@ use tars_pipeline::{
 };
 use tars_runtime::trajectory_match::{self, MatchMode, ToolStep};
 use tars_runtime::{
-    Agent, AgentContext, AgentOutput, CheckRunner, Invariant, ValidatorInvariant, WorkerAgent,
+    Agent, AgentContext, AgentOutput, ArgEquivalenceJudge, CheckRunner, Invariant,
+    ValidatorInvariant, WorkerAgent, args_match_judged, ensure_anti_incest,
 };
 use tars_tools::builtins::{GlobTool, GrepTool, ListDirTool, ReadFileTool};
 use tars_tools::{Tool, ToolRegistry};
 use tars_types::{
-    ChatRequest, ChatResponse, ChatResponseBuilder, ModelHint, RequestContext, TrajectoryId, Usage,
+    ChatRequest, ChatResponse, ChatResponseBuilder, ModelHint, ProviderId, RequestContext,
+    TrajectoryId, Usage,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -218,7 +220,7 @@ pub struct EvalRunArgs {
 
     /// Built-in invariant checks to run against each output (repeatable).
     /// Recognized: `non-empty`, `valid-json`, `max-length:<N>`, and
-    /// `trajectory-match[:<exact|ordered|set|args>[:<threshold>]]` — scores the
+    /// `trajectory-match[:<exact|ordered|set|args|args-judge>[:<threshold>]]` — scores the
     /// tools the model selected against each case's `expected_tools.json`
     /// (Doc 26). Custom invariants are a Rust-API feature (Doc 18 §4.1).
     #[arg(long = "check")]
@@ -239,6 +241,17 @@ pub struct EvalRunArgs {
     /// In `--agent` mode, cap the tool-loop iterations per case.
     #[arg(long)]
     pub agent_max_iterations: Option<u32>,
+
+    /// Judge provider for `trajectory-match:args-judge` (Doc 26 M3' pt2) —
+    /// an LLM decides whether byte-different tool arguments are *semantically*
+    /// equivalent. Must differ from `--provider` (anti-incest).
+    #[arg(long)]
+    pub judge_provider: Option<String>,
+
+    /// Judge model hint for `--judge-provider`. Defaults to that provider's
+    /// default model.
+    #[arg(long)]
+    pub judge_model: Option<String>,
 }
 
 /// Resolved `--agent` configuration (the read-only tool set + iteration cap).
@@ -265,7 +278,7 @@ fn build_invariant(spec: &str) -> Result<Arc<dyn Invariant>> {
         }
         other => anyhow::bail!(
             "unknown --check `{other}`. Recognized: non-empty, valid-json, max-length:<N>, \
-             trajectory-match[:<exact|ordered|set|args>[:<threshold>]]"
+             trajectory-match[:<exact|ordered|set|args|args-judge>[:<threshold>]]"
         ),
     };
     Ok(inv)
@@ -282,13 +295,16 @@ struct TrajectorySpec {
     mode: MatchMode,
     /// Per-case pass threshold on the score (default 1.0 = strict).
     threshold: f64,
+    /// `args-judge` mode (Doc 26 M3' pt2): like `args`, but byte-different
+    /// arguments are LLM-judged for semantic equivalence (needs a judge).
+    judge: bool,
 }
 
 impl TrajectorySpec {
     /// Parse `trajectory-match`, `trajectory-match:<mode>`, or
     /// `trajectory-match:<mode>:<threshold>`. Returns `Ok(None)` when `spec`
     /// is not a trajectory-match spec (so the caller falls back to
-    /// [`build_invariant`]).
+    /// [`build_invariant`]). `<mode>` may be `args-judge` (= `args` + judge).
     fn parse(spec: &str) -> Result<Option<Self>> {
         let rest = match spec.strip_prefix("trajectory-match") {
             Some(r) => r,
@@ -298,12 +314,16 @@ impl TrajectorySpec {
         let rest = rest.strip_prefix(':').unwrap_or(rest);
         let mut it = rest.splitn(2, ':');
         let mode_tok = it.next().unwrap_or("");
+        let mut judge = false;
         let mode = if mode_tok.is_empty() {
             MatchMode::Ordered // bare `trajectory-match` → ordered
+        } else if mode_tok == "args-judge" {
+            judge = true;
+            MatchMode::Args
         } else {
             MatchMode::parse(mode_tok).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown trajectory-match mode `{mode_tok}`. Recognized: exact, ordered, set, args"
+                    "unknown trajectory-match mode `{mode_tok}`. Recognized: exact, ordered, set, args, args-judge, args-judge"
                 )
             })?
         };
@@ -317,6 +337,7 @@ impl TrajectorySpec {
             raw: spec.to_string(),
             mode,
             threshold,
+            judge,
         }))
     }
 
@@ -347,6 +368,42 @@ impl TrajectorySpec {
                     "score={s:.3} < {:.3} ({}); want={want:?} got={got:?}",
                     self.threshold,
                     self.mode.as_str()
+                ),
+            })
+        }
+    }
+
+    /// `args-judge` variant of [`eval_case`] (Doc 26 M3' pt2): scores via the
+    /// LLM arg-equivalence judge. `None` = no `expected_tools` (skipped).
+    async fn eval_case_judged(
+        &self,
+        actual: &[ToolStep],
+        expected: Option<&[ToolStep]>,
+        judge: &ArgEquivalenceJudge,
+    ) -> Option<CaseCheckResult> {
+        let expected = expected?;
+        let got: Vec<&str> = actual.iter().map(|x| x.name.as_str()).collect();
+        let s = match args_match_judged(actual, expected, judge).await {
+            Ok(s) => s,
+            Err(e) => {
+                return Some(CaseCheckResult::Failed {
+                    name: self.raw.clone(),
+                    reason: format!("arg-judge error: {e}"),
+                });
+            }
+        };
+        if s >= self.threshold {
+            Some(CaseCheckResult::Passed {
+                name: self.raw.clone(),
+                note: Some(format!("score={s:.3} (args-judge) got={got:?}")),
+            })
+        } else {
+            let want: Vec<&str> = expected.iter().map(|x| x.name.as_str()).collect();
+            Some(CaseCheckResult::Failed {
+                name: self.raw.clone(),
+                reason: format!(
+                    "score={s:.3} < {:.3} (args-judge); want={want:?} got={got:?}",
+                    self.threshold
                 ),
             })
         }
@@ -862,7 +919,7 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
     let traj_diff = if args.trajectory {
         let mode = MatchMode::parse(&args.trajectory_mode).ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown --trajectory-mode `{}`. Recognized: exact, ordered, set, args",
+                "unknown --trajectory-mode `{}`. Recognized: exact, ordered, set, args, args-judge",
                 args.trajectory_mode
             )
         })?;
@@ -1223,6 +1280,39 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         None
     };
 
+    // 2d. Arg-equivalence judge (Doc 26 M3' pt2): built only when a
+    //     trajectory-match:args-judge check is requested.
+    let arg_judge = if traj_specs.iter().any(|t| t.judge) {
+        let jp = args.judge_provider.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("trajectory-match:args-judge requires --judge-provider")
+        })?;
+        // Anti-incest: the judge must not be the provider under test.
+        ensure_anti_incest(jp, &[provider_id.as_str()]).map_err(|e| {
+            anyhow::anyhow!("{e}\nthe run uses provider `{provider_id}`; pick a different --judge-provider")
+        })?;
+        let jpid = ProviderId::new(jp);
+        let jprov = registry
+            .get(&jpid)
+            .ok_or_else(|| anyhow::anyhow!("judge provider `{jp}` not in config"))?;
+        let jpipeline = Pipeline::default_chain(jprov, PipelineOpts::new(jpid.clone()));
+        let jmodel = args
+            .judge_model
+            .clone()
+            .map(ModelHint::Explicit)
+            .unwrap_or_else(|| ModelHint::Explicit("".into()));
+        let jid = format!("{}:{}", jp, args.judge_model.as_deref().unwrap_or("default"));
+        let svc: Arc<dyn LlmService> = Arc::new(jpipeline);
+        Some(ArgEquivalenceJudge::new(svc, jid, jmodel))
+    } else {
+        if args.judge_provider.is_some() || args.judge_model.is_some() {
+            anyhow::bail!(
+                "--judge-provider / --judge-model only apply to a \
+                 `--check trajectory-match:args-judge` check"
+            );
+        }
+        None
+    };
+
     // 3. Discover cases.
     let cases = load_corpus(&args.corpus)
         .with_context(|| format!("loading corpus from {}", args.corpus.display()))?;
@@ -1271,6 +1361,7 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
             &check_runner,
             &traj_specs,
             agent_mode.as_ref(),
+            arg_judge.as_ref(),
         )
         .await;
         // Persist response text + per-case report regardless of outcome.
@@ -1607,6 +1698,7 @@ async fn run_one_case(
     checks: &CheckRunner,
     traj_specs: &[TrajectorySpec],
     agent: Option<&AgentMode>,
+    arg_judge: Option<&ArgEquivalenceJudge>,
 ) -> CaseOutcome {
     let started = Instant::now();
     let req = build_case_request(case, model, max_output_tokens);
@@ -1664,8 +1756,21 @@ async fn run_one_case(
     // selected tools against this case's expected_tools. A case with no
     // expected_tools is skipped (eval_case → None), not failed.
     if status == EvalCaseStatus::Ok {
+        let expected = case.expected_tools.as_deref();
         for ts in traj_specs {
-            if let Some(r) = ts.eval_case(&tool_steps, case.expected_tools.as_deref()) {
+            let r = if ts.judge {
+                match arg_judge {
+                    Some(j) => ts.eval_case_judged(&tool_steps, expected, j).await,
+                    // args-judge requested but no judge built — fail loud per case.
+                    None => expected.map(|_| CaseCheckResult::Failed {
+                        name: ts.name().to_string(),
+                        reason: "args-judge requires --judge-provider".into(),
+                    }),
+                }
+            } else {
+                ts.eval_case(&tool_steps, expected)
+            };
+            if let Some(r) = r {
                 case_checks.push(r);
             }
         }
@@ -1848,6 +1953,17 @@ mod tests {
     fn trajectory_spec_rejects_unknown_mode_and_bad_threshold() {
         assert!(TrajectorySpec::parse("trajectory-match:fuzzy").is_err());
         assert!(TrajectorySpec::parse("trajectory-match:exact:notanum").is_err());
+    }
+
+    #[test]
+    fn trajectory_spec_args_judge_sets_judge_flag() {
+        let s = TrajectorySpec::parse("trajectory-match:args-judge").unwrap().unwrap();
+        assert_eq!(s.mode, MatchMode::Args);
+        assert!(s.judge, "args-judge must set the judge flag");
+        assert_eq!(s.name(), "trajectory-match:args-judge");
+        // plain args mode does NOT enable the judge
+        let plain = TrajectorySpec::parse("trajectory-match:args").unwrap().unwrap();
+        assert!(!plain.judge);
     }
 
     // ── trajectory-match: per-case scoring (Doc 26 E2E-1/2/5) ─────────
