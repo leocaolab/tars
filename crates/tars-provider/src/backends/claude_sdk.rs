@@ -268,40 +268,58 @@ impl ClaudeSdkProvider {
             .map_err(|e| ProviderError::Internal(format!("claude_sdk: encode body: {e}")))?;
         line.push('\n');
 
-        {
-            let mut stdin = session.stdin.lock().await;
-            if let Err(e) = stdin.write_all(line.as_bytes()).await {
-                // Most likely the child died between session lookup and
-                // now; drop our pending entry and surface the cause.
-                // Also evict the dead session so the NEXT call respawns
-                // instead of reusing a broken pipe and hanging on a reply
-                // that will never arrive.
-                session.pending.lock().await.remove(&id);
-                self.clear_session(&session).await;
-                return Err(ProviderError::Internal(format!(
-                    "claude_sdk: write to child stdin failed: {e}"
-                )));
+        // The timeout MUST cover the stdin WRITE, not just the reply wait.
+        // The daemon shares ONE stdin pipe across N concurrent requests; when
+        // it's busy emitting a dense file's long structured-output reply it
+        // stops draining stdin, the pipe buffer fills, and `write_all` blocks
+        // — and the OLD code only guarded `rx`, so that stuck write hung
+        // forever and the per-call timeout never fired (observed: a claude_sdk
+        // reviewer wedged >40 min on llm_client.rs / validators.rs, far past
+        // the 900 s timeout). Guard the whole request→reply round-trip.
+        let outcome = tokio::time::timeout(self.timeout, async {
+            {
+                let mut stdin = session.stdin.lock().await;
+                stdin.write_all(line.as_bytes()).await.map_err(|e| {
+                    ProviderError::Internal(format!(
+                        "claude_sdk: write to child stdin failed: {e}"
+                    ))
+                })?;
+                stdin.flush().await.map_err(|e| {
+                    ProviderError::Internal(format!(
+                        "claude_sdk: flush child stdin failed: {e}"
+                    ))
+                })?;
             }
-            if let Err(e) = stdin.flush().await {
-                session.pending.lock().await.remove(&id);
-                self.clear_session(&session).await;
-                return Err(ProviderError::Internal(format!(
-                    "claude_sdk: flush child stdin failed: {e}"
-                )));
+            // `rx` resolves to the daemon's `Result<reply, ProviderError>`;
+            // a RecvError means the reader task dropped the sender.
+            match rx.await {
+                Ok(result) => result,
+                Err(_) => Err(ProviderError::Internal(
+                    "claude_sdk: pending channel dropped (reader task gone)".into(),
+                )),
             }
-        }
+        })
+        .await;
 
-        match tokio::time::timeout(self.timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(ProviderError::Internal(
-                "claude_sdk: pending channel dropped (reader task gone)".into(),
-            )),
-            Err(_) => {
-                // Reclaim the pending slot so a late reply doesn't try
-                // to send into a dropped sender.
+        match outcome {
+            Ok(Ok(reply)) => Ok(reply),
+            // A write/flush error or a reader-gone error inside the round-trip:
+            // drop our pending slot and evict the (probably dead) session so
+            // the NEXT call respawns instead of reusing a broken pipe.
+            Ok(Err(e)) => {
                 session.pending.lock().await.remove(&id);
+                self.clear_session(&session).await;
+                Err(e)
+            }
+            // Timed out ANYWHERE in the round-trip — including a stuck stdin
+            // write. Reclaim the pending slot AND evict the wedged session
+            // (the old code only removed pending; a daemon stuck not-draining
+            // stdin would wedge every subsequent call too).
+            Err(_) => {
+                session.pending.lock().await.remove(&id);
+                self.clear_session(&session).await;
                 Err(ProviderError::Internal(format!(
-                    "claude_sdk: timed out waiting for child reply after {:?}",
+                    "claude_sdk: timed out in request/reply round-trip after {:?}",
                     self.timeout
                 )))
             }
@@ -757,5 +775,56 @@ mod tests {
         let b = b.expect("beta");
         assert!(a.text.to_lowercase().contains("alpha"), "{:?}", a.text);
         assert!(b.text.to_lowercase().contains("beta"), "{:?}", b.text);
+    }
+
+    /// Regression: the per-call timeout MUST cover the stdin WRITE, not just
+    /// the reply wait. A daemon wedged in a rate-limit backoff (the real
+    /// claude_sdk reviewer-hang root cause: an `rate_limit_event` makes the
+    /// Agent SDK sleep, so the single-threaded daemon stops draining stdin)
+    /// fills the stdin pipe buffer; `write_all` then blocks. The OLD code
+    /// guarded only `rx`, so that blocked write hung FOREVER and the 900 s
+    /// per-call timeout never fired (observed: a reviewer wedged >40 min).
+    /// Here a fake daemon prints the ready line then spins without ever
+    /// reading stdin; with a >64 KB prompt the write blocks, and the call
+    /// must time out (Err) near the budget instead of hanging.
+    #[tokio::test]
+    #[ignore = "spawns a node child; verifies timeout covers a stuck stdin write"]
+    async fn call_times_out_when_daemon_never_drains_stdin() {
+        use std::io::Write as _;
+        let mut script = std::env::temp_dir();
+        script.push(format!("tars_stuck_daemon_{}.mjs", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&script).unwrap();
+            // No stdin listener, no stdout write — just keep the event loop
+            // alive so the child never drains the request pipe.
+            writeln!(
+                f,
+                "process.stderr.write('claude-daemon stdio ready (stuck-test)\\n'); \
+                 setInterval(() => {{}}, 1e9);"
+            )
+            .unwrap();
+        }
+        let p = ClaudeSdkProviderBuilder::new("stuck_daemon_test")
+            .default_model("m")
+            .script_path(script.to_str().unwrap().to_string())
+            .timeout(Duration::from_millis(800))
+            .build();
+        // Comfortably past the 64 KB pipe buffer so `write_all` blocks against
+        // the non-draining child.
+        let big_prompt = "x".repeat(256 * 1024);
+        let req = ChatRequest::user(ModelHint::Explicit("m".into()), big_prompt);
+        let t0 = std::time::Instant::now();
+        let r = p
+            .complete(req, tars_types::RequestContext::test_default())
+            .await;
+        let elapsed = t0.elapsed();
+        let _ = std::fs::remove_file(&script);
+        // Pre-fix: hangs (the stuck write was outside the timeout). Post-fix:
+        // the whole round-trip is under timeout → Err within ~the budget.
+        assert!(r.is_err(), "a non-draining daemon must yield Err, not hang");
+        assert!(
+            elapsed < Duration::from_secs(8),
+            "must time out near the 800ms budget, not hang; took {elapsed:?}"
+        );
     }
 }

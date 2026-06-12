@@ -64,12 +64,34 @@ async function handleChat({ prompt, system, model, max_turns = 7, schema }) {
   // claude_sdk gets strict schema without re-enabling tool agency.
   if (schema) opts.outputFormat = { type: 'json_schema', schema };
 
+  if (process.env.CLAUDE_DAEMON_TRACE) {
+    process.stderr.write(
+      `trace: query() starting (prompt=${prompt.length} chars, schema=${schema ? 'yes' : 'no'})\n`,
+    );
+  }
   const q = query({ prompt, options: opts });
 
   try {
     for await (const msg of q) {
       if (ttfb === null) ttfb = performance.now() - t0;
       messageCount += 1;
+      // Observability: log every SDK message as it streams, so a wedged or
+      // looping daemon shows WHAT the model is doing — a `tool_use` block (the
+      // model trying to call a tool despite disallowedTools:['*'] — the
+      // reviewer-hang signature), a long run of thinking with no result, or
+      // NOTHING at all (query stuck before the first message). Gated on
+      // CLAUDE_DAEMON_TRACE so production stays silent.
+      if (process.env.CLAUDE_DAEMON_TRACE) {
+        let detail = '';
+        const c = msg.message?.content;
+        if (Array.isArray(c)) {
+          const kinds = c
+            .map((b) => (b?.type ?? '?') + (b?.name ? `:${b.name}` : ''))
+            .join(',');
+          if (kinds) detail = ` [${kinds}]`;
+        }
+        process.stderr.write(`trace: msg#${messageCount} type=${msg.type}${detail}\n`);
+      }
       // Defend against unexpected message shapes from the SDK (e.g. content
       // arriving as a string rather than a block array, or a non-string
       // block.text). A single malformed message must not abort the stream.
