@@ -787,6 +787,62 @@ mod tests {
     }
 
     #[test]
+    fn drain_one_call_forwards_cwd_to_request_context() {
+        // Regression (cwd plumbing — worker leg): drain_one_call must copy the
+        // agent's working dir (AgentContext.cwd) onto the RequestContext it
+        // hands the LLM, so a native-agent provider can spawn its subprocess
+        // there (else claude's own tools run in arc's process cwd, not the fix
+        // worktree). A capturing LlmService records the cwd it receives; the
+        // call returns an error immediately — we assert on the captured ctx,
+        // not the response.
+        use crate::agent::AgentContext;
+        use tars_pipeline::LlmEventStream;
+        use tars_types::{ModelHint, ProviderError, TrajectoryId};
+
+        type Captured = Arc<std::sync::Mutex<Option<Option<std::path::PathBuf>>>>;
+        let captured: Captured = Arc::new(std::sync::Mutex::new(None));
+
+        struct CapturingLlm(Captured);
+        #[async_trait]
+        impl LlmService for CapturingLlm {
+            async fn call(
+                self: Arc<Self>,
+                _req: ChatRequest,
+                ctx: RequestContext,
+            ) -> Result<LlmEventStream, ProviderError> {
+                *self.0.lock().unwrap() = Some(ctx.cwd.clone());
+                Err(ProviderError::InvalidRequest("capture-only".into()))
+            }
+        }
+
+        let wt = std::path::PathBuf::from("/tmp/arc/worktrees/fix-xyz");
+        let ctx = AgentContext {
+            trajectory_id: TrajectoryId::new("t"),
+            step_seq: 1,
+            llm: Arc::new(CapturingLlm(captured.clone())),
+            cancel: Default::default(),
+            cwd: Some(wt.clone()),
+            permissions: tars_model::Permissions::allow_all(),
+            readable_roots: vec![],
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+            let _ = super::drain_one_call(&ctx, req).await;
+        });
+
+        assert_eq!(
+            captured.lock().unwrap().clone().flatten(),
+            Some(wt),
+            "AgentContext.cwd must be forwarded to RequestContext.cwd"
+        );
+    }
+
+    #[test]
     fn build_worker_request_threads_prior_results_for_listed_deps_only() {
         // Verifies the DAG executor's dependency-result threading at
         // the prompt-construction layer. The worker for step s2

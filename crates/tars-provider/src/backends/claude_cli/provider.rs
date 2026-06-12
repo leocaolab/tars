@@ -460,6 +460,53 @@ mod tests {
         runner.0.lock().unwrap().clone().unwrap()
     }
 
+    #[test]
+    fn cwd_flows_from_request_context_into_invocation() {
+        // Regression (cwd plumbing): a native-agent fixer sets
+        // RequestContext.cwd to the fix worktree; the provider MUST forward it
+        // to SubprocessInvocation.cwd so the runner spawns `claude -p` with
+        // current_dir = the worktree. Without it, claude's own Read/Edit/Bash
+        // operate in arc's process cwd (the main repo) and the agent "fixes"
+        // files the worktree diff never sees — every fix reads as a no-op.
+        struct RecRunner(std::sync::Mutex<Option<SubprocessInvocation>>);
+        #[async_trait]
+        impl SubprocessRunner for RecRunner {
+            async fn run(&self, inv: SubprocessInvocation) -> Result<Value, ProviderError> {
+                *self.0.lock().unwrap() = Some(inv);
+                Ok(json!({"result": "", "is_error": false}))
+            }
+        }
+        let runner = Arc::new(RecRunner(std::sync::Mutex::new(None)));
+        let provider = ClaudeCliProviderBuilder::new("test").build_with_runner(runner.clone());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let wt = std::path::PathBuf::from("/tmp/arc/worktrees/fix-abc");
+        rt.block_on(async {
+            let _ = provider
+                .complete(
+                    ChatRequest::user(ModelHint::Explicit("opus".into()), "hi"),
+                    RequestContext::test_default().with_cwd(wt.clone()),
+                )
+                .await;
+        });
+        let inv = runner.0.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            inv.cwd,
+            Some(wt),
+            "RequestContext.cwd must reach SubprocessInvocation.cwd (→ subprocess current_dir)"
+        );
+    }
+
+    #[test]
+    fn no_cwd_in_request_context_leaves_invocation_cwd_none() {
+        // The default (no cwd) must NOT pin a current_dir — every non-fixer
+        // caller inherits the parent process cwd unchanged.
+        let inv = make_invocation(|b| b); // uses RequestContext::test_default() (cwd = None)
+        assert_eq!(inv.cwd, None);
+    }
+
     /// Helper: find argv index of a flag token; panic if not present.
     fn idx(argv: &[String], flag: &str) -> usize {
         argv.iter()
