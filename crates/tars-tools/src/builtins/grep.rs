@@ -273,6 +273,17 @@ fn run_search(
     // (the `ignore` crate gates gitignore on a .git dir by default). A code
     // search tool should skip target/, node_modules/, etc. regardless.
     builder.require_git(false);
+    // Do NOT climb to parent-directory ignore files. The `ignore` crate
+    // defaults to reading .gitignore from ABOVE the search root — which
+    // silently breaks searching any tree that a parent repo ignores. The
+    // canonical victim: an agent worktree at `<repo>/.arc/worktrees/fix-X`
+    // while `<repo>/.gitignore` lists `.arc/`. The parent rule marks the
+    // whole worktree ignored, the walk is pruned to zero files, and EVERY
+    // `fs.grep` returns "(no matches)" for patterns that plainly exist —
+    // forcing the agent to flail with `bash find|grep`, balloon its context,
+    // and eventually truncate. Ignore files INSIDE the search root (target/,
+    // node_modules/) are still honored.
+    builder.parents(false);
     if let Some(g) = glob {
         let mut ob = ignore::overrides::OverrideBuilder::new(&search_root);
         ob.add(g)
@@ -388,6 +399,35 @@ mod tests {
             .unwrap();
         assert!(!r.is_error, "no-match must be success, not error");
         assert!(r.content.contains("no matches"));
+    }
+
+    #[tokio::test]
+    async fn searches_root_a_parent_gitignore_marks_ignored() {
+        // Regression: an agent worktree lives at `<repo>/.arc/worktrees/fix-X`
+        // while `<repo>/.gitignore` lists `.arc/`. The `ignore` crate's
+        // default parent-traversal marked the whole search root ignored and
+        // pruned the walk to ZERO files, so every fs.grep returned
+        // "(no matches)" for patterns that plainly exist — forcing the agent
+        // to flail with `bash find|grep`. We must search the requested root
+        // regardless of what a PARENT repo ignores.
+        let repo = tempfile::tempdir().unwrap();
+        write(repo.path(), ".gitignore", ".arc/\n");
+        let worktree = repo.path().join(".arc/worktrees/fix-X");
+        write(&worktree, "static_layer.rs", "fn parse_ruff_output() {}\n");
+        let tool: Arc<dyn Tool> = Arc::new(GrepTool::new());
+        let r = tool
+            .execute(
+                json!({"pattern": "parse_ruff_output", "path": worktree.to_str().unwrap()}),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!r.is_error, "got: {}", r.content);
+        assert!(
+            r.content.contains("static_layer.rs:1: fn parse_ruff_output() {}"),
+            "parent .gitignore must NOT blind a search of the requested root; got: {}",
+            r.content
+        );
     }
 
     #[tokio::test]
