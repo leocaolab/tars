@@ -219,6 +219,51 @@ is the automatable companion.
 If you can't fill in "a defined notion of correct," you don't have a
 test — you have two outputs and an opinion.
 
+## 5a. Two A/B axes — and why one needs the cassette
+
+§2–6 frame A/B as the **LLM-change axis**: a prompt / model / dataset
+varies, the code is fixed, and because the LLM is stochastic you diff
+*behavior* with statistical significance over many samples. But the same
+machinery must serve a second axis — **A/B for any software change**,
+LLM-involved or not:
+
+| Axis | What varies | What's pinned | Diff | Samples |
+|---|---|---|---|---|
+| **LLM-change** (§2–6) | prompt / model / data | the code | behavioral, statistical | many (for significance) |
+| **Code-change** | the code (a refactor, a pipeline rewrite) | **the LLM** | **exact / deterministic** | **one** |
+
+The code-change axis answers "did this refactor change observable
+behavior?" — the regression question. When the subject calls an LLM you
+cannot answer it unless the LLM is **pinned**; otherwise model noise
+swamps the code delta. (A subject with no LLM needs no pinning — just run
+old/new and diff; the LLM case is the hard, more-needed one.)
+
+### The cassette — deterministic replay (pin the LLM)
+
+A `CassetteProvider` wraps any provider in two modes:
+
+- **record:** pass through to the real provider, capture every `(request →
+  response)` to a portable cassette — a map keyed by a **stable hash of the
+  request's deterministic parts** (`system + messages + model + schema`;
+  excluding ids / timestamps / tenant).
+- **replay:** serve the recorded response for a matching request hash. A
+  **miss is a signal** — an input the recording didn't cover, usually a
+  prompt that changed — so fail loud (or pass-through-and-record under a
+  flag).
+
+`bodies.db` (Doc 17, content-addressed) is the recording substrate;
+`MockProvider` (`tars-provider/backends/mock.rs`) is the replay seam to
+extend from a fixed list to a hash-keyed cassette. **One recording per
+request suffices on the code-change axis** — both sides replay the same
+response → the LLM is constant → the diff is pure code. This is also what
+makes §4.4 golden tests deterministic.
+
+> General principle: a deterministic A/B over a code change requires
+> pinning **every** nondeterministic input — LLM (the dominant one, via the
+> cassette), clock, RNG, network. The cassette is the LLM instance of
+> "freeze the inputs"; a consumer's harness (e.g. A.R.C.'s `arc ab`)
+> supplies the corpus, the output snapshot, and the goldens.
+
 ## 6. Comparison statistics
 
 Two metric tiers:
