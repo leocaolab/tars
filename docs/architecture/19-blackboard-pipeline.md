@@ -88,23 +88,30 @@ step(blackboard) -> { working set ← read(blackboard)         # the ONLY input 
                       write(blackboard, result, {commit, now}) }  # the ONLY output channel
 ```
 
-Two invariants:
+This is the **blackboard** architecture, **not a pipe**: steps are not
+transformers wired output→input; they are agents that read/write one shared
+model. Two invariants:
 
-1. **Inter-step channel = blackboard only.** A step's `depends_on` means "the
-   blackboard rows my predecessor wrote." tars `PartialResult` carries control
-   signals (status, token counts, which branch) — never the authoritative
-   finding state. The next step re-reads the blackboard (arc:
-   `entity_to_threads(review_id)` reconstructs the working `threads` from the
-   entity tables — the inverse of `apply_threads_to_entity`).
-2. **Write-own-with-provenance.** When a step finishes a unit, it writes that
-   unit's blackboard delta immediately, stamped with the commit it produced and
-   the current time — captured locally, at the step.
+1. **Edges are ordering, not pipes — there is NO node-to-node channel.**
+   `depends_on` means *happens-after*, nothing more; it carries no data. A step
+   reads its working set from the blackboard (`view(scope)`) and writes back
+   (`commit`). EVERYTHING a downstream step needs — including a transient fact
+   like "the fix landed on branch X at commit Y" — is blackboard state (an
+   entity's event + its provenance), read from the blackboard, never piped. So a
+   step doesn't know or receive its predecessor's output; it reads the current
+   scoped state. tars's `prior_results` is reduced to a **scheduling** signal
+   ("does this scope have work?", to skip an empty step) — never authoritative
+   state, and even that is derivable from a blackboard query.
+2. **Write-own-with-provenance.** When a step finishes a unit, it `commit`s that
+   unit's transition immediately, stamped with the commit it produced and the
+   time — captured locally, at the step.
 
 ---
 
 ## 4. The blackboard
 
-For A.R.C. the blackboard is the entity store in `arc_db`:
+The blackboard is an abstract model (§4.1); A.R.C. *backs* it with the entity
+store in `arc_db` (one storage choice — the model itself has no DB/tables/files):
 
 - **`findings`** (`arc_db/schema.rs:190`, PK `fingerprint`) — current state of
   each finding (status, file, snippet, the v18 blackboard scalars
@@ -116,16 +123,68 @@ For A.R.C. the blackboard is the entity store in `arc_db`:
   review_id, event)` → idempotent.
 - **`finding_history`** (v19) — the full multi-turn Critic↔Fixer debate.
 
-Concurrency: the store runs `journal_mode=WAL` + `busy_timeout(30s)`
-(`arc_db/connection.rs:87,90`), so parallel worktree workers each open the repo's
-`.arc/arc.db` and write concurrently without corruption — this is what makes
-"each step writes its own" safe under the parallel DAG.
+**Why parallel "each step writes its own" doesn't race — the MODEL, not the
+backing.** The model is append-only + per-entity + idempotent on event identity:
+concurrent steps append *distinct* events to *distinct* entities — there is no
+shared mutable cell to read-modify-write, so there is nothing to race on; a
+replayed `(entity, transition)` is absorbed. That safety is **structural to the
+model**. A backing need only provide concurrent-safe appends + idempotent-keyed
+inserts; *how* — a log, an actor, MVCC, SQLite WAL — is its own choice.
+(Reference: A.R.C.'s SQLite backing happens to use `journal_mode=WAL` +
+`busy_timeout` — one way to honor the contract, not the reason it is correct.)
 
-The generic tars contract: **a blackboard is any store with (a) idempotent
-keyed upserts, (b) an append-only per-entity event log with per-event
-provenance, (c) concurrency-safe writes.** tars supplies the Worker/Plan
-machinery (Doc 04) and the event store (Doc 17); the consumer supplies the
-blackboard schema.
+Likewise **durability vs consistency** split cleanly: the model gives
+*consistency* (every `commit` is atomic and independent, no run-end batch → the
+blackboard is valid after every commit; a crash leaves a consistent prefix); the
+backing gives *durability* (whether a committed event survives a crash — fsync /
+WAL / replication). The model kills the "torn run-end batch" failure
+structurally; the backing decides how durable each commit is.
+
+The contract a **valid backing** must satisfy (the operational guarantees behind
+the model's `view`/`commit`): (a) idempotent keyed upserts, (b) an append-only
+per-entity event log with per-event provenance, (c) concurrency-safe writes,
+(d) consistency after every commit. tars supplies the Worker/Plan machinery
+(Doc 04) and the event store (Doc 17); the consumer supplies a backing.
+
+### 4.1 The blackboard is a MODEL — and how a step obtains it
+
+The blackboard is an **abstract model, not a database**. No tables, no files, no
+SQL. It is a keyed set of **entities**; each entity has a current value and an
+**append-only timeline of self-describing events** (each event carries its own
+transition, time, and the version it happened in). Two operations — that is the
+*entire* model:
+
+```rust
+pub trait Blackboard {
+    type Scope; type Entity; type Event;
+    fn view(&self, scope: &Self::Scope) -> Vec<Self::Entity>;         // a step's working set
+    fn commit(&self, e: &Self::Entity, ev: Transition<Self::Event>);  // new value + append event
+}
+```
+
+How it is **backed** — in-memory, an event log, a document store, a SQL DB — is a
+separate, pluggable concern the model and every step are oblivious to. (Reference:
+A.R.C. *happens* to back it with SQLite rows; that is arc's storage choice, not
+the blackboard.)
+
+**Context = how a step is HANDED the blackboard (the tars seam).** A step never
+constructs or fetches it. tars threads a consumer-supplied `Arc<S>` (the
+`Blackboard`) through the DAG and injects it into each step's context:
+
+```rust
+pub struct WorkerContext<S> { runtime, trajectory_id, cancel, refinements,
+                              shared: Arc<S> }          // ← the blackboard, injected
+trait Worker<S> { async fn run(&self, plan, step,
+    prior: &HashMap<String, AgentMessage>,              // CONTROL signals only (§3.1)
+    ctx: WorkerContext<S>) -> WorkerOutput; }
+run_plan<S>(.., workers: WorkerRegistry<S>, shared: Arc<S>, ..)   // injects S into every ctx
+```
+
+So a step's whole surface is three channels: **state** = `ctx.shared.view(scope)`
+/ `ctx.shared.commit(e, ev)`; **control** = `prior.get(dep_id)` (signals only —
+which entities have work, which branch — never the authoritative value, §3.1);
+**services** = `ctx.runtime` / `ctx.cancel`. It holds nothing else — so it cannot
+reach storage, another step's set, or batch.
 
 ---
 
