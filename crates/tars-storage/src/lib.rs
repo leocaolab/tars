@@ -39,12 +39,16 @@
 //! benefit from inline columns extracted from the typed shape; the
 //! payload still goes to SQLite as JSON for debug-ability.
 
+pub mod blackboard;
 mod body_store;
 mod error;
 mod event_store;
 mod pipeline_event_store;
 mod sqlite;
 
+pub use blackboard::{
+    Blackboard, BlackboardCodec, BbError, MemBlackboard, Scope, SqliteBlackboard, Transition,
+};
 pub use body_store::{BodyStore, SqliteBodyStore, SqliteBodyStoreConfig};
 pub use error::StorageError;
 pub use event_store::{EventRecord, EventStore};
