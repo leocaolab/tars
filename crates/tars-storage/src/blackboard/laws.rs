@@ -70,6 +70,11 @@ impl BlackboardDomain for ToyStore {
         }
         status
     }
+
+    fn with_status(e: &Item, _status: &str) -> Item {
+        // Item carries no status field — return it unchanged.
+        e.clone()
+    }
 }
 
 impl BlackboardStore for ToyStore {

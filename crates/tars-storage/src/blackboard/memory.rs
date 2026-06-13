@@ -65,7 +65,16 @@ impl<D: BlackboardDomain> Blackboard for InMemoryBlackboard<D> {
             .map(|(k, _)| k)
             .collect();
         keys.sort();
-        Ok(keys.into_iter().map(|k| s.entities[k].value.clone()).collect())
+        // Stamp the projected status back onto each returned value, so the
+        // in-memory view agrees with the timeline (law #5) — the same status a
+        // SQLite store would read from its synced column.
+        Ok(keys
+            .into_iter()
+            .map(|k| {
+                let entry = &s.entities[k];
+                D::with_status(&entry.value, &entry.status)
+            })
+            .collect())
     }
 
     fn timeline(&self, key: &str) -> Result<Vec<D::Event>, BbError> {

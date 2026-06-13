@@ -115,6 +115,14 @@ pub trait BlackboardDomain: Send + Sync + 'static {
     /// The **value ≡ timeline** projection (law #5): fold a timeline into the
     /// status it implies. `None` ⇒ keep the entity's initial/current status.
     fn project_status(timeline: &[Self::Event]) -> Option<String>;
+
+    /// Stamp the projected `status` back onto an entity value. The framework
+    /// knows the status STRING but not where the entity keeps it — so
+    /// [`InMemoryBlackboard`] calls this when projecting a `view`, keeping its
+    /// returned entity's status consistent with the timeline (law #5), exactly
+    /// like a SQLite store's `view` reads the synced status column. A consumer
+    /// whose entity has no status field returns it unchanged.
+    fn with_status(e: &Self::Entity, status: &str) -> Self::Entity;
 }
 
 /// The **SQLite injection port**: the storage operations a consumer plugs into
