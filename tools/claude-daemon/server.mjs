@@ -31,7 +31,7 @@ import readline from 'node:readline';
 // the final answer. Tools stay disabled below (`disallowedTools:
 // ['*']`) so the model can't go agentic regardless of this
 // counter.
-async function handleChat({ prompt, system, model, max_turns = 7, schema }) {
+async function handleChat({ prompt, system, model, max_turns = 7, schema, thinking: thinkingMode }) {
   if (typeof prompt !== 'string' || !prompt.length) {
     throw new Error('prompt (string) is required');
   }
@@ -39,6 +39,7 @@ async function handleChat({ prompt, system, model, max_turns = 7, schema }) {
   const t0 = performance.now();
   let ttfb = null;
   let text = '';
+  let thinking = '';
   let structuredOutput = null;
   let usage = null;
   let resultSubtype = null;
@@ -63,6 +64,16 @@ async function handleChat({ prompt, system, model, max_turns = 7, schema }) {
   // from agentic tools, so it coexists with `disallowedTools: ['*']` —
   // claude_sdk gets strict schema without re-enabling tool agency.
   if (schema) opts.outputFormat = { type: 'json_schema', schema };
+  // Extended thinking. `display: 'summarized'` is REQUIRED to populate the
+  // thinking-block text — the default omits it (empty), which is why the
+  // reasoning was a black hole: it happened + was billed, but never logged.
+  // `thinkingMode` of 'off'/'disabled' turns thinking off — but note that
+  // removes the reasoning CHANNEL, so the model reasons in visible text
+  // instead (verbose prose / the "essay"). Default: on + summarized.
+  opts.thinking =
+    thinkingMode === 'off' || thinkingMode === 'disabled'
+      ? { type: 'disabled' }
+      : { type: 'adaptive', display: 'summarized' };
 
   if (process.env.CLAUDE_DAEMON_TRACE) {
     process.stderr.write(
@@ -103,6 +114,8 @@ async function handleChat({ prompt, system, model, max_turns = 7, schema }) {
             for (const block of content) {
               if (block?.type === 'text' && typeof block.text === 'string') {
                 text += block.text;
+              } else if (block?.type === 'thinking' && typeof block.thinking === 'string') {
+                thinking += block.thinking;
               }
             }
           }
@@ -158,6 +171,7 @@ async function handleChat({ prompt, system, model, max_turns = 7, schema }) {
   const replyText = structuredOutput != null ? JSON.stringify(structuredOutput) : text;
   return {
     text: replyText,
+    thinking,
     result_subtype: resultSubtype,
     usage,
     model: actualModel,

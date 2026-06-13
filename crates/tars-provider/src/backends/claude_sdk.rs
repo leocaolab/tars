@@ -206,11 +206,17 @@ impl LlmProvider for ClaudeSdkProvider {
             .model
             .unwrap_or_else(|| self.default_model.clone().unwrap_or_default());
         let stop_reason = map_stop_reason(resp.result_subtype.as_deref());
-        let events: Vec<Result<ChatEvent, ProviderError>> = vec![
-            Ok(ChatEvent::started(actual_model)),
-            Ok(ChatEvent::Delta { text: resp.text }),
-            Ok(ChatEvent::Finished { stop_reason, usage }),
-        ];
+        // Project the captured reasoning as a ThinkingDelta so the canonical
+        // event→ChatResponse fold lands it on `ChatResponse.thinking` — and
+        // thus into the bodies/event store alongside the request/response.
+        // Was a black hole before: thinking happened + was billed, never logged.
+        let mut events: Vec<Result<ChatEvent, ProviderError>> =
+            vec![Ok(ChatEvent::started(actual_model))];
+        if !resp.thinking.is_empty() {
+            events.push(Ok(ChatEvent::ThinkingDelta { text: resp.thinking }));
+        }
+        events.push(Ok(ChatEvent::Delta { text: resp.text }));
+        events.push(Ok(ChatEvent::Finished { stop_reason, usage }));
         Ok(Box::pin(stream::iter(events)))
     }
 }
@@ -263,6 +269,11 @@ impl ClaudeSdkProvider {
             // regardless of how high this counter climbs.
             max_turns: 7,
             schema: req.structured_output.as_ref().map(|s| &s.schema),
+            // Only an explicit `Off` disables thinking; Auto/Budget leave it
+            // on so the daemon captures summarized reasoning. (Daemon default
+            // when absent is on+summarized.) Off makes the model reason in
+            // visible text — the caller's verbosity/speed tradeoff.
+            thinking: req.thinking.is_off().then_some("off"),
         };
         let mut line = serde_json::to_string(&body)
             .map_err(|e| ProviderError::Internal(format!("claude_sdk: encode body: {e}")))?;
@@ -479,6 +490,7 @@ async fn dispatch_reply_line(line: &str, pending: PendingMap) -> Result<(), Prov
         (Some(err), _) => Err(ProviderError::Internal(format!("claude_sdk daemon: {err}"))),
         (None, Some(text)) => Ok(DaemonChatReply {
             text,
+            thinking: raw.thinking.unwrap_or_default(),
             result_subtype: raw.result_subtype,
             usage: raw.usage,
             model: raw.model,
@@ -629,6 +641,12 @@ struct ChatLine<'a> {
     /// and returns the constrained answer as the reply text.
     #[serde(skip_serializing_if = "Option::is_none")]
     schema: Option<&'a serde_json::Value>,
+    /// Thinking switch passed to the daemon: `"off"` disables extended
+    /// thinking, anything else (or absent) leaves it on with summarized
+    /// display so the reasoning text is captured. Off pushes the model to
+    /// reason in visible text instead — the caller's tradeoff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<&'a str>,
 }
 
 /// Reply lines carry the `id` alongside either reply fields or an
@@ -640,6 +658,8 @@ struct ReplyLine {
     id: u64,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
     #[serde(default)]
     result_subtype: Option<String>,
     #[serde(default)]
@@ -653,6 +673,7 @@ struct ReplyLine {
 #[derive(Debug)]
 struct DaemonChatReply {
     text: String,
+    thinking: String,
     result_subtype: Option<String>,
     usage: Option<RawUsage>,
     model: Option<String>,
@@ -679,6 +700,32 @@ mod tests {
     fn serialize_single_user_message() {
         let req = ChatRequest::user(ModelHint::Explicit("m".into()), "ping");
         assert_eq!(serialize_messages(&req), "[user]\nping");
+    }
+
+    #[test]
+    fn reply_line_carries_thinking() {
+        // The daemon now returns a `thinking` field; the provider must
+        // deserialize it so the reasoning lands on ChatResponse.thinking
+        // (was a black hole — billed but never logged).
+        let raw: ReplyLine = serde_json::from_str(
+            r#"{"id":3,"text":"{\"findings\":[]}","thinking":"checked rule X, no match"}"#,
+        )
+        .unwrap();
+        assert_eq!(raw.thinking.as_deref(), Some("checked rule X, no match"));
+        let reply = DaemonChatReply {
+            text: raw.text.unwrap_or_default(),
+            thinking: raw.thinking.unwrap_or_default(),
+            result_subtype: raw.result_subtype,
+            usage: raw.usage,
+            model: raw.model,
+        };
+        assert_eq!(reply.thinking, "checked rule X, no match");
+    }
+
+    #[test]
+    fn reply_line_thinking_absent_is_empty() {
+        let raw: ReplyLine = serde_json::from_str(r#"{"id":1,"text":"hi"}"#).unwrap();
+        assert_eq!(raw.thinking, None);
     }
 
     #[test]
