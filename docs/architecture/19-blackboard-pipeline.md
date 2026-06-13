@@ -323,46 +323,83 @@ Plus the existing characterization test stays green as the per-call-writer net.
 
 ---
 
-## 10. Making the contract structural (not conventional)
+## 10. The write primitive — `commit` is an observable state transition
 
-§3.2's "each step writes its own event with its own provenance" is, today, a
+§3.2's "each step emits its own event with its own provenance" is, today, a
 **convention** — and conventions rot. The recurring bug exists because the write
-was hand-coded at ≥4 sites that share one key and defeat each other. The generic
-cure: a consumer funnels every blackboard write through ONE framework-owned site,
-under two rules:
+was hand-coded at ≥4 different *implementations* that share one key and overwrite
+each other. An early, WRONG instinct was to "fix" this by taking the write away
+from the step — body returns a result, a framework wrapper performs the sole
+commit, the body "can't get it wrong". That is backwards: it buries the one
+observable transition in a black box, which is the very loss the model exists to
+prevent. The cure is not to hide the write — it is to define the primitive and
+give every step exactly one of it.
 
-- the step **body is a pure function of the blackboard view** — it returns its
-  result + provenance and holds NO write handle, so it *cannot* persist a
-  terminal-only state or skip an event;
-- the **transition is declarative data** (which event it emits) — not control
-  flow an author can forget.
-
-tars supplies the seam: a `Worker` whose `run` is generated from a `(body,
-emits)` pair, so the sole event-write lives in that generated wrapper and "forgot
-to write / batched at run-end" is unrepresentable.
-
-**Reference: A.R.C.** (illustrative — arc is one consumer of this contract):
+**`commit` is an observable state transition — not "insert a row".** When a step
+calls
 
 ```rust
-// a Node = body (domain work) + emits (declarative event); holds NO DB handle
-trait Node { fn emits(&self) -> EventKind; fn scope(&self, ..) -> Scope;
-             async fn body(&self, view, ctx) -> NodeProduct; }
-```
-```
-NodeRunner::run(...):                              # the SOLE write site
-    view    = blackboard.view(node.scope(step))     # only input channel (§3.1)
-    product = node.body(view, ctx).await            # domain work, no side effects
-    for f in product.transitioned:
-        blackboard.commit_transition(f,             # seals record_event_at
-            { event: node.emits(), commit: product.commit, at: now() })  # §3.2
+bb.commit(entity, Transition { kind, version, at, reason })
 ```
 
-`commit_transition` seals `record_event_at`/`apply_threads_to_entity` behind it →
-an arc node body has no path to emit directly, batch, or forget. arc's step set
-collapses from **5 tangled write paths** (`scan_worker`, `persist_fix_step`,
-`finalize_entity_only`, `backfill`, `prior_exists` guard) to **4 declarative
-nodes** (scan/fix/verify/merge), each emitting at source. Adding a step is "write
-`body` + declare `emits`" — zero persistence code, no way to get it wrong.
+it publishes, in the open: *"I moved THIS entity one notch — to `kind`, at
+`version`, now."* That append to the entity's timeline IS the observable record;
+the entity's current value is the timeline's projection (value≡timeline). A
+commit is how a step changes the world **and is seen doing it**.
+
+Two things fix the bug WITHOUT hiding the write:
+
+- **One commit FUNCTION, not one call site.** §4 collapses the ≥4 hand-coded
+  write implementations into the single, sealed `Blackboard::commit` (atomic +
+  idempotent + value≡timeline). Once the write *mechanism* is one funnel, many
+  steps calling that same `commit` is safe — they cannot defeat each other. The
+  danger was ever multiple write *implementations*, never multiple *callers*.
+- **The step commits EXPLICITLY.** A step calls `commit` itself, in plain sight —
+  so conditional emits, a different event per entity, or several events are all
+  expressible, and the author can SEE what their step writes. A transition you
+  cannot see is the bug.
+
+**Observability is the commit timeline** — there is no separate mechanism to add.
+Every state change is a committed event, so found→fixed→verified→merged is fully
+visible by construction; a step's observable output is *precisely* the
+transitions it commits. (A backing MAY mirror each commit into the execution
+trajectory — Doc 17 — so domain transitions also surface in the run log; but the
+source of truth is the commit.)
+
+### The step abstraction — a `Node`
+
+A step still needs a SHAPE, or every worker reads/writes the blackboard ad-hoc.
+A **Node** is that shape — *declarative* about what it touches, *explicit* about
+what it writes:
+
+```rust
+trait Node {
+    fn scope(&self) -> Scope;          // which entities it reads (declared)
+    fn emits(&self) -> &[Event];       // which transition kinds it MAY commit (declared)
+    async fn run(&self, ctx: &Ctx) -> Result<()>;  // domain work; commits EXPLICITLY via ctx.bb
+}
+```
+
+- `scope` / `emits` are **declarations**, not actions. They let a pipeline reason
+  about the event flow (scan emits `Found`; fix emits `Fixed|Wontfix`) and let
+  the framework apply a guard (a node's actual commits ⊆ its declared `emits`).
+  They do NOT perform the write.
+- `run` does the domain work and calls `ctx.bb.commit(..)` itself — visible and
+  controllable.
+
+The framework runs a Node as one tars `Worker` step: it injects `ctx.bb` (the
+run-scoped blackboard, §4.1), records the step lifecycle
+(`StepStarted`/`Completed`), and checks the `emits` guard. It does NOT write on
+the node's behalf — the node's own `commit` calls are the writes. (`NodeRunner`,
+if named, is just this thin Node→Worker adapter, never a hidden write site.)
+
+**Reference: A.R.C.** arc's tangled write set — `scan_worker`,
+`persist_fix_step`, `finalize_entity_only`, `backfill`, the `prior_exists`
+guard — collapses into four nodes (scan/fix/verify/merge), each calling the one
+`commit` at source. `review` and `auto` share the SAME `ScanNode`, so they
+cannot diverge. Adding a step is "declare `scope` + `emits`, write the body,
+commit your transitions" — no hidden machinery, nothing to forget, nothing to
+hide.
 
 ---
 
@@ -383,7 +420,7 @@ one-shot is an implementation detail behind `invoke`. Under that one contract:
 |---|---|---|
 | MCP tool | leaf | external server (Doc 05) |
 | native tool | leaf | in-proc fn (Doc 05 / Doc 23 unified tool layer) |
-| **node** | 1 | a `Worker` + sealed blackboard write (§10) |
+| **node** | 1 | a `Worker` that commits its own transitions (§10) |
 | **pipeline** | DAG | composed nodes → a `Plan` run via `run_plan` |
 
 So a one-shot tool and a `run_plan` DAG **register the same way and present the
@@ -405,5 +442,5 @@ Layering:
 | Layer | Owns |
 |---|---|
 | **tars** | scheduling / dataflow / lifecycle (`run_plan`, `Worker`, `emit_step_lifecycle`); the unified callable registry (Doc 05 / 23) |
-| **consumer's blackboard** | durable domain truth + event-at-source (sealed, §10) |
+| **consumer's blackboard** | durable domain truth + event-at-source via explicit `commit` (§10) |
 | **consumer's nodes/pipelines** | domain bodies + composition; each registers as ONE callable |
