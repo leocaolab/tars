@@ -234,150 +234,87 @@ Plus the existing characterization test stays green as the per-call-writer net.
 
 ---
 
-## 10. The authoring abstraction (make the contract structural, not conventional)
+## 10. Making the contract structural (not conventional)
 
-§1–6 state the principle. But "each step writes its own event with its own
-provenance" is, today, a **convention** — and conventions rot. The recurring bug
-exists precisely because the write was hand-coded at ≥4 call sites
-(`scan_worker.rs:230`, `persist_fix_step` `orchestration.rs:781`,
-`finalize_entity_only` `session.rs:71`, `backfill` `migration.rs:24`) that share
-one `review_id` and defeat each other (`!prior_exists` guard + terminal-once
-persist). Every fix patched one site; another re-broke it. The cure is to make
-the contract **unrepresentable to violate**: a single framework-owned write path.
+§3.2's "each step writes its own event with its own provenance" is, today, a
+**convention** — and conventions rot. The recurring bug exists because the write
+was hand-coded at ≥4 sites that share one key and defeat each other. The generic
+cure: a consumer funnels every blackboard write through ONE framework-owned site,
+under two rules:
 
-**Node** — the unit of authoring. It DECLARES its blackboard interaction and
-contains ONLY domain work (the LLM call / git op). It has no DB handle.
+- the step **body is a pure function of the blackboard view** — it returns its
+  result + provenance and holds NO write handle, so it *cannot* persist a
+  terminal-only state or skip an event;
+- the **transition is declarative data** (which event it emits) — not control
+  flow an author can forget.
+
+tars supplies the seam: a `Worker` whose `run` is generated from a `(body,
+emits)` pair, so the sole event-write lives in that generated wrapper and "forgot
+to write / batched at run-end" is unrepresentable.
+
+**Reference: A.R.C.** (illustrative — arc is one consumer of this contract):
 
 ```rust
-#[async_trait]
-pub trait Node: Send + Sync {
-    fn role(&self) -> &'static str;        // "scan" | "fix" | "verify" | "merge"
-    fn emits(&self) -> EventKind;          // DECLARATIVE — the event is data, not
-                                           // control flow an author can forget
-    fn scope(&self, step: &PlanStep) -> Scope;   // which blackboard rows it reads
-
-    /// Domain work ONLY. Returns the findings it transitioned + the commit it
-    /// produced. MUST NOT touch the DB / emit events — there is no handle to.
-    async fn body(&self, view: Threads, ctx: &NodeCtx)
-        -> Result<NodeProduct, NodeError>;   // { transitioned, commit }
-}
+// a Node = body (domain work) + emits (declarative event); holds NO DB handle
+trait Node { fn emits(&self) -> EventKind; fn scope(&self, ..) -> Scope;
+             async fn body(&self, view, ctx) -> NodeProduct; }
 ```
-
-**NodeRunner** — the SINGLE place persistence happens. `impl Worker for
-NodeRunner<N: Node>` runs `view(scope) → body → commit_transition(per finding)`
-and wraps it in `emit_step_lifecycle` (Doc 04). This adapter is the *only*
-caller of the event API:
-
 ```
-NodeRunner::run(plan, step, prior, ctx):
-    view    = blackboard.view(node.scope(step))     # the ONLY input channel (§3.1)
+NodeRunner::run(...):                              # the SOLE write site
+    view    = blackboard.view(node.scope(step))     # only input channel (§3.1)
     product = node.body(view, ctx).await            # domain work, no side effects
     for f in product.transitioned:
-        blackboard.commit_transition(f, Transition {
-            event:  node.emits(),                    # declarative (§10)
-            commit: product.commit.as_deref(),       # THIS step's provenance (§3.2)
-            at:     now(),                            # captured here, at the step
-        })                                           # idempotent (§4)
-    PartialResult { summary: control-only }          # never the authoritative state
+        blackboard.commit_transition(f,             # seals record_event_at
+            { event: node.emits(), commit: product.commit, at: now() })  # §3.2
 ```
 
-**`Blackboard::commit_transition` is sealed** — `record_event_at` /
-`apply_threads_to_entity` are private behind it. A node body cannot emit an event
-directly, cannot skip one, cannot batch at run-end. **The bug is structurally
-unrepresentable**: there is no code path by which an author persists a
-terminal-only status, because the author never holds the writer.
-
-**Pipelines compose the SAME node instances** — one emit site per event:
-
-```rust
-Pipeline::review()  // [ScanNode]
-Pipeline::fix()     // [FixNode, VerifyNode, MergeNode]
-Pipeline::auto()    // [ScanNode, FixNode, VerifyNode, MergeNode]
-Pipeline::verify()  // [VerifyNode]
-```
-
-`ScanNode` is the ONE place `found` is emitted; `review` and `auto` share it, so
-they cannot diverge. A `Pipeline` compiles to a tars `Plan` (one `PlanStep` per
-node-instance, `depends_on` = edges) and runs via `run_plan` — reusing the exact
-DAG shape of `scan_then_fix_via_tars_dag` (`tars_dag/scan_then_fix_dag.rs:191`).
-
-**Simplification (the bug, concretely).** The author's surface collapses:
-
-| Today — 5 tangled write paths | After — 4 declarative nodes |
-|---|---|
-| `scan_worker` per-file write (no event) | `ScanNode { emits: Found }` |
-| `persist_fix_step` (fixed) | `FixNode { emits: Fixed }` |
-| verify's `finalize_entity_only` | `VerifyNode { emits: Verified }` |
-| `merge_sweep` event | `MergeNode { emits: Merged }` |
-| run-end batch + `backfill` + `prior_exists` guard | **deleted** (§6.2) |
-
-The author writes four small `body` functions (the domain logic they already
-have) plus four `emits` declarations. Persistence, provenance, idempotency, and
-lifecycle are framework-owned. Adding a step (e.g. `TestNode`) is: implement
-`body` + declare `emits` — the event auto-persists at source with zero
-persistence code in the node (and no way to get it wrong).
+`commit_transition` seals `record_event_at`/`apply_threads_to_entity` behind it →
+an arc node body has no path to emit directly, batch, or forget. arc's step set
+collapses from **5 tangled write paths** (`scan_worker`, `persist_fix_step`,
+`finalize_entity_only`, `backfill`, `prior_exists` guard) to **4 declarative
+nodes** (scan/fix/verify/merge), each emitting at source. Adding a step is "write
+`body` + declare `emits`" — zero persistence code, no way to get it wrong.
 
 ---
 
-## 11. Pipelines as encapsulated, LLM-invocable units
+## 11. One invocation interface: mcp · tool · node · pipeline
 
-A `Pipeline` is not only an internal composition — it is a **named, parameterized
-unit** addressable as one call, so a higher-order driver (an agent, the
-dirty-tree recovery handler, a skill) invokes a whole pipeline without composing
-nodes itself:
+A node (one step) and a pipeline (a DAG of nodes) are, to a caller, the same kind
+of thing a tool or an MCP endpoint is — a **callable**: a name, a typed input
+schema, and `invoke(args) -> result`. The goal is a SINGLE interface so an LLM
+has ONE way to call anything — a leaf MCP tool, a native tool, a single node, or
+a whole multi-step pipeline — without knowing which it is.
 
-```rust
-impl Pipeline {
-    pub async fn run(&self, bb: &Blackboard, args: PipelineArgs)
-        -> Result<PipelineOutcome, PipelineError>;
-}
-// registry: name -> Pipeline   →  run("fix", {ids:[3,7]})  is ONE call
-```
+Model it on the **skill contract** (cf. Claude skills, Doc 05): a capability is
+`{ name, description, input_schema, invoke }` — the model selects by
+`description` and calls by `name` with schema-checked args; multi-step vs
+one-shot is an implementation detail behind `invoke`. Under that one contract:
 
-This is the **skill-like** layer: pipelines are registered by name with typed
-args, the same way tools/skills are (Doc 05), so an LLM can *drive* a pipeline as
-a single tool call — "run the `fix` pipeline on these findings" — at a higher
-unit than individual nodes. It composes with the TarsAgent (Doc 20/21): an agent
-reasons about WHICH pipeline to run on WHAT, and the pipeline owns the
-deterministic node DAG underneath. This is the arc-side generalization of
-"spawn one handler with full context + a high-level verb" rather than wiring
-steps by hand — the encapsulation boundary is the pipeline, not the node.
-
-Layering (sharp boundaries):
-
-| Layer | Owns | Reuses |
+| Callable | Steps | Backed by |
 |---|---|---|
-| **tars** | step scheduling, dataflow, lifecycle | `run_plan`, `Worker`, `emit_step_lifecycle` |
-| **Blackboard** | the durable domain truth + event-at-source (sealed) | entity store §4 |
-| **Node** | one step's domain body + its declared transition | §10 |
-| **Pipeline** | node composition + the encapsulated, named, LLM-invocable unit | §11 |
+| MCP tool | leaf | external server (Doc 05) |
+| native tool | leaf | in-proc fn (Doc 05 / Doc 23 unified tool layer) |
+| **node** | 1 | a `Worker` + sealed blackboard write (§10) |
+| **pipeline** | DAG | composed nodes → a `Plan` run via `run_plan` |
 
----
+So a one-shot tool and a `run_plan` DAG **register the same way and present the
+same face**. The driving LLM (TarsAgent, Doc 20/21) reasons over a flat list of
+callables and picks the granularity it needs — a single tool or a whole pipeline
+— with no per-kind wiring. The unified registry + the description/schema contract
+is **Doc 05's** concern (tools · MCP · skills); **Doc 23** (unified tool layer) is
+where node/pipeline join tool/MCP under one surface. This section asserts only
+that *a blackboard pipeline IS such a callable*, not a special case — a `Plan`
+behind an `invoke`, registered like any skill.
 
-## 12. Rollout gate — state-level A/B (do this BEFORE the rewrite)
+**Reference: A.R.C.** — `Pipeline::{review,fix,auto,verify}` register as composite
+callables; `run("fix", {ids:[3,7]})` is one schema-checked call that drives the
+shared-node DAG underneath (one emit site per event; `review` and `auto` cannot
+diverge because they share `ScanNode`).
 
-This contract has been "fixed" repeatedly and regressed each time because changes
-shipped without a net that diffs the **event state**. A *finding-level* diff
-(abdiff today) would NOT catch this bug: the finding looks correct (status
-`verified`, content present) — the regression is in the missing
-`found`/`fixed`/`merged` *events*. So the gate must snapshot and diff the FULL
-state, and it must exist before §6/§10 land.
+Layering:
 
-1. **Pin the LLM.** Mock/recorded provider so old-vs-new diff reflects only the
-   code change, not model nondeterminism (the foundation — without it the A/B is
-   noise).
-2. **Snapshot full state**, not just findings: `findings` + `finding_events`
-   (the timeline — where this bug lives) + `finding_history` + status.
-   Normalize incidental fields (run_id, ephemeral timestamps).
-3. **Expected-correct goldens, NOT characterize-current.** The current behavior
-   IS the bug (only `verified`); golden-ing it would freeze the bug. Hand-author
-   the correct timeline (`found→fixed→verified→merged`, distinct commits) as the
-   oracle. The OLD pipeline's deviation from it = the bug being fixed.
-4. **Gate:** the new pipeline ships only if (a) it matches the expected golden,
-   (b) the ONLY diffs vs old are the intended fixes (events now present), (c) no
-   unexplained delta (collateral regression).
-
-Build on abdiff; extend it from finding-level to state-level. Each §6/§10 change
-lands behind this A/B so the large rewrite cannot silently re-regress — the
-explicit de-risk requirement that motivated writing this section before
-implementing.
+| Layer | Owns |
+|---|---|
+| **tars** | scheduling / dataflow / lifecycle (`run_plan`, `Worker`, `emit_step_lifecycle`); the unified callable registry (Doc 05 / 23) |
+| **consumer's blackboard** | durable domain truth + event-at-source (sealed, §10) |
+| **consumer's nodes/pipelines** | domain bodies + composition; each registers as ONE callable |
