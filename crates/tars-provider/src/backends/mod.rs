@@ -12,6 +12,7 @@
 //! - `vllm` etc. = OpenAI-compatible local servers.
 
 pub mod anthropic;
+pub mod cassette;
 pub mod claude_cli;
 pub mod claude_sdk;
 pub mod codex_cli;

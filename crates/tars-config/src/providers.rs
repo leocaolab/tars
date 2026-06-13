@@ -349,6 +349,29 @@ pub enum ProviderConfig {
         #[serde(default = "default_mock_response")]
         canned_response: String,
     },
+
+    /// Cassette — deterministic LLM replay for A/B / regression testing
+    /// (record-once, replay-forever; VCR pattern). If `path` exists it is
+    /// loaded and REPLAYED (a request the recording doesn't cover is an
+    /// error — a signal a prompt changed). If `path` is absent and
+    /// `record_from` names another provider, that provider is wrapped and
+    /// its responses captured, flushed to `path` when the run ends.
+    /// Internal testing only — never a user-facing provider.
+    Cassette {
+        /// Cassette file (`{request_fingerprint: response_text}` JSON).
+        #[serde(deserialize_with = "de_trimmed_string")]
+        path: String,
+        /// Provider id to wrap+record when `path` doesn't exist yet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        record_from: Option<String>,
+        /// Model label reported for tier resolution.
+        #[serde(default = "default_cassette_model")]
+        default_model: String,
+    },
+}
+
+fn default_cassette_model() -> String {
+    "cassette".into()
 }
 
 fn default_claude_executable() -> String {
@@ -515,7 +538,8 @@ impl ProviderConfig {
             | ClaudeCli { default_model, .. }
             | ClaudeSdk { default_model, .. }
             | GeminiCli { default_model, .. }
-            | CodexCli { default_model, .. } => default_model,
+            | CodexCli { default_model, .. }
+            | Cassette { default_model, .. } => default_model,
             Mock { .. } => "mock-model",
         }
     }
@@ -727,6 +751,11 @@ impl ProviderConfig {
                 check_default_model(default_model, sink);
             }
             ProviderConfig::Mock { .. } => {}
+            ProviderConfig::Cassette { path, .. } => {
+                if path.trim().is_empty() {
+                    sink.push(ValidationError::new(key("path"), "must not be empty"));
+                }
+            }
         }
     }
 }

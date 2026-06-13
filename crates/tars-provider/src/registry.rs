@@ -20,6 +20,7 @@ use tars_types::{Auth, ProviderId};
 
 use crate::auth::AuthResolver;
 use crate::backends::anthropic::AnthropicProviderBuilder;
+use crate::backends::cassette::CassetteProvider;
 use crate::backends::claude_cli::ClaudeCliProviderBuilder;
 use crate::backends::claude_sdk::ClaudeSdkProviderBuilder;
 use crate::backends::codex_cli::{CodexCliProviderBuilder, SandboxMode};
@@ -75,8 +76,21 @@ impl ProviderRegistry {
     ) -> Result<Self, RegistryError> {
         let mut map: HashMap<ProviderId, Arc<dyn LlmProvider>> = HashMap::new();
         let mut default_models: HashMap<ProviderId, String> = HashMap::new();
-        for (id, entry) in cfg.iter() {
-            let provider = build_one(id.clone(), entry, http.clone(), auth_resolver.clone())?;
+        // Two passes: cassette providers may wrap another provider (record
+        // mode wraps `record_from`), so build the base providers first, then
+        // the cassettes once the map can be looked up.
+        let (cassettes, base): (Vec<_>, Vec<_>) = cfg
+            .iter()
+            .partition(|(_, e)| matches!(e, ProviderConfig::Cassette { .. }));
+        for (id, entry) in base.into_iter().chain(cassettes) {
+            let provider = match entry {
+                ProviderConfig::Cassette {
+                    path,
+                    record_from,
+                    ..
+                } => build_cassette(id.clone(), path, record_from.as_deref(), &map),
+                _ => build_one(id.clone(), entry, http.clone(), auth_resolver.clone())?,
+            };
             // Keep the two maps coupled: only record the default model on
             // the *same* path that successfully inserts the provider, via
             // the `Entry` API. This makes the
@@ -365,12 +379,51 @@ fn build_one(
         ProviderConfig::Mock { canned_response } => {
             MockProvider::new(id, CannedResponse::Text(canned_response.clone()))
         }
+
+        // Cassette is built in a dedicated second pass in `from_config`
+        // (it may wrap another provider), so it never reaches build_one.
+        ProviderConfig::Cassette { .. } => {
+            unreachable!("cassette providers are built via build_cassette")
+        }
     };
 
     // Suppress unused-Auth-Variant warnings for now while CLI providers
     // don't consume Auth (they use Delegate semantics implicitly).
     let _ = Auth::None;
     Ok(provider)
+}
+
+/// Build a cassette provider (deterministic LLM replay; INTERNAL testing).
+///
+/// `path` exists → REPLAY it. `path` absent + `record_from` names a built
+/// provider → wrap it and RECORD (auto-flushes to `path` on run end). A
+/// missing/unloadable cassette with no `record_from` degrades to an empty
+/// replay, so every request MISSES — surfacing "you forgot to record" as a
+/// signal rather than silently fabricating answers.
+fn build_cassette(
+    id: ProviderId,
+    path: &str,
+    record_from: Option<&str>,
+    built: &HashMap<ProviderId, Arc<dyn LlmProvider>>,
+) -> Arc<dyn LlmProvider> {
+    let pb = std::path::PathBuf::from(path);
+    if pb.exists() {
+        match CassetteProvider::replay_from_file(id.clone(), &pb) {
+            Ok(p) => return p,
+            Err(e) => {
+                tracing::warn!(error = %e, path, "cassette load failed; replaying empty (all miss)");
+                return CassetteProvider::replay(id, HashMap::new());
+            }
+        }
+    }
+    if let Some(src) = record_from {
+        if let Some(inner) = built.get(&ProviderId::new(src)) {
+            tracing::info!(path, record_from = src, "cassette recording (no file yet)");
+            return CassetteProvider::record_to(id, inner.clone(), Some(pb));
+        }
+        tracing::warn!(record_from = src, "cassette record_from not found; replaying empty");
+    }
+    CassetteProvider::replay(id, HashMap::new())
 }
 
 #[cfg(test)]
@@ -411,6 +464,68 @@ mod tests {
         // user entries survived the round-trip.
         assert!(mapped.get(&ProviderId::new("a")).is_some());
         assert!(mapped.get(&ProviderId::new("b")).is_some());
+    }
+
+    #[tokio::test]
+    async fn cassette_records_then_replays_via_config() {
+        use crate::provider::LlmProvider;
+        use futures::StreamExt;
+        use tars_types::{ChatEvent, ChatRequest, ModelHint, RequestContext};
+
+        let path = std::env::temp_dir()
+            .join(format!("tars_cassette_cfg_{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let cfg_str = format!(
+            r#"
+            [providers.real]
+            type = "mock"
+            canned_response = "RECORDED_FINDING"
+
+            [providers.cass]
+            type = "cassette"
+            path = "{}"
+            record_from = "real"
+            "#,
+            path.display()
+        );
+
+        async fn ask(p: Arc<dyn LlmProvider>, prompt: &str) -> String {
+            p.stream(
+                ChatRequest::user(ModelHint::Explicit("m".into()), prompt),
+                RequestContext::test_default(),
+            )
+            .await
+            .unwrap()
+            .filter_map(|e| async move {
+                match e {
+                    Ok(ChatEvent::Delta { text }) => Some(text),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .await
+            .join("")
+        }
+
+        // Pass 1: path absent → record mode wrapping the mock.
+        {
+            let cfg = ConfigManager::load_from_str(&cfg_str).unwrap();
+            let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
+            let cass = reg.get(&ProviderId::new("cass")).unwrap();
+            assert_eq!(ask(cass.clone(), "file-x").await, "RECORDED_FINDING");
+            drop(cass);
+            drop(reg); // last Arc drops → Drop flushes the cassette to `path`
+        }
+        assert!(path.exists(), "recording run must write the cassette file");
+
+        // Pass 2: path present → replay mode, deterministic, no inner provider.
+        {
+            let cfg = ConfigManager::load_from_str(&cfg_str).unwrap();
+            let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
+            let cass = reg.get(&ProviderId::new("cass")).unwrap();
+            assert_eq!(ask(cass.clone(), "file-x").await, "RECORDED_FINDING");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
