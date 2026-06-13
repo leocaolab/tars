@@ -81,17 +81,30 @@ impl CassetteProvider {
     }
 
     /// Record + flush to `flush_path` (if set) after every captured response.
+    /// `seed` pre-loads already-recorded entries so a recording session split
+    /// across multiple registry builds ACCUMULATES into the file instead of
+    /// each build overwriting it with only its own captures.
     pub fn record_to(
         id: impl Into<ProviderId>,
         inner: Arc<dyn LlmProvider>,
         flush_path: Option<PathBuf>,
+    ) -> Arc<Self> {
+        Self::record_seeded(id, inner, flush_path, HashMap::new())
+    }
+
+    /// Like [`Self::record_to`] but pre-seeded with prior recordings.
+    pub fn record_seeded(
+        id: impl Into<ProviderId>,
+        inner: Arc<dyn LlmProvider>,
+        flush_path: Option<PathBuf>,
+        seed: HashMap<String, Recording>,
     ) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
             capabilities: inner.capabilities().clone(),
             mode: Mode::Record {
                 inner,
-                captured: Mutex::new(HashMap::new()),
+                captured: Mutex::new(seed),
                 flush_path,
             },
         })

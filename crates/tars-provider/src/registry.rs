@@ -407,7 +407,17 @@ fn build_cassette(
     built: &HashMap<ProviderId, Arc<dyn LlmProvider>>,
 ) -> Arc<dyn LlmProvider> {
     let pb = std::path::PathBuf::from(path);
-    if pb.exists() {
+    // Explicit record override (`TARS_CASSETTE_RECORD=1`): force record mode
+    // even though the file may already exist. A recording session flushes the
+    // cassette on its FIRST capture, so a later registry build in the SAME
+    // session would otherwise see the file and flip to replay — losing every
+    // request after the first (re-reviews, multi-turn agent loops). The
+    // explicit flag keeps the whole session in record mode (proper VCR
+    // "record" vs "replay" vs file-driven "auto").
+    let force_record = std::env::var("TARS_CASSETTE_RECORD")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if pb.exists() && !force_record {
         match CassetteProvider::replay_from_file(id.clone(), &pb) {
             Ok(p) => return p,
             Err(e) => {
@@ -418,8 +428,14 @@ fn build_cassette(
     }
     if let Some(src) = record_from {
         if let Some(inner) = built.get(&ProviderId::new(src)) {
-            tracing::info!(path, record_from = src, "cassette recording (no file yet)");
-            return CassetteProvider::record_to(id, inner.clone(), Some(pb));
+            // Seed from the file (if any) so a multi-build recording session
+            // accumulates instead of overwriting.
+            let seed = std::fs::read_to_string(&pb)
+                .ok()
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+            tracing::info!(path, record_from = src, "cassette recording");
+            return CassetteProvider::record_seeded(id, inner.clone(), Some(pb), seed);
         }
         tracing::warn!(record_from = src, "cassette record_from not found; replaying empty");
     }
