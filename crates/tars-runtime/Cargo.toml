@@ -42,4 +42,5 @@ tempfile = "3"
 async-trait.workspace = true
 futures.workspace = true
 anyhow = "1"
+rusqlite = { workspace = true }
 tars-provider = { path = "../tars-provider" }

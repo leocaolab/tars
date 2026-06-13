@@ -366,49 +366,59 @@ transitions it commits. (A backing MAY mirror each commit into the execution
 trajectory — Doc 17 — so domain transitions also surface in the run log; but the
 source of truth is the commit.)
 
-### The step abstraction — a `Node`
+### The step abstraction — the `Worker` itself (no `Node` layer)
 
-A step still needs a SHAPE, or every worker reads/writes the blackboard ad-hoc.
-A **Node** is that shape — *declarative* about what it touches, *explicit* about
-what it writes:
+A step needs a SHAPE, or every worker reads/writes the blackboard ad-hoc. But a
+`Worker` (Doc 04) ALREADY IS the step. So rather than wrap it in a new `Node`
+trait + a `NodeRunner` adapter, **upgrade `Worker` itself** — give it two
+DECLARATIONS, defaulted so every existing worker is untouched:
 
 ```rust
-trait Node {
-    fn scope(&self) -> Scope;          // which entities it reads (declared)
-    fn emits(&self) -> &[Event];       // which transition kinds it MAY commit (declared)
-    async fn run(&self, ctx: &Ctx) -> Result<()>;  // domain work; commits EXPLICITLY via ctx.bb
+trait Worker {
+    fn reads(&self) -> Scope { Scope::All }      // DECLARED: which entities it reads
+    fn emits(&self) -> Vec<String> { vec![] }    // DECLARED: which transition kinds it MAY commit
+    async fn run(&self, plan, step, prior, ctx: WorkerContext) -> WorkerOutput;
+    // run commits EXPLICITLY via ctx.shared.commit(..)
 }
 ```
 
-- `scope` / `emits` are **declarations**, not actions. They let a pipeline reason
-  about the event flow (scan emits `Found`; fix emits `Fixed|Wontfix`) and let
-  the framework apply a guard (a node's actual commits ⊆ its declared `emits`).
-  They do NOT perform the write.
-- `run` does the domain work and calls `ctx.bb.commit(..)` itself — visible and
-  controllable.
+- `reads` / `emits` are **declarations**, not actions — readable BEFORE the run,
+  so a pipeline can reason about dataflow (scan emits `found`; fix emits
+  `fixed|wontfix`) and the framework can apply an optional guard (actual commits
+  ⊆ declared `emits`). They do NOT perform the write. (`emits` is wire strings,
+  not a typed `Event`: `Worker` is a trait object with no consumer `Event` type.)
+- `run` does the domain work and calls `ctx.shared.commit(..)` itself —
+  explicit, visible, controllable (conditional emits, a different event per
+  entity, several events — all expressible).
+- The blackboard reaches the worker through **`WorkerContext.shared`** — the
+  run-scoped blackboard, type-erased (the worker downcasts it to its handle),
+  injected once via `RunPlanConfig.shared`. The executor records the step
+  lifecycle (`StepStarted`/`Completed`) and may check the `emits` guard; it
+  never writes on the worker's behalf.
 
-The framework runs a Node as one tars `Worker` step: it injects `ctx.bb` (the
-run-scoped blackboard, §4.1), records the step lifecycle
-(`StepStarted`/`Completed`), and checks the `emits` guard. It does NOT write on
-the node's behalf — the node's own `commit` calls are the writes. (`NodeRunner`,
-if named, is just this thin Node→Worker adapter, never a hidden write site.)
+There is **no `Node` / `NodeRunner` layer**: a `Worker` is the step, a pipeline
+is already a `Plan` of workers. The only things that were missing — the
+blackboard in the context, and the two declarations on the worker — are now on
+`Worker`/`WorkerContext` directly. (A `Node` trait would have been a strict
+subset of `Worker` minus the ability to express per-entity events, plus an
+adapter — pure cost.)
 
 **Reference: A.R.C.** arc's tangled write set — `scan_worker`,
 `persist_fix_step`, `finalize_entity_only`, `backfill`, the `prior_exists`
-guard — collapses into four nodes (scan/fix/verify/merge), each calling the one
-`commit` at source. `review` and `auto` share the SAME `ScanNode`, so they
-cannot diverge. Adding a step is "declare `scope` + `emits`, write the body,
-commit your transitions" — no hidden machinery, nothing to forget, nothing to
-hide.
+guard — collapses into four blackboard-based workers (scan/fix/verify/merge),
+each calling the one `commit` at source. `review` and `auto` share the SAME
+`ScanWorker`, so they cannot diverge. Adding a step is "declare `reads` +
+`emits`, write the body, commit your transitions" — no hidden machinery, nothing
+to forget, nothing to hide.
 
 ---
 
-## 11. One invocation interface: mcp · tool · node · pipeline
+## 11. One invocation interface: mcp · tool · worker · pipeline
 
-A node (one step) and a pipeline (a DAG of nodes) are, to a caller, the same kind
+A worker (one step) and a pipeline (a DAG of workers) are, to a caller, the same kind
 of thing a tool or an MCP endpoint is — a **callable**: a name, a typed input
 schema, and `invoke(args) -> result`. The goal is a SINGLE interface so an LLM
-has ONE way to call anything — a leaf MCP tool, a native tool, a single node, or
+has ONE way to call anything — a leaf MCP tool, a native tool, a single worker, or
 a whole multi-step pipeline — without knowing which it is.
 
 Model it on the **skill contract** (cf. Claude skills, Doc 05): a capability is
@@ -420,21 +430,21 @@ one-shot is an implementation detail behind `invoke`. Under that one contract:
 |---|---|---|
 | MCP tool | leaf | external server (Doc 05) |
 | native tool | leaf | in-proc fn (Doc 05 / Doc 23 unified tool layer) |
-| **node** | 1 | a `Worker` that commits its own transitions (§10) |
-| **pipeline** | DAG | composed nodes → a `Plan` run via `run_plan` |
+| **worker** | 1 | one blackboard-based step that commits its own transitions (§10) |
+| **pipeline** | DAG | composed workers → a `Plan` run via `run_plan` |
 
 So a one-shot tool and a `run_plan` DAG **register the same way and present the
 same face**. The driving LLM (TarsAgent, Doc 20/21) reasons over a flat list of
 callables and picks the granularity it needs — a single tool or a whole pipeline
 — with no per-kind wiring. The unified registry + the description/schema contract
 is **Doc 05's** concern (tools · MCP · skills); **Doc 23** (unified tool layer) is
-where node/pipeline join tool/MCP under one surface. This section asserts only
+where worker/pipeline join tool/MCP under one surface. This section asserts only
 that *a blackboard pipeline IS such a callable*, not a special case — a `Plan`
 behind an `invoke`, registered like any skill.
 
 **Reference: A.R.C.** — `Pipeline::{review,fix,auto,verify}` register as composite
 callables; `run("fix", {ids:[3,7]})` is one schema-checked call that drives the
-shared-node DAG underneath (one emit site per event; `review` and `auto` cannot
+shared-worker DAG underneath (one emit site per event; `review` and `auto` cannot
 diverge because they share `ScanNode`).
 
 Layering:
@@ -443,4 +453,4 @@ Layering:
 |---|---|
 | **tars** | scheduling / dataflow / lifecycle (`run_plan`, `Worker`, `emit_step_lifecycle`); the unified callable registry (Doc 05 / 23) |
 | **consumer's blackboard** | durable domain truth + event-at-source via explicit `commit` (§10) |
-| **consumer's nodes/pipelines** | domain bodies + composition; each registers as ONE callable |
+| **consumer's workers/pipelines** | domain bodies + composition; each registers as ONE callable |

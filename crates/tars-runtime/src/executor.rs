@@ -106,6 +106,13 @@ pub struct WorkerContext {
     /// these into the next prompt; non-LLM workers ignore them
     /// (their Critic — if any — is whatever they encode internally).
     pub refinements: Vec<String>,
+    /// The run-scoped blackboard (Doc 19 §4.1), injected so a worker can
+    /// `view`/`commit` domain state. Type-erased because `Worker` is a trait
+    /// object and the blackboard is the consumer's concrete type (with its own
+    /// `Entity`/`Event`): a blackboard-aware worker downcasts it back to its
+    /// own handle (e.g. `Arc<ArcBlackboard>`); workers that don't touch domain
+    /// state ignore it. `None` when the caller didn't supply one.
+    pub shared: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// Per-invocation context handed to a [`Critic`]. Same shape as
@@ -137,6 +144,23 @@ pub trait Worker: Send + Sync {
         prior_results: &HashMap<String, AgentMessage>,
         ctx: WorkerContext,
     ) -> Result<WorkerOutput, WorkerError>;
+
+    /// DECLARED: which blackboard entities this worker reads (Doc 19 §10). A
+    /// declaration, not an action — lets a pipeline reason about dataflow. The
+    /// worker still calls `ctx.shared` itself inside `run`. Default: reads
+    /// nothing domain-specific.
+    fn reads(&self) -> tars_storage::Scope {
+        tars_storage::Scope::All
+    }
+
+    /// DECLARED: which transition kinds (wire strings) this worker MAY commit
+    /// (Doc 19 §10) — for pipeline reasoning + an optional emits guard. A
+    /// declaration, not the write: the worker commits EXPLICITLY in `run` via
+    /// `ctx.shared.commit(..)`. Wire strings (not a typed `Event`) because
+    /// `Worker` is a trait object with no consumer `Event` type. Default: none.
+    fn emits(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Judges a [`Worker`]'s output and returns a [`VerdictKind`]:
@@ -214,8 +238,13 @@ impl Default for WorkerRegistry {
 /// Tunables for [`run_plan`]. Defaults match
 /// [`crate::RunTaskConfig`]'s historical defaults so existing
 /// callers see no behavioural change after the executor refactor.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RunPlanConfig {
+    /// Run-scoped blackboard (Doc 19 §4.1), type-erased, injected into every
+    /// `WorkerContext.shared` on the run. `None` = no blackboard (pre-existing
+    /// callers). Type-erased because `Worker` is a trait object; a
+    /// blackboard-aware worker downcasts it back to its concrete handle.
+    pub shared: Option<Arc<dyn std::any::Any + Send + Sync>>,
     /// Maximum number of `Refine` retries per step (NOT counting
     /// the initial attempt). `0` = worker gets exactly one shot per
     /// step; any `Refine` verdict immediately fails the step with
@@ -259,11 +288,26 @@ pub struct RunPlanConfig {
 impl Default for RunPlanConfig {
     fn default() -> Self {
         Self {
+            shared: None,
             max_refinements_per_step: 2,
             max_concurrent: None,
             infra_retry: InfraRetryPolicy::default(),
             step_time_budget: None,
         }
+    }
+}
+
+impl std::fmt::Debug for RunPlanConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `shared` is a type-erased `Arc<dyn Any>` (no `Debug`); show only its
+        // presence.
+        f.debug_struct("RunPlanConfig")
+            .field("shared", &self.shared.is_some())
+            .field("max_refinements_per_step", &self.max_refinements_per_step)
+            .field("max_concurrent", &self.max_concurrent)
+            .field("infra_retry", &self.infra_retry)
+            .field("step_time_budget", &self.step_time_budget)
+            .finish()
     }
 }
 
@@ -932,6 +976,9 @@ async fn run_one_step(
                     trajectory_id: trajectory_id.clone(),
                     cancel: cancel.clone(),
                     refinements: refinements.clone(),
+                    // Injected from RunPlanConfig so every step on this run sees
+                    // the same run-scoped blackboard handle.
+                    shared: config.shared.clone(),
                 };
                 // Run the worker under two backstops, both per-attempt:
                 //  - catch_unwind (P2): a panic in one worker becomes a
