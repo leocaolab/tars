@@ -72,15 +72,22 @@ impl<Ev> Transition<Ev> {
     }
 }
 
-/// Blackboard failure. `Domain` carries a consumer-side storage failure message
-/// at the model boundary (the injected ops return their own typed errors and
-/// map into this).
+/// Blackboard failure. `Store` carries the consumer's OWN typed storage error
+/// boxed (so a caller can downcast back to it — never stringified) at the model
+/// boundary; tars doesn't know the concrete type.
 #[derive(Debug, thiserror::Error)]
 pub enum BbError {
     #[error("blackboard sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("blackboard store: {0}")]
-    Domain(String),
+    Store(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl BbError {
+    /// Wrap a consumer storage error, keeping it typed (downcastable).
+    pub fn store(e: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Store(Box::new(e))
+    }
 }
 
 /// The **domain seam** shared by BOTH backings: how a consumer's entity is
