@@ -524,10 +524,33 @@ impl WorkerAgent {
             );
         }
 
+        // Surface the TAIL of the tool trajectory — a bare "kept emitting
+        // tool calls" is undebuggable (which tool? on what?). Show the last
+        // few calls (name + a truncated args preview) so a release-build
+        // failure is diagnosable without the body store.
+        let tail: Vec<String> = tool_names
+            .iter()
+            .zip(tool_args.iter())
+            .rev()
+            .take(5)
+            .map(|(name, args)| {
+                let mut a = args.to_string();
+                if a.len() > 200 {
+                    a.truncate(200);
+                    a.push('…');
+                }
+                format!("{name}({a})")
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         Err(AgentError::Internal(format!(
             "worker tool loop hit max_tool_iterations={} without a text-only \
-             response (model kept emitting tool calls)",
+             response (model kept emitting tool calls). last {} call(s): [{}]",
             self.max_tool_iterations,
+            tail.len(),
+            tail.join(", "),
         )))
     }
 }

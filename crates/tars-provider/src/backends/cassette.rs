@@ -37,11 +37,36 @@ use crate::provider::{LlmEventStream, LlmProvider};
 /// The recorded response for one request: the exact successful event sequence.
 type Recording = Vec<ChatEvent>;
 
+/// Collapse run-varying paths so a recording replays across runs that allocate
+/// a fresh worktree. A white-box agent's system prompt embeds its absolute
+/// worktree (`…/.arc/worktrees/fix-<id>`), whose `<id>` changes every run — left
+/// raw, the fingerprint differs and replay MISSes. The id token after
+/// `worktrees/fix-` is replaced with a constant. (Record and replay both run
+/// this, so they agree.) Extend here as other volatile request substrings surface.
+fn normalize_volatile(canon: &str) -> String {
+    const NEEDLE: &str = "worktrees/fix-";
+    let mut out = String::with_capacity(canon.len());
+    let mut rest = canon;
+    while let Some(i) = rest.find(NEEDLE) {
+        out.push_str(&rest[..i + NEEDLE.len()]);
+        let after = &rest[i + NEEDLE.len()..];
+        // The worktree id is an alnum/`-`/`_` run; skip it, keep the remainder.
+        let end = after
+            .find(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(after.len());
+        out.push_str("NORM");
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Stable fingerprint of a request's deterministic content. Record and replay
-/// MUST compute it identically — both call this on the live `ChatRequest`.
+/// MUST compute it identically — both call this on the live `ChatRequest`, after
+/// the same volatile-path normalization.
 pub fn request_fingerprint(req: &ChatRequest) -> String {
-    let canon =
-        serde_json::to_string(req).unwrap_or_else(|_| format!("{:?}", req.model.label()));
+    let canon = serde_json::to_string(req).unwrap_or_else(|_| format!("{:?}", req.model.label()));
+    let canon = normalize_volatile(&canon);
     let mut h = std::collections::hash_map::DefaultHasher::new();
     canon.hash(&mut h);
     format!("{:016x}", h.finish())
@@ -65,12 +90,40 @@ pub struct CassetteProvider {
     mode: Mode,
 }
 
+/// On-disk cassette: the recordings PLUS the recorded provider's capabilities.
+/// Capabilities matter because arc builds a DIFFERENT request depending on
+/// whether the provider advertises tool support (a fixer's request carries tool
+/// defs); a replay that advertised a bare `text_only_baseline` produced a
+/// tool-less request → a fingerprint MISS. Storing + replaying the recorded caps
+/// keeps the request byte-identical. `recordings` is a `BTreeMap` for a stable,
+/// diff-friendly file.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CassetteFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capabilities: Option<Capabilities>,
+    // No `#[serde(default)]` — a legacy bare-map cassette has no `recordings`
+    // key, so it fails to parse as `CassetteFile` and falls back below.
+    recordings: std::collections::BTreeMap<String, Recording>,
+}
+
 impl CassetteProvider {
-    /// Replay from a loaded cassette (fingerprint → recorded event sequence).
+    /// Replay from a loaded cassette (fingerprint → recorded event sequence),
+    /// advertising a bare text-only baseline.
     pub fn replay(id: impl Into<ProviderId>, cassette: HashMap<String, Recording>) -> Arc<Self> {
+        Self::replay_with_caps(id, cassette, None)
+    }
+
+    /// Replay advertising the RECORDED provider's capabilities (so arc rebuilds
+    /// the identical request). `None` → text-only baseline (legacy cassettes).
+    pub fn replay_with_caps(
+        id: impl Into<ProviderId>,
+        cassette: HashMap<String, Recording>,
+        caps: Option<Capabilities>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
-            capabilities: Capabilities::text_only_baseline(Pricing::default()),
+            capabilities: caps
+                .unwrap_or_else(|| Capabilities::text_only_baseline(Pricing::default())),
             mode: Mode::Replay { cassette },
         })
     }
@@ -110,12 +163,18 @@ impl CassetteProvider {
         })
     }
 
-    /// Load a cassette file (`{fingerprint: [events]}` JSON) for replay.
+    /// Load a cassette file for replay. New format carries `capabilities` +
+    /// `recordings`; a legacy bare `{fingerprint: [events]}` map still loads
+    /// (text-only baseline caps).
     pub fn replay_from_file(
         id: impl Into<ProviderId>,
         path: &std::path::Path,
     ) -> std::io::Result<Arc<Self>> {
         let raw = std::fs::read_to_string(path)?;
+        if let Ok(file) = serde_json::from_str::<CassetteFile>(&raw) {
+            let recordings: HashMap<String, Recording> = file.recordings.into_iter().collect();
+            return Ok(Self::replay_with_caps(id, recordings, file.capabilities));
+        }
         let cassette: HashMap<String, Recording> = serde_json::from_str(&raw)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         Ok(Self::replay(id, cassette))
@@ -132,14 +191,17 @@ impl CassetteProvider {
     }
 }
 
-/// Serialize a captured map to a cassette file (sorted keys → stable,
-/// diff-friendly). Best-effort: a write failure is logged, never panics.
-fn write_cassette(map: &HashMap<String, Recording>, path: &std::path::Path) {
+/// Serialize a captured map + the recorded provider's capabilities to a cassette
+/// file (sorted keys → stable, diff-friendly). Best-effort: a write failure is
+/// logged, never panics.
+fn write_cassette(map: &HashMap<String, Recording>, caps: &Capabilities, path: &std::path::Path) {
     if map.is_empty() {
         return;
     }
-    let sorted: std::collections::BTreeMap<_, _> = map.iter().collect();
-    match serde_json::to_string_pretty(&sorted) {
+    let recordings: std::collections::BTreeMap<String, Recording> =
+        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let file = CassetteFile { capabilities: Some(caps.clone()), recordings };
+    match serde_json::to_string_pretty(&file) {
         Ok(json) => {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -147,7 +209,7 @@ fn write_cassette(map: &HashMap<String, Recording>, path: &std::path::Path) {
             if let Err(e) = std::fs::write(path, json) {
                 tracing::warn!(error = %e, path = %path.display(), "cassette flush failed");
             } else {
-                tracing::debug!(path = %path.display(), entries = sorted.len(), "cassette flushed");
+                tracing::debug!(path = %path.display(), entries = file.recordings.len(), "cassette flushed");
             }
         }
         Err(e) => tracing::warn!(error = %e, "cassette serialize failed"),
@@ -204,7 +266,7 @@ impl LlmProvider for CassetteProvider {
                     // exits via std::process::exit never runs destructors, so
                     // Drop-only flushing silently loses the whole recording.
                     if let Some(path) = flush_path {
-                        write_cassette(&snapshot, path);
+                        write_cassette(&snapshot, &self.capabilities, path);
                     }
                 }
                 Ok(Box::pin(stream::iter(events)))
@@ -225,7 +287,7 @@ impl Drop for CassetteProvider {
         } = &self.mode
         {
             let map = captured.lock().unwrap_or_else(|e| e.into_inner());
-            write_cassette(&map, path);
+            write_cassette(&map, &self.capabilities, path);
         }
     }
 }
@@ -321,5 +383,36 @@ mod tests {
             .stream(req("uncovered"), RequestContext::test_default())
             .await;
         assert!(err.is_err(), "a cassette miss must surface as an error, not a silent wrong answer");
+    }
+
+    #[test]
+    fn fingerprint_ignores_the_run_varying_worktree_id() {
+        // Two runs allocate different fixer worktrees; the prompt is otherwise
+        // identical. They must hash the same so the recording replays.
+        let run1 = r#"{"system":"Working directory (absolute): /tmp/r/.arc/worktrees/fix-1140ccbb\nfix it"}"#;
+        let run2 = r#"{"system":"Working directory (absolute): /tmp/r/.arc/worktrees/fix-563e568e\nfix it"}"#;
+        assert_ne!(run1, run2, "raw strings differ");
+        assert_eq!(
+            normalize_volatile(run1),
+            normalize_volatile(run2),
+            "the worktree id must be normalized out of the fingerprint",
+        );
+    }
+
+    #[test]
+    fn cassette_file_round_trips_capabilities() {
+        // A recording stores the provider's caps; replay advertises them (so arc
+        // rebuilds the identical, tool-carrying request). Legacy bare maps still load.
+        let mut caps = Capabilities::text_only_baseline(Pricing::default());
+        caps.supports_tool_use = true;
+        let file = CassetteFile {
+            capabilities: Some(caps.clone()),
+            recordings: std::collections::BTreeMap::new(),
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let back: CassetteFile = serde_json::from_str(&json).unwrap();
+        assert!(back.capabilities.unwrap().supports_tool_use, "caps survive the cassette file");
+        // legacy bare map fails to parse as CassetteFile (no `recordings` key)
+        assert!(serde_json::from_str::<CassetteFile>(r#"{"abc":[]}"#).is_err());
     }
 }
