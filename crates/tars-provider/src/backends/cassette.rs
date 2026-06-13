@@ -4,14 +4,21 @@
 //! modes, ONE request-fingerprint function (so record and replay agree):
 //!
 //!   - **record**: wrap a real provider, pass its responses through, and capture
-//!     `(request fingerprint → response text)` into a cassette file.
-//!   - **replay**: serve the recorded response for a matching request; a **miss
+//!     `(request fingerprint → full event sequence)` into a cassette file.
+//!   - **replay**: serve the recorded events for a matching request; a **miss
 //!     is a signal** (an input the recording didn't cover — usually a prompt that
 //!     changed) and surfaces as a provider error, never a silent wrong answer.
 //!
 //! The fingerprint is a stable hash of the serialized `ChatRequest` (model +
 //! system + messages + tools + schema) — `ChatRequest: Serialize` — so the same
 //! logical request maps to the same key at record and replay time.
+//!
+//! The cassette stores the **whole `Vec<ChatEvent>`** per request, not just the
+//! text — so it replays tool calls (`ToolCallStart`/`ToolCallEnd`) verbatim and
+//! can freeze a white-box AGENT (fixer) tool loop, not only a text critic. A
+//! multi-turn agent records N (request → events) pairs in one session; each
+//! later turn's request (carrying the prior tool results) hashes to its own key
+//! and replays in turn.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -23,10 +30,12 @@ use futures::{stream, StreamExt};
 
 use tars_types::{
     Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, RequestContext,
-    StopReason, Usage,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
+
+/// The recorded response for one request: the exact successful event sequence.
+type Recording = Vec<ChatEvent>;
 
 /// Stable fingerprint of a request's deterministic content. Record and replay
 /// MUST compute it identically — both call this on the live `ChatRequest`.
@@ -39,16 +48,15 @@ pub fn request_fingerprint(req: &ChatRequest) -> String {
 }
 
 enum Mode {
-    /// Pass through `inner`, capturing each (fingerprint → text) into `captured`.
-    /// `flush_path` (if set) is written with the captured map when the provider
-    /// drops at end of run — auto-VCR recording.
+    /// Pass through `inner`, capturing each (fingerprint → events) into
+    /// `captured`. `flush_path` (if set) is written after every capture.
     Record {
         inner: Arc<dyn LlmProvider>,
-        captured: Mutex<HashMap<String, String>>,
+        captured: Mutex<HashMap<String, Recording>>,
         flush_path: Option<PathBuf>,
     },
-    /// Serve recorded text by fingerprint; a miss is an error (signal).
-    Replay { cassette: HashMap<String, String> },
+    /// Serve recorded events by fingerprint; a miss is an error (signal).
+    Replay { cassette: HashMap<String, Recording> },
 }
 
 pub struct CassetteProvider {
@@ -58,8 +66,8 @@ pub struct CassetteProvider {
 }
 
 impl CassetteProvider {
-    /// Replay from a loaded cassette (fingerprint → response text).
-    pub fn replay(id: impl Into<ProviderId>, cassette: HashMap<String, String>) -> Arc<Self> {
+    /// Replay from a loaded cassette (fingerprint → recorded event sequence).
+    pub fn replay(id: impl Into<ProviderId>, cassette: HashMap<String, Recording>) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
             capabilities: Capabilities::text_only_baseline(Pricing::default()),
@@ -72,7 +80,7 @@ impl CassetteProvider {
         Self::record_to(id, inner, None)
     }
 
-    /// Record + auto-flush to `flush_path` (if set) when the provider drops.
+    /// Record + flush to `flush_path` (if set) after every captured response.
     pub fn record_to(
         id: impl Into<ProviderId>,
         inner: Arc<dyn LlmProvider>,
@@ -89,48 +97,31 @@ impl CassetteProvider {
         })
     }
 
-    /// Load a cassette file (`{fingerprint: response_text}` JSON) for replay.
+    /// Load a cassette file (`{fingerprint: [events]}` JSON) for replay.
     pub fn replay_from_file(
         id: impl Into<ProviderId>,
         path: &std::path::Path,
     ) -> std::io::Result<Arc<Self>> {
         let raw = std::fs::read_to_string(path)?;
-        let cassette: HashMap<String, String> = serde_json::from_str(&raw)
+        let cassette: HashMap<String, Recording> = serde_json::from_str(&raw)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         Ok(Self::replay(id, cassette))
     }
 
     /// Drain everything captured so far (record mode) → write it to a cassette.
-    pub fn take_captured(&self) -> HashMap<String, String> {
+    pub fn take_captured(&self) -> HashMap<String, Recording> {
         match &self.mode {
-            Mode::Record { captured, .. } => std::mem::take(
-                &mut *captured.lock().unwrap_or_else(|e| e.into_inner()),
-            ),
+            Mode::Record { captured, .. } => {
+                std::mem::take(&mut *captured.lock().unwrap_or_else(|e| e.into_inner()))
+            }
             Mode::Replay { .. } => HashMap::new(),
-        }
-    }
-}
-
-impl Drop for CassetteProvider {
-    fn drop(&mut self) {
-        // Backstop only — the primary flush is per-capture in `stream`,
-        // because a CLI host that exits via std::process::exit never runs
-        // destructors. This catches the graceful-shutdown case.
-        if let Mode::Record {
-            captured,
-            flush_path: Some(path),
-            ..
-        } = &self.mode
-        {
-            let map = captured.lock().unwrap_or_else(|e| e.into_inner());
-            write_cassette(&map, path);
         }
     }
 }
 
 /// Serialize a captured map to a cassette file (sorted keys → stable,
 /// diff-friendly). Best-effort: a write failure is logged, never panics.
-fn write_cassette(map: &HashMap<String, String>, path: &std::path::Path) {
+fn write_cassette(map: &HashMap<String, Recording>, path: &std::path::Path) {
     if map.is_empty() {
         return;
     }
@@ -150,20 +141,6 @@ fn write_cassette(map: &HashMap<String, String>, path: &std::path::Path) {
     }
 }
 
-fn text_events(text: String, model: String) -> Vec<Result<ChatEvent, ProviderError>> {
-    vec![
-        Ok(ChatEvent::started(model)),
-        Ok(ChatEvent::Delta { text: text.clone() }),
-        Ok(ChatEvent::Finished {
-            stop_reason: StopReason::EndTurn,
-            usage: Usage {
-                output_tokens: text.len() as u64 / 4,
-                ..Default::default()
-            },
-        }),
-    ]
-}
-
 #[async_trait]
 impl LlmProvider for CassetteProvider {
     fn id(&self) -> &ProviderId {
@@ -179,10 +156,13 @@ impl LlmProvider for CassetteProvider {
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let key = request_fingerprint(&req);
-        let model = req.model.label().to_string();
         match &self.mode {
             Mode::Replay { cassette } => match cassette.get(&key) {
-                Some(text) => Ok(Box::pin(stream::iter(text_events(text.clone(), model)))),
+                Some(events) => {
+                    let out: Vec<Result<ChatEvent, ProviderError>> =
+                        events.iter().cloned().map(Ok).collect();
+                    Ok(Box::pin(stream::iter(out)))
+                }
                 None => Err(ProviderError::Internal(format!(
                     "cassette MISS for request fp={key} — an input the recording \
                      didn't cover (a prompt changed?). Re-record or fix the prompt."
@@ -193,33 +173,46 @@ impl LlmProvider for CassetteProvider {
                 captured,
                 flush_path,
             } => {
-                // Collect the inner stream, aggregate the text, capture it,
-                // then re-emit verbatim (collect-then-replay; recording is
-                // not latency-sensitive).
+                // Collect the inner stream, capture the full event sequence,
+                // then re-emit verbatim (collect-then-replay; recording is not
+                // latency-sensitive). Only a clean stream (no transport error)
+                // is cached — a failed call must not be frozen as a "response".
                 let events: Vec<Result<ChatEvent, ProviderError>> =
                     inner.clone().stream(req, ctx).await?.collect().await;
-                let text: String = events
-                    .iter()
-                    .filter_map(|e| match e {
-                        Ok(ChatEvent::Delta { text }) => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                // Flush after EVERY capture (a fresh snapshot under the lock),
-                // not on Drop: a CLI host that exits via std::process::exit
-                // never runs destructors, so Drop-only flushing silently loses
-                // the whole recording. Per-capture write is cheap for the tiny
-                // corpora cassettes target.
-                let snapshot = {
-                    let mut guard = captured.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.insert(key, text);
-                    guard.clone()
-                };
-                if let Some(path) = flush_path {
-                    write_cassette(&snapshot, path);
+                if events.iter().all(|e| e.is_ok()) {
+                    let recording: Recording =
+                        events.iter().map(|e| e.as_ref().unwrap().clone()).collect();
+                    let snapshot = {
+                        let mut guard = captured.lock().unwrap_or_else(|e| e.into_inner());
+                        guard.insert(key, recording);
+                        guard.clone()
+                    };
+                    // Flush after EVERY capture, not on Drop: a CLI host that
+                    // exits via std::process::exit never runs destructors, so
+                    // Drop-only flushing silently loses the whole recording.
+                    if let Some(path) = flush_path {
+                        write_cassette(&snapshot, path);
+                    }
                 }
                 Ok(Box::pin(stream::iter(events)))
             }
+        }
+    }
+}
+
+impl Drop for CassetteProvider {
+    fn drop(&mut self) {
+        // Backstop only — the primary flush is per-capture in `stream`,
+        // because a CLI host that exits via std::process::exit never runs
+        // destructors. This catches the graceful-shutdown case.
+        if let Mode::Record {
+            captured,
+            flush_path: Some(path),
+            ..
+        } = &self.mode
+        {
+            let map = captured.lock().unwrap_or_else(|e| e.into_inner());
+            write_cassette(&map, path);
         }
     }
 }
@@ -249,6 +242,20 @@ mod tests {
             .join("")
     }
 
+    async fn collect_tool_names(p: Arc<dyn LlmProvider>, r: ChatRequest) -> Vec<String> {
+        p.stream(r, RequestContext::test_default())
+            .await
+            .unwrap()
+            .filter_map(|e| async move {
+                match e {
+                    Ok(ChatEvent::ToolCallStart { name, .. }) => Some(name),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .await
+    }
+
     #[tokio::test]
     async fn record_then_replay_round_trips_by_fingerprint() {
         let real = MockProvider::with_responses(
@@ -256,18 +263,42 @@ mod tests {
             vec![CannedResponse::text("FINDING_A"), CannedResponse::text("FINDING_B")],
         );
         let rec = CassetteProvider::record("cass", real);
-        // record two distinct requests
         assert_eq!(collect_text(rec.clone(), req("file-1")).await, "FINDING_A");
         assert_eq!(collect_text(rec.clone(), req("file-2")).await, "FINDING_B");
         let cassette = rec.take_captured();
         assert_eq!(cassette.len(), 2);
 
-        // replay returns the SAME response per request, deterministically
         let play = CassetteProvider::replay("cass", cassette);
         assert_eq!(collect_text(play.clone(), req("file-1")).await, "FINDING_A");
         assert_eq!(collect_text(play.clone(), req("file-2")).await, "FINDING_B");
-        // and again — stable
+        // stable across repeats
         assert_eq!(collect_text(play.clone(), req("file-1")).await, "FINDING_A");
+    }
+
+    #[tokio::test]
+    async fn replay_preserves_tool_calls_not_just_text() {
+        // A white-box agent's response is a tool call, not text — the cassette
+        // must replay it so a fixer tool loop can be frozen.
+        use tars_types::{StopReason, Usage};
+        let tool_resp = CannedResponse::Sequence(vec![
+            ChatEvent::started("real"),
+            ChatEvent::ToolCallStart { index: 0, id: "c1".into(), name: "fs.write_file".into() },
+            ChatEvent::ToolCallEnd {
+                index: 0,
+                id: "c1".into(),
+                parsed_args: serde_json::json!({"path": "a.rs", "content": "fixed"}),
+                thought_signature: None,
+            },
+            ChatEvent::Finished { stop_reason: StopReason::ToolUse, usage: Usage::default() },
+        ]);
+        let real = MockProvider::with_responses("real", vec![tool_resp]);
+        let rec = CassetteProvider::record("cass", real);
+        assert_eq!(collect_tool_names(rec.clone(), req("fix")).await, vec!["fs.write_file"]);
+        let cassette = rec.take_captured();
+
+        let play = CassetteProvider::replay("cass", cassette);
+        // the tool call survives record→replay
+        assert_eq!(collect_tool_names(play.clone(), req("fix")).await, vec!["fs.write_file"]);
     }
 
     #[tokio::test]
