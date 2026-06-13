@@ -155,17 +155,47 @@ transition, time, and the version it happened in). Two operations — that is th
 *entire* model:
 
 ```rust
-pub trait Blackboard {
-    type Scope; type Entity; type Event;
-    fn view(&self, scope: &Self::Scope) -> Vec<Self::Entity>;         // a step's working set
-    fn commit(&self, e: &Self::Entity, ev: Transition<Self::Event>);  // new value + append event
+pub trait Blackboard: Send + Sync {     // Send+Sync: shared via Arc<S> across parallel steps
+    type Key;               // entity identity, STABLE across runs            (arc: fingerprint)
+    type Entity;            // current value: key + attributes + state        (arc: NormalizedIssue)
+    type Event: Copy + Eq;  // transition kind — a CLOSED set     (arc: Found|Fixed|Verified|Merged|Reopened)
+    type Scope;             // a read selector over entities    (arc: "open findings in run R, file F")
+    type Version;           // provenance: the state-of-world a transition happened against (arc: commit sha)
+
+    fn view(&self, scope: &Self::Scope) -> Result<Vec<Self::Entity>, BbError>;
+    fn commit(&self, e: &Self::Entity, t: Transition<Self::Event, Self::Version>) -> Result<(), BbError>;
+}
+
+pub struct Transition<Ev, Ver> {
+    pub kind: Ev,                 // which transition (the event)
+    pub at: Time,                 // when — captured AT the step
+    pub version: Ver,             // the version it happened in (its provenance)
+    pub reason: Option<String>,   // optional audit note
 }
 ```
 
+A handle is **scoped to one run** (it carries the run id), so `commit` stamps
+that run automatically; entities PERSIST across runs (found in run 1, fixed in
+run 2 — same `Key`, two events).
+
+**Five laws** — the model; a valid backing (§4) must honor them:
+
+1. **Append-only** — `commit` never deletes or mutates a prior event; it appends.
+2. **Atomic** — for one `commit`, value-set + event-append is one unit (both or
+   neither).
+3. **Idempotent on `(Key, run, kind)`** — re-committing the same transition in the
+   same run is absorbed (no duplicate event); retries / parallel re-entry safe.
+4. **Read-your-writes (per run)** — after `commit(e, ..)`, a later `view(scope ∋ e)`
+   sees e's new value.
+5. **Value ≡ timeline** — an entity's current value agrees with its latest
+   transition (status = last event's `kind`); the timeline is the truth, the
+   value is its projection — a backing MAY materialize/cache the value but must
+   keep it consistent.
+
 How it is **backed** — in-memory, an event log, a document store, a SQL DB — is a
-separate, pluggable concern the model and every step are oblivious to. (Reference:
-A.R.C. *happens* to back it with SQLite rows; that is arc's storage choice, not
-the blackboard.)
+separate, pluggable concern the model and every step are oblivious to, as long as
+the five laws hold. (Reference: A.R.C. backs it with SQLite rows — one storage
+choice, not the blackboard.)
 
 **Context = how a step is HANDED the blackboard (the tars seam).** A step never
 constructs or fetches it. tars threads a consumer-supplied `Arc<S>` (the
