@@ -1,54 +1,58 @@
-//! The blackboard MODEL (Doc 19 §4.1) — **generic framework infrastructure**.
+//! The blackboard MODEL (Doc 19 §4.1) — **framework mechanism**, zero domain.
 //!
-//! A blackboard is a keyed set of **entities**; each entity has a current value
-//! and an **append-only timeline of self-describing events**. Two operations —
+//! A blackboard is a keyed set of **entities**; each has a current value and an
+//! **append-only timeline of self-describing events**. Two operations —
 //! `view` + `commit` — and five laws. It is the single framework-owned write
-//! path: a step appends ITS event at source, so a finding's timeline can never
-//! end up holding only the last event (the bug the model exists to kill).
+//! path: a step appends ITS event at source, so a timeline can never collapse to
+//! only its last event (the bug the model exists to kill).
 //!
-//! tars supplies the whole framework: the [`Blackboard`] trait, BOTH backings
-//! ([`SqliteBlackboard`] + [`MemBlackboard`]), and the [`BlackboardCodec`] seam.
-//! A **consumer supplies only a `BlackboardCodec`** — how to key / (de)serialize
-//! its entity, map its event kind to the wire, and project the value≡timeline
-//! status. The consumer writes NO storage code and owns NO laws: it declares its
-//! domain, tars runs the model. (Reference: A.R.C. binds `Entity = Finding`,
-//! `Event = EventKind` via one `FindingCodec` — and reuses these backings.)
+//! ## Responsibility split (this is the whole point)
+//! tars owns the **mechanism**, bound to the run/pipeline context but NOT to any
+//! domain:
+//!   - [`Blackboard`] — the contract (view/timeline/commit).
+//!   - [`BlackboardStore`] — the **injection port**: the storage operations a
+//!     consumer plugs in (upsert / append_event / read_timeline / sync_status /
+//!     view), each taking a `&Connection`. tars never writes a domain row.
+//!   - [`SqliteBlackboard`] — the **orchestrator**: holds the run's connection +
+//!     `run_id` (the context), and on `commit` opens one transaction and calls
+//!     the injected ops IN ORDER. That orchestration is where the five laws are
+//!     enforced (atomic = the tx; idempotent = the store's UNIQUE key;
+//!     value≡timeline = it calls `sync_status` after the append).
+//!
+//! The consumer owns the **domain + storage**: a `BlackboardStore` impl that
+//! reuses ITS OWN tables and queries. (Reference: A.R.C.'s `FindingStore` wraps
+//! its existing `findings`/`finding_events` writers — no blob, its report/board
+//! keep reading the same tables.)
 //!
 //! ## The five laws (Doc 19 §4.1)
-//! 1. **Append-only** — `commit` never deletes or mutates a prior event.
-//! 2. **Atomic** — value-set + event-append is one unit per commit.
-//! 3. **Idempotent on `(Key, run, kind)`** — a re-committed transition is absorbed.
+//! 1. **Append-only** — `commit` never deletes/mutates a prior event.
+//! 2. **Atomic** — value-set + event-append is one transaction per commit.
+//! 3. **Idempotent on `(key, run, kind)`** — a re-committed transition is absorbed.
 //! 4. **Read-your-writes** — after `commit(e, ..)`, `view(scope ∋ e)` sees it.
-//! 5. **Value ≡ timeline** — status is a projection of the event log; the log is
-//!    the truth.
-//!
-//! The `Scope` and provenance dimensions are framework-universal (every
-//! blackboard has a status and a birth run), so they are concrete here — the
-//! consumer does not reinvent them.
+//! 5. **Value ≡ timeline** — status is a projection of the event log.
 
 mod memory;
 mod sqlite;
 
-pub use memory::MemBlackboard;
+pub use memory::InMemoryBlackboard;
 pub use sqlite::SqliteBlackboard;
 
 #[cfg(test)]
 mod laws;
 
-/// A read selector over entities — the framework-universal dimensions.
+use rusqlite::Connection;
+
+/// A read selector over entities — the framework-universal dimensions (every
+/// blackboard has a status and a birth run).
 #[derive(Debug, Clone)]
 pub enum Scope {
-    /// Every entity on the board.
     All,
-    /// Entities whose current status is one of these.
     WithStatus(Vec<String>),
-    /// Entities first seen in a given run.
     FirstSeenIn(String),
 }
 
 /// One transition appended to an entity's timeline (Doc 19 §4.1). `version` is
-/// the state-of-world it happened in (a commit sha, say); `at` is captured AT
-/// the step, never at a run-end batch.
+/// the state-of-world it happened in; `at` is captured AT the step.
 #[derive(Debug, Clone)]
 pub struct Transition<Ev> {
     pub kind: Ev,
@@ -68,69 +72,97 @@ impl<Ev> Transition<Ev> {
     }
 }
 
-/// Blackboard failure. `Codec` carries the consumer's (de)serialization error as
-/// a message at the model boundary.
+/// Blackboard failure. `Domain` carries a consumer-side storage failure message
+/// at the model boundary (the injected ops return their own typed errors and
+/// map into this).
 #[derive(Debug, thiserror::Error)]
 pub enum BbError {
     #[error("blackboard sqlite: {0}")]
     Sqlite(#[from] rusqlite::Error),
-    #[error("blackboard codec: {0}")]
-    Codec(String),
+    #[error("blackboard store: {0}")]
+    Domain(String),
 }
 
-/// What a consumer supplies to use the framework backings: how to key /
-/// (de)serialize its entity, map its event kind to/from the wire, and project
-/// the value≡timeline status. tars owns storage; this owns the domain.
-///
-/// The consumer's `Key` is projected to a `String` (the backing's primary key) —
-/// any stable identity (a fingerprint, a UUID) maps cleanly. `Event` is a small
-/// `Copy` enum the consumer maps to/from a wire string.
-pub trait BlackboardCodec: Send + Sync + 'static {
-    /// The current value: key + attributes + state.
+/// The **domain seam** shared by BOTH backings: how a consumer's entity is
+/// keyed, how its event maps to the wire, and how a timeline projects to a
+/// status. Pure domain — no storage. [`InMemoryBlackboard`] needs only this;
+/// [`BlackboardStore`] extends it with the SQLite storage ops.
+pub trait BlackboardDomain: Send + Sync + 'static {
+    /// Current value: key + attributes + state.
     type Entity: Clone + Send + Sync;
-    /// The transition kind — a closed set.
+    /// Transition kind — a closed set.
     type Event: Copy + Eq + Send + Sync;
 
-    /// Stable identity of an entity (the blackboard Key), unchanged across runs.
+    /// Stable identity of an entity (the blackboard key), across runs.
     fn key(e: &Self::Entity) -> String;
-
-    /// Serialize the entity value; the backing stores it opaquely.
-    fn encode(e: &Self::Entity) -> Result<String, BbError>;
-    /// Inverse of [`Self::encode`].
-    fn decode(s: &str) -> Result<Self::Entity, BbError>;
 
     /// The status an entity carries when its timeline implies no transition
     /// (e.g. only a `found` sighting) — the value the consumer ships it with.
     fn initial_status(e: &Self::Entity) -> String;
 
-    /// Wire string for an event kind (stored in the timeline).
+    /// Wire string for an event kind.
     fn event_str(ev: Self::Event) -> String;
-    /// Parse a wire string back to an event kind (the consumer's own fallback
-    /// for an unknown token — never panic, never drop the row).
+    /// Parse a wire string back to an event kind (the consumer's own fallback).
     fn event_from_str(s: &str) -> Self::Event;
 
-    /// The **value ≡ timeline** projection (law #5): fold a timeline of event
-    /// kinds into the status it implies. `None` ⇒ no transition yet, keep the
-    /// entity's initial/current status. Both backings call THIS, so they agree.
+    /// The **value ≡ timeline** projection (law #5): fold a timeline into the
+    /// status it implies. `None` ⇒ keep the entity's initial/current status.
     fn project_status(timeline: &[Self::Event]) -> Option<String>;
+}
+
+/// The **SQLite injection port**: the storage operations a consumer plugs into
+/// [`SqliteBlackboard`]. Each is a free function over `&Connection` (the
+/// orchestrator hands it the run's connection, inside a transaction for the
+/// write path) — so a consumer reuses its OWN tables/queries instead of a
+/// tars-imposed schema. tars never learns what the rows are.
+///
+/// Contract the orchestrator relies on to keep the five laws:
+/// - `append_event` is idempotent on `(key, run, kind)` (a UNIQUE key), returns
+///   `true` only on a NEW row, and never mutates a prior event (append-only).
+/// - `sync_status` re-derives status from the timeline (the value≡timeline fold).
+pub trait BlackboardStore: BlackboardDomain {
+    /// Create whatever tables/indexes this store needs (idempotent). A store
+    /// over EXISTING consumer tables leaves this a no-op (the default).
+    fn init(conn: &Connection) -> Result<(), BbError> {
+        let _ = conn;
+        Ok(())
+    }
+
+    /// Set the entity's current value (no event). Idempotent on key.
+    fn upsert(conn: &Connection, e: &Self::Entity) -> Result<(), BbError>;
+
+    /// Append `ev` to `e`'s timeline for `run`, idempotently on
+    /// `(key, run, ev)`. `e` is passed whole so the store can stamp any
+    /// location it keeps (file/line). Returns `true` iff a new row was inserted.
+    fn append_event(
+        conn: &Connection,
+        e: &Self::Entity,
+        run: &str,
+        ev: Self::Event,
+        at: i64,
+        version: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<bool, BbError>;
+
+    /// Read an entity's timeline, oldest first.
+    fn read_timeline(conn: &Connection, key: &str) -> Result<Vec<Self::Event>, BbError>;
+
+    /// Re-derive + persist the entity's status from its timeline
+    /// (the value≡timeline projection).
+    fn sync_status(conn: &Connection, key: &str) -> Result<(), BbError>;
+
+    /// Read the current value of every entity matching `scope`.
+    fn view(conn: &Connection, scope: &Scope) -> Result<Vec<Self::Entity>, BbError>;
 }
 
 /// The blackboard model (Doc 19 §4.1). A handle is **scoped to one run** (it
 /// carries the run id), so `commit` stamps that run automatically; entities
 /// PERSIST across runs (found in run 1, fixed in run 2 — same key, two events).
 pub trait Blackboard: Send + Sync {
-    /// Current value: key + attributes + state.
     type Entity;
-    /// Transition kind — a closed set.
     type Event: Copy + Eq;
 
-    /// Project the current VALUE of every entity matching `scope`.
     fn view(&self, scope: &Scope) -> Result<Vec<Self::Entity>, BbError>;
-
-    /// Project the append-only TIMELINE of one entity (by key), oldest first.
     fn timeline(&self, key: &str) -> Result<Vec<Self::Event>, BbError>;
-
-    /// Append `t` to `e`'s timeline and set `e`'s value, atomically (both or
-    /// neither). Idempotent on `(key, run, kind)`.
     fn commit(&self, e: &Self::Entity, t: Transition<Self::Event>) -> Result<(), BbError>;
 }

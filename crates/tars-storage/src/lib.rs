@@ -47,7 +47,8 @@ mod pipeline_event_store;
 mod sqlite;
 
 pub use blackboard::{
-    Blackboard, BlackboardCodec, BbError, MemBlackboard, Scope, SqliteBlackboard, Transition,
+    BbError, Blackboard, BlackboardDomain, BlackboardStore, InMemoryBlackboard, Scope,
+    SqliteBlackboard, Transition,
 };
 pub use body_store::{BodyStore, SqliteBodyStore, SqliteBodyStoreConfig};
 pub use error::StorageError;

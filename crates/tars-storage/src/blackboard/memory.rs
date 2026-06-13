@@ -1,31 +1,30 @@
-//! The in-memory backing of the [`Blackboard`] model — **generic** over a
-//! [`BlackboardCodec`]. A real, usable backing for ephemeral / test runs, and
-//! the proof the five laws are the model's contract, not SQLite's: the law tests
+//! [`InMemoryBlackboard`] — the in-memory implementation of [`Blackboard`].
+//! It needs only the [`BlackboardDomain`] seam (key / event-map / status
+//! projection); its storage is a generic `HashMap` + append-only `Vec` the
+//! framework owns. A real, usable backing for ephemeral / test runs, and the
+//! proof the five laws are the model's contract, not SQLite's — the law tests
 //! run against this AND [`super::SqliteBlackboard`] and must pass identically.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Mutex;
 
-use super::{BbError, Blackboard, BlackboardCodec, Scope, Transition};
+use super::{BbError, Blackboard, BlackboardDomain, Scope, Transition};
 
-/// In-memory blackboard, scoped to one run (`run_id`), generic over the
-/// consumer's [`BlackboardCodec`].
-pub struct MemBlackboard<C: BlackboardCodec> {
+/// In-memory blackboard, scoped to one run, generic over a [`BlackboardDomain`].
+pub struct InMemoryBlackboard<D: BlackboardDomain> {
     run_id: String,
-    state: Mutex<State<C>>,
+    state: Mutex<State<D>>,
 }
 
-struct State<C: BlackboardCodec> {
-    /// Current value per key (status is a projection of `log`, law #5).
-    entities: HashMap<String, Entry<C>>,
-    /// The append-only timeline across all entities (law #1).
+struct State<D: BlackboardDomain> {
+    entities: HashMap<String, Entry<D>>,
     log: Vec<Logged>,
-    _codec: PhantomData<fn() -> C>,
+    _d: PhantomData<fn() -> D>,
 }
 
-struct Entry<C: BlackboardCodec> {
-    value: C::Entity,
+struct Entry<D: BlackboardDomain> {
+    value: D::Entity,
     status: String,
     first_seen_run: String,
 }
@@ -36,11 +35,11 @@ struct Logged {
     kind_str: String,
 }
 
-impl<C: BlackboardCodec> MemBlackboard<C> {
+impl<D: BlackboardDomain> InMemoryBlackboard<D> {
     pub fn new(run_id: impl Into<String>) -> Self {
         Self {
             run_id: run_id.into(),
-            state: Mutex::new(State { entities: HashMap::new(), log: Vec::new(), _codec: PhantomData }),
+            state: Mutex::new(State { entities: HashMap::new(), log: Vec::new(), _d: PhantomData }),
         }
     }
 
@@ -49,11 +48,11 @@ impl<C: BlackboardCodec> MemBlackboard<C> {
     }
 }
 
-impl<C: BlackboardCodec> Blackboard for MemBlackboard<C> {
-    type Entity = C::Entity;
-    type Event = C::Event;
+impl<D: BlackboardDomain> Blackboard for InMemoryBlackboard<D> {
+    type Entity = D::Entity;
+    type Event = D::Event;
 
-    fn view(&self, scope: &Scope) -> Result<Vec<C::Entity>, BbError> {
+    fn view(&self, scope: &Scope) -> Result<Vec<D::Entity>, BbError> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let mut keys: Vec<&String> = s
             .entities
@@ -69,33 +68,32 @@ impl<C: BlackboardCodec> Blackboard for MemBlackboard<C> {
         Ok(keys.into_iter().map(|k| s.entities[k].value.clone()).collect())
     }
 
-    fn timeline(&self, key: &str) -> Result<Vec<C::Event>, BbError> {
+    fn timeline(&self, key: &str) -> Result<Vec<D::Event>, BbError> {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         Ok(s.log
             .iter()
             .filter(|e| e.key == key)
-            .map(|e| C::event_from_str(&e.kind_str))
+            .map(|e| D::event_from_str(&e.kind_str))
             .collect())
     }
 
-    fn commit(&self, e: &C::Entity, t: Transition<C::Event>) -> Result<(), BbError> {
-        let key = C::key(e);
+    fn commit(&self, e: &D::Entity, t: Transition<D::Event>) -> Result<(), BbError> {
+        let key = D::key(e);
         // Law #2 (atomic): one lock guards value-set AND event-append.
         let mut s = self.state.lock().unwrap_or_else(|st| st.into_inner());
 
-        // Upsert the value; preserve first_seen_run on re-touch.
         let first_seen = s
             .entities
             .get(&key)
-            .map(|prior| prior.first_seen_run.clone())
+            .map(|p| p.first_seen_run.clone())
             .unwrap_or_else(|| self.run_id.clone());
         s.entities.insert(
             key.clone(),
-            Entry { value: e.clone(), status: C::initial_status(e), first_seen_run: first_seen },
+            Entry { value: e.clone(), status: D::initial_status(e), first_seen_run: first_seen },
         );
 
         // Law #3 (idempotent on key+run+kind): absorb a duplicate transition.
-        let kind_str = C::event_str(t.kind);
+        let kind_str = D::event_str(t.kind);
         let dup = s
             .log
             .iter()
@@ -104,15 +102,14 @@ impl<C: BlackboardCodec> Blackboard for MemBlackboard<C> {
             s.log.push(Logged { key: key.clone(), run_id: self.run_id.clone(), kind_str });
         }
 
-        // Law #5 (value ≡ timeline): re-derive status from the (post-append)
-        // timeline via the SHARED codec projection.
-        let timeline: Vec<C::Event> = s
+        // Law #5 (value ≡ timeline): re-derive status from the post-append log.
+        let timeline: Vec<D::Event> = s
             .log
             .iter()
             .filter(|ev| ev.key == key)
-            .map(|ev| C::event_from_str(&ev.kind_str))
+            .map(|ev| D::event_from_str(&ev.kind_str))
             .collect();
-        if let Some(status) = C::project_status(&timeline) {
+        if let Some(status) = D::project_status(&timeline) {
             if let Some(entry) = s.entities.get_mut(&key) {
                 entry.status = status;
             }
