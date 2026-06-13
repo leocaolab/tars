@@ -113,35 +113,40 @@ impl CassetteProvider {
 
 impl Drop for CassetteProvider {
     fn drop(&mut self) {
-        // Auto-VCR: on run end, a recording provider writes its captured
-        // (fingerprint → response) map to disk. Sorted keys for a stable,
-        // diff-friendly cassette. Best-effort — a write failure here must
-        // not panic a teardown, so it's logged, not propagated.
+        // Backstop only — the primary flush is per-capture in `stream`,
+        // because a CLI host that exits via std::process::exit never runs
+        // destructors. This catches the graceful-shutdown case.
         if let Mode::Record {
             captured,
             flush_path: Some(path),
             ..
         } = &self.mode
         {
-            let map = std::mem::take(&mut *captured.lock().unwrap_or_else(|e| e.into_inner()));
-            if map.is_empty() {
-                return;
+            let map = captured.lock().unwrap_or_else(|e| e.into_inner());
+            write_cassette(&map, path);
+        }
+    }
+}
+
+/// Serialize a captured map to a cassette file (sorted keys → stable,
+/// diff-friendly). Best-effort: a write failure is logged, never panics.
+fn write_cassette(map: &HashMap<String, String>, path: &std::path::Path) {
+    if map.is_empty() {
+        return;
+    }
+    let sorted: std::collections::BTreeMap<_, _> = map.iter().collect();
+    match serde_json::to_string_pretty(&sorted) {
+        Ok(json) => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
-            let sorted: std::collections::BTreeMap<_, _> = map.into_iter().collect();
-            match serde_json::to_string_pretty(&sorted) {
-                Ok(json) => {
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    if let Err(e) = std::fs::write(path, json) {
-                        tracing::warn!(error = %e, path = %path.display(), "cassette flush failed");
-                    } else {
-                        tracing::info!(path = %path.display(), entries = sorted.len(), "cassette recorded");
-                    }
-                }
-                Err(e) => tracing::warn!(error = %e, "cassette serialize failed"),
+            if let Err(e) = std::fs::write(path, json) {
+                tracing::warn!(error = %e, path = %path.display(), "cassette flush failed");
+            } else {
+                tracing::debug!(path = %path.display(), entries = sorted.len(), "cassette flushed");
             }
         }
+        Err(e) => tracing::warn!(error = %e, "cassette serialize failed"),
     }
 }
 
@@ -184,7 +189,9 @@ impl LlmProvider for CassetteProvider {
                 ))),
             },
             Mode::Record {
-                inner, captured, ..
+                inner,
+                captured,
+                flush_path,
             } => {
                 // Collect the inner stream, aggregate the text, capture it,
                 // then re-emit verbatim (collect-then-replay; recording is
@@ -198,10 +205,19 @@ impl LlmProvider for CassetteProvider {
                         _ => None,
                     })
                     .collect();
-                captured
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(key, text);
+                // Flush after EVERY capture (a fresh snapshot under the lock),
+                // not on Drop: a CLI host that exits via std::process::exit
+                // never runs destructors, so Drop-only flushing silently loses
+                // the whole recording. Per-capture write is cheap for the tiny
+                // corpora cassettes target.
+                let snapshot = {
+                    let mut guard = captured.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.insert(key, text);
+                    guard.clone()
+                };
+                if let Some(path) = flush_path {
+                    write_cassette(&snapshot, path);
+                }
                 Ok(Box::pin(stream::iter(events)))
             }
         }
