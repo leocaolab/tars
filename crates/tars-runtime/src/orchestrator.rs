@@ -197,6 +197,134 @@ impl StepCondition {
     }
 }
 
+/// Fan-out shape for a [`PlanBuilder`] stage — how one declared stage
+/// expands into concrete [`PlanStep`]s over `n` items.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fan {
+    /// One step per item — `{name}-0..{name}-{n-1}`. Each `{name}-i`
+    /// depends on `{upstream}-i` for every `after` stage (per-item
+    /// pairing: `fix-i` ← `scan-i`).
+    PerItem,
+    /// Like [`Fan::PerItem`] but SERIALIZED: `{name}-i` additionally
+    /// depends on `{name}-{i-1}`, so the stage runs one item at a time
+    /// (a single-writer chain — e.g. merges that all touch HEAD).
+    Chain,
+    /// A single step `{name}` depending on EVERY step of each `after`
+    /// stage (a fan-in barrier — e.g. one end-of-run sweep).
+    Collect,
+}
+
+struct StageSpec {
+    name: String,
+    worker_role: String,
+    fan: Fan,
+    after: Vec<String>,
+    /// `(upstream stage name, substring)` → gate each item on that
+    /// upstream item's `PartialResult.summary` containing the substring.
+    gate: Option<(String, String)>,
+}
+
+/// Declarative fan-out plan builder. Declare each STAGE once — its worker
+/// role, fan-out shape, upstream stages, optional gate — then `build(n)`
+/// expands them into a concrete [`Plan`] of `n`-wide [`PlanStep`]s with the
+/// right per-item dependencies and conditions. This is the pipeline shape a
+/// fan-out consumer (per-file review, per-finding fix, …) would otherwise
+/// hand-roll with nested `for` loops + manual `{name}-{i}` id/dep wiring;
+/// the builder makes the shape declarative and the wiring one place.
+///
+/// ```ignore
+/// let plan = PlanBuilder::new("scan-fix", "review then fix")
+///     .stage("scan", "scan_file", Fan::PerItem, &[], None)
+///     .stage("fix",  "fix_file",  Fan::PerItem, &["scan"], Some(("scan", "\"has_findings\":true")))
+///     .stage("merge","merge",     Fan::Chain,   &["fix"],  None)
+///     .build(n_files);
+/// // → scan-0..scan-{n-1} (roots),
+/// //   fix-i (dep scan-i, gated on scan-i's summary),
+/// //   merge-i (dep fix-i + merge-{i-1}).
+/// ```
+pub struct PlanBuilder {
+    plan_id: String,
+    goal: String,
+    stages: Vec<StageSpec>,
+}
+
+impl PlanBuilder {
+    pub fn new(plan_id: impl Into<String>, goal: impl Into<String>) -> Self {
+        Self { plan_id: plan_id.into(), goal: goal.into(), stages: Vec::new() }
+    }
+
+    /// Append a stage. `after` = upstream stage names; `gate` =
+    /// `Some((upstream_stage, substring))` to skip an item whose upstream
+    /// item's `PartialResult.summary` lacks the substring. The gate's
+    /// `if_dep` is auto-filled to the per-item upstream (`{upstream}-{i}`),
+    /// which `Plan::validate` requires to be in `depends_on` — so the
+    /// gated stage MUST list that upstream in `after`.
+    pub fn stage(
+        mut self,
+        name: impl Into<String>,
+        worker_role: impl Into<String>,
+        fan: Fan,
+        after: &[&str],
+        gate: Option<(&str, &str)>,
+    ) -> Self {
+        self.stages.push(StageSpec {
+            name: name.into(),
+            worker_role: worker_role.into(),
+            fan,
+            after: after.iter().map(|s| s.to_string()).collect(),
+            gate: gate.map(|(d, c)| (d.to_string(), c.to_string())),
+        });
+        self
+    }
+
+    /// Expand the declared stages into a concrete [`Plan`] over `n` items.
+    pub fn build(self, n: usize) -> Plan {
+        let mut steps = Vec::new();
+        for st in &self.stages {
+            match st.fan {
+                Fan::PerItem | Fan::Chain => {
+                    for i in 0..n {
+                        let mut deps: Vec<String> =
+                            st.after.iter().map(|a| format!("{a}-{i}")).collect();
+                        if st.fan == Fan::Chain && i > 0 {
+                            deps.push(format!("{}-{}", st.name, i - 1));
+                        }
+                        let condition = match &st.gate {
+                            Some((dep_stage, contains)) => StepCondition::IfDepSummaryContains {
+                                if_dep: format!("{dep_stage}-{i}"),
+                                contains: contains.clone(),
+                            },
+                            None => StepCondition::Always,
+                        };
+                        steps.push(PlanStep {
+                            id: format!("{}-{i}", st.name),
+                            worker_role: st.worker_role.clone(),
+                            instruction: format!("{} {i}", st.name),
+                            depends_on: deps,
+                            condition,
+                        });
+                    }
+                }
+                Fan::Collect => {
+                    let deps: Vec<String> = st
+                        .after
+                        .iter()
+                        .flat_map(|a| (0..n).map(move |i| format!("{a}-{i}")))
+                        .collect();
+                    steps.push(PlanStep {
+                        id: st.name.clone(),
+                        worker_role: st.worker_role.clone(),
+                        instruction: st.name.clone(),
+                        depends_on: deps,
+                        condition: StepCondition::Always,
+                    });
+                }
+            }
+        }
+        Plan { plan_id: self.plan_id, goal: self.goal, steps }
+    }
+}
+
 impl Plan {
     /// Group `steps` into dependency depth-levels for parallel
     /// execution. Level 0 = no deps (roots). Level N = steps whose
@@ -696,6 +824,47 @@ mod tests {
             depends_on: deps.into_iter().map(String::from).collect(),
             condition: StepCondition::Always,
         }
+    }
+
+    #[test]
+    fn plan_builder_fans_out_with_per_item_deps_gate_and_chain() {
+        let plan = PlanBuilder::new("p", "g")
+            .stage("scan", "scan_file", Fan::PerItem, &[], None)
+            .stage("fix", "fix_file", Fan::PerItem, &["scan"], Some(("scan", "has_findings")))
+            .stage("merge", "merge", Fan::Chain, &["fix"], None)
+            .build(2);
+
+        let ids: Vec<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["scan-0", "scan-1", "fix-0", "fix-1", "merge-0", "merge-1"]);
+
+        // scan is a parallel root.
+        assert!(plan.steps[0].depends_on.is_empty());
+
+        // fix-i pairs with scan-i AND is gated on scan-i's summary.
+        let fix0 = plan.steps.iter().find(|s| s.id == "fix-0").unwrap();
+        assert_eq!(fix0.depends_on, vec!["scan-0".to_string()]);
+        assert!(matches!(&fix0.condition,
+            StepCondition::IfDepSummaryContains { if_dep, contains }
+            if if_dep == "scan-0" && contains == "has_findings"));
+
+        // merge-i pairs with fix-i AND chains to merge-{i-1} (single writer).
+        let merge0 = plan.steps.iter().find(|s| s.id == "merge-0").unwrap();
+        assert_eq!(merge0.depends_on, vec!["fix-0".to_string()]);
+        let merge1 = plan.steps.iter().find(|s| s.id == "merge-1").unwrap();
+        assert_eq!(merge1.depends_on, vec!["fix-1".to_string(), "merge-0".to_string()]);
+
+        // The whole thing validates + layers (scan | fix | merge-chain).
+        plan.validate().expect("builder output is a valid plan");
+    }
+
+    #[test]
+    fn plan_builder_collect_is_a_fan_in_barrier() {
+        let plan = PlanBuilder::new("p", "g")
+            .stage("fix", "fix", Fan::PerItem, &[], None)
+            .stage("sweep", "sweep", Fan::Collect, &["fix"], None)
+            .build(3);
+        let sweep = plan.steps.iter().find(|s| s.id == "sweep").unwrap();
+        assert_eq!(sweep.depends_on, vec!["fix-0".to_string(), "fix-1".to_string(), "fix-2".to_string()]);
     }
 
     #[test]

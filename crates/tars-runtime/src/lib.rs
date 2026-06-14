@@ -81,7 +81,9 @@ pub use metamorphic::{
     DeleteSubstringMutation, DirectionalRelation, GoldenMatch, InvarianceRelation,
     MetamorphicRelation, Mutation, MutationVerdict, mutation_caught,
 };
-pub use orchestrator::{OrchestratorAgent, OrchestratorError, Plan, PlanStep, StepCondition};
+pub use orchestrator::{
+    Fan, OrchestratorAgent, OrchestratorError, Plan, PlanBuilder, PlanStep, StepCondition,
+};
 pub use arg_judge::{ArgEquivalenceJudge, args_match_judged};
 pub use trajectory_match::{MatchMode, ToolStep};
 pub use prompt::PromptBuilder;
