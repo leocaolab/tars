@@ -48,20 +48,48 @@ value + reflection); **Reflexion** supplies the gradient-free backprop
 (natural-language critique as the value-update signal); **process-reward /
 rStar / AlphaCodium** supply the verifier-grounded-search-for-code precedent.
 
-### 1.1 The actor–critic + controller decomposition
+### 1.1 The role roster (actor–critic + controller)
 
-Three agents, the minimal complete set, mapping 1:1 to RL/MCTS roles — and each
-killing one pain:
+**5 first-class roles**, plus the Human (escalation-only boundary) and a
+macro-only Synthesizer. But the number that matters is **2 model camps** —
+**doer** vs **judge** — because that separation is the anti-incest invariant
+(§1.2). Of the 5 roles only **3 are LLMs**; 2 are pure code. A role is defined by
+five things: ① its I/O contract (what it reads/writes on the blackboard), ② its
+RL function (policy / value / control), ③ its model camp, ④ LLM vs code vs human,
+⑤ a single responsibility **and the thing it must NOT do**.
 
-| Agent | RL/MCTS role | Kills |
-|---|---|---|
-| **Planner** ("从讨论生成进一步计划") | policy `π` / node **expansion** | no-next-step |
-| **Goal-Eval** ("eval 目的是否达成") | **reward `R` / value `V`** + terminal + drift detector | drift |
-| **Yes-Man** | **controller / liveness** (select + commit, never returns to human) | stop-and-ask |
+| Role | Does | LLM/code | Camp | tars primitive | MUST NOT | Kills |
+|---|---|---|---|---|---|---|
+| **Planner** ("从讨论生成计划") | propose N candidate next-steps from spec + last critique | LLM | doer | `OrchestratorAgent::plan` (`orchestrator.rs:473`) | execute; score | no-next-step |
+| **Executor** ("谁来执行") | do the chosen step for real in an isolated worktree | LLM | doer | `WorkerAgent` (`worker.rs`), Doc 26 §15 sandbox | self-grade; pick the next step | (rollout) |
+| **Verifier** ("谁来 eval, trustworthy half") | run compile/test/eval → the hard number | **code** | — | `CheckRunner`/`Invariant` (`check.rs:58`), eval/Doc 26 | trust "looks right" (no LLM) | drift |
+| **Evaluator** ("eval 目的是否达成") | score the residue the Verifier can't + emit the "why" critique (Reflexion) | LLM | **judge** | `CriticAgent::critique` (`critic.rs:74`) + `ArgEquivalenceJudge` + `ensure_anti_incest` (`judge.rs:76`) | share a model with the doers; dominate the backprop number | drift |
+| **Controller** (Yes-Man + Guard) | PUCT-select + commit + drive; terminal / escalate / no-progress | **code** | — | `run_task` (`task.rs:210`) + SearchTree | **judge correctness** — only says yes to *motion* | stop-and-ask |
+| *Human* | consulted **only** when Evaluator returns `Unevaluable`; lands the winning branch | human | — | — | be a runtime value oracle | — |
+| *Synthesizer* (macro) | merge the winner + runners-up's best ideas (design-selection) | LLM | doer | new (CUJ-4) | — | — |
 
-Plus a non-agent **No-Progress Guard** (convergence: K idle rounds → prune /
-backtrack / escalate; + a token/step budget) — without it the yes-man perpetuates
-forever.
+**Who evals (deliberately two layers).** A **Verifier** (deterministic *code* —
+compile/test/eval) produces the *trustworthy ground truth* that drives backprop;
+an **Evaluator** (*LLM*, anti-incest + capped + cached, Doc 26 args-judge pattern)
+scores only the residue the Verifier cannot. The load-bearing consequence: **a
+hallucinating LLM cannot corrupt the search**, because the number that moves the
+tree comes from the deterministic Verifier — the Evaluator only touches the small
+free-text remainder. This is the cure to "yes-man + weak verifier = fast confident
+failure" (§1.2).
+
+**Who executes.** The **Executor** (`WorkerAgent`) is a *distinct* role from the
+Planner: Planner decides *what*, Executor does it — only inside an isolated
+worktree with read-only sandboxed tools (Doc 26 §15). (Earlier drafts buried the
+Executor inside `run_task`; it is a first-class role.)
+
+**2 camps, ≥2 models.** doer = {Planner, Executor, Synthesizer}; judge =
+{Evaluator}; Verifier + Controller are code. The whole loop runs with as few as
+**two models** (one doer, one judge) — "how many roles" (5) ≠ "how many models"
+(2 camps).
+
+Plus a non-agent **No-Progress Guard** (folded into the Controller; convergence:
+K idle rounds → prune / backtrack / escalate; + a token/step budget) — without it
+the yes-man perpetuates forever.
 
 ### 1.2 The load-bearing safety invariant
 
