@@ -91,6 +91,16 @@ impl Pipeline {
     /// This is the Rust-native counterpart of `tars.Pipeline.from_default`
     /// in tars-py — same composition, no Python dependency.
     pub fn default_chain(provider: Arc<dyn LlmProvider>, opts: PipelineOpts) -> Self {
+        // CircuitBreaker is a per-provider wrapper (innermost, below
+        // Retry): wrap the single provider here so an open breaker
+        // rejects before the provider is hit. Routed `chain_over` callers
+        // have no single provider to wrap — they wrap each candidate
+        // before assembling the routed inner, so the field is theirs to
+        // ignore.
+        let provider = match &opts.circuit_breaker {
+            Some(cfg) => crate::circuit_breaker::CircuitBreaker::wrap(provider, cfg.clone()),
+            None => provider,
+        };
         Self::chain_over(crate::service::ProviderService::new(provider), opts)
     }
 
@@ -108,6 +118,9 @@ impl Pipeline {
             cache_registry,
             cache_factory,
             retry,
+            // Consumed by `default_chain` (provider-level wrapper); a
+            // routed inner service has no single provider to wrap.
+            circuit_breaker: _,
             cache,
         } = opts;
 
@@ -185,6 +198,22 @@ pub struct PipelineOpts {
     /// (3 attempts, exp backoff, 30s cap).
     pub retry: Option<crate::retry::RetryConfig>,
 
+    /// Per-provider circuit breaker. `None` (default) = no breaker.
+    /// When set, [`Pipeline::default_chain`] wraps the provider with
+    /// [`crate::CircuitBreaker`] (innermost, below Retry): after
+    /// `failure_threshold` consecutive open-time failures it opens and
+    /// rejects calls for `cooldown` with
+    /// [`tars_types::ProviderError::CircuitOpen`] (a `Retriable` class,
+    /// so Retry / Routing react). The breaker state lives on the wrapper,
+    /// so every call routed through the same built pipeline SHARES it —
+    /// concurrent callers fast-fail the moment any of them trips it,
+    /// which is the point for fan-out workloads (hundreds of concurrent
+    /// calls against one provider shouldn't each burn a full retry loop
+    /// when it's down). Ignored by [`Pipeline::chain_over`] — a routed
+    /// inner has no single provider to wrap; routed callers wrap each
+    /// candidate provider individually before building the inner.
+    pub circuit_breaker: Option<crate::circuit_breaker::CircuitBreakerConfig>,
+
     /// Include the `CacheLookup` layer. `true` (default) matches the
     /// canonical chain. Set `false` to skip caching entirely — useful
     /// for callers that need every call to hit the provider (latency
@@ -205,6 +234,7 @@ impl PipelineOpts {
             cache_registry: None,
             cache_factory: None,
             retry: None,
+            circuit_breaker: None,
             cache: true,
         }
     }
@@ -400,6 +430,82 @@ mod tests {
         let pipeline = Pipeline::default_chain(mock, opts);
         // cache_lookup dropped; the rest of the canonical order stands.
         assert_eq!(pipeline.layer_names(), &["telemetry", "retry"]);
+    }
+
+    #[tokio::test]
+    async fn default_chain_wires_circuit_breaker_when_configured() {
+        // A provider that always fails; with the breaker configured to
+        // open after 2 consecutive failures, the 3rd call must reject
+        // with CircuitOpen WITHOUT reaching the provider. Retry is set to
+        // a single attempt and cache disabled so each `call` = one
+        // provider hit and the breaker's per-call accounting is exact.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::time::Duration;
+        use tars_provider::{LlmEventStream, LlmProvider};
+        use tars_types::{Capabilities, Pricing, ProviderError, ProviderId};
+
+        struct AlwaysErr {
+            id: ProviderId,
+            caps: Capabilities,
+            hits: Arc<AtomicU32>,
+        }
+        #[async_trait]
+        impl LlmProvider for AlwaysErr {
+            fn id(&self) -> &ProviderId {
+                &self.id
+            }
+            fn capabilities(&self) -> &Capabilities {
+                &self.caps
+            }
+            async fn stream(
+                self: Arc<Self>,
+                _req: ChatRequest,
+                _ctx: RequestContext,
+            ) -> Result<LlmEventStream, ProviderError> {
+                self.hits.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::ModelOverloaded)
+            }
+        }
+
+        let hits = Arc::new(AtomicU32::new(0));
+        let provider: Arc<dyn LlmProvider> = Arc::new(AlwaysErr {
+            id: ProviderId::new("p"),
+            caps: Capabilities::text_only_baseline(Pricing::default()),
+            hits: hits.clone(),
+        });
+
+        let mut opts = PipelineOpts::new(ProviderId::new("p"));
+        opts.cache = false;
+        opts.retry = Some(crate::retry::RetryConfig {
+            max_attempts: 1,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+            multiplier: 1.0,
+            respect_retry_after: false,
+            max_attempts_maybe_retriable: 1,
+            max_wait: Duration::MAX,
+            jitter: Duration::ZERO,
+        });
+        opts.circuit_breaker = Some(crate::circuit_breaker::CircuitBreakerConfig {
+            failure_threshold: 2,
+            cooldown: Duration::from_secs(30),
+        });
+        let pipeline = Arc::new(Pipeline::default_chain(provider, opts));
+
+        let req = || ChatRequest::user(ModelHint::Explicit("m".into()), "x");
+        // Two failures trip the breaker (both reach the provider).
+        for _ in 0..2 {
+            let e = pipeline.clone().call(req(), RequestContext::test_default()).await;
+            assert!(matches!(e, Err(ProviderError::ModelOverloaded)));
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "both failures hit the provider");
+        // Third call: breaker is Open → reject without touching the provider.
+        let e = pipeline.clone().call(req(), RequestContext::test_default()).await;
+        assert!(
+            matches!(e, Err(ProviderError::CircuitOpen { .. })),
+            "breaker must reject the 3rd call as CircuitOpen",
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "open breaker spared the provider");
     }
 
     #[tokio::test]
