@@ -17,10 +17,18 @@
 //! - [`ErrorClass::MaybeRetriable`] — retry once. Anything more is
 //!   risky for parse / internal / subprocess failures.
 //!
-//! Backoff is exponential with jitter-free multiplier; if the error
-//! carries a `retry_after` (Anthropic / OpenAI Retry-After header)
-//! we honour that instead of computing our own — the provider knows
-//! its own load shape better than we do.
+//! Backoff is exponential; if the error carries a `retry_after`
+//! (Anthropic / OpenAI Retry-After header) we honour that instead of
+//! computing our own — the provider knows its own load shape better
+//! than we do.
+//!
+//! Optional **jitter** ([`RetryConfig::jitter`], off by default) adds a
+//! small pseudo-random offset to each *computed* backoff so that many
+//! independently-started clients sharing one rate-limited provider don't
+//! retry in lockstep (a thundering herd that re-collides every round).
+//! It is NOT applied to an explicit `Retry-After` — there the provider
+//! is dictating the cadence and a herd it told to wait `N`s should wait
+//! `N`s. Single-client callers leave it at zero.
 //!
 //! `max_wait` caps how long we'll honour a `Retry-After`. Past the
 //! cap, we bubble the error unchanged so an outer FallbackMiddleware
@@ -60,6 +68,16 @@ pub struct RetryConfig {
     /// instead of sleeping. Default: 30 s. Set to `Duration::MAX` to
     /// disable (don't — agents shouldn't sleep for minutes).
     pub max_wait: Duration,
+    /// Maximum random jitter ADDED to each *computed* backoff, to de-sync
+    /// many concurrent clients that would otherwise retry in lockstep
+    /// (thundering herd against a rate-limited provider). Each attempt's
+    /// actual jitter is a pseudo-random value in `[0, jitter)`, derived
+    /// from the wall-clock sub-millisecond fraction so independently-
+    /// started workers land on different offsets without a PRNG
+    /// dependency. NOT applied to an explicit `Retry-After` wait (the
+    /// provider's cadence is authoritative). Default `ZERO` — disabled,
+    /// so single-client behaviour and existing tests are unchanged.
+    pub jitter: Duration,
 }
 
 impl Default for RetryConfig {
@@ -72,6 +90,7 @@ impl Default for RetryConfig {
             respect_retry_after: true,
             max_attempts_maybe_retriable: 2,
             max_wait: Duration::from_secs(30),
+            jitter: Duration::ZERO,
         }
     }
 }
@@ -103,6 +122,9 @@ impl RetryMiddleware {
                 // Tests don't exercise long Retry-After bubbling; the
                 // dedicated test for that uses an explicit config.
                 max_wait: Duration::MAX,
+                // No jitter — polling tests advance the paused clock by
+                // an exact backoff and must land deterministically.
+                jitter: Duration::ZERO,
             },
         }
     }
@@ -194,10 +216,10 @@ impl LlmService for RetryService {
             let (wait, used_retry_after) = if cfg.respect_retry_after {
                 match err.retry_after() {
                     Some(ra) => (ra, true),
-                    None => (backoff, false),
+                    None => (with_jitter(backoff, cfg.jitter), false),
                 }
             } else {
-                (backoff, false)
+                (with_jitter(backoff, cfg.jitter), false)
             };
 
             // Don't sleep past the cap — bubble the error so an outer
@@ -286,6 +308,28 @@ fn millis_u64(d: Duration) -> u64 {
 /// doesn't validate `multiplier`, so guard the arithmetic here: a
 /// non-finite/negative multiplier or an overflowing product collapses
 /// to `max` rather than panicking inside the retry loop.
+/// Add a pseudo-random `[0, jitter)` offset to a computed backoff so
+/// concurrent clients de-sync. The randomness source is the wall-clock
+/// sub-millisecond fraction (`subsec_micros`): dep-free (no `rand`), and
+/// independently-started workers reach this point at different instants
+/// so they read different offsets — which is all jitter needs (de-sync,
+/// not cryptographic randomness). The jittered value feeds only this
+/// attempt's sleep; the exponential `backoff` itself escalates from the
+/// un-jittered base, so jitter never compounds. A zero ceiling (the
+/// default) or a frozen/unavailable clock yields the base unchanged,
+/// keeping `start_paused` tests deterministic.
+fn with_jitter(base: Duration, jitter: Duration) -> Duration {
+    let ceil_ms = u64::try_from(jitter.as_millis()).unwrap_or(u64::MAX);
+    if ceil_ms == 0 {
+        return base;
+    }
+    let offset_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_micros()) % ceil_ms)
+        .unwrap_or(0);
+    base + Duration::from_millis(offset_ms)
+}
+
 fn next_backoff(current: Duration, multiplier: f64, max: Duration) -> Duration {
     if !multiplier.is_finite() || multiplier < 0.0 {
         return max;
@@ -378,6 +422,23 @@ mod tests {
         assert_eq!(observed.load(Ordering::SeqCst), 3);
     }
 
+    #[test]
+    fn jitter_zero_is_identity_and_bounded_when_set() {
+        let base = Duration::from_secs(4);
+        // Zero ceiling (the default) must not perturb the backoff —
+        // this is what keeps `start_paused` polling tests deterministic.
+        assert_eq!(with_jitter(base, Duration::ZERO), base);
+        // A set ceiling adds an offset within `[0, jitter)`: never below
+        // base, never `base + jitter` or beyond. Sample a few reads (the
+        // wall clock advances between them) to exercise the range.
+        let ceil = Duration::from_millis(400);
+        for _ in 0..50 {
+            let w = with_jitter(base, ceil);
+            assert!(w >= base, "jitter must not shrink the wait");
+            assert!(w < base + ceil, "jitter must stay under the ceiling");
+        }
+    }
+
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn never_retries_permanent_errors() {
         let (svc, observed) = build(
@@ -412,6 +473,7 @@ mod tests {
             respect_retry_after: false,
             max_attempts_maybe_retriable: 2,
             max_wait: Duration::MAX,
+            jitter: Duration::ZERO,
         };
         let (svc, observed) = build(
             10,
@@ -440,6 +502,7 @@ mod tests {
             // Test asserts cancel during sleep — needs the sleep to
             // actually happen, so allow long waits.
             max_wait: Duration::MAX,
+            jitter: Duration::ZERO,
         };
         let (svc, observed) = build(
             10,
@@ -481,6 +544,7 @@ mod tests {
             respect_retry_after: true,
             max_attempts_maybe_retriable: 5,
             max_wait: Duration::from_secs(10),
+            jitter: Duration::ZERO,
         };
         let (svc, observed) = build(
             10,
@@ -522,6 +586,7 @@ mod tests {
             respect_retry_after: true,
             max_attempts_maybe_retriable: 5,
             max_wait: Duration::from_secs(10),
+            jitter: Duration::ZERO,
         };
         let (svc, observed) = build(
             1,
