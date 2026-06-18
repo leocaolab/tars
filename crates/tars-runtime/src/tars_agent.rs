@@ -39,6 +39,13 @@ use crate::worker::{WorkerAgent, WorkerError};
 
 /// An LLM-backed [`Agent`]: a [`SkillSet`] (backed by a tars-tools
 /// `ToolRegistry`) driven over a pure-inference provider.
+///
+/// `Clone` is cheap — `id`/`role`/`skills` are small value types and
+/// `llm`/`worker` are `Arc`s (the clone shares the provider + tool loop).
+/// It lets a domain agent set a PER-CALL [`WorkerPersona`] (e.g. a critic
+/// whose system prompt varies by rubric / L4-vs-L5 / stateful) by cloning
+/// then `with_persona`, instead of baking one persona at construction.
+#[derive(Clone)]
 pub struct TarsAgent {
     id: AgentId,
     role: AgentRole,
