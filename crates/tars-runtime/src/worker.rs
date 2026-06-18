@@ -70,6 +70,22 @@ use crate::prompt::PromptBuilder;
 /// model can't run forever.
 pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 50;
 
+/// Domain overrides for an agent that isn't the generic plan-step worker —
+/// a reviewer/verifier/critic with its OWN system prompt (persona) and its
+/// OWN structured-output contract, instead of the built-in
+/// `WORKER_SYSTEM_PROMPT` + `WorkerResult` schema. The tool loop, trajectory
+/// logging, and provider plumbing are unchanged — only the request's system
+/// text and (optionally) its `response_format` schema differ.
+#[derive(Clone, Debug)]
+pub struct WorkerPersona {
+    /// Replaces `WORKER_SYSTEM_PROMPT[_WITH_TOOLS]` verbatim.
+    pub system_prompt: String,
+    /// `(schema_name, json_schema)` for provider-side structured output.
+    /// `None` leaves the built-in schema decision (WorkerResult when the
+    /// worker has no tools; nothing when it does).
+    pub output_schema: Option<(String, serde_json::Value)>,
+}
+
 /// LLM-driven Worker — the agent that actually does the work for one
 /// plan step. See module docs for stub-vs-tool flavours.
 pub struct WorkerAgent {
@@ -92,6 +108,9 @@ pub struct WorkerAgent {
     /// budget, so a caller wiring such a model MUST set this from its config —
     /// see [`Self::with_thinking`].
     thinking: ThinkingMode,
+    /// Optional domain overrides (own system prompt + output schema). `None`
+    /// = the built-in worker protocol. See [`Self::with_persona`].
+    persona: Option<WorkerPersona>,
 }
 
 impl WorkerAgent {
@@ -110,6 +129,7 @@ impl WorkerAgent {
             tools: None,
             max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
             thinking: ThinkingMode::Off,
+            persona: None,
         })
     }
 
@@ -135,6 +155,7 @@ impl WorkerAgent {
             tools: Some(tools),
             max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
             thinking: ThinkingMode::Off,
+            persona: None,
         })
     }
 
@@ -148,6 +169,7 @@ impl WorkerAgent {
             tools: self.tools.clone(),
             max_tool_iterations: n,
             thinking: self.thinking,
+            persona: self.persona.clone(),
         })
     }
 
@@ -163,6 +185,24 @@ impl WorkerAgent {
             tools: self.tools.clone(),
             max_tool_iterations: self.max_tool_iterations,
             thinking,
+            persona: self.persona.clone(),
+        })
+    }
+
+    /// Give this worker a domain [`WorkerPersona`] — its own system prompt and
+    /// (optionally) its own structured-output schema, replacing the built-in
+    /// `WORKER_SYSTEM_PROMPT` + `WorkerResult` contract. Returns a fresh Arc.
+    /// Use for a reviewer/verifier/critic whose output isn't a generic
+    /// `WorkerResult`. The tool loop and trajectory logging are unchanged.
+    pub fn with_persona(self: Arc<Self>, persona: WorkerPersona) -> Arc<Self> {
+        Arc::new(Self {
+            id: self.id.clone(),
+            model: self.model.clone(),
+            domain: self.domain.clone(),
+            tools: self.tools.clone(),
+            max_tool_iterations: self.max_tool_iterations,
+            thinking: self.thinking,
+            persona: Some(persona),
         })
     }
 
@@ -258,10 +298,12 @@ impl WorkerAgent {
         let user_text = serde_json::to_string_pretty(&payload)
             .expect("JSON encoding of plan/step is infallible for valid types");
 
-        let system_prompt = if self.tools.is_some() {
-            WORKER_SYSTEM_PROMPT_WITH_TOOLS
-        } else {
-            WORKER_SYSTEM_PROMPT
+        // A persona's own system prompt wins; otherwise the built-in worker
+        // prompt (tool-aware variant when this worker has tools).
+        let system_prompt: String = match &self.persona {
+            Some(p) => p.system_prompt.clone(),
+            None if self.tools.is_some() => WORKER_SYSTEM_PROMPT_WITH_TOOLS.to_string(),
+            None => WORKER_SYSTEM_PROMPT.to_string(),
         };
         let tool_specs = self
             .tools
@@ -282,8 +324,15 @@ impl WorkerAgent {
         // so dropping the provider hint for tool agents costs nothing — and
         // matches the drive-loop's existing "don't re-impose structured_output
         // mid tool-loop" contract.
+        // Provider-side structured output only for tool-free workers (the
+        // response_format-with-tools rejection above). A persona may supply its
+        // OWN schema (e.g. a verdict {verdict, reason, confidence}); otherwise
+        // the built-in WorkerResult.
         if !has_tools {
-            pb = pb.structured_output("WorkerResult", worker_json_schema());
+            match self.persona.as_ref().and_then(|p| p.output_schema.as_ref()) {
+                Some((name, schema)) => pb = pb.structured_output(name.clone(), schema.clone()),
+                None => pb = pb.structured_output("WorkerResult", worker_json_schema()),
+            }
         }
         let mut req = pb.build();
         // Apply the worker's configured thinking mode. PromptBuilder defaults to
@@ -790,6 +839,48 @@ mod tests {
             .collect();
         assert!(required.contains(&"summary"));
         assert!(required.contains(&"confidence"));
+    }
+
+    #[test]
+    fn persona_overrides_system_prompt_and_output_schema() {
+        // A reviewer/verifier persona replaces the built-in worker prompt +
+        // WorkerResult schema with its own — so a domain agent (own persona +
+        // verdict contract) can be a TarsAgent without bending the generic
+        // worker protocol.
+        let verdict_schema = json!({
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string"},
+                "reason": {"type": "string"},
+                "confidence": {"type": "number"}
+            },
+            "required": ["verdict", "reason", "confidence"]
+        });
+        let w = WorkerAgent::new(AgentId::new("verify"), "gpt-4o", "verify").with_persona(
+            WorkerPersona {
+                system_prompt: "You are a strict code-review VERIFIER.".into(),
+                output_schema: Some(("Verdict".into(), verdict_schema)),
+            },
+        );
+        let plan = sample_plan();
+        let empty = std::collections::HashMap::new();
+        let req = w.build_worker_request(&plan, &plan.steps[0], &[], &empty);
+        // System = the persona's, NOT the built-in "Worker…" prompt.
+        assert_eq!(
+            req.system.as_deref(),
+            Some("You are a strict code-review VERIFIER.")
+        );
+        // Schema = the persona's verdict, NOT WorkerResult.
+        let schema = req.structured_output.as_ref().expect("structured_output set");
+        assert_eq!(schema.name.as_deref(), Some("Verdict"));
+        let required: Vec<&str> = schema.schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"verdict"));
+        assert!(!required.contains(&"summary"));
     }
 
     #[test]

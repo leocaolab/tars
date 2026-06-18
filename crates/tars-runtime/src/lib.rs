@@ -99,4 +99,4 @@ pub use tars_tools::{
     Tool, ToolContext, ToolDecision, ToolError, ToolRegistry, ToolResult,
 };
 pub use task::{RunTaskConfig, RunTaskError, StepOutcome, TaskOutcome, run_task};
-pub use worker::{WorkerAgent, WorkerError};
+pub use worker::{WorkerAgent, WorkerError, WorkerPersona};

@@ -88,6 +88,16 @@ impl TarsAgent {
         self
     }
 
+    /// Give the agent a domain [`WorkerPersona`] — its own system prompt and
+    /// (optionally) its own structured-output schema, instead of the built-in
+    /// worker protocol. This is what makes a TarsAgent a *reviewer* / *verifier*
+    /// / *critic* (own persona + verdict schema) rather than a generic
+    /// plan-step worker, while still being scheduled as an `Agent` + `Worker`.
+    pub fn with_persona(mut self, persona: crate::worker::WorkerPersona) -> Self {
+        self.worker = self.worker.clone().with_persona(persona);
+        self
+    }
+
     /// Render a [`Task`] into the single-step instruction the worker reads.
     /// Goal first, then any named inputs as a labelled block.
     fn instruction_for(task: &Task) -> String {
