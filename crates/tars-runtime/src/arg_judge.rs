@@ -196,10 +196,10 @@ mod tests {
 
     #[test]
     fn parse_yes_no_is_forgiving_but_strict() {
-        assert_eq!(parse_yes_no("YES").unwrap(), true);
-        assert_eq!(parse_yes_no("yes, they match\nbecause…").unwrap(), true);
-        assert_eq!(parse_yes_no("NO").unwrap(), false);
-        assert_eq!(parse_yes_no("Not equivalent — different query").unwrap(), false);
+        assert!(parse_yes_no("YES").unwrap());
+        assert!(parse_yes_no("yes, they match\nbecause…").unwrap());
+        assert!(!parse_yes_no("NO").unwrap());
+        assert!(!parse_yes_no("Not equivalent — different query").unwrap());
         assert!(parse_yes_no("maybe?").is_err());
     }
 
