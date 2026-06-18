@@ -28,10 +28,14 @@ use tars_pipeline::LlmService;
 use tars_tools::ToolRegistry;
 use tars_types::TrajectoryId;
 
-use crate::agent::AgentContext as StepContext;
+use std::collections::HashMap;
+
+use crate::agent::{Agent as StepAgent, AgentContext as StepContext};
+use crate::executor::{Worker, WorkerContext, WorkerOutput};
 use crate::message::AgentMessage;
 use crate::orchestrator::{Plan, PlanStep, StepCondition};
-use crate::worker::WorkerAgent;
+use crate::runtime::execute_agent_step;
+use crate::worker::{WorkerAgent, WorkerError};
 
 /// An LLM-backed [`Agent`]: a [`SkillSet`] (backed by a tars-tools
 /// `ToolRegistry`) driven over a pure-inference provider.
@@ -165,5 +169,63 @@ impl Agent for TarsAgent {
                 "native agent produced a non-result message: {other:?}"
             ))),
         }
+    }
+}
+
+/// `TarsAgent` is ALSO a DAG [`Worker`], not only a task-level [`Agent`]:
+/// the SAME inner `WorkerAgent` tool loop, driven from a [`PlanStep`] instead
+/// of a [`Task`]. So one type is both the thing you hand a task to AND the
+/// unit the pipeline schedules — no separate per-step worker wrapper.
+///
+/// Mirrors [`crate::LlmWorker`]: `build_worker_request` (threading
+/// `prior_results` + `refinements`) → [`execute_agent_step`] (trajectory
+/// logging) → `parse_worker_response`. A blackboard `commit` is the
+/// consumer's concern (via `ctx.shared`); a generic agent doesn't know the
+/// domain — so this bridge stays commit-free, exactly like `LlmWorker`.
+#[async_trait]
+impl Worker for TarsAgent {
+    async fn run(
+        &self,
+        plan: &Plan,
+        step: &PlanStep,
+        prior_results: &HashMap<String, AgentMessage>,
+        ctx: WorkerContext,
+    ) -> Result<WorkerOutput, WorkerError> {
+        let req =
+            self.worker
+                .build_worker_request(plan, step, &ctx.refinements, prior_results);
+        let agent: Arc<dyn StepAgent> = self.worker.clone();
+        let result = execute_agent_step(
+            ctx.runtime.as_ref(),
+            &ctx.trajectory_id,
+            self.llm.clone(),
+            agent,
+            req,
+            ctx.cancel.clone(),
+        )
+        .await
+        .map_err(|e| match e {
+            crate::runtime::AgentExecutionError::Agent(a) => WorkerError::Agent(a),
+            crate::runtime::AgentExecutionError::Runtime(r) => {
+                WorkerError::InvalidResult(format!("runtime: {r}"))
+            }
+        })?;
+        let json_text = match result.output {
+            crate::agent::AgentOutput::Text { text } => text,
+            other => {
+                return Err(WorkerError::UnexpectedOutput(format!(
+                    "expected JSON text from worker; got {other:?}"
+                )));
+            }
+        };
+        let message = WorkerAgent::parse_worker_response(
+            &json_text,
+            self.worker.id(),
+            Some(step.id.as_str()),
+        )?;
+        Ok(WorkerOutput {
+            message,
+            usage: result.usage,
+        })
     }
 }

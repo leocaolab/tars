@@ -222,3 +222,76 @@ async fn a_denied_skill_never_runs_the_tool() {
         "denied skill must not have written the file"
     );
 }
+
+/// `TarsAgent` is ALSO a `Worker`: registered in a `WorkerRegistry` and
+/// scheduled by `run_plan`, the SAME type the tests above hand a `Task` runs
+/// a `PlanStep` to completion. One type is both Agent and Worker — no separate
+/// per-step worker wrapper. (Proves the P1 bridge of the arc agent-pipeline
+/// unification: `docs/architecture` / arc `agent-pipeline-unification`.)
+#[tokio::test]
+async fn tars_agent_is_also_a_worker_scheduled_by_run_plan() {
+    use tars_runtime::{
+        run_plan, LocalRuntime, Plan, PlanStep, RunPlanConfig, Runtime, StepCondition,
+        StepOutcome, WorkerRegistry,
+    };
+    use tars_storage::{EventStore, SqliteEventStore};
+    use tokio_util::sync::CancellationToken;
+
+    // One pure-inference turn: the worker JSON the step parses into a result.
+    let provider = EventQueueProvider::new(vec![final_text_events(
+        &serde_json::json!({ "summary": "reviewed lib.rs", "confidence": 0.9 }).to_string(),
+    )]);
+    let agent = TarsAgent::new(
+        "agent:critic",
+        "review",
+        SkillSet::new(),
+        "any-model",
+        build_llm(provider),
+        Arc::new(ToolRegistry::new()), // no tools = pure inference
+    );
+
+    let store: Arc<dyn EventStore> = SqliteEventStore::in_memory().expect("in-memory store");
+    let rt = LocalRuntime::new(store);
+    let traj = rt.create_trajectory(None, "worker-face").await.unwrap();
+
+    let plan = Plan {
+        plan_id: "p".into(),
+        goal: "review".into(),
+        steps: vec![PlanStep {
+            id: "review-0".into(),
+            worker_role: "review".into(),
+            instruction: "review the file".into(),
+            depends_on: vec![],
+            condition: StepCondition::Always,
+        }],
+    };
+    let registry = WorkerRegistry::new().with_default(Arc::new(agent));
+
+    let outcome = run_plan(
+        rt.clone() as Arc<dyn Runtime>,
+        traj,
+        plan,
+        registry,
+        None,
+        RunPlanConfig::default(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("run_plan completes with TarsAgent as the worker");
+
+    // The step ran THROUGH TarsAgent's Worker impl and produced the parsed result.
+    let ok = outcome.steps.iter().any(|s| {
+        matches!(
+            s,
+            StepOutcome::Completed { step_id, result, .. }
+                if step_id == "review-0"
+                && matches!(result, tars_runtime::AgentMessage::PartialResult { summary, .. }
+                    if summary == "reviewed lib.rs")
+        )
+    });
+    assert!(
+        ok,
+        "review-0 must complete via TarsAgent-as-Worker with the worker JSON; got {:?}",
+        outcome.steps
+    );
+}
