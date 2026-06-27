@@ -1620,6 +1620,7 @@ fn synth_response(text: String, usage: Usage) -> ChatResponse {
         usage,
         cache_hit: Default::default(),
         validation_summary: Default::default(),
+        created: 0,
     }
 }
 

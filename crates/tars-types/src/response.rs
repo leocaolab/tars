@@ -27,10 +27,30 @@ pub struct ChatResponse {
     /// pre-validation EventStore dumps still deserialize cleanly.
     #[serde(default, skip_serializing_if = "is_empty_validation_summary")]
     pub validation_summary: ValidationSummary,
+    /// Unix-seconds wall-clock when this response was finalized — i.e. when
+    /// the stream completed and the model's answer was in hand. Set once by
+    /// [`ChatResponseBuilder::finish`] / `finish_checked`, so EVERY response
+    /// self-reports "when did the model answer" regardless of provider. This
+    /// is the call's DISCOVERY time: observability/debugging, and the honest
+    /// `at` for anything a consumer derives from this response (decoupled from
+    /// when that consumer later persists it). `#[serde(default)]` so older
+    /// EventStore dumps (no `created`) still deserialize.
+    #[serde(default)]
+    pub created: i64,
 }
 
 fn is_empty_validation_summary(s: &ValidationSummary) -> bool {
     s.outcomes.is_empty() && s.validators_run.is_empty() && s.total_wall_ms == 0
+}
+
+/// Unix-seconds wall-clock now. Saturates to 0 if the clock is before the
+/// epoch (unrepresentable rather than panicking). Stamped onto every
+/// [`ChatResponse`] at finalize.
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 impl ChatResponse {
@@ -57,6 +77,7 @@ impl ChatResponse {
             usage,
             cache_hit: _,          // overridden by argument
             validation_summary: _, // discard: validators rerun on hit (Doc 15 §4)
+            created: _,            // re-stamped when the replayed stream re-finishes
         } = self;
 
         let mut out = Vec::with_capacity(3 + tool_calls.len() * 2);
@@ -228,7 +249,8 @@ impl ChatResponseBuilder {
     /// that never got a matching End (their buffered args are dropped).
     /// Use [`finish_checked`](Self::finish_checked) when you want that
     /// surfaced as a hard error instead of a log line.
-    pub fn finish(self) -> ChatResponse {
+    pub fn finish(mut self) -> ChatResponse {
+        self.inner.created = now_unix_secs();
         if self.inner.stop_reason.is_none() {
             tracing::warn!(
                 buffered_tool_calls = self.tool_args_buffer.len(),
@@ -248,7 +270,8 @@ impl ChatResponseBuilder {
     /// still inspect/log it. Incomplete means either no terminal
     /// `Finished` event, or one or more tool-call Starts that never
     /// received a matching End (whose buffered args would be lost).
-    pub fn finish_checked(self) -> Result<ChatResponse, Box<IncompleteStream>> {
+    pub fn finish_checked(mut self) -> Result<ChatResponse, Box<IncompleteStream>> {
+        self.inner.created = now_unix_secs();
         // `IncompleteStream` embeds a full `ChatResponse`, so the Err
         // variant is large; box it to keep `Result` cheap to move on the
         // (common) Ok path — the allocation only happens on the rare
@@ -333,6 +356,7 @@ mod tests {
             },
             cache_hit: CacheHitInfo::default(),
             validation_summary: Default::default(),
+            created: 0,
         };
         let events = original.clone().into_events(CacheHitInfo {
             cached_input_tokens: 8,
@@ -365,12 +389,37 @@ mod tests {
             usage: Usage::default(),
             cache_hit: CacheHitInfo::default(),
             validation_summary: Default::default(),
+            created: 0,
         };
         let events = r.into_events(CacheHitInfo::default());
         // Just Started + Finished — no empty Delta to confuse consumers.
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], ChatEvent::Started { .. }));
         assert!(matches!(events[1], ChatEvent::Finished { .. }));
+    }
+
+    #[test]
+    fn finish_stamps_created_so_every_response_self_reports_when_it_answered() {
+        let mut b = ChatResponseBuilder::new();
+        b.apply(ChatEvent::Started {
+            actual_model: "m".into(),
+            cache_hit: CacheHitInfo::default(),
+        });
+        b.apply(ChatEvent::Finished {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        });
+        let r = b.finish();
+        // The whole point: a finalized response carries its DISCOVERY time —
+        // common infra, every consumer can read it instead of guessing.
+        assert!(r.created > 0, "finish() must stamp `created` with the finalize wall-clock");
+        // finish_checked takes the same path.
+        let mut b2 = ChatResponseBuilder::new();
+        b2.apply(ChatEvent::Finished {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        });
+        assert!(b2.finish_checked().unwrap().created > 0);
     }
 
     #[test]
