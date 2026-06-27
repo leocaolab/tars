@@ -43,14 +43,16 @@ fn is_empty_validation_summary(s: &ValidationSummary) -> bool {
     s.outcomes.is_empty() && s.validators_run.is_empty() && s.total_wall_ms == 0
 }
 
-/// Unix-seconds wall-clock now. Saturates to 0 if the clock is before the
-/// epoch (unrepresentable rather than panicking). Stamped onto every
+/// Unix-seconds wall-clock now, as a SIGNED offset from the epoch — total, no
+/// information lost: a clock set before 1970 yields a negative value (honest)
+/// rather than being clamped to a fake `0` or panicking. Stamped onto every
 /// [`ChatResponse`] at finalize.
 fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        // `now` is before the epoch: `e.duration()` is how far before.
+        Err(e) => -(e.duration().as_secs() as i64),
+    }
 }
 
 impl ChatResponse {
