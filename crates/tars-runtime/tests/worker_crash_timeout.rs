@@ -40,6 +40,7 @@ fn ok_output(step: &PlanStep) -> WorkerOutput {
             confidence: 1.0,
         },
         usage: Default::default(),
+        created: 0,
     }
 }
 

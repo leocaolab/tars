@@ -243,6 +243,7 @@ impl Worker for TarsAgent {
         Ok(WorkerOutput {
             message,
             usage: result.usage,
+            created: result.created,
         })
     }
 }

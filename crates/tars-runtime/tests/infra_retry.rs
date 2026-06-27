@@ -54,6 +54,7 @@ impl Worker for FlakyWorker {
                 confidence: 1.0,
             },
             usage: Default::default(),
+            created: 0,
         })
     }
 }

@@ -88,6 +88,10 @@ pub struct WorkerOutput {
     /// Token usage for this step. LLM workers fill real counts;
     /// non-LLM workers pass [`Usage::default()`].
     pub usage: Usage,
+    /// Unix-seconds when this step's LLM response was finalized
+    /// ([`ChatResponse::created`]) — the DISCOVERY time. LLM workers carry the
+    /// real value up alongside `usage`; non-LLM workers pass `0`.
+    pub created: i64,
 }
 
 /// Per-invocation context handed to a [`Worker`]. The worker is

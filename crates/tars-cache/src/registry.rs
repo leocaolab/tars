@@ -219,6 +219,7 @@ mod tests {
                 usage: Usage::default(),
                 cache_hit: CacheHitInfo::default(),
                 validation_summary: Default::default(),
+                created: 0,
             },
             cached_at: SystemTime::now(),
             origin_provider: ProviderId::new("test_p"),

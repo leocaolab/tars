@@ -495,10 +495,12 @@ impl WorkerAgent {
                 // doesn't re-impose provider-side structured_output mid
                 // tool-loop (some providers can't combine tools + strict
                 // schema), so the single validation point is execute_step.
+                let created = response.created;
                 let output = AgentOutput::from_response_parts(response.text, vec![]);
                 return Ok(AgentStepResult {
                     output,
                     usage: total_usage,
+                    created,
                     tool_calls: tool_names,
                     tool_call_args: tool_args,
                 });

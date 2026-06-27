@@ -204,6 +204,7 @@ fn done(step: &PlanStep, summary: &str) -> WorkerOutput {
             confidence: 1.0,
         },
         usage: Usage::default(),
+        created: 0,
     }
 }
 

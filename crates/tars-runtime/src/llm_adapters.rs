@@ -85,6 +85,7 @@ impl Worker for LlmWorker {
         Ok(WorkerOutput {
             message,
             usage: result.usage,
+            created: result.created,
         })
     }
 }
