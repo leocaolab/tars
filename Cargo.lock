@@ -4668,6 +4668,7 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "futures",
+ "rusqlite",
  "serde",
  "serde_json",
  "tars-cache",

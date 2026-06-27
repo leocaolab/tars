@@ -55,3 +55,4 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 uuid = { workspace = true }
+rusqlite.workspace = true
