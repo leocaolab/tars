@@ -108,6 +108,7 @@ impl BlackboardStore for ToyStore {
         at: i64,
         _version: Option<&str>,
         _reason: Option<&str>,
+        _role: Option<&str>,
     ) -> Result<bool, BbError> {
         let n = conn.execute(
             "INSERT INTO toy_events (id, run, kind, at) VALUES (?1, ?2, ?3, ?4)

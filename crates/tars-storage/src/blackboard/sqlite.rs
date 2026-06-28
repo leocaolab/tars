@@ -74,6 +74,7 @@ impl<S: BlackboardStore> Blackboard for SqliteBlackboard<S> {
             t.at,
             t.version.as_deref(),
             t.reason.as_deref(),
+            t.role.as_deref(),
         )?;
         // Law #5 (value ≡ timeline): re-derive status from the post-append log.
         S::sync_status(&tx, &S::key(e))?;

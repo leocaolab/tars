@@ -59,15 +59,23 @@ pub struct Transition<Ev> {
     pub at: i64,
     pub version: Option<String>,
     pub reason: Option<String>,
+    /// The ROLE that produced this transition — recorded at the SOURCE by the
+    /// sending agent, never derived from the event kind downstream.
+    pub role: Option<String>,
 }
 
 impl<Ev> Transition<Ev> {
     pub fn new(kind: Ev, at: i64, version: Option<String>) -> Self {
-        Self { kind, at, version, reason: None }
+        Self { kind, at, version, reason: None, role: None }
     }
 
     pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
         self.reason = Some(reason.into());
+        self
+    }
+
+    pub fn with_role(mut self, role: impl Into<String>) -> Self {
+        self.role = Some(role.into());
         self
     }
 }
@@ -157,6 +165,7 @@ pub trait BlackboardStore: BlackboardDomain {
         at: i64,
         version: Option<&str>,
         reason: Option<&str>,
+        role: Option<&str>,
     ) -> Result<bool, BbError>;
 
     /// Read an entity's timeline, oldest first.
