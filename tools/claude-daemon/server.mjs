@@ -164,6 +164,31 @@ async function handleChat({ prompt, system, model, max_turns = 7, schema, thinki
     }
   }
 
+  // The agentic SDK's `outputFormat: json_schema` is SOFT, not forced: on a
+  // sizable fraction of verify-style calls the model narrates its analysis as
+  // prose (or hits max_turns mid-think) and never emits the structured block,
+  // so `structured_output` is null and only `text` (un-parseable prose) is
+  // left. Passing that prose through made arc's JSON parser fail → "parse_failed",
+  // throwing away a real analysis the model already did. Instead: when a schema
+  // WAS requested but no structured output came back, re-ask the model to render
+  // ITS OWN analysis as the schema — one cheap, no-think formatting pass. If
+  // that still yields nothing, fall through to the prose (no worse than before).
+  if (schema && structuredOutput == null && text.trim().length) {
+    try {
+      const coerced = await coerceToSchema({ analysis: text, schema, system, model });
+      if (coerced != null) {
+        structuredOutput = coerced;
+        if (process.env.CLAUDE_DAEMON_TRACE) {
+          process.stderr.write('trace: recovered structured output via schema coercion\n');
+        }
+      }
+    } catch (err) {
+      process.stderr.write(
+        `handleChat: schema coercion failed (keeping prose): ${err?.message ?? err}\n`,
+      );
+    }
+  }
+
   const total = performance.now() - t0;
   // When the SDK returned structured output, IT is the answer — serialize
   // it as the reply text so the Rust text path (and arc's JSON parser)
@@ -181,6 +206,46 @@ async function handleChat({ prompt, system, model, max_turns = 7, schema, thinki
       total_ms: Math.round(total),
     },
   };
+}
+
+// Re-ask the model to render an analysis it ALREADY produced as the required
+// schema. Used only as a fallback when the main call narrated prose instead of
+// emitting structured output (see handleChat). Deliberately minimal: one turn,
+// no thinking, no tools — this is pure formatting of a conclusion already
+// reached, not a re-investigation. Returns the structured output, or null if
+// the model still didn't produce one (caller then keeps the prose).
+async function coerceToSchema({ analysis, schema, system, model }) {
+  const opts = {
+    // The structured-output emulation is a tool round-trip that itself costs
+    // turns, so maxTurns:1 throws "Reached maximum number of turns (1)" before
+    // any output is produced. A few turns of headroom is required even for a
+    // pure formatting pass.
+    maxTurns: 4,
+    disallowedTools: ['*'],
+    settingSources: [],
+    permissionMode: 'bypassPermissions',
+    thinking: { type: 'disabled' },
+    outputFormat: { type: 'json_schema', schema },
+  };
+  if (model) opts.model = model;
+  // Carry the ORIGINAL system prompt: it holds the domain vocabulary (e.g. the
+  // verdict enum VERIFIED/REOPEN/ESCALATED). Without it the model formats the
+  // prose into plausible-but-out-of-schema values (`"WONTFIX_CORRECT"`) the
+  // caller then rejects — defeating the recovery.
+  if (system) opts.systemPrompt = system;
+  const prompt =
+    'Express the analysis below as the required structured JSON output. Do not ' +
+    're-investigate or change the conclusion — only format what was already ' +
+    'decided.\n\n--- analysis ---\n' +
+    analysis;
+  const q = query({ prompt, options: opts });
+  let out = null;
+  for await (const msg of q) {
+    if (msg.type === 'result' && msg.structured_output != null) {
+      out = msg.structured_output;
+    }
+  }
+  return out;
 }
 
 // ────────────────────────────────────────────────────────────────────
