@@ -41,7 +41,7 @@ mod role;
 mod skill;
 mod task;
 
-pub use agent::{Agent, AgentError, AgentOutput};
+pub use agent::{Agent, TaskError, AgentOutput};
 pub use context::AgentContext;
 pub use ids::{AgentId, TaskId};
 pub use permission::{Decision, Permissions};

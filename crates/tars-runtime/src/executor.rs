@@ -62,7 +62,7 @@ use tokio_util::sync::CancellationToken;
 
 use tars_types::{TrajectoryId, Usage};
 
-use crate::agent::AgentError;
+use crate::agent::StepError;
 use crate::critic::CriticError;
 use crate::event::AgentEvent;
 use crate::message::{AgentMessage, VerdictKind};
@@ -635,7 +635,7 @@ enum StepDecision {
 ///   semaphore). `None` = unbounded, matching the old per-tier peak.
 /// - **Cancel-on-reject**: the first `Reject` (or hard error) fires
 ///   the run-wide cancel token; in-flight siblings observe
-///   `cancel.cancelled()` and bail with [`AgentError::Cancelled`],
+///   `cancel.cancelled()` and bail with [`StepError::Cancelled`],
 ///   which the scheduler drains + discards.
 /// - **Skip-cascade + conditional**: when a step's deps all resolve it
 ///   is classified before dispatch. A step is skipped if any dep was
@@ -1293,7 +1293,7 @@ async fn log_skip(
 // ─── Error mapping ─────────────────────────────────────────────────────
 
 fn map_worker_error(traj: &TrajectoryId, step_id: String, e: WorkerError) -> RunPlanError {
-    // LLM-backed workers bubble `WorkerError::Agent(AgentError)`;
+    // LLM-backed workers bubble `WorkerError::Agent(StepError)`;
     // surface those as `AgentStep` so the cancel-detection helper +
     // existing `RunTaskError::AgentStep` mapping in `run_task`
     // continue to recognise them. Non-LLM workers' decode / shape
@@ -1335,7 +1335,7 @@ fn is_cancellation_err(err: &RunPlanError) -> bool {
     matches!(
         err,
         RunPlanError::AgentStep {
-            source: AgentExecutionError::Agent(AgentError::Cancelled),
+            source: AgentExecutionError::Agent(StepError::Cancelled),
             ..
         }
     )

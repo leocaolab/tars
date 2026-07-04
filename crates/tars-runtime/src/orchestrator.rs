@@ -36,7 +36,7 @@ use thiserror::Error;
 
 use tars_types::{AgentId, ChatRequest};
 
-use crate::agent::{Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult};
+use crate::agent::{Agent, AgentContext, StepError, AgentOutput, AgentRole, AgentStepResult};
 use crate::prompt::PromptBuilder;
 
 // ── Plan data model ────────────────────────────────────────────────────
@@ -593,7 +593,7 @@ impl Agent for OrchestratorAgent {
         self: Arc<Self>,
         ctx: AgentContext,
         input: ChatRequest,
-    ) -> Result<AgentStepResult, AgentError> {
+    ) -> Result<AgentStepResult, StepError> {
         // Same shape as SingleShotAgent — drain the stream into a
         // ChatResponse, wrap as AgentOutput. The structured-output
         // contract belongs to whoever built `input`; we're a
@@ -609,7 +609,7 @@ impl Agent for OrchestratorAgent {
 pub enum OrchestratorError {
     /// Underlying LLM call failed.
     #[error("agent: {0}")]
-    Agent(#[from] AgentError),
+    Agent(#[from] StepError),
     /// Model returned text that wasn't valid JSON for [`Plan`].
     #[error("decode: {0}")]
     Decode(serde_json::Error),

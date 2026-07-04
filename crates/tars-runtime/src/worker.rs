@@ -55,7 +55,7 @@ use tars_types::{
 };
 use thiserror::Error;
 
-use crate::agent::{Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult};
+use crate::agent::{Agent, AgentContext, StepError, AgentOutput, AgentRole, AgentStepResult};
 use crate::message::AgentMessage;
 use crate::orchestrator::{Plan, PlanStep};
 use crate::prompt::PromptBuilder;
@@ -423,7 +423,7 @@ impl Agent for WorkerAgent {
         self: Arc<Self>,
         ctx: AgentContext,
         input: ChatRequest,
-    ) -> Result<AgentStepResult, AgentError> {
+    ) -> Result<AgentStepResult, StepError> {
         // Take the Arc<ToolRegistry> out via clone so the subsequent
         // `self` move into `drive_with_tools` doesn't conflict with
         // the borrow used to read `self.tools`.
@@ -455,7 +455,7 @@ impl WorkerAgent {
         ctx: AgentContext,
         initial_input: ChatRequest,
         registry: Arc<ToolRegistry>,
-    ) -> Result<AgentStepResult, AgentError> {
+    ) -> Result<AgentStepResult, StepError> {
         let mut req = initial_input;
         // Ground the model in its ABSOLUTE working directory (see
         // `ground_system_with_cwd`) so it doesn't guess and loop against a
@@ -555,7 +555,7 @@ impl WorkerAgent {
             if errors_this_iter == response.tool_calls.len() {
                 consecutive_all_error += 1;
                 if consecutive_all_error >= MAX_CONSECUTIVE_ALL_ERROR_ITERS {
-                    return Err(AgentError::Internal(format!(
+                    return Err(StepError::Internal(format!(
                         "worker tool loop aborted: every tool call failed for \
                          {consecutive_all_error} consecutive iterations \
                          (last iteration: {errors_this_iter}/{} calls errored) — \
@@ -596,7 +596,7 @@ impl WorkerAgent {
             .into_iter()
             .rev()
             .collect();
-        Err(AgentError::Internal(format!(
+        Err(StepError::Internal(format!(
             "worker tool loop hit max_tool_iterations={} without a text-only \
              response (model kept emitting tool calls). last {} call(s): [{}]",
             self.max_tool_iterations,
@@ -613,7 +613,7 @@ impl WorkerAgent {
 async fn drain_one_call(
     ctx: &AgentContext,
     input: ChatRequest,
-) -> Result<tars_types::ChatResponse, AgentError> {
+) -> Result<tars_types::ChatResponse, StepError> {
     // Same RequestContext construction as `agent::drive_llm_call` —
     // the canonical agent LLM path. `AgentContext` carries no
     // RequestContext (only `cancel`), so cancel is the only field
@@ -633,7 +633,7 @@ async fn drain_one_call(
 
     let stream_result = tokio::select! {
         biased;
-        _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+        _ = ctx.cancel.cancelled() => return Err(StepError::Cancelled),
         r = llm.call(input, req_ctx) => r,
     };
     let mut stream = stream_result?;
@@ -642,12 +642,12 @@ async fn drain_one_call(
     loop {
         let event = tokio::select! {
             biased;
-            _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+            _ = ctx.cancel.cancelled() => return Err(StepError::Cancelled),
             ev = stream.next() => ev,
         };
         match event {
             Some(Ok(ev)) => builder.apply(ev),
-            Some(Err(e)) => return Err(AgentError::Provider(e)),
+            Some(Err(e)) => return Err(StepError::Provider(e)),
             None => break,
         }
     }
@@ -668,7 +668,7 @@ struct RawWorkerResult {
 pub enum WorkerError {
     /// Underlying LLM call failed.
     #[error("agent: {0}")]
-    Agent(#[from] AgentError),
+    Agent(#[from] StepError),
     /// Model returned text that didn't parse as the worker shape.
     #[error("decode: {0}")]
     Decode(serde_json::Error),

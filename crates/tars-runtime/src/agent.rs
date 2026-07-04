@@ -181,7 +181,7 @@ pub struct AgentStepResult {
 /// during the wrapping `execute_agent_step` are kept separate (they
 /// come back as [`crate::RuntimeError`]).
 #[derive(Debug, Error)]
-pub enum AgentError {
+pub enum StepError {
     /// Underlying LLM call failed. Carries the typed
     /// [`ProviderError`] so callers can class-by-error
     /// (Permanent / Retriable / MaybeRetriable) without re-parsing.
@@ -196,7 +196,7 @@ pub enum AgentError {
     Internal(String),
 }
 
-impl AgentError {
+impl StepError {
     /// One-word classification for the trajectory log. Maps to the
     /// `classification` field on `AgentEvent::StepFailed`.
     pub fn classification(&self) -> &'static str {
@@ -234,7 +234,7 @@ pub trait Agent: Send + Sync + 'static {
         self: Arc<Self>,
         ctx: AgentContext,
         input: ChatRequest,
-    ) -> Result<AgentStepResult, AgentError>;
+    ) -> Result<AgentStepResult, StepError>;
 }
 
 /// Baseline agent: forwards the input to the LLM unchanged, drains
@@ -274,7 +274,7 @@ impl Agent for SingleShotAgent {
         self: Arc<Self>,
         ctx: AgentContext,
         input: ChatRequest,
-    ) -> Result<AgentStepResult, AgentError> {
+    ) -> Result<AgentStepResult, StepError> {
         drive_llm_call(ctx, input).await
     }
 }
@@ -296,7 +296,7 @@ impl Agent for SingleShotAgent {
 pub(crate) async fn drive_llm_call(
     ctx: AgentContext,
     input: ChatRequest,
-) -> Result<AgentStepResult, AgentError> {
+) -> Result<AgentStepResult, StepError> {
     // Shape an LLM RequestContext from what AgentContext gives us.
     // IAM / principal / tenant come once tars-security exists; for
     // now we use the test default and inherit cancel.
@@ -309,7 +309,7 @@ pub(crate) async fn drive_llm_call(
     // before the provider even gets the request.
     let stream_result = tokio::select! {
         biased;
-        _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+        _ = ctx.cancel.cancelled() => return Err(StepError::Cancelled),
         r = llm.call(input, req_ctx) => r,
     };
     let mut stream = stream_result?;
@@ -318,12 +318,12 @@ pub(crate) async fn drive_llm_call(
     loop {
         let event = tokio::select! {
             biased;
-            _ = ctx.cancel.cancelled() => return Err(AgentError::Cancelled),
+            _ = ctx.cancel.cancelled() => return Err(StepError::Cancelled),
             ev = stream.next() => ev,
         };
         match event {
             Some(Ok(ev)) => builder.apply(ev),
-            Some(Err(e)) => return Err(AgentError::Provider(e)),
+            Some(Err(e)) => return Err(StepError::Provider(e)),
             None => break,
         }
     }
@@ -390,15 +390,15 @@ mod tests {
 
     #[test]
     fn agent_error_classification_maps_provider_class() {
-        let e: AgentError = ProviderError::Auth("bad".into()).into();
+        let e: StepError = ProviderError::Auth("bad".into()).into();
         assert_eq!(e.classification(), "permanent");
-        let e: AgentError = ProviderError::ModelOverloaded.into();
+        let e: StepError = ProviderError::ModelOverloaded.into();
         assert_eq!(e.classification(), "retriable");
-        let e: AgentError = ProviderError::Parse("bad json".into()).into();
+        let e: StepError = ProviderError::Parse("bad json".into()).into();
         assert_eq!(e.classification(), "maybe_retriable");
-        assert_eq!(AgentError::Cancelled.classification(), "cancelled");
+        assert_eq!(StepError::Cancelled.classification(), "cancelled");
         assert_eq!(
-            AgentError::Internal("x".into()).classification(),
+            StepError::Internal("x".into()).classification(),
             "internal"
         );
     }

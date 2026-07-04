@@ -41,7 +41,7 @@ use thiserror::Error;
 
 use tars_types::{AgentId, ChatRequest};
 
-use crate::agent::{Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult};
+use crate::agent::{Agent, AgentContext, StepError, AgentOutput, AgentRole, AgentStepResult};
 use crate::message::{AgentMessage, VerdictKind};
 use crate::orchestrator::Plan;
 use crate::prompt::PromptBuilder;
@@ -151,7 +151,7 @@ impl Agent for CriticAgent {
         self: Arc<Self>,
         ctx: AgentContext,
         input: ChatRequest,
-    ) -> Result<AgentStepResult, AgentError> {
+    ) -> Result<AgentStepResult, StepError> {
         // Same shape as OrchestratorAgent — pass through to the
         // shared drive_llm_call helper. The typed parsing happens in
         // `critique()` above.
@@ -264,7 +264,7 @@ impl RawVerdict {
 pub enum CriticError {
     /// Underlying LLM call failed.
     #[error("agent: {0}")]
-    Agent(#[from] AgentError),
+    Agent(#[from] StepError),
     /// Model returned text that didn't parse as the verdict shape.
     #[error("decode: {0}")]
     Decode(serde_json::Error),

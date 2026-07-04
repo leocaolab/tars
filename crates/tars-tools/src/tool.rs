@@ -162,7 +162,7 @@ pub enum ToolError {
 
 impl ToolError {
     /// One-word classification for logs / metrics. Mirrors the
-    /// pattern `tars_runtime::AgentError::classification` uses.
+    /// pattern `tars_runtime::StepError::classification` uses.
     pub fn classification(&self) -> &'static str {
         match self {
             Self::Cancelled => "cancelled",

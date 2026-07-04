@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use futures::future::{BoxFuture, select_all};
 
 use tars_model::{
-    Agent, AgentContext, AgentError, AgentId, AgentOutput, AgentRole, SkillSet, Task,
+    Agent, AgentContext, TaskError, AgentId, AgentOutput, AgentRole, SkillSet, Task,
 };
 
 /// Runs a Task on several candidate agents at once; first success wins.
@@ -68,15 +68,15 @@ impl Agent for EnsembleAgent {
         &self.skills
     }
 
-    async fn run(&self, task: Task, ctx: AgentContext) -> Result<AgentOutput, AgentError> {
+    async fn run(&self, task: Task, ctx: AgentContext) -> Result<AgentOutput, TaskError> {
         if self.candidates.is_empty() {
-            return Err(AgentError::Execution("ensemble has no candidates".into()));
+            return Err(TaskError::Execution("ensemble has no candidates".into()));
         }
 
         // Each candidate gets a CHILD cancel token: a parent cancel still
         // stops everyone, but the winner cancelling the losers doesn't
         // touch the parent.
-        let mut futures: Vec<BoxFuture<'static, Result<AgentOutput, AgentError>>> =
+        let mut futures: Vec<BoxFuture<'static, Result<AgentOutput, TaskError>>> =
             Vec::with_capacity(self.candidates.len());
         let tokens: Vec<_> = self
             .candidates
@@ -94,7 +94,7 @@ impl Agent for EnsembleAgent {
 
         let cancel_all = || tokens.iter().for_each(|t| t.cancel());
 
-        let mut last_err: Option<AgentError> = None;
+        let mut last_err: Option<TaskError> = None;
         let mut remaining = futures;
         while !remaining.is_empty() {
             let (result, _idx, rest) = select_all(remaining).await;
@@ -104,10 +104,10 @@ impl Agent for EnsembleAgent {
                     cancel_all();
                     return Ok(out);
                 }
-                Err(AgentError::Cancelled) => {
+                Err(TaskError::Cancelled) => {
                     // A sibling/parent cancel raced in; keep waiting on the
                     // others rather than failing the whole ensemble.
-                    last_err = Some(AgentError::Cancelled);
+                    last_err = Some(TaskError::Cancelled);
                     remaining = rest;
                 }
                 Err(e) => {
@@ -118,7 +118,7 @@ impl Agent for EnsembleAgent {
         }
 
         // Everyone failed.
-        Err(last_err.unwrap_or_else(|| AgentError::Execution("all candidates failed".into())))
+        Err(last_err.unwrap_or_else(|| TaskError::Execution("all candidates failed".into())))
     }
 }
 
@@ -165,10 +165,10 @@ mod tests {
         fn skills(&self) -> &SkillSet {
             &self.skills
         }
-        async fn run(&self, _t: Task, _c: AgentContext) -> Result<AgentOutput, AgentError> {
+        async fn run(&self, _t: Task, _c: AgentContext) -> Result<AgentOutput, TaskError> {
             match &self.result {
                 Ok(s) => Ok(AgentOutput::new(s.clone())),
-                Err(e) => Err(AgentError::Execution(e.clone())),
+                Err(e) => Err(TaskError::Execution(e.clone())),
             }
         }
     }

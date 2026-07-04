@@ -54,7 +54,7 @@ impl AgentOutput {
 /// and produced a "the work didn't pan out" result — that's a successful
 /// `AgentOutput` the caller interprets.
 #[derive(Debug, thiserror::Error)]
-pub enum AgentError {
+pub enum TaskError {
     /// Cancelled mid-run (an upstream Drop / SIGINT).
     #[error("cancelled")]
     Cancelled,
@@ -81,7 +81,7 @@ pub enum AgentError {
     Execution(String),
 }
 
-impl AgentError {
+impl TaskError {
     /// One-word classification for logs / metrics.
     pub fn classification(&self) -> &'static str {
         match self {
@@ -126,7 +126,7 @@ pub trait Agent: Send + Sync {
     fn skills(&self) -> &SkillSet;
 
     /// Hand it a task; it does it.
-    async fn run(&self, task: Task, ctx: AgentContext) -> Result<AgentOutput, AgentError>;
+    async fn run(&self, task: Task, ctx: AgentContext) -> Result<AgentOutput, TaskError>;
 }
 
 #[cfg(test)]
@@ -153,7 +153,7 @@ mod tests {
         fn skills(&self) -> &SkillSet {
             &self.skills
         }
-        async fn run(&self, task: Task, _ctx: AgentContext) -> Result<AgentOutput, AgentError> {
+        async fn run(&self, task: Task, _ctx: AgentContext) -> Result<AgentOutput, TaskError> {
             Ok(AgentOutput::new(format!("did: {}", task.goal)))
         }
     }

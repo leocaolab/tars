@@ -60,7 +60,7 @@ mod task;
 mod worker;
 
 pub use agent::{
-    Agent, AgentContext, AgentError, AgentOutput, AgentRole, AgentStepResult, SingleShotAgent,
+    Agent, AgentContext, StepError, AgentOutput, AgentRole, AgentStepResult, SingleShotAgent,
 };
 pub use bind::{BindError, bind};
 pub use check::{CheckResult, CheckRunner, Invariant, MembershipInvariant, ValidatorInvariant};

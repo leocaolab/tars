@@ -892,7 +892,7 @@ async fn replan_exhausted_after_max_replans_consecutive_rejects() {
 ///    `drive_llm_call`'s `tokio::select!` against `cancel.cancelled()`,
 ///    which drops the in-flight provider futures (and their inner
 ///    Notify await) — so `run_one_step` returns
-///    `Err(AgentError::Cancelled)`, the drain loop discards those,
+///    `Err(StepError::Cancelled)`, the drain loop discards those,
 ///    and the task can finally return `ReplanExhausted`.
 ///  - We track `entered_gate_count` to prove the gated arm WAS
 ///    reached (not just that the first worker bailed before any

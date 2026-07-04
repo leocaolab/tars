@@ -15,7 +15,7 @@ use tars_types::{ChatRequest, TrajectoryId};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agent::{Agent, AgentContext, AgentError, AgentStepResult};
+use crate::agent::{Agent, AgentContext, StepError, AgentStepResult};
 use crate::error::RuntimeError;
 use crate::event::{AgentEvent, StepIdempotencyKey};
 
@@ -438,7 +438,7 @@ fn guess_provider_id(req: &ChatRequest) -> tars_types::ProviderId {
 #[derive(Debug, thiserror::Error)]
 pub enum AgentExecutionError {
     #[error("agent: {0}")]
-    Agent(#[from] AgentError),
+    Agent(#[from] StepError),
     #[error("runtime: {0}")]
     Runtime(#[from] RuntimeError),
 }

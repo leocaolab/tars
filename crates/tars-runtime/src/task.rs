@@ -69,7 +69,7 @@ use tars_pipeline::LlmService;
 use tars_types::TrajectoryId;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Agent, AgentError, AgentOutput};
+use crate::agent::{Agent, StepError, AgentOutput};
 use crate::critic::{CriticAgent, CriticError};
 use crate::event::AgentEvent;
 use crate::message::AgentMessage;
@@ -199,7 +199,7 @@ impl RunTaskError {
 ///
 /// `cancel` is honoured at every agent boundary — a triggered token
 /// surfaces as `RunTaskError::AgentStep` carrying
-/// `AgentError::Cancelled`. The trajectory is left Abandoned in that
+/// `StepError::Cancelled`. The trajectory is left Abandoned in that
 /// case so a recovery scan sees it as terminal.
 //
 // `too_many_arguments`: this is the user-facing entry point; explicit
@@ -406,7 +406,7 @@ fn map_run_plan_error(traj: &TrajectoryId, e: crate::executor::RunPlanError) -> 
         RunPlanError::NoWorkerForRole { role, step_id, .. } => RunTaskError::AgentStep {
             trajectory_id: traj.clone(),
             step_id,
-            source: AgentExecutionError::Agent(AgentError::Internal(format!(
+            source: AgentExecutionError::Agent(StepError::Internal(format!(
                 "no worker registered for role `{role}` — run_task only registers \
                  an LLM default worker, so the registry's default fallback should \
                  have matched; this is a bug in run_task's wiring",

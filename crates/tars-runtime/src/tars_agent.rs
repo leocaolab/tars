@@ -22,7 +22,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use tars_model::{
-    Agent, AgentContext, AgentError, AgentId, AgentOutput, AgentRole, SkillSet, Task,
+    Agent, AgentContext, TaskError, AgentId, AgentOutput, AgentRole, SkillSet, Task,
 };
 use tars_pipeline::LlmService;
 use tars_tools::ToolRegistry;
@@ -124,12 +124,12 @@ impl TarsAgent {
 }
 
 /// Lift a [`WorkerError`] (runtime layer) to the task-level
-/// [`tars_model::AgentError`] WITHOUT burning the typed provider error.
+/// [`tars_model::TaskError`] WITHOUT burning the typed provider error.
 ///
 /// The inner worker chain keeps the [`ProviderError`](tars_types::ProviderError)
-/// typed all the way up: `ProviderError` → `runtime::AgentError::Provider` →
+/// typed all the way up: `ProviderError` → `runtime::StepError::Provider` →
 /// `WorkerError::Agent`. When that's the shape, we hand the SAME typed
-/// `ProviderError` to `tars_model::AgentError::Provider`, so a consumer
+/// `ProviderError` to `tars_model::TaskError::Provider`, so a consumer
 /// (arc) classes the failure by matching the variant (rate-limit / auth /
 /// overloaded) instead of grepping a stringified message. A bare cancel
 /// maps to the typed `Cancelled`. Every other `WorkerError`
@@ -137,11 +137,11 @@ impl TarsAgent {
 /// agent-internal) has no typed provider error to keep — those really are
 /// just text, so `Execution(String)` is honest there. `Display` walks the
 /// `#[source]` chain, so no double-stringify.
-fn worker_error_to_agent_error(e: WorkerError) -> AgentError {
+fn worker_error_to_agent_error(e: WorkerError) -> TaskError {
     match e {
-        WorkerError::Agent(crate::agent::AgentError::Provider(pe)) => AgentError::Provider(pe),
-        WorkerError::Agent(crate::agent::AgentError::Cancelled) => AgentError::Cancelled,
-        other => AgentError::Execution(other.to_string()),
+        WorkerError::Agent(crate::agent::StepError::Provider(pe)) => TaskError::Provider(pe),
+        WorkerError::Agent(crate::agent::StepError::Cancelled) => TaskError::Cancelled,
+        other => TaskError::Execution(other.to_string()),
     }
 }
 
@@ -159,7 +159,7 @@ impl Agent for TarsAgent {
         &self.skills
     }
 
-    async fn run(&self, task: Task, ctx: AgentContext) -> Result<AgentOutput, AgentError> {
+    async fn run(&self, task: Task, ctx: AgentContext) -> Result<AgentOutput, TaskError> {
         // Shape the task into a one-step plan the WorkerAgent can run.
         let plan = Plan {
             plan_id: task.id.to_string(),
@@ -204,7 +204,7 @@ impl Agent for TarsAgent {
                 ..
             } => Ok(AgentOutput::new(summary)
                 .with_data(serde_json::json!({ "confidence": confidence }))),
-            other => Err(AgentError::Execution(format!(
+            other => Err(TaskError::Execution(format!(
                 "native agent produced a non-result message: {other:?}"
             ))),
         }
@@ -297,7 +297,7 @@ mod tests {
 
     /// The load-bearing guarantee: a provider failure inside the inner
     /// worker chain surfaces at the `Agent::run` boundary as a TYPED
-    /// [`tars_model::AgentError::Provider`], carrying the same
+    /// [`tars_model::TaskError::Provider`], carrying the same
     /// [`ProviderError`] — NOT flattened into `Execution(String)`. Proved
     /// by MATCHING the variant + reading `kind()` (typed), never by
     /// grepping the message.
@@ -318,13 +318,13 @@ mod tests {
             .expect_err("a rate-limited provider must fail the run");
 
         match err {
-            AgentError::Provider(pe) => {
+            TaskError::Provider(pe) => {
                 // Typed downcast, not a substring match: the retry_after
                 // payload survives the whole lift intact.
                 assert_eq!(pe.kind(), ProviderErrorKind::RateLimited);
                 assert_eq!(pe.retry_after(), Some(std::time::Duration::from_secs(30)));
             }
-            other => panic!("expected typed AgentError::Provider, got {other:?}"),
+            other => panic!("expected typed TaskError::Provider, got {other:?}"),
         }
     }
 
@@ -335,7 +335,7 @@ mod tests {
     fn non_provider_worker_error_maps_to_execution() {
         let e = WorkerError::UnexpectedOutput("model returned tool calls".into());
         match worker_error_to_agent_error(e) {
-            AgentError::Execution(_) => {}
+            TaskError::Execution(_) => {}
             other => panic!("expected Execution for a text-only worker error, got {other:?}"),
         }
     }
