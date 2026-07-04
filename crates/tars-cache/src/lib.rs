@@ -24,12 +24,14 @@
 //!   the request. (See Doc 03 §4.2 for the future tier-fingerprint
 //!   second pass; not built yet.)
 
+mod clock;
 mod error;
 mod key;
 mod policy;
 mod registry;
 mod sqlite;
 
+pub use clock::{Clock, SystemClock};
 pub use error::CacheError;
 pub use key::{CacheKey, CacheKeyFactory};
 pub use policy::{CacheLayerPolicy, CachePolicy};

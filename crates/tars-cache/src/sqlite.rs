@@ -34,12 +34,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::clock::{Clock, system_clock};
 use crate::error::CacheError;
 use crate::key::CacheKey;
 use crate::policy::CachePolicy;
@@ -87,12 +88,25 @@ pub struct SqliteCacheRegistry {
     l2: Arc<Mutex<Connection>>,
     l2_ttl: Duration,
     write_count: Arc<std::sync::atomic::AtomicU64>,
+    /// Injected wall-clock used for every TTL-expiry decision, so
+    /// expiry is testable without sleeping. Defaults to [`SystemClock`].
+    clock: Arc<dyn Clock>,
 }
 
 impl SqliteCacheRegistry {
     /// Open (creating if needed) the cache file at `path`. The parent
-    /// directory must exist.
+    /// directory must exist. Uses the real [`SystemClock`]; call
+    /// [`Self::open_with_clock`] to inject a clock (e.g. in tests).
     pub fn open(config: SqliteCacheRegistryConfig) -> Result<Arc<Self>, CacheError> {
+        Self::open_with_clock(config, system_clock())
+    }
+
+    /// Like [`Self::open`], but with an injected [`Clock`] driving all
+    /// TTL-expiry decisions.
+    pub fn open_with_clock(
+        config: SqliteCacheRegistryConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Arc<Self>, CacheError> {
         let conn = Connection::open(&config.path).map_err(|e| {
             CacheError::Backend(format!("opening sqlite cache at {:?}: {e}", config.path))
         })?;
@@ -109,12 +123,21 @@ impl SqliteCacheRegistry {
             l2: Arc::new(Mutex::new(conn)),
             l2_ttl: config.l2_ttl,
             write_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            clock,
         }))
     }
 
     /// Open an in-memory SQLite cache — useful for tests that want
-    /// L2 semantics without touching the filesystem.
+    /// L2 semantics without touching the filesystem. Uses the real
+    /// [`SystemClock`]; call [`Self::in_memory_with_clock`] to inject one.
     pub fn in_memory() -> Result<Arc<Self>, CacheError> {
+        Self::in_memory_with_clock(system_clock())
+    }
+
+    /// Like [`Self::in_memory`], but with an injected [`Clock`] driving
+    /// all TTL-expiry decisions — lets a test advance time and assert
+    /// expiry without sleeping.
+    pub fn in_memory_with_clock(clock: Arc<dyn Clock>) -> Result<Arc<Self>, CacheError> {
         let conn = Connection::open_in_memory()
             .map_err(|e| CacheError::Backend(format!("opening in-memory sqlite: {e}")))?;
         Self::pragma_setup(&conn)?;
@@ -130,7 +153,13 @@ impl SqliteCacheRegistry {
             l2: Arc::new(Mutex::new(conn)),
             l2_ttl: DEFAULT_L2_TTL,
             write_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            clock,
         }))
+    }
+
+    /// Current time in epoch-ms according to the injected clock.
+    fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
     }
 
     fn pragma_setup(conn: &Connection) -> Result<(), CacheError> {
@@ -207,7 +236,7 @@ impl CacheRegistry for SqliteCacheRegistry {
         }
         let l2 = self.l2.clone();
         let fp = key.fingerprint;
-        let now = now_ms();
+        let now = self.now_ms();
         let blob: Option<Vec<u8>> =
             tokio::task::spawn_blocking(move || -> Result<_, CacheError> {
                 let conn = l2
@@ -260,7 +289,7 @@ impl CacheRegistry for SqliteCacheRegistry {
 
         let blob = serde_json::to_vec(&value)
             .map_err(|e| CacheError::Backend(format!("encode for l2: {e}")))?;
-        let now = now_ms();
+        let now = self.now_ms();
         // `l2_ttl_effective` returns `None` if L2 is off; we already
         // returned above when `!policy.l2` so this is equivalent to
         // `policy.l2_ttl` here — but going through the accessor keeps
@@ -360,18 +389,32 @@ pub fn open_at_path(path: &Path) -> Result<Arc<SqliteCacheRegistry>, CacheError>
     SqliteCacheRegistry::open(SqliteCacheRegistryConfig::new(path))
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::CacheLayerPolicy;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::time::SystemTime;
     use tars_types::{CacheHitInfo, ChatResponse, ProviderId, StopReason, Usage};
+
+    /// Test clock whose "now" is a settable/advanceable `AtomicI64`, so
+    /// TTL expiry can be exercised deterministically without sleeping.
+    struct FakeClock(AtomicI64);
+
+    impl FakeClock {
+        fn new(start_ms: i64) -> Arc<Self> {
+            Arc::new(Self(AtomicI64::new(start_ms)))
+        }
+        fn advance(&self, delta_ms: i64) {
+            self.0.fetch_add(delta_ms, Ordering::SeqCst);
+        }
+    }
+
+    impl Clock for FakeClock {
+        fn now_ms(&self) -> i64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
 
     /// L2-only count of non-expired rows. Test-only assertion helper,
     /// scoped to this `mod tests` so it doesn't appear as a `pub(crate)`
@@ -381,7 +424,7 @@ mod tests {
     /// through the telemetry middleware.
     impl SqliteCacheRegistry {
         pub(super) fn l2_entry_count(&self) -> Result<u64, CacheError> {
-            let now = now_ms();
+            let now = self.now_ms();
             let conn = self
                 .l2
                 .lock()
@@ -576,6 +619,47 @@ mod tests {
             "b"
         );
         assert_eq!(r.l2_entry_count().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn l2_ttl_expiry_is_testable_via_injected_clock() {
+        // The whole point of injecting the clock: prove TTL expiry
+        // deterministically, without sleeping. Start the clock at a
+        // fixed instant, write an L2 row with a 1s TTL, then jump the
+        // clock past it and assert the lookup filters the expired row.
+        let clock = FakeClock::new(1_000_000);
+        let r = SqliteCacheRegistry::in_memory_with_clock(clock.clone()).unwrap();
+        // L1 off so the lookup exercises L2's clock-driven TTL filter,
+        // not moka's own (real-time) expiry.
+        let policy = CachePolicy {
+            l1: CacheLayerPolicy::Disabled,
+            l2: CacheLayerPolicy::Override {
+                ttl: Duration::from_millis(1000),
+            },
+            l3: CacheLayerPolicy::Disabled,
+        };
+
+        r.write(key(9), value("soon-expires"), &policy)
+            .await
+            .unwrap();
+
+        // Still within the TTL window: present.
+        assert_eq!(
+            r.lookup(&key(9), &policy)
+                .await
+                .unwrap()
+                .unwrap()
+                .response
+                .text,
+            "soon-expires"
+        );
+        assert_eq!(r.l2_entry_count().unwrap(), 1);
+
+        // Advance the fake clock past the TTL — no sleeping.
+        clock.advance(1_500);
+
+        assert!(r.lookup(&key(9), &policy).await.unwrap().is_none());
+        assert_eq!(r.l2_entry_count().unwrap(), 0);
     }
 
     #[tokio::test]
