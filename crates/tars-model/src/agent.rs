@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 
-use tars_types::Usage;
+use tars_types::{ProviderError, Usage};
 
 use crate::context::AgentContext;
 use crate::ids::AgentId;
@@ -64,8 +64,19 @@ pub enum AgentError {
     /// A required capability was not permitted for this agent.
     #[error("denied: {0}")]
     Denied(String),
-    /// The agent tried and failed (LLM error, tool failure, subprocess
-    /// died, …).
+    /// The underlying LLM provider call failed, carried TYPED. A native
+    /// agent's inner worker chain surfaces a [`ProviderError`]
+    /// (rate-limit, auth, overloaded, …); preserving it here — rather than
+    /// stringifying into [`Execution`](Self::Execution) — lets consumers
+    /// class-by-variant (Permanent / Retriable / MaybeRetriable) via
+    /// [`ProviderError::class`] instead of grepping a message. This is the
+    /// same typed error that lives inside the runtime worker chain, lifted
+    /// intact to the `Agent::run` boundary.
+    #[error("provider: {0}")]
+    Provider(#[from] ProviderError),
+    /// The agent tried and failed for a reason with no typed provider
+    /// error to preserve (decode / unexpected output / invalid result /
+    /// worker panic / agent-internal bug). Genuinely text.
     #[error("execution failed: {0}")]
     Execution(String),
 }
@@ -77,6 +88,13 @@ impl AgentError {
             Self::Cancelled => "cancelled",
             Self::BadTask(_) => "bad_task",
             Self::Denied(_) => "denied",
+            // Classify from the TYPED provider error, not a string — one
+            // typed source of truth shared with the runtime layer.
+            Self::Provider(e) => match e.class() {
+                tars_types::ErrorClass::Permanent => "permanent",
+                tars_types::ErrorClass::Retriable => "retriable",
+                tars_types::ErrorClass::MaybeRetriable => "maybe_retriable",
+            },
             Self::Execution(_) => "execution",
         }
     }
