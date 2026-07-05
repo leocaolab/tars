@@ -291,6 +291,84 @@ with real filesystem tools, see
 cargo run -p tars-runtime --example multi_step_with_tools
 ```
 
+## Decoding a structured response
+
+When you asked the model for JSON, `resp.text` is a string you still have
+to parse — and *how* you parse it depends on how the provider produced it.
+tars gives you one seam that gets this right: `tars-types::json_decode`
+(`decode` / `decode_json` / `ChatResponse::json`). It handles the two
+failure modes that bite hand-rolled `serde_json::from_str`: providers that
+wrap JSON in a ```` ```json ```` fence or chatty prose, and models that
+emit an out-of-range integer.
+
+The strategy is keyed off the `StructuredOutputMode` the request used
+(from the provider's `Capabilities`), so the layer that knows how the
+response was produced tells the decoder how to read it:
+
+| Mode | Meaning | Decode strategy |
+|------|---------|-----------------|
+| `StrictSchema` / `JsonObjectMode` | provider guarantees a clean JSON document | parse `text` directly; a fenced/chatty body is a *broken promise* → `InvalidJson`, never a silent scrape |
+| `None` / `ToolUseEmulation` | `text` may be chatty prose with JSON embedded | strip the code fence, scan for the first balanced `{…}` / `[…]`, parse that |
+
+**`ChatResponse::json` — the common case:**
+
+```rust
+use serde::Deserialize;
+use tars_types::StructuredOutputMode;
+
+#[derive(Deserialize)]
+struct Review { severity: u8, summary: String }
+
+// `mode` is whatever the request/provider used.
+let review: Review = resp.json::<Review>(StructuredOutputMode::JsonObjectMode)?;
+```
+
+`decode_json::<T>(text, mode)` is the same thing when you only have the
+text; `resp.json` is a thin wrapper over it.
+
+**`decode` — envelope tags + integer clamp.** Use the full `decode` when
+the model wraps its JSON in a declared envelope tag, or when you need the
+lossy integer-clamp recovery. A response type opts into unwrapping by
+implementing `JsonAgentResponse` and listing its tags — tried in order,
+first match wins; brackets optional (`"<report>"` ≡ `"report"`). List a
+new tag first and legacy aliases after to accept both. Empty (the default)
+means bare JSON.
+
+```rust
+use tars_types::{decode, DecodeOpts, JsonAgentResponse};
+
+#[derive(Deserialize)]
+struct FixReport { id: i64, changed: Vec<String> }
+
+impl JsonAgentResponse for FixReport {
+    fn wrapper_tags() -> &'static [&'static str] { &["<fix_report>", "<report>"] }
+}
+
+// Extracts the <fix_report>…</fix_report> block, then decodes.
+// DecodeOpts::clamping() opts into clamping any integer above i64::MAX
+// down to i64::MAX (off by default — a lossy recovery for a bogus id).
+let report: FixReport = decode(&resp.text, mode, DecodeOpts::clamping())?;
+```
+
+**Error taxonomy** (`TarsJsonError`) — the failure tells you *which* stage
+broke, so you branch on the variant, not a substring:
+
+| Variant | Meaning |
+|---------|---------|
+| `EmptyStream` | no assistant text to decode (e.g. a tool-only turn) |
+| `MissingBlock { tried }` | declared envelope tags, none found in the text |
+| `NoJsonObject { attempts }` | chatty scan found no balanced JSON value |
+| `InvalidJson` | text wasn't valid JSON (in strict mode: a violated "clean JSON" promise) |
+| `Schema` | valid JSON, but the wrong shape for `T` |
+
+`JsonValueType` is a Python-named JSON type tag (`dict` / `list` / `int` /
+…) if you want to write your own "expected an object, got a list" message.
+
+This seam is **Rust-side today.** `tars-py` / `tars-node` consumers get
+`resp.text` and parse it with `json.loads` / `JSON.parse`; the mode-aware
+fence-scrape isn't bound to those runtimes yet (see the CHANGELOG entry for
+why).
+
 ## Agents — hand a task to a capability set
 
 The three shapes above are *calls*. An **Agent** is one level up: a set of

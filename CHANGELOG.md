@@ -19,6 +19,65 @@ is authoritative. This file aggregates.
 
 ---
 
+## Result-side JSON-decode seam (`tars-types`) — `v0.8.0`
+
+A single generic place to turn an LLM completion into a typed value at the
+transport boundary, so no consumer re-implements "scrape the JSON out of a
+chat response". Lives in `tars-types::json_decode`, re-exported from the
+crate root. Generic transport only — no consumer-specific envelope tags,
+types, or domain validation.
+
+### `decode` / `decode_json` / `ChatResponse::json` (`f39215c`, `7f58a0e`)
+
+Three layers, each generic:
+
+- **`decode_json::<T>(text, mode)`** — bare decode of a response's text
+  into `T: DeserializeOwned`, strategy keyed off `StructuredOutputMode`.
+- **`decode::<T>(text, mode, opts)`** — the full seam: strip a markdown
+  fence → (if `T::wrapper_tags()` is non-empty) extract the first matching
+  `<tag>…</tag>` envelope → mode-dispatch → optional integer-clamp →
+  `from_value::<T>`.
+- **`ChatResponse::json::<T>(mode)`** — convenience method over
+  `decode_json` for the common "I have a `ChatResponse`, give me `T`" case.
+
+**Mode drives strict-vs-scrape.** `StrictSchema` / `JsonObjectMode` (the
+provider guarantees a clean JSON document) → parse `text` directly, and a
+fenced/chatty body is a *broken promise* (`InvalidJson`), never a silent
+scrape. `None` / `ToolUseEmulation` (text may be chatty prose) → strip
+fences and scan for the first balanced JSON value. The caller passes the
+`StructuredOutputMode` the request/provider used, so the layer that knows
+how the response was produced tells the decoder how to read it.
+
+**`JsonAgentResponse::wrapper_tags()`** — a response type opts into
+envelope unwrapping by listing its tags (tried in order, first match wins;
+brackets optional, so `"<report>"` and `"report"` are equivalent). List a
+new tag first and legacy aliases after to accept both. Empty (the default)
+means bare JSON — no envelope. The tag *strings* are the consumer's
+convention; the extraction *mechanism* is generic.
+
+**`DecodeOpts { clamp_ints }`** — opt-in, lossy recovery. Off by default;
+when on, any unsigned integer above `i64::MAX` is clamped down to
+`i64::MAX` before the final deserialize (for models that emit a bogus
+out-of-range id into an `i64` field). In-range ints, floats, and every
+non-number value are untouched.
+
+**Error taxonomy** (`TarsJsonError`): `EmptyStream` (no assistant text) ·
+`MissingBlock { tried }` (declared envelope tags, none found) ·
+`NoJsonObject { attempts }` (chatty scan found no balanced JSON) ·
+`InvalidJson` (bytes weren't valid JSON — in strict mode, a violated
+"clean JSON" promise) · `Schema` (valid JSON, wrong shape for `T`). The
+serde `Data`-vs-syntax category picks `Schema` vs `InvalidJson`
+automatically. `JsonValueType` is a Python-named JSON type tag
+(`dict`/`list`/`int`/…) for a consumer's own "expected X, got Y" messages.
+
+**Bindings:** Rust-side only for now. The generic `decode::<T>` is
+parametric over a Rust type and has no py/ts analogue; a `decode_json`-
+style `(text, mode) → dict/object` helper wasn't added to `tars-py` /
+`tars-node` because neither surfaces `StructuredOutputMode` to the
+consumer today and no py/ts consumer needs the fence-scrape yet — a plain
+`json.loads` / `JSON.parse` covers the strict case. Revisit when a binding
+consumer needs mode-aware scraping.
+
 ## Agent abstraction (Doc 20 / 21) — `v0.4.0`
 
 The user-facing **Agent** layer: a capability set (skills) you hand a
