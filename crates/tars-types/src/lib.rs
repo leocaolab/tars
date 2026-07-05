@@ -35,6 +35,7 @@ pub mod error;
 pub mod events;
 pub mod http_extras;
 pub mod ids;
+pub mod json_decode;
 pub mod judge;
 pub mod model;
 pub mod pipeline_events;
@@ -65,6 +66,7 @@ pub use ids::{
     AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId,
     TenantId, TraceId, TrajectoryId,
 };
+pub use json_decode::{TarsJsonError, decode_json};
 pub use judge::{JudgeItem, JudgeReport, JudgeVerdict, JudgedItem, McNemarResult, mcnemar};
 pub use model::{ModelHint, ModelTier, ThinkingMode};
 pub use pipeline_events::{
