@@ -37,27 +37,48 @@ use crate::provider::{LlmEventStream, LlmProvider};
 /// The recorded response for one request: the exact successful event sequence.
 type Recording = Vec<ChatEvent>;
 
-/// Collapse run-varying paths so a recording replays across runs that allocate
-/// a fresh worktree. A white-box agent's system prompt embeds its absolute
-/// worktree (`…/.arc/worktrees/fix-<id>`), whose `<id>` changes every run — left
-/// raw, the fingerprint differs and replay MISSes. The id token after
-/// `worktrees/fix-` is replaced with a constant. (Record and replay both run
-/// this, so they agree.) Extend here as other volatile request substrings surface.
+/// Collapse run-varying paths so a recording replays across runs — AND across
+/// machines/tempdirs. A white-box agent's system prompt embeds its absolute
+/// worktree (`<root>/.arc/worktrees/fix-<id>`), where BOTH parts vary: the
+/// `<id>` changes every run, and the absolute `<root>` prefix changes whenever
+/// the repo lives at a different path (another checkout, a fresh tempdir, a CI
+/// box). Left raw, the fingerprint differs and replay MISSes even though the
+/// logical request is identical. So we collapse the WHOLE absolute path token
+/// that ends in `worktrees/fix-<id>`, prefix included, to a single constant —
+/// making the fingerprint path-portable, mirroring how the critic references
+/// files by repo-RELATIVE path. This is fingerprint-only: the live prompt the
+/// model sees still carries the real absolute cwd (its tools resolve against the
+/// process cwd, not this hash). (Record and replay both run this, so they
+/// agree.) Extend here as other volatile request substrings surface.
 fn normalize_volatile(canon: &str) -> String {
     const NEEDLE: &str = "worktrees/fix-";
+    const REPL: &str = "NORMROOT/worktrees/fix-NORM";
+    let bytes = canon.as_bytes();
     let mut out = String::with_capacity(canon.len());
-    let mut rest = canon;
-    while let Some(i) = rest.find(NEEDLE) {
-        out.push_str(&rest[..i + NEEDLE.len()]);
-        let after = &rest[i + NEEDLE.len()..];
-        // The worktree id is an alnum/`-`/`_` run; skip it, keep the remainder.
-        let end = after
+    let mut cursor = 0usize; // start of the not-yet-emitted region
+    while let Some(rel) = canon[cursor..].find(NEEDLE) {
+        let needle_start = cursor + rel;
+        // Walk back to the start of the absolute path token so the run-varying
+        // tmp/worktree PREFIX collapses too, not just the `fix-<id>` suffix. The
+        // token runs until a JSON string delimiter (`"`, `\`) or whitespace.
+        let mut path_start = needle_start;
+        while path_start > cursor {
+            let c = bytes[path_start - 1];
+            if c == b'"' || c == b'\\' || (c as char).is_whitespace() {
+                break;
+            }
+            path_start -= 1;
+        }
+        out.push_str(&canon[cursor..path_start]);
+        // Skip the worktree id (an alnum/`-`/`_` run) after the needle.
+        let after_needle = needle_start + NEEDLE.len();
+        let id_len = canon[after_needle..]
             .find(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
-            .unwrap_or(after.len());
-        out.push_str("NORM");
-        rest = &after[end..];
+            .unwrap_or(canon.len() - after_needle);
+        out.push_str(REPL);
+        cursor = after_needle + id_len;
     }
-    out.push_str(rest);
+    out.push_str(&canon[cursor..]);
     out
 }
 
@@ -397,6 +418,47 @@ mod tests {
             normalize_volatile(run2),
             "the worktree id must be normalized out of the fingerprint",
         );
+    }
+
+    #[test]
+    fn fingerprint_is_path_portable_across_worktree_roots() {
+        // The fixer's system prompt grounds the model with its ABSOLUTE cwd. A
+        // second checkout / a fresh tempdir / a CI box puts the repo at a
+        // different absolute root, so the `worktrees/fix-<id>` PREFIX differs
+        // even when the id would match. The logical request is identical, so the
+        // fingerprint must collapse the whole path — not just the id — else the
+        // FIRST fixer call MISSes when replayed from a different directory.
+        let here = r#"{"system":"Working directory (absolute): /Users/dev/checkout-a/.arc/worktrees/fix-1140ccbb\nfix it"}"#;
+        let there = r#"{"system":"Working directory (absolute): /private/tmp/.tmpXY9/repo/.arc/worktrees/fix-563e568e\nfix it"}"#;
+        assert_ne!(here, there, "raw strings differ (different tmp/root prefixes)");
+        assert_eq!(
+            request_fingerprint_of(here),
+            request_fingerprint_of(there),
+            "a different worktree ROOT must not change the fingerprint",
+        );
+
+        // Guard the collapse isn't over-eager: a genuinely different prompt body
+        // (same worktree path) must still fingerprint distinctly.
+        let other_body = r#"{"system":"Working directory (absolute): /private/tmp/.tmpXY9/repo/.arc/worktrees/fix-563e568e\nDO SOMETHING ELSE"}"#;
+        assert_ne!(
+            request_fingerprint_of(there),
+            request_fingerprint_of(other_body),
+            "only the path is volatile; the rest of the prompt must still count",
+        );
+
+        // A prompt with no worktree path (the critic) passes through untouched.
+        let critic = r#"{"system":"review crates/foo.rs against the rubric"}"#;
+        assert_eq!(normalize_volatile(critic), critic, "non-worktree prompts are unchanged");
+    }
+
+    /// Hash a canonical string the same way `request_fingerprint` does, but
+    /// straight from a `&str` so the test can exercise the volatile-path collapse
+    /// without constructing a full `ChatRequest`.
+    fn request_fingerprint_of(canon: &str) -> String {
+        let canon = normalize_volatile(canon);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        canon.hash(&mut h);
+        format!("{:016x}", h.finish())
     }
 
     #[test]
