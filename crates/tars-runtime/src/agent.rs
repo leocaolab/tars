@@ -93,6 +93,15 @@ pub struct AgentContext {
     /// [`tars_tools::ToolContext`] so search/read tools may reach a
     /// dependency's source beyond `cwd` (write tools stay confined to `cwd`).
     pub readable_roots: Vec<std::path::PathBuf>,
+    /// OS-confinement policy (D5/D6) threaded into each per-dispatch
+    /// [`tars_tools::ToolContext::sandbox`]. This is the **per-role** seam:
+    /// a fixer step gets `WorkspaceWrite`, a reviewer step `ReadOnly`. The
+    /// executor sets it per `WorkerContext`/`CriticContext` from the resolved
+    /// `[sandbox]` config + `--sandbox` flag. Default
+    /// [`SandboxPolicy::default`] = `DangerFullAccess` = today's unconfined
+    /// behaviour, so every existing construction site is unchanged unless it
+    /// opts in.
+    pub sandbox: tars_tools::SandboxPolicy,
 }
 
 /// What an Agent returns from one execute() call.

@@ -38,6 +38,7 @@ use serde_json::json;
 use tars_types::JsonSchema;
 
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
+use crate::SandboxMode;
 
 /// Default max bytes read by `fs.read_file`. ~256 KiB.
 pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024;
@@ -103,10 +104,24 @@ impl ReadFileTool {
         self
     }
 
-    /// Resolve an input path against the optional `cwd` hint, then
-    /// (if jail is enabled) canonicalize and verify it sits inside
-    /// `root`. Returns the path to actually open.
-    fn resolve(&self, input: &str, cwd: Option<&Path>) -> Result<PathBuf, ToolResult> {
+    /// Resolve an input path against the optional `cwd` hint, then enforce
+    /// the read jail. Two independent sources of confinement, both applied:
+    ///
+    /// * `self.root` — the per-tool `with_root` jail (kept working, enforced
+    ///   in every mode, defense in depth).
+    /// * `ctx.sandbox` — when the mode is confining (`ReadOnly` /
+    ///   `WorkspaceWrite`) AND read roots are defined (`cwd` + `readable_roots`),
+    ///   the path must resolve under one of them. Mirrors the glob/grep jail
+    ///   so all fs tools read the same allowed-read set. `DangerFullAccess`
+    ///   (the default) adds nothing, so default behaviour is unchanged.
+    ///
+    /// Returns the canonicalized path to actually open.
+    fn resolve(
+        &self,
+        input: &str,
+        ctx: &ToolContext,
+    ) -> Result<PathBuf, ToolResult> {
+        let cwd = ctx.cwd.as_deref();
         let raw = Path::new(input);
         let combined = if raw.is_absolute() {
             raw.to_path_buf()
@@ -116,24 +131,52 @@ impl ReadFileTool {
             raw.to_path_buf()
         };
 
-        let Some(root) = &self.root else {
+        let sandbox_confined = ctx.sandbox.mode != SandboxMode::DangerFullAccess;
+        if self.root.is_none() && !sandbox_confined {
+            // No jail at all — today's default, unchanged.
             return Ok(combined);
-        };
+        }
 
-        // Jail enforcement requires canonicalization, which fails if
-        // the file doesn't exist. We surface that as the same
-        // "not found" error the actual read would, so callers see
-        // one consistent message.
+        // Any jail needs a canonical path. Canonicalization fails if the file
+        // doesn't exist; surface that as the same "not found"-shaped message
+        // the actual read would, so callers see one consistent error.
         let canonical = std::fs::canonicalize(&combined).map_err(|e| {
             ToolResult::error(format!("cannot resolve path `{}`: {e}", combined.display(),))
         })?;
-        if !canonical.starts_with(root) {
-            return Err(ToolResult::error(format!(
-                "path `{}` resolves outside the allowed root `{}`",
-                canonical.display(),
-                root.display(),
-            )));
+
+        // The per-tool `with_root` jail (enforced in every mode).
+        if let Some(root) = &self.root {
+            if !canonical.starts_with(root) {
+                return Err(ToolResult::error(format!(
+                    "path `{}` resolves outside the allowed root `{}`",
+                    canonical.display(),
+                    root.display(),
+                )));
+            }
         }
+
+        // Sandbox read confinement: when a confining mode is active AND at
+        // least one read root is defined, the path must sit under one of them.
+        if sandbox_confined {
+            let read_roots: Vec<PathBuf> = cwd
+                .into_iter()
+                .map(Path::to_path_buf)
+                .chain(ctx.readable_roots.iter().cloned())
+                .filter_map(|p| std::fs::canonicalize(&p).ok())
+                .collect();
+            if !read_roots.is_empty() && !read_roots.iter().any(|r| canonical.starts_with(r)) {
+                return Err(ToolResult::error(format!(
+                    "path `{}` resolves outside the allowed read root(s): {}",
+                    canonical.display(),
+                    read_roots
+                        .iter()
+                        .map(|r| r.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )));
+            }
+        }
+
         Ok(canonical)
     }
 }
@@ -186,7 +229,7 @@ impl Tool for ReadFileTool {
         let parsed: ReadFileArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        let resolved = match self.resolve(&parsed.path, ctx.cwd.as_deref()) {
+        let resolved = match self.resolve(&parsed.path, &ctx) {
             Ok(p) => p,
             Err(result) => return Ok(result),
         };
@@ -442,6 +485,74 @@ mod tests {
         let r = tool.execute(json!({"path": "rel.txt"}), ctx).await.unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content, "rel ok");
+    }
+
+    #[tokio::test]
+    async fn sandbox_confines_reads_to_readable_roots() {
+        use crate::{SandboxMode, SandboxPolicy};
+
+        let allowed = tempfile::tempdir().unwrap();
+        let inside = allowed.path().join("ok.txt");
+        write(&inside, b"inside").await;
+
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().join("secret.txt");
+        write(&outside, b"secret").await;
+
+        // No `with_root`; confinement comes purely from the sandbox policy.
+        let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::new());
+        let ctx = ToolContext {
+            sandbox: SandboxPolicy {
+                mode: SandboxMode::ReadOnly,
+                writable_roots: vec![],
+                network: false,
+            },
+            readable_roots: vec![allowed.path().to_path_buf()],
+            ..Default::default()
+        };
+
+        // Inside a readable root: allowed.
+        let r = tool
+            .execute(json!({"path": inside.to_str().unwrap()}), ctx.clone())
+            .await
+            .unwrap();
+        assert!(!r.is_error, "read inside readable_root must succeed: {}", r.content);
+        assert_eq!(r.content, "inside");
+
+        // Outside every read root: rejected.
+        let r = tool
+            .execute(json!({"path": outside.to_str().unwrap()}), ctx)
+            .await
+            .unwrap();
+        assert!(r.is_error, "read outside readable_roots must be rejected");
+        assert!(
+            r.content.contains("outside the allowed read root"),
+            "got: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn default_sandbox_does_not_restrict_reads() {
+        // DangerFullAccess (the default) must not add any read confinement:
+        // an absolute path anywhere still reads, even with readable_roots set
+        // that do NOT contain it.
+        let bystander = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("free.txt");
+        write(&path, b"free").await;
+
+        let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::new());
+        let ctx = ToolContext {
+            readable_roots: vec![bystander.path().to_path_buf()],
+            ..Default::default() // sandbox = DangerFullAccess
+        };
+        let r = tool
+            .execute(json!({"path": path.to_str().unwrap()}), ctx)
+            .await
+            .unwrap();
+        assert!(!r.is_error, "default policy must not restrict reads: {}", r.content);
+        assert_eq!(r.content, "free");
     }
 
     #[tokio::test]

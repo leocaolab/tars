@@ -188,6 +188,11 @@ impl Agent for TarsAgent {
             cwd: ctx.cwd.clone(),
             permissions: ctx.permissions.clone(),
             readable_roots: ctx.readable_roots.clone(),
+            // The native-agent path runs one worker step directly (no executor
+            // WorkerContext). Its per-role sandbox would come from the
+            // `tars_model::AgentContext` once that boundary carries a policy;
+            // until then it's unconfined (DangerFullAccess), same as before.
+            sandbox: tars_tools::SandboxPolicy::default(),
         };
 
         let msg = self
@@ -241,6 +246,8 @@ impl Worker for TarsAgent {
             agent,
             req,
             ctx.cancel.clone(),
+            // Worker/fixer confinement (D5/D6) from the executor's WorkerContext.
+            ctx.sandbox.clone(),
         )
         .await
         .map_err(|e| match e {

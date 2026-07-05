@@ -175,6 +175,7 @@ async fn same_tool_runs_identically_via_session_and_worker() {
         cwd: None,
         permissions: Default::default(),
         readable_roots: Vec::new(),
+        sandbox: Default::default(),
     };
     worker
         .execute_step(ctx, &plan, &plan.steps[0], &[])

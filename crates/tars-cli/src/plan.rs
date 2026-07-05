@@ -144,6 +144,8 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
             agent.clone(),
             req,
             cancel.clone(),
+            // The planner has no filesystem tools — confinement is irrelevant.
+            tars_tools::SandboxPolicy::default(),
         )
         .await;
         match result {
@@ -160,6 +162,7 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
             cwd: None,
             permissions: Default::default(),
             readable_roots: Vec::new(),
+            sandbox: Default::default(),
         };
         agent
             .plan(ctx, &goal)

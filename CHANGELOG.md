@@ -19,6 +19,59 @@ is authoritative. This file aggregates.
 
 ---
 
+## Bless store — loadable field-level reference assertions (`tars-types`) — `v0.9.0`
+
+Golden/approval testing for LLM output, sitting on the shipped cassette (Doc 28).
+A **bless** is a committed JSON file of `{selector, expected, match}` assertions
+about a *pinned* reply; a test decodes the (cassette-replayed → deterministic)
+response and `check`s it — empty outcome = pass, any drift = fail naming
+`(selector, expected, actual)`. The bless is the output-side counterpart to the
+cassette's input-side pin. Design: [`docs/architecture/28-bless-store.md`](docs/architecture/28-bless-store.md).
+
+### `tars_types::bless` (M0–M2)
+
+- **`Bless` / `Assert` / `MatchTier` / `BlessOutcome` / `Drift`** — the file
+  format + `load`/`save`/`check`. Field-level, not whole-snapshot: assert only
+  the load-bearing fields, leave noisy prose free.
+- **Selector** — a JSONPath **subset** (`$.a.b`, `$['a']`, `[N]`); a typo is a
+  loud `BadSelector`, a missing field is a fail-closed `Drift` (never a silent
+  pass). A full RFC-9535 engine can replace the resolver behind the same API.
+- **`MatchTier`** — `exact` (Value eq) · `normalized` (whitespace/number
+  canonicalized, so `8` == `8.0`) · `semantic` (LLM-judged; injected as a
+  closure via `check_with` since the judge lives above `tars-types`).
+- **`check_or_bless`** — the approval assert (insta pattern): `do_bless` →
+  capture selected fields, stage `*.new`, promote (never in-place clobber);
+  else load + check; else (CI, no file) error. `capture` refuses to bless an
+  absent field.
+- 17 unit tests; `cargo test -p tars-types bless` + clippy green.
+
+### `tars eval bless` (M3)
+
+`tars eval bless <run> --select '$.severity' [--accept]` captures per-case
+`output.bless.json`; `tars eval bless <run>` checks each case's `output.txt`
+against its committed bless and bails on drift — the Doc 18 §4.4 golden loop.
+Verified end-to-end through a cassette-pinned eval run (record → check → drift).
+
+### E2E
+
+`crates/tars-provider/tests/ab_cassette.rs` extends the cassette test: load a
+committed `examples/bless/severity.bless.json` over the pinned reply → pass;
+mutate a field → drift with `(selector, expected, actual)`; `check_or_bless`
+round-trip. Offline, in CI (5 tests).
+
+**Deferred:** py/ts `load_bless` bindings (M4) and the `eval diff` blessed-drift
+tier — the Rust API + `eval bless` cover the arc (Rust consumer) path; bindings
+are consumer-convenience follow-ups.
+
+### Related work
+
+Doc 28 §1a maps the field: bless is the deliberate **union** of file-based
+snapshot/approval (insta `.snap.new`→review→`.snap`, ApprovalTests
+`.received`→`.approved`) and field-level LLM-output assertion (promptfoo,
+OpenAI Evals, LangSmith golden sets), made deterministic by the cassette — the
+one thing snapshot tools assume and LLM outputs violate. The input-pin idea
+itself (vcrpy / vcr-langchain) is well-trodden; the *integration* is the point.
+
 ## Result-side JSON-decode seam (`tars-types`) — `v0.8.0`
 
 A single generic place to turn an LLM completion into a typed value at the

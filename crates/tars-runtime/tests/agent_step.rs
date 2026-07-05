@@ -58,6 +58,7 @@ async fn full_stack_agent_step_lands_in_trajectory_log() {
         agent,
         req,
         CancellationToken::new(),
+        Default::default(),
     )
     .await
     .expect("agent step should succeed");
@@ -132,6 +133,7 @@ async fn agent_failure_writes_step_failed_and_propagates() {
         agent,
         ChatRequest::user(ModelHint::Explicit("mock".into()), "x"),
         CancellationToken::new(),
+        Default::default(),
     )
     .await
     .expect_err("agent step should fail");
@@ -184,6 +186,7 @@ async fn step_seq_increments_across_multiple_agent_calls() {
             agent.clone(),
             ChatRequest::user(ModelHint::Explicit("m".into()), format!("turn {i}")),
             CancellationToken::new(),
+            Default::default(),
         )
         .await
         .expect("step should succeed");

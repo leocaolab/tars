@@ -15,6 +15,24 @@ use crate::child_reaper::ReaperGuard;
 use super::argv::{SubprocessInvocation, SubprocessRunner, build_argv_with, streaming_enabled};
 use super::streaming::run_streaming;
 
+/// Opt-in exec sandbox for the claude delegate (Doc 29). Off by default until
+/// the jail policy is validated against a live `claude -p` run per platform;
+/// arc enables it (`TARS_CLAUDE_SANDBOX=1`) where validated.
+fn sandbox_enabled() -> bool {
+    std::env::var("TARS_CLAUDE_SANDBOX")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// The bare (unsandboxed) command — executable + argv. Caller sets cwd.
+fn bare_command(inv: &SubprocessInvocation, argv: &[String]) -> Command {
+    let mut c = Command::new(&inv.executable);
+    for tok in argv {
+        c.arg(tok);
+    }
+    c
+}
+
 pub struct RealSubprocessRunner;
 
 #[async_trait]
@@ -28,23 +46,55 @@ impl SubprocessRunner for RealSubprocessRunner {
         // `stream-json` (or vice-versa), corrupting the result.
         let streaming = streaming_enabled();
 
-        let mut cmd = Command::new(&inv.executable);
-        for tok in build_argv_with(&inv, streaming) {
-            cmd.arg(tok);
-        }
+        let argv = build_argv_with(&inv, streaming);
 
-        // Run the child IN the request's working dir when set — this is what
-        // makes claude's own Read/Edit/Bash (`--tools default`) operate in the
-        // fix worktree instead of arc's process cwd. `None` inherits the parent.
-        if let Some(cwd) = &inv.cwd {
-            cmd.current_dir(cwd);
-        }
+        // Exec sandbox (Doc 29): when `TARS_CLAUDE_SANDBOX=1` AND we have a
+        // worktree cwd, jail the delegate's process tree to that worktree so it
+        // cannot read/write beyond the repo (claude runs with
+        // `bypassPermissions`, so its own confinement is off — the OS jail is
+        // the only structural boundary). Fail-closed: if a sandbox is requested
+        // but can't be built, we return the error rather than spawn unconfined.
+        let sandboxed = sandbox_enabled();
+        let mut cmd = match (&inv.cwd, sandboxed) {
+            (Some(cwd), true) => {
+                // Write-jail the delegate's process tree to the worktree (codex
+                // model). `wrap` is fail-closed: an error here aborts the spawn
+                // rather than running unconfined.
+                let (wrapper, wrapped_argv) = tars_sandbox::SandboxPolicy::workspace_write(cwd)
+                    .wrap(&inv.executable, &argv, cwd)
+                    .map_err(|e| ProviderError::Internal(format!("exec sandbox: {e}")))?;
+                let mut c = Command::new(wrapper);
+                for tok in wrapped_argv {
+                    c.arg(tok);
+                }
+                c.current_dir(cwd); // claude's Read/Edit/Bash still default to the worktree
+                c
+            }
+            _ => {
+                let mut c = bare_command(&inv, &argv);
+                if let Some(cwd) = &inv.cwd {
+                    c.current_dir(cwd);
+                }
+                c
+            }
+        };
 
         // Strip the dangerous env vars CASE-INSENSITIVELY. Pass through everything else.
         cmd.env_clear();
         for (k, v) in std::env::vars() {
             if !inv.stripped_env.contains(&k.to_uppercase()) {
                 cmd.env(k, v);
+            }
+        }
+
+        // In the jail, host /tmp + /var/folders are read-only, so point the
+        // delegate's scratch (TMPDIR/TMP/TEMP) INSIDE the writable worktree.
+        // Set after the pass-through loop so it wins over an inherited value.
+        if sandboxed {
+            if let Some(cwd) = &inv.cwd {
+                cmd.env("TMPDIR", cwd);
+                cmd.env("TMP", cwd);
+                cmd.env("TEMP", cwd);
             }
         }
 

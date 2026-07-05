@@ -407,6 +407,27 @@ fn ground_system_with_cwd(
     })
 }
 
+/// Finalise the per-step [`tars_tools::SandboxPolicy`] before it reaches the
+/// tools' `ToolContext` (D5/D6). The only massaging done here: a
+/// `WorkspaceWrite` policy that carries no explicitly-configured
+/// `writable_roots` is scoped to the agent's worktree (`cwd`) — "write only the
+/// worktree" (Doc 22 §4-5). `ReadOnly` / `DangerFullAccess` (and a
+/// `WorkspaceWrite` with roots already set) pass through unchanged. If
+/// WorkspaceWrite is requested but there's no cwd to root it at, the empty
+/// roots are left as-is (the sandbox layer then denies all writes — fail
+/// closed, never widened).
+fn resolve_step_sandbox(
+    mut policy: tars_tools::SandboxPolicy,
+    cwd: Option<&std::path::Path>,
+) -> tars_tools::SandboxPolicy {
+    if policy.mode == tars_tools::SandboxMode::WorkspaceWrite && policy.writable_roots.is_empty() {
+        if let Some(cwd) = cwd {
+            policy.writable_roots = vec![cwd.to_path_buf()];
+        }
+    }
+    policy
+}
+
 #[async_trait]
 impl Agent for WorkerAgent {
     fn id(&self) -> &AgentId {
@@ -537,12 +558,21 @@ impl WorkerAgent {
                     tars_model::Decision::Ask => tars_tools::ToolDecision::Ask,
                 })
             };
+            // Resolve the OS-confinement policy this step's tools run under
+            // (D5/D6). `ctx.sandbox` is the per-role policy the executor set
+            // (fixer=WorkspaceWrite, reviewer=ReadOnly). For WorkspaceWrite
+            // with no explicitly-configured writable roots, default them to the
+            // agent's worktree (`ctx.cwd`) — the tools may write only there.
+            // Default policy is DangerFullAccess (unconfined), so this is inert
+            // until config/flag opts in.
+            let sandbox = resolve_step_sandbox(ctx.sandbox.clone(), ctx.cwd.as_deref());
             for call in &response.tool_calls {
                 let tool_ctx = ToolContext {
                     cancel: ctx.cancel.clone(),
                     cwd: ctx.cwd.clone(),
                     permission: Some(permission.clone()),
                     readable_roots: ctx.readable_roots.clone(),
+                    sandbox: sandbox.clone(),
                     ..Default::default()
                 };
                 let tool_msg = registry.dispatch(call, tool_ctx).await;
@@ -944,6 +974,7 @@ mod tests {
             cwd: Some(wt.clone()),
             permissions: tars_model::Permissions::allow_all(),
             readable_roots: vec![],
+            sandbox: Default::default(),
         };
 
         let rt = tokio::runtime::Builder::new_current_thread()

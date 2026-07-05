@@ -338,7 +338,7 @@ mod tests {
 
     use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalSink};
     use crate::permission::{PermissionView, ToolDecision};
-    use crate::sandbox::SandboxPolicy;
+    use crate::SandboxPolicy;
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};

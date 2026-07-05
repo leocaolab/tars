@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/tars-types",
+    "crates/tars-sandbox",
     "crates/tars-model",
     "crates/tars-config",
     "crates/tars-provider",
@@ -33,6 +34,7 @@ members = [
 # the platform-tagged artifact + index.js / index.d.ts for npm.
 default-members = [
     "crates/tars-types",
+    "crates/tars-sandbox",
     "crates/tars-config",
     "crates/tars-provider",
     "crates/tars-pipeline",
@@ -47,7 +49,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"

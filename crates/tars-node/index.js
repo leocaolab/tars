@@ -310,7 +310,8 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { hello, Pipeline } = nativeBinding
+const { hello, blessCheck, Pipeline } = nativeBinding
 
 module.exports.hello = hello
+module.exports.blessCheck = blessCheck
 module.exports.Pipeline = Pipeline

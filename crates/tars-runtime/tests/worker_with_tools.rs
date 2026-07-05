@@ -90,6 +90,7 @@ fn ctx(llm: Arc<dyn LlmService>) -> AgentContext {
         cwd: None,
         permissions: Default::default(),
         readable_roots: Vec::new(),
+        sandbox: Default::default(),
     }
 }
 
@@ -341,5 +342,126 @@ async fn stub_worker_without_tools_still_works_unchanged() {
     assert!(
         history[0].tools.is_empty(),
         "stub worker must NOT advertise tools",
+    );
+}
+
+// ── M4: the resolved SandboxPolicy reaches the tool's ToolContext ─────
+
+/// A tool that records the `ToolContext.sandbox` it is dispatched with, so
+/// a test can assert what confinement the worker threaded down (D5/D6).
+struct SandboxCapturingTool {
+    seen: Arc<Mutex<Option<tars_tools::SandboxPolicy>>>,
+    schema: tars_types::JsonSchema,
+}
+
+impl SandboxCapturingTool {
+    fn new(seen: Arc<Mutex<Option<tars_tools::SandboxPolicy>>>) -> Self {
+        Self {
+            seen,
+            schema: tars_types::JsonSchema::strict("Noop", serde_json::json!({"type": "object"})),
+        }
+    }
+}
+
+#[async_trait]
+impl tars_tools::Tool for SandboxCapturingTool {
+    fn name(&self) -> &str {
+        "test.capture_sandbox"
+    }
+    fn description(&self) -> &str {
+        "records the sandbox policy it was dispatched with"
+    }
+    fn input_schema(&self) -> &tars_types::JsonSchema {
+        &self.schema
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: tars_tools::ToolContext,
+    ) -> Result<tars_tools::ToolResult, tars_tools::ToolError> {
+        *self.seen.lock().unwrap() = Some(ctx.sandbox.clone());
+        Ok(tars_tools::ToolResult::success("captured"))
+    }
+}
+
+#[tokio::test]
+async fn resolved_workspace_write_policy_reaches_tool_context() {
+    use tars_tools::{SandboxMode, SandboxPolicy};
+
+    let seen = Arc::new(Mutex::new(None));
+    let mut reg = ToolRegistry::new();
+    reg.register_owned(SandboxCapturingTool::new(seen.clone()))
+        .unwrap();
+    let registry = Arc::new(reg);
+
+    // One tool call → final answer.
+    let final_json = serde_json::json!({"summary": "done", "confidence": 1.0}).to_string();
+    let provider = EventQueueProvider::new(vec![
+        tool_call_events("c1", "test.capture_sandbox", serde_json::json!({})),
+        final_text_events(&final_json),
+    ]);
+    let llm = build_llm(provider);
+
+    let worker =
+        WorkerAgent::with_tools(AgentId::new("worker"), "any-model", "general", registry);
+
+    // AgentContext carries a WorkspaceWrite policy with NO explicit roots and a
+    // worktree cwd — the worker must fill writable_roots with [cwd].
+    let worktree = std::path::PathBuf::from("/tmp/arc/worktrees/fix-42");
+    let mut ctx = ctx(llm);
+    ctx.cwd = Some(worktree.clone());
+    ctx.sandbox = SandboxPolicy {
+        mode: SandboxMode::WorkspaceWrite,
+        writable_roots: Vec::new(),
+        network: true,
+    };
+
+    let plan = sample_plan();
+    worker
+        .execute_step(ctx, &plan, &plan.steps[0], &[])
+        .await
+        .expect("worker should finish");
+
+    let policy = seen.lock().unwrap().clone().expect("tool was dispatched");
+    assert_eq!(policy.mode, SandboxMode::WorkspaceWrite, "mode threaded through");
+    assert_eq!(
+        policy.writable_roots,
+        vec![worktree],
+        "WorkspaceWrite with no explicit roots is scoped to the worktree cwd",
+    );
+}
+
+#[tokio::test]
+async fn default_policy_reaching_tool_context_is_unconfined() {
+    use tars_tools::SandboxMode;
+
+    let seen = Arc::new(Mutex::new(None));
+    let mut reg = ToolRegistry::new();
+    reg.register_owned(SandboxCapturingTool::new(seen.clone()))
+        .unwrap();
+    let registry = Arc::new(reg);
+
+    let final_json = serde_json::json!({"summary": "done", "confidence": 1.0}).to_string();
+    let provider = EventQueueProvider::new(vec![
+        tool_call_events("c1", "test.capture_sandbox", serde_json::json!({})),
+        final_text_events(&final_json),
+    ]);
+    let llm = build_llm(provider);
+
+    let worker =
+        WorkerAgent::with_tools(AgentId::new("worker"), "any-model", "general", registry);
+
+    // Default AgentContext (no opt-in) ⇒ DangerFullAccess reaches the tool.
+    let plan = sample_plan();
+    worker
+        .execute_step(ctx(llm), &plan, &plan.steps[0], &[])
+        .await
+        .expect("worker should finish");
+
+    let policy = seen.lock().unwrap().clone().expect("tool was dispatched");
+    assert_eq!(
+        policy.mode,
+        SandboxMode::DangerFullAccess,
+        "absent config/flag ⇒ unconfined default is preserved end to end",
     );
 }

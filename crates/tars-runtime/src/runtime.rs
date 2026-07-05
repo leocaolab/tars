@@ -291,6 +291,7 @@ impl Runtime for LocalRuntime {
 /// In short: side effects inside `agent.execute` (the LLM call) may run
 /// more than once across a crash+retry; the event log is the source of
 /// truth for what actually completed.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_agent_step(
     runtime: &dyn Runtime,
     traj: &TrajectoryId,
@@ -298,6 +299,11 @@ pub async fn execute_agent_step(
     agent: Arc<dyn Agent>,
     input: ChatRequest,
     cancel: CancellationToken,
+    // OS-confinement policy for this step's tools (D5/D6). The caller
+    // (executor via `WorkerContext`/`CriticContext`) sets it per role from the
+    // resolved `[sandbox]` config + `--sandbox` flag. `SandboxPolicy::default()`
+    // = `DangerFullAccess` = today's unconfined behaviour.
+    sandbox: tars_tools::SandboxPolicy,
 ) -> Result<AgentStepResult, AgentExecutionError> {
     // 1. step_seq = (count of existing StepStarted events) + 1.
     //    NOT event high-water + 1 — that conflates "trajectory's
@@ -366,6 +372,9 @@ pub async fn execute_agent_step(
         cwd: None,
         permissions: Default::default(),
         readable_roots: Vec::new(),
+        // Per-role confinement (D5), passed through from the executor's
+        // WorkerContext/CriticContext. Default = DangerFullAccess (unconfined).
+        sandbox,
     };
     let result = agent.clone().execute(ctx, input).await;
 

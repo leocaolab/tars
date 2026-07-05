@@ -36,6 +36,7 @@ fn ctx(llm: Arc<dyn LlmService>) -> AgentContext {
         cwd: None,
         permissions: Default::default(),
         readable_roots: Vec::new(),
+        sandbox: Default::default(),
     }
 }
 
@@ -145,6 +146,7 @@ async fn orchestrator_step_logs_in_trajectory_via_execute_agent_step() {
         agent,
         req,
         CancellationToken::new(),
+        Default::default(),
     )
     .await
     .expect("agent step should succeed");

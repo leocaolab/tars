@@ -1,0 +1,397 @@
+{
+  "capabilities": {
+    "max_context_tokens": 128000,
+    "max_output_tokens": 16384,
+    "supports_tool_use": true,
+    "supports_parallel_tool_calls": true,
+    "supports_structured_output": "json_object_mode",
+    "supports_vision": false,
+    "supports_thinking": false,
+    "supports_cancel": true,
+    "prompt_cache": {
+      "implicit_prefix": {
+        "min_tokens": 1024
+      }
+    },
+    "streaming": true,
+    "modalities_in": [
+      "text"
+    ],
+    "modalities_out": [
+      "text"
+    ],
+    "pricing": {
+      "input_per_million": 0.0,
+      "output_per_million": 0.0,
+      "cached_input_per_million": 0.0,
+      "cache_creation_per_million": 0.0,
+      "thinking_per_million": 0.0
+    }
+  },
+  "recordings": {
+    "7563ffbff563803d": [
+      {
+        "type": "started",
+        "actual_model": "qwen/qwen3-coder-30b",
+        "cache_hit": {
+          "cached_input_tokens": 0,
+          "used_explicit_handle": false,
+          "replayed_from_cache": false
+        }
+      },
+      {
+        "type": "delta",
+        "text": "{\n"
+      },
+      {
+        "type": "delta",
+        "text": "  \""
+      },
+      {
+        "type": "delta",
+        "text": "severity"
+      },
+      {
+        "type": "delta",
+        "text": "\":"
+      },
+      {
+        "type": "delta",
+        "text": " 8"
+      },
+      {
+        "type": "delta",
+        "text": ",\n"
+      },
+      {
+        "type": "delta",
+        "text": "  \""
+      },
+      {
+        "type": "delta",
+        "text": "summary"
+      },
+      {
+        "type": "delta",
+        "text": "\":"
+      },
+      {
+        "type": "delta",
+        "text": " \""
+      },
+      {
+        "type": "delta",
+        "text": "A"
+      },
+      {
+        "type": "delta",
+        "text": " config"
+      },
+      {
+        "type": "delta",
+        "text": " reload"
+      },
+      {
+        "type": "delta",
+        "text": " causes"
+      },
+      {
+        "type": "delta",
+        "text": " a"
+      },
+      {
+        "type": "delta",
+        "text": " use"
+      },
+      {
+        "type": "delta",
+        "text": "-after"
+      },
+      {
+        "type": "delta",
+        "text": "-free"
+      },
+      {
+        "type": "delta",
+        "text": " error"
+      },
+      {
+        "type": "delta",
+        "text": " when"
+      },
+      {
+        "type": "delta",
+        "text": " a"
+      },
+      {
+        "type": "delta",
+        "text": " buffer"
+      },
+      {
+        "type": "delta",
+        "text": " referenced"
+      },
+      {
+        "type": "delta",
+        "text": " by"
+      },
+      {
+        "type": "delta",
+        "text": " an"
+      },
+      {
+        "type": "delta",
+        "text": " in"
+      },
+      {
+        "type": "delta",
+        "text": "-flight"
+      },
+      {
+        "type": "delta",
+        "text": " request"
+      },
+      {
+        "type": "delta",
+        "text": " is"
+      },
+      {
+        "type": "delta",
+        "text": " prematurely"
+      },
+      {
+        "type": "delta",
+        "text": " freed"
+      },
+      {
+        "type": "delta",
+        "text": ","
+      },
+      {
+        "type": "delta",
+        "text": " potentially"
+      },
+      {
+        "type": "delta",
+        "text": " leading"
+      },
+      {
+        "type": "delta",
+        "text": " to"
+      },
+      {
+        "type": "delta",
+        "text": " crashes"
+      },
+      {
+        "type": "delta",
+        "text": " or"
+      },
+      {
+        "type": "delta",
+        "text": " security"
+      },
+      {
+        "type": "delta",
+        "text": " vulnerabilities"
+      },
+      {
+        "type": "delta",
+        "text": ".\"\n"
+      },
+      {
+        "type": "delta",
+        "text": "}"
+      },
+      {
+        "type": "finished",
+        "stop_reason": "end_turn",
+        "usage": {
+          "input_tokens": 81,
+          "output_tokens": 45,
+          "cached_input_tokens": 0,
+          "cache_creation_tokens": 0,
+          "thinking_tokens": 0
+        }
+      }
+    ],
+    "897701a34d99d76b": [
+      {
+        "type": "started",
+        "actual_model": "qwen/qwen3-coder-30b",
+        "cache_hit": {
+          "cached_input_tokens": 0,
+          "used_explicit_handle": false,
+          "replayed_from_cache": false
+        }
+      },
+      {
+        "type": "delta",
+        "text": "{\n"
+      },
+      {
+        "type": "delta",
+        "text": "  \""
+      },
+      {
+        "type": "delta",
+        "text": "severity"
+      },
+      {
+        "type": "delta",
+        "text": "\":"
+      },
+      {
+        "type": "delta",
+        "text": " 8"
+      },
+      {
+        "type": "delta",
+        "text": ",\n"
+      },
+      {
+        "type": "delta",
+        "text": "  \""
+      },
+      {
+        "type": "delta",
+        "text": "summary"
+      },
+      {
+        "type": "delta",
+        "text": "\":"
+      },
+      {
+        "type": "delta",
+        "text": " \""
+      },
+      {
+        "type": "delta",
+        "text": "Un"
+      },
+      {
+        "type": "delta",
+        "text": "wr"
+      },
+      {
+        "type": "delta",
+        "text": "apping"
+      },
+      {
+        "type": "delta",
+        "text": " None"
+      },
+      {
+        "type": "delta",
+        "text": " values"
+      },
+      {
+        "type": "delta",
+        "text": " in"
+      },
+      {
+        "type": "delta",
+        "text": " request"
+      },
+      {
+        "type": "delta",
+        "text": " handlers"
+      },
+      {
+        "type": "delta",
+        "text": " causes"
+      },
+      {
+        "type": "delta",
+        "text": " worker"
+      },
+      {
+        "type": "delta",
+        "text": " pan"
+      },
+      {
+        "type": "delta",
+        "text": "ics"
+      },
+      {
+        "type": "delta",
+        "text": " on"
+      },
+      {
+        "type": "delta",
+        "text": " malformed"
+      },
+      {
+        "type": "delta",
+        "text": " input"
+      },
+      {
+        "type": "delta",
+        "text": ","
+      },
+      {
+        "type": "delta",
+        "text": " representing"
+      },
+      {
+        "type": "delta",
+        "text": " a"
+      },
+      {
+        "type": "delta",
+        "text": " critical"
+      },
+      {
+        "type": "delta",
+        "text": " stability"
+      },
+      {
+        "type": "delta",
+        "text": " issue"
+      },
+      {
+        "type": "delta",
+        "text": " with"
+      },
+      {
+        "type": "delta",
+        "text": " high"
+      },
+      {
+        "type": "delta",
+        "text": " impact"
+      },
+      {
+        "type": "delta",
+        "text": " on"
+      },
+      {
+        "type": "delta",
+        "text": " system"
+      },
+      {
+        "type": "delta",
+        "text": " reliability"
+      },
+      {
+        "type": "delta",
+        "text": ".\"\n"
+      },
+      {
+        "type": "delta",
+        "text": "}"
+      },
+      {
+        "type": "finished",
+        "stop_reason": "end_turn",
+        "usage": {
+          "input_tokens": 79,
+          "output_tokens": 43,
+          "cached_input_tokens": 0,
+          "cache_creation_tokens": 0,
+          "thinking_tokens": 0
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,167 @@
+{
+  "capabilities": {
+    "max_context_tokens": 128000,
+    "max_output_tokens": 16384,
+    "supports_tool_use": true,
+    "supports_parallel_tool_calls": true,
+    "supports_structured_output": "json_object_mode",
+    "supports_vision": false,
+    "supports_thinking": false,
+    "supports_cancel": true,
+    "prompt_cache": {
+      "implicit_prefix": {
+        "min_tokens": 1024
+      }
+    },
+    "streaming": true,
+    "modalities_in": [
+      "text"
+    ],
+    "modalities_out": [
+      "text"
+    ],
+    "pricing": {
+      "input_per_million": 0.0,
+      "output_per_million": 0.0,
+      "cached_input_per_million": 0.0,
+      "cache_creation_per_million": 0.0,
+      "thinking_per_million": 0.0
+    }
+  },
+  "recordings": {
+    "e6e5b3b82767c3ce": [
+      {
+        "type": "started",
+        "actual_model": "qwen/qwen3-coder-30b",
+        "cache_hit": {
+          "cached_input_tokens": 0,
+          "used_explicit_handle": false,
+          "replayed_from_cache": false
+        }
+      },
+      {
+        "type": "delta",
+        "text": "{\n"
+      },
+      {
+        "type": "delta",
+        "text": "  \""
+      },
+      {
+        "type": "delta",
+        "text": "severity"
+      },
+      {
+        "type": "delta",
+        "text": "\":"
+      },
+      {
+        "type": "delta",
+        "text": " 8"
+      },
+      {
+        "type": "delta",
+        "text": ",\n"
+      },
+      {
+        "type": "delta",
+        "text": "  \""
+      },
+      {
+        "type": "delta",
+        "text": "summary"
+      },
+      {
+        "type": "delta",
+        "text": "\":"
+      },
+      {
+        "type": "delta",
+        "text": " \""
+      },
+      {
+        "type": "delta",
+        "text": "Un"
+      },
+      {
+        "type": "delta",
+        "text": "wrap"
+      },
+      {
+        "type": "delta",
+        "text": " of"
+      },
+      {
+        "type": "delta",
+        "text": " None"
+      },
+      {
+        "type": "delta",
+        "text": " value"
+      },
+      {
+        "type": "delta",
+        "text": " in"
+      },
+      {
+        "type": "delta",
+        "text": " request"
+      },
+      {
+        "type": "delta",
+        "text": " handler"
+      },
+      {
+        "type": "delta",
+        "text": " causes"
+      },
+      {
+        "type": "delta",
+        "text": " worker"
+      },
+      {
+        "type": "delta",
+        "text": " panic"
+      },
+      {
+        "type": "delta",
+        "text": " leading"
+      },
+      {
+        "type": "delta",
+        "text": " to"
+      },
+      {
+        "type": "delta",
+        "text": " complete"
+      },
+      {
+        "type": "delta",
+        "text": " service"
+      },
+      {
+        "type": "delta",
+        "text": " failure"
+      },
+      {
+        "type": "delta",
+        "text": "\"\n"
+      },
+      {
+        "type": "delta",
+        "text": "}"
+      },
+      {
+        "type": "finished",
+        "stop_reason": "end_turn",
+        "usage": {
+          "input_tokens": 79,
+          "output_tokens": 32,
+          "cached_input_tokens": 0,
+          "cache_creation_tokens": 0,
+          "thinking_tokens": 0
+        }
+      }
+    ]
+  }
+}

@@ -69,6 +69,43 @@ console.log(resp.usage.outputTokens);
 console.log(resp.stopReason);        // "end_turn" / "max_tokens" / ...
 ```
 
+### Validating against a JSON Schema
+
+The Rust `decode::<T>` seam is Rust-only; from Node the schema-valid path is:
+
+1. **Decode-time enforcement — `responseSchema`.** Hand the JSON Schema to
+   the provider's structured-output mode; a strict-capable provider
+   (Gemini / OpenAI / Anthropic) is *forced* to emit conforming JSON, so
+   `result.text` parses cleanly. (A local LM Studio model may reject
+   `response_format` — fall back to a JSON-forcing prompt.)
+2. **Parse + shape-check in your code.** Unlike `tars-py`, the Node binding
+   has **no in-pipeline validators** yet — run `JSON.parse(result.text)`
+   then validate the shape yourself (plain JS, or zod / ajv):
+
+   ```ts
+   const result = await pipeline.complete({ model, user, responseSchema: SCHEMA });
+   const data = JSON.parse(result.text);
+   if (!Number.isInteger(data.severity)) throw new Error('severity must be int');
+   ```
+
+Runnable end-to-end example (record-once / replay-forever via a cassette —
+no live model needed):
+[`examples/node/schema-validation.mjs`](../../examples/node/schema-validation.mjs).
+
+### Deterministic tests — cassette replay
+
+`type = "cassette"` in the config wraps a real provider and records
+`(request → events)` to a JSON file, then replays it forever (VCR pattern) —
+so tests/examples run with no live model. A request the recording doesn't
+cover is a hard **MISS error**, never a silent re-call. Record and replay
+compute the *same* request fingerprint across bindings, so a cassette
+recorded from `tars-py` replays byte-identically through `tars-node`.
+
+```
+TARS_CASSETTE_RECORD=1 node examples/node/schema-validation.mjs  # record (live)
+node examples/node/schema-validation.mjs                          # replay (offline)
+```
+
 ## Why a separate binding?
 
 Same answer as `tars-py`: every layer above the provider — cache, retry,

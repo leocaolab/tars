@@ -117,6 +117,11 @@ pub struct WorkerContext {
     /// own handle (e.g. `Arc<ArcBlackboard>`); workers that don't touch domain
     /// state ignore it. `None` when the caller didn't supply one.
     pub shared: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// OS-confinement policy this worker's tools run under (D5/D6). This is the
+    /// **fixer** side of the per-role seam — typically `WorkspaceWrite` (write
+    /// only the worktree). Injected from `RunPlanConfig.sandbox`. Default
+    /// `DangerFullAccess` = unconfined (today's behaviour).
+    pub sandbox: tars_tools::SandboxPolicy,
 }
 
 /// Per-invocation context handed to a [`Critic`]. Same shape as
@@ -126,6 +131,11 @@ pub struct CriticContext {
     pub runtime: Arc<dyn Runtime>,
     pub trajectory_id: TrajectoryId,
     pub cancel: CancellationToken,
+    /// OS-confinement policy this critic's tools run under (D5/D6). This is the
+    /// **reviewer** side of the per-role seam — typically `ReadOnly` today
+    /// (→ `WorkspaceWrite` when the reviewer gets write-git, per the tracking
+    /// doc). Injected from `RunPlanConfig.sandbox`. Default `DangerFullAccess`.
+    pub sandbox: tars_tools::SandboxPolicy,
 }
 
 /// Executes one [`PlanStep`]. Trait so callers can plug in:
@@ -287,6 +297,17 @@ pub struct RunPlanConfig {
     /// `PlanStep` literal across callers. Per-step budgets can be added
     /// later if a real need appears.)
     pub step_time_budget: Option<Duration>,
+    /// OS-confinement policy (D5/D6) applied to every step's tools on this run,
+    /// resolved from the `[sandbox]` TOML section + `--sandbox` flag. Copied
+    /// into each `WorkerContext.sandbox` / `CriticContext.sandbox`.
+    ///
+    /// One policy per run today (worker + critic share it). Per-role
+    /// differentiation — fixer=`WorkspaceWrite`, reviewer=`ReadOnly` (D5) —
+    /// would split this into `worker_sandbox` / `critic_sandbox` once role
+    /// selection is wired; the `WorkerContext`/`CriticContext` fields are
+    /// already separate so only this config + the two build sites below change.
+    /// Default `DangerFullAccess` = unconfined (today's behaviour).
+    pub sandbox: tars_tools::SandboxPolicy,
 }
 
 impl Default for RunPlanConfig {
@@ -297,6 +318,7 @@ impl Default for RunPlanConfig {
             max_concurrent: None,
             infra_retry: InfraRetryPolicy::default(),
             step_time_budget: None,
+            sandbox: tars_tools::SandboxPolicy::default(),
         }
     }
 }
@@ -311,6 +333,7 @@ impl std::fmt::Debug for RunPlanConfig {
             .field("max_concurrent", &self.max_concurrent)
             .field("infra_retry", &self.infra_retry)
             .field("step_time_budget", &self.step_time_budget)
+            .field("sandbox", &self.sandbox)
             .finish()
     }
 }
@@ -983,6 +1006,10 @@ async fn run_one_step(
                     // Injected from RunPlanConfig so every step on this run sees
                     // the same run-scoped blackboard handle.
                     shared: config.shared.clone(),
+                    // Per-role confinement (D5): the worker/fixer side. One
+                    // policy per run today; a per-role split would give the
+                    // fixer WorkspaceWrite here vs the critic ReadOnly below.
+                    sandbox: config.sandbox.clone(),
                 };
                 // Run the worker under two backstops, both per-attempt:
                 //  - catch_unwind (P2): a panic in one worker becomes a
@@ -1080,6 +1107,8 @@ async fn run_one_step(
                     runtime: runtime.clone(),
                     trajectory_id: trajectory_id.clone(),
                     cancel: cancel.clone(),
+                    // Per-role confinement (D5): the critic/reviewer side.
+                    sandbox: config.sandbox.clone(),
                 };
                 match c.judge(plan, step, &worker_msg, cctx).await {
                     Ok(v) => AgentMessage::Verdict {

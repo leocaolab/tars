@@ -55,8 +55,39 @@ struct Cli {
     #[arg(long, global = true, value_enum, env = "TARS_LOG_FORMAT_FLAG")]
     log_format: Option<LogFormat>,
 
+    /// OS sandbox confinement for the agent's filesystem/bash tools (D5/D6),
+    /// codex-consistent. OVERRIDES the `[sandbox].mode` in the TOML config when
+    /// present. Absent here AND in the config ⇒ `danger-full-access` (today's
+    /// unconfined behaviour) — confinement is strictly opt-in.
+    ///
+    ///   - `read-only`         — no writes anywhere (reviewer agents)
+    ///   - `workspace-write`   — write only the worktree (the fixer default)
+    ///   - `danger-full-access`— no confinement (explicit escape hatch)
+    #[arg(long, global = true, value_enum)]
+    sandbox: Option<SandboxModeArg>,
+
     #[command(subcommand)]
     command: Command,
+}
+
+/// CLI mirror of [`tars_tools::SandboxMode`]. clap renders the variants
+/// kebab-case (`read-only` / `workspace-write` / `danger-full-access`), matching
+/// codex + the `[sandbox].mode` TOML values.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SandboxModeArg {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl From<SandboxModeArg> for tars_tools::SandboxMode {
+    fn from(m: SandboxModeArg) -> Self {
+        match m {
+            SandboxModeArg::ReadOnly => tars_tools::SandboxMode::ReadOnly,
+            SandboxModeArg::WorkspaceWrite => tars_tools::SandboxMode::WorkspaceWrite,
+            SandboxModeArg::DangerFullAccess => tars_tools::SandboxMode::DangerFullAccess,
+        }
+    }
 }
 
 /// Local mirror of [`tars_melt::TelemetryFormat`]. Kept here (not on
@@ -99,7 +130,7 @@ enum Command {
     /// per-provider breakdown, errors). See
     /// `docs/eval-and-arc-llm-roadmap.md §1.1`.
     RunReport(run_report::RunReportArgs),
-    /// Eval subcommands: corpus replay (now), judge / diff (future).
+    /// Eval subcommands: corpus replay, judge, and diff (all shipped).
     /// See `docs/eval-and-arc-llm-roadmap.md §1.3`.
     #[command(subcommand_value_name = "COMMAND")]
     Eval(eval::EvalArgs),
@@ -159,7 +190,9 @@ async fn main() -> ExitCode {
     let result: Result<()> = match cli.command {
         Command::Run(args) => run::execute(args, cli.config).await,
         Command::Plan(args) => plan::execute(args, cli.config).await,
-        Command::RunTask(args) => run_task::execute(args, cli.config).await,
+        Command::RunTask(args) => {
+            run_task::execute(args, cli.config, cli.sandbox.map(Into::into)).await
+        }
         Command::Probe(args) => probe::execute(args, cli.config).await,
         Command::Bench(args) => bench::execute(args, cli.config).await,
         Command::Trajectory(args) => {

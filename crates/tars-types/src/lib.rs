@@ -27,6 +27,7 @@
 
 pub mod auth;
 pub mod batch;
+pub mod bless;
 pub mod cache;
 pub mod capabilities;
 pub mod chat;
@@ -53,6 +54,7 @@ pub mod validation;
 
 pub use auth::Auth;
 pub use batch::{BatchResultItem, BatchStatus};
+pub use bless::{Assert, Bless, BlessError, BlessOutcome, Codec, Drift, MatchTier};
 pub use cache::{CacheDirective, CacheHitInfo, ProviderCacheHandle, systemtime_millis};
 pub use capabilities::{Capabilities, Modality, PromptCacheKind, StructuredOutputMode};
 pub use chat::{

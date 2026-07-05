@@ -301,6 +301,12 @@ failure modes that bite hand-rolled `serde_json::from_str`: providers that
 wrap JSON in a ```` ```json ```` fence or chatty prose, and models that
 emit an out-of-range integer.
 
+**The strong type is yours; tars is a generic engine — you hand it a `T`,
+it hands you back a `T`.** tars never learns your type or your envelope
+tag; those live only in your crate. And because it returns *either* a
+valid `T` *or* a typed `TarsJsonError`, you cannot end up holding an
+ill-formed `T`: the type is the contract (*parse, don't validate*).
+
 The strategy is keyed off the `StructuredOutputMode` the request used
 (from the provider's `Capabilities`), so the layer that knows how the
 response was produced tells the decoder how to read it:
@@ -350,6 +356,26 @@ impl JsonAgentResponse for FixReport {
 let report: FixReport = decode(&resp.text, mode, DecodeOpts::clamping())?;
 ```
 
+**Then stage two — strong type → domain.** `decode` gives you the *wire
+mirror* (a serde type shaped like what the model emits). Your own transform
+turns it into domain values (filter to known ids, split tags, fold …) —
+plain code over a type you already trust, no more JSON in sight:
+
+```rust
+let replies: HashMap<String, FixReply> = parse_fix_report_domain(report, known_ids)?;
+```
+
+**A different agent is a different type — the call doesn't change.** Each
+consumer response is its own serde type + a three-line `impl
+JsonAgentResponse` naming its tags; the `decode::<T>` call site is
+identical:
+
+```rust
+// critic: reply may arrive as an array, a dict, or a flat object
+let wire: CriticWire = decode(&resp.text, mode, DecodeOpts::clamping())?;
+let findings = wire.into_flat_findings();               // stage two
+```
+
 **Error taxonomy** (`TarsJsonError`) — the failure tells you *which* stage
 broke, so you branch on the variant, not a substring:
 
@@ -364,10 +390,223 @@ broke, so you branch on the variant, not a substring:
 `JsonValueType` is a Python-named JSON type tag (`dict` / `list` / `int` /
 …) if you want to write your own "expected an object, got a list" message.
 
-This seam is **Rust-side today.** `tars-py` / `tars-node` consumers get
-`resp.text` and parse it with `json.loads` / `JSON.parse`; the mode-aware
-fence-scrape isn't bound to those runtimes yet (see the CHANGELOG entry for
-why).
+**Consuming the seam from another repo.** Point your `tars-types`
+dependency at the branch (don't pin a rev), and use a local `[patch]` while
+you hack on tars itself — edit and verify without pushing each time:
+
+```toml
+[dependencies]
+tars-types = { git = "https://github.com/leocaolab/tars", branch = "result-side-json-decode" }
+
+# while iterating on tars locally, redirect to your checkout:
+[patch."https://github.com/leocaolab/tars"]
+tars-types = { path = "../tars/crates/tars-types" }
+```
+
+In one line: a local strong type is *your* serde type + a three-line `impl
+JsonAgentResponse` + one `decode::<T>` call. The type is yours; the
+mechanism is tars's.
+
+### Validating a schema from Python
+
+The `decode::<T>` seam above is **Rust-side only** — it's parametric over a
+Rust type and has no cross-FFI analogue. Python's strong typing is a
+*runtime* concern, and there are two current, complementary ways to get it:
+
+1. **Enforce at decode time (first choice).** Pass the JSON Schema as the
+   `response_schema=` kwarg on `complete`. For a strict-capable provider the
+   model is *forced* to emit conforming JSON (`StrictSchema` mode), so
+   `resp.text` is clean by construction. `response_schema_strict=False`
+   makes the schema a hint rather than a hard constraint.
+
+   ```python
+   resp = p.complete(
+       model="claude-sonnet-4-5",
+       user="Rate this diff.",
+       response_schema={
+           "type": "object",
+           "properties": {"severity": {"type": "integer"}, "summary": {"type": "string"}},
+           "required": ["severity", "summary"],
+       },
+   )
+   data = json.loads(resp.text)          # clean JSON — parse straight through
+   review = Review.model_validate(data)  # …into your pydantic model, if you use one
+   ```
+
+2. **Validate post-hoc with an output validator (defense in depth).** Attach
+   a Python callable via the `validators=` kwarg; it runs inside the
+   pipeline and can `Reject` a bad response (which `RetryMiddleware` will
+   retry) or `Annotate` it. There is **no** built-in schema validator on the
+   Python side — you write the check with the `jsonschema` PyPI package (or
+   pydantic) and return a typed outcome:
+
+   ```python
+   import json, jsonschema, tars
+
+   SCHEMA = {"type": "object", "required": ["severity", "summary"]}
+
+   def validate_schema(req, resp):
+       try:
+           data = json.loads(resp.text)
+           jsonschema.validate(data, SCHEMA)
+       except (json.JSONDecodeError, jsonschema.ValidationError) as e:
+           return tars.Reject(reason=str(e))   # raw error carried out, not a sentinel
+       return tars.Pass()
+
+   p = tars.Pipeline.from_default("anthropic", validators=[("schema", validate_schema)])
+   ```
+
+   See [Output validators](#output-validators) below for the full outcome
+   vocabulary (`Pass` / `Reject` / `FilterText` / `Annotate`).
+
+Node/`tars-node` follows the same shape: `responseSchema` on the completion
+options for decode-time enforcement, then `JSON.parse(result.text)` into
+your own TS type. The mode-aware fence-scrape of `decode` isn't bound to
+either runtime yet — see the CHANGELOG's v0.8.0 entry for the rationale.
+
+## A/B testing — two axes, and pinning the LLM
+
+tars frames A/B on **two axes** (Doc 18 §5a); getting a strong-typed,
+schema-valid result (above) is *not* one of them — it's the input you then
+A/B over:
+
+| Axis | What varies | What's pinned | Diff | Samples |
+|------|-------------|---------------|------|---------|
+| **LLM-change** | prompt / model / dataset | the code | behavioral, **statistical** | many (for significance) |
+| **Code-change** | the code (refactor, rewrite) | **the LLM** | **exact / deterministic** | **one** |
+
+**Code-change axis — pin the LLM with a cassette.** "Did this refactor
+change observable behavior?" is unanswerable if the LLM is stochastic —
+model noise swamps the code delta. So pin it: record a cassette once, then
+run code variant A vs B against the *same replayed responses*. The only
+thing that moved is your code, so the diff is exact and one sample suffices.
+
+```python
+# Both arms replay the SAME pinned completion (examples/tars.toml cassette),
+# so the difference is pure code — the regression question.
+pipe = tars.Pipeline.from_config("examples/tars.toml", "cassette_schema")
+review = json.loads(pipe.complete(model=MODEL, system=SYS, user=USER).text)
+
+a = bucket_v_a(review["severity"])   # old code
+b = bucket_v_b(review["severity"])   # refactored code
+if a != b:
+    print(f"behavior changed: {a!r} → {b!r}")   # a regression a text diff won't show
+```
+
+Runnable: [`examples/python/ab-testing/code_change_ab.py`](../examples/python/ab-testing/code_change_ab.py).
+
+**LLM-change axis — vary the prompt/model, diff behavior statistically.**
+Here the code is fixed and you compare two configs over a fixed corpus.
+Because outcomes are **paired** (same corpus through both), the correct
+test is **McNemar** on the discordant cells — *not* two overlapping
+confidence intervals. Tag each cohort so the event store can split them
+(`RequestContext::with_tags([...])` in Rust; the `tags=` kwarg on
+`complete` in Python/Node), then compare with `tars eval diff`. The full
+methodology (McNemar, paired bootstrap, precision/recall) lives in
+[eval-methodology.md](eval-methodology.md) and [Doc 18](architecture/18-agent-testing.md).
+
+### Reading a run + diff — and where the tooling stops
+
+`tars eval run` writes a run directory: a `manifest.json` (per-case status,
+tokens, latency, check outcomes) plus per-case `output.txt` / `report.json`.
+`tars eval diff <baseline> <candidate>` then reports, in tiers:
+
+```
+operational:
+  cases / errors / tokens in-out        plain deltas (=, +N, -N)
+  latency p50            34420ms → 0ms  (-100%)
+checks (violation rate):
+  json_shape                   0.0% → 12.5%  (+12.5%)   ← a check got worse
+trajectory (--trajectory):
+  divergence   30.8% (12/39 cases differ)   diverging: case_003, case_011, …
+  McNemar (trajectory-match): regressed b=2 improved c=7 χ²=2.78 → NOT significant at α=0.05
+quality (if you ran `tars eval judge`):
+  precision / recall deltas with Wilson CIs
+```
+
+`--json` emits the same as one machine-readable object.
+
+**How to drill down.** The diff hands you the *coordinates*, not the cause:
+1. a check-rate or divergence delta tells you **what** moved;
+2. `diverging:` names **which** cases (paired by id);
+3. open those cases' `report.json` — each failed check carries a required
+   `reason`; compare the two runs' `output.txt` / `tool_trajectory`;
+4. McNemar tells you whether the change is **signal or noise**.
+
+**Where it stops — be clear-eyed.** `eval diff` is a *localizer + statistician*.
+It does **not** write a narrative report, interpret the delta into a
+conclusion, or find root cause — that last mile is human. (`tars eval judge`
+adds per-case correctness verdicts *with* the judge's rationale, but that
+explains whether an output is *right*, not *why the diff happened*.) An
+automated "why did B regress on case_003" analysis would be a consumer-layer
+LLM pass over `eval diff --json` + the diverging cases — a natural use of the
+[decode seam](#decoding-a-structured-response), but it is **not built in**.
+
+### Freeze it as a test (py / ts / rs), not a CLI run
+
+Once a cassette is recorded, the comparison is just a deterministic function
+call — so pin it in your normal test runner instead of the `tars eval` CLI.
+Point a test at a cassette provider (committed cassette = the fixture) and
+assert; no live model, so it runs in CI. The request **fingerprint is
+binding-agnostic** — one cassette recorded from Python replays byte-identically
+in Node *and* Rust:
+
+```python
+# pytest — crates/tars-py/python/tests/test_ab_cassette.py
+def test_severity_bucket_snapshot():
+    pipe = tars.Pipeline.from_config("examples/tars.toml", "cassette_schema")
+    severity = json.loads(pipe.complete(model=MODEL, system=SYS, user=USER,
+                                        max_output_tokens=200).text)["severity"]
+    assert bucket(severity) == "high"   # refactor changes this → fails → you bless
+```
+
+```rust
+// #[tokio::test] — crates/tars-provider/tests/ab_cassette.rs
+let provider = CassetteProvider::replay_from_file("cassette_schema", &cassette_path())?;
+let review: Review = tars_types::decode_json(&replay_text().await, StructuredOutputMode::None)?;
+assert_eq!(review.severity, 8);          // replays the SAME cassette the py test uses
+```
+
+Node mirrors this with `node --test` (`crates/tars-node/__test__/ab_cassette.test.mjs`).
+A Python test that isn't marked `requires_provider` runs everywhere (conftest
+only skips the live ones) — the cassette test is exactly that.
+
+### Blessing a change
+
+When a diff or a snapshot test goes red for an **intended** change, you
+"bless" it — accept the new output as the reference. As of **v0.9.0** a bless is
+a first-class, committed file of field-level assertions (Doc 28):
+
+```rust
+// load a committed bless over the (cassette-pinned) decoded reply → pass/drift
+let outcome = tars_types::Bless::load(&path)?.check(&value)?;   // rs
+// or the approval assert: TARS_BLESS=1 captures/updates, else loads + checks
+Bless::check_or_bless(&path, &value, &["$.severity"], None, do_bless)?;
+```
+
+```python
+r = tars.bless_check("severity.bless.json", resp.text)   # py  → {"passed", "drifts"}
+```
+```ts
+const r = blessCheck("severity.bless.json", result.text); // ts → {passed, drifts}
+```
+
+Over an eval run: `tars eval bless <run> --select '$.severity' --accept` captures
+per-case references; `tars eval bless <run>` checks and bails on drift. Blessing
+is still *regenerate the fixture + commit* — the git diff of the `.bless.json` is
+the review surface, and a capture always stages a `.new` before it can clobber a
+committed file:
+
+- **The model's reply changed** (new model/prompt, or you re-recorded): bless
+  by re-recording — `TARS_CASSETTE_RECORD=1 …` — and commit the new
+  `*.cassette.json`. Reviewers see exactly which replies moved.
+- **Behavior/threshold changed** (a refactor you meant): bless by updating the
+  asserted expected value in the test, or promote the candidate run to the
+  baseline dir (`benchmarks/baselines/eval/<model>/` — a manual `cp`, the
+  convention `tars eval diff` compares against).
+
+The discipline: a bless is a **reviewable commit**, never a silent overwrite —
+so an unintended drift can't slip through as an "accepted" snapshot.
 
 ## Agents — hand a task to a capability set
 

@@ -96,6 +96,44 @@ while let Some(event) = stream.next().await {
 }
 ```
 
+### Typed results — decode a completion into your own struct (Rust)
+
+`resp.text` is a string; getting a value you can trust out of it is the
+same dirty work in every consumer (strip the fence, find the JSON, handle
+an out-of-range int). `tars-types::json_decode` owns that mechanism
+generically: **the strong type is yours; tars is a generic engine — hand it
+a `T`, get back a `T`.** It never learns your type or your envelope tag,
+and it returns either a valid `T` or a typed `TarsJsonError` — you can't
+hold an ill-formed `T` (*parse, don't validate*).
+
+```rust
+use tars_types::{decode, DecodeOpts, JsonAgentResponse};
+
+// 1. Your serde type — mirrors the wire shape, lives in *your* crate.
+#[derive(serde::Deserialize)]
+struct FixReport { id: i64, changed: Vec<String> }
+
+// 2. impl the generic trait — just declare your envelope tags (first
+//    match wins; brackets optional; omit for bare JSON).
+impl JsonAgentResponse for FixReport {
+    fn wrapper_tags() -> &'static [&'static str] { &["<fix_report>", "<report>"] }
+}
+
+// 3. decode::<T> — strip fence → extract <fix_report> → parse-or-scrape
+//    by `mode` → optional int-clamp → your strong type.
+let mode = caps.supports_structured_output;                 // provider's StructuredOutputMode
+let report: FixReport = decode(&resp.text, mode, DecodeOpts::clamping())?;
+```
+
+`mode` drives strict-vs-scrape: `StrictSchema` / `JsonObjectMode` parse
+`text` directly (a fenced body is a broken promise → `InvalidJson`);
+`None` / `ToolUseEmulation` scrape the first balanced JSON out of chatty
+prose. A different agent is just a different type — the call is identical.
+Shortcuts for the bare case: `decode_json::<T>(text, mode)` and
+`resp.json::<T>(mode)`. **Rust-side only today** — Python/Node callers use
+`response_schema` + `json.loads` / `JSON.parse` (see below). Full recipe:
+[USER-GUIDE → Decoding a structured response](docs/USER-GUIDE.md#decoding-a-structured-response).
+
 ### Pre-flight capability check (no model call)
 
 ```python

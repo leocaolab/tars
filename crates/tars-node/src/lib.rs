@@ -93,6 +93,51 @@ pub fn hello(name: String) -> String {
     format!("tars-node says hi, {name}")
 }
 
+/// One failed bless assertion (Doc 28). `expected`/`actual` are JSON-encoded
+/// strings so any value shape survives the FFI boundary.
+#[napi(object)]
+pub struct BlessDrift {
+    pub selector: String,
+    pub expected: String,
+    pub actual: Option<String>,
+    pub reason: String,
+}
+
+/// Result of [`blessCheck`]. `passed` is true when `drifts` is empty.
+#[napi(object)]
+pub struct BlessResult {
+    pub passed: bool,
+    pub drifts: Vec<BlessDrift>,
+}
+
+/// Load a committed bless file and check a completion's text against it
+/// (Doc 28). `text` is decoded as JSON (chatty-tolerant), then each blessed
+/// field is asserted. Mirrors `tars-py`'s `bless_check`.
+#[napi]
+pub fn bless_check(path: String, text: String) -> Result<BlessResult> {
+    let value: serde_json::Value =
+        tars_types::decode_json(&text, tars_types::StructuredOutputMode::None)
+            .map_err(|e| Error::from_reason(format!("bless decode: {e}")))?;
+    let bless = tars_types::Bless::load(std::path::Path::new(&path))
+        .map_err(|e| Error::from_reason(format!("bless load: {e}")))?;
+    let outcome = bless
+        .check(&value)
+        .map_err(|e| Error::from_reason(format!("bless check: {e}")))?;
+    Ok(BlessResult {
+        passed: outcome.is_pass(),
+        drifts: outcome
+            .drifts
+            .iter()
+            .map(|d| BlessDrift {
+                selector: d.selector.clone(),
+                expected: d.expected.to_string(),
+                actual: d.actual.as_ref().map(|v| v.to_string()),
+                reason: d.reason.clone(),
+            })
+            .collect(),
+    })
+}
+
 // ── TS-facing shapes ─────────────────────────────────────────────────
 
 /// Options for [`Pipeline::complete`]. Mirrors `tars-py`'s

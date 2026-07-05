@@ -1967,12 +1967,43 @@ fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Load a committed bless file and check a completion's text against it
+/// (Doc 28). `text` is decoded as JSON (chatty-tolerant), then each blessed
+/// field is asserted. Returns
+/// `{"passed": bool, "drifts": [{"selector","expected","actual","reason"}]}`.
+/// `expected`/`actual` are JSON-encoded strings so any value shape survives.
+#[pyfunction]
+fn bless_check<'py>(py: Python<'py>, path: String, text: String) -> PyResult<Bound<'py, PyDict>> {
+    let value: serde_json::Value =
+        tars_types::decode_json(&text, tars_types::StructuredOutputMode::None)
+            .map_err(|e| crate::errors::TarsProviderError::new_err(format!("bless decode: {e}")))?;
+    let bless = tars_types::Bless::load(std::path::Path::new(&path))
+        .map_err(|e| crate::errors::TarsConfigError::new_err(format!("bless load: {e}")))?;
+    let outcome = bless
+        .check(&value)
+        .map_err(|e| crate::errors::TarsConfigError::new_err(format!("bless check: {e}")))?;
+    let d = PyDict::new(py);
+    d.set_item("passed", outcome.is_pass())?;
+    let drifts = PyList::empty(py);
+    for dr in &outcome.drifts {
+        let dd = PyDict::new(py);
+        dd.set_item("selector", &dr.selector)?;
+        dd.set_item("expected", dr.expected.to_string())?;
+        dd.set_item("actual", dr.actual.as_ref().map(|v| v.to_string()))?;
+        dd.set_item("reason", &dr.reason)?;
+        drifts.append(dd)?;
+    }
+    d.set_item("drifts", drifts)?;
+    Ok(d)
+}
+
 /// PyO3 module entry point. Symbol must be `_tars_py` to match
 /// `pyproject.toml`'s `module-name = "tars._tars_py"`. Public Python
 /// surface is curated by `python/tars/__init__.py`.
 #[pymodule]
 fn _tars_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_function(wrap_pyfunction!(bless_check, m)?)?;
     m.add_function(wrap_pyfunction!(default_config_path_py, m)?)?;
     m.add_function(wrap_pyfunction!(eval::write_score, m)?)?;
     m.add_function(wrap_pyfunction!(eval::read_calls, m)?)?;

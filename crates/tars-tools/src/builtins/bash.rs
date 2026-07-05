@@ -107,8 +107,18 @@ impl Tool for BashTool {
         let parsed: BashArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg(&parsed.command);
+        // Confine the shell's process tree via `ctx.sandbox` (Doc 22: "naked
+        // spawn → sandboxed"). The default policy is `DangerFullAccess`, which
+        // `wrap` returns as a passthrough — so behaviour is unchanged until a
+        // caller threads a confining `SandboxMode` (M4). Fail-closed: a
+        // requested-but-unbuildable sandbox errors here, never spawns bare.
+        let workdir = ctx.cwd.clone().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let (program, argv) = ctx
+            .sandbox
+            .wrap("sh", &["-c".to_string(), parsed.command.clone()], &workdir)
+            .map_err(|e| ToolError::Execute(format!("exec sandbox: {e}")))?;
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.args(argv);
         if let Some(cwd) = ctx.cwd.as_deref() {
             cmd.current_dir(cwd);
         }
@@ -193,6 +203,41 @@ mod tests {
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("marker.txt"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // M2/M6: BashTool actually confined by a WorkspaceWrite sandbox (macOS).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandbox_confines_bash_writes_to_worktree() {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let wt = base.join(format!("tars_bash_jail_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(&wt).unwrap();
+        let wt = std::fs::canonicalize(&wt).unwrap();
+        let outside = base.join(format!("tars_bash_escape_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&outside);
+
+        let jailed = || {
+            let mut c = ctx(Some(wt.clone()));
+            c.sandbox = crate::SandboxPolicy::workspace_write(&wt);
+            c
+        };
+
+        // write inside worktree → allowed
+        BashTool::new()
+            .execute(json!({ "command": "echo ok > inside.txt" }), jailed())
+            .await
+            .unwrap();
+        assert!(wt.join("inside.txt").exists(), "write inside worktree must succeed");
+
+        // write OUTSIDE worktree → blocked by the sandbox
+        let _ = BashTool::new()
+            .execute(json!({ "command": format!("echo pwned > {}", outside.display()) }), jailed())
+            .await;
+        assert!(!outside.exists(), "sandbox MUST block bash writes outside the worktree");
+
+        let _ = std::fs::remove_dir_all(&wt);
+        let _ = std::fs::remove_file(&outside);
     }
 
     #[tokio::test]

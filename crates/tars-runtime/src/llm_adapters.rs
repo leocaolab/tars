@@ -56,6 +56,9 @@ impl Worker for LlmWorker {
             agent,
             req,
             ctx.cancel.clone(),
+            // Worker/fixer confinement (D5/D6) — carried from the executor's
+            // WorkerContext into this step's tool ToolContext.
+            ctx.sandbox.clone(),
         )
         .await
         .map_err(|e| match e {
@@ -127,6 +130,9 @@ impl Critic for LlmCritic {
             agent,
             req,
             ctx.cancel.clone(),
+            // Critic/reviewer confinement (D5/D6) — carried from the executor's
+            // CriticContext into this step's tool ToolContext.
+            ctx.sandbox.clone(),
         )
         .await
         .map_err(|e| match e {

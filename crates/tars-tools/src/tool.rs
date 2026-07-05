@@ -11,7 +11,7 @@ use tars_types::JsonSchema;
 
 use crate::approval::ApprovalSink;
 use crate::permission::PermissionView;
-use crate::sandbox::SandboxPolicy;
+use crate::SandboxPolicy;
 
 /// Per-call environment a [`Tool`] receives. The `cancel`/`cwd` fields are the
 /// historical core; `permission`/`approval`/`sandbox` are the gate + seams

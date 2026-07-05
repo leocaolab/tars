@@ -10,6 +10,27 @@
  */
 export declare function hello(name: string): string
 /**
+ * One failed bless assertion (Doc 28). `expected`/`actual` are JSON-encoded
+ * strings so any value shape survives the FFI boundary.
+ */
+export interface BlessDrift {
+  selector: string
+  expected: string
+  actual?: string
+  reason: string
+}
+/** Result of [`blessCheck`]. `passed` is true when `drifts` is empty. */
+export interface BlessResult {
+  passed: boolean
+  drifts: Array<BlessDrift>
+}
+/**
+ * Load a committed bless file and check a completion's text against it
+ * (Doc 28). `text` is decoded as JSON (chatty-tolerant), then each blessed
+ * field is asserted. Mirrors `tars-py`'s `bless_check`.
+ */
+export declare function blessCheck(path: string, text: string): BlessResult
+/**
  * Options for [`Pipeline::complete`]. Mirrors `tars-py`'s
  * `Pipeline.complete(**kwargs)` in camelCase.
  */

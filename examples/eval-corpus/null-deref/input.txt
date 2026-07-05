@@ -1,0 +1,3 @@
+Rate the severity (0-10 integer) of this bug and summarize it in one sentence. Return an object with keys `severity` and `summary`.
+
+BUG: a config reload frees a buffer still referenced by an in-flight request, causing a use-after-free.

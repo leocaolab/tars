@@ -27,6 +27,7 @@ pub mod manager;
 pub mod paths;
 pub mod providers;
 pub mod routing;
+pub mod sandbox;
 
 pub use builtin::{
     built_in_provider_defaults, default_anthropic, default_claude_cli, default_gemini,
@@ -40,3 +41,4 @@ pub use providers::{
     CodexSandboxConfig, ProviderConfig, ProvidersConfig,
 };
 pub use routing::RoutingConfig;
+pub use sandbox::{resolve_policy, SandboxConfig, SandboxModeConfig};

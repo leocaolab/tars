@@ -77,6 +77,58 @@ p = tars.Pipeline.from_default(
 A buggy validator that raises a Python exception is caught by the
 adapter and surfaced as a permanent `TarsProviderError(kind="validation_failed")` — the worker is never crashed by user-side bugs.
 
+> **Note:** inside a validator, `req` / `resp` are **dict views**
+> (`resp["text"]`, `resp["tool_calls"]`, …). The `Response` object that
+> `complete()` *returns* is different — there you use attribute access
+> (`resp.text`, `resp.usage`).
+
+### Validating against a JSON Schema
+
+The Rust `decode::<T>` seam (envelope/fence-scrape → typed `T`) is
+Rust-only; from Python there are two complementary ways to get a
+schema-valid result:
+
+1. **Decode-time enforcement — `response_schema=`.** Hand the JSON Schema
+   to the provider's structured-output mode. A strict-capable provider is
+   *forced* to emit conforming JSON, so `resp.text` is clean by
+   construction:
+
+   ```python
+   resp = p.complete(
+       model="claude-sonnet-4-5",
+       user="Rate this diff.",
+       response_schema={
+           "type": "object",
+           "properties": {"severity": {"type": "integer"}, "summary": {"type": "string"}},
+           "required": ["severity", "summary"],
+       },
+       response_schema_strict=True,   # False → schema is a hint, not enforced
+   )
+   review = json.loads(resp.text)     # clean → parse straight through
+   ```
+
+2. **Post-hoc validator (defense in depth).** A validator callback that
+   parses + shape-checks and `Reject`s on mismatch. There is **no** built-in
+   schema validator on the Python side — write the check with plain Python,
+   or `jsonschema` / pydantic:
+
+   ```python
+   def validate_schema(req, resp):
+       try:
+           data = json.loads(resp["text"])          # dict view → resp["text"]
+       except json.JSONDecodeError as e:
+           return tars.Reject(reason=f"not JSON: {e}")
+       if not isinstance(data.get("severity"), int):
+           return tars.Reject(reason=f"severity must be int; raw={resp['text'][:80]!r}")
+       return tars.Pass()
+
+   p = tars.Pipeline.from_default("anthropic", validators=[("schema", validate_schema)])
+   ```
+
+Runnable end-to-end example (record-once / replay-forever via a cassette,
+so it needs no live model):
+[`examples/python/structured-output/schema_validation.py`](../../examples/python/structured-output/schema_validation.py).
+
 ### Pre-flight capability check
 
 Verify each agent role's configured provider can satisfy its needs at startup, instead of failing at runtime on first request:

@@ -91,6 +91,14 @@ pub struct RunTaskConfig {
     /// orchestrator gets the initial plan + up to 2 replans = 3
     /// total plan attempts before `ReplanExhausted` fires.
     pub max_replans: u32,
+    /// OS-confinement policy (D5/D6) for every step's tools on this task,
+    /// resolved from the `[sandbox]` TOML section + `--sandbox` flag by the
+    /// caller (tars-cli). Flows into `RunPlanConfig.sandbox` →
+    /// `WorkerContext`/`CriticContext` → `ToolContext.sandbox`. Default
+    /// `DangerFullAccess` = unconfined (today's behaviour) — existing callers
+    /// that build `RunTaskConfig` without this field via `..Default::default()`
+    /// are unchanged.
+    pub sandbox: tars_tools::SandboxPolicy,
 }
 
 impl Default for RunTaskConfig {
@@ -98,6 +106,7 @@ impl Default for RunTaskConfig {
         Self {
             max_refinements_per_step: 2,
             max_replans: 2,
+            sandbox: tars_tools::SandboxPolicy::default(),
         }
     }
 }
@@ -237,6 +246,9 @@ pub async fn run_task(
     let workers = crate::executor::WorkerRegistry::new().with_default(llm_worker_impl);
     let run_plan_config = crate::executor::RunPlanConfig {
         max_refinements_per_step: config.max_refinements_per_step,
+        // Thread the resolved per-run OS-confinement policy (D5/D6) down to
+        // every step's tools. Default DangerFullAccess = unconfined.
+        sandbox: config.sandbox.clone(),
         // run_task's LLM agent loop keeps the historical semantics:
         // unbounded per-tier concurrency + no infra retry (the
         // LlmService layer owns its own transport retry). The infra
@@ -503,6 +515,9 @@ async fn drive_orchestrator_call(
         agent,
         req,
         ctx.cancel.clone(),
+        // The orchestrator/planner emits a Plan — it has no filesystem tools,
+        // so its confinement is irrelevant; pass the unconfined default.
+        tars_tools::SandboxPolicy::default(),
     )
     .await
     .map_err(|e| RunTaskError::AgentStep {

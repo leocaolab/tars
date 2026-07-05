@@ -1,0 +1,15 @@
+[package]
+name = "tars-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OS exec-confinement mechanism (Seatbelt / bubblewrap) — model-agnostic, lifted per Doc 22 §4-5. Both tars-tools (BashTool) and tars-provider (claude_cli) thread a SandboxPolicy through it."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Deliberately zero deps: a pure mechanism crate (builds an argv/profile,
+# never spawns). Both tars-tools and tars-provider — siblings on tars-types —
+# depend on THIS so the sandbox lives below both, not in the LLM layer.

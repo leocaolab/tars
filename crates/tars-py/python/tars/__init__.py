@@ -35,6 +35,7 @@ from tars._tars_py import (
     Telemetry,
     Usage,
     ValidationSummary,
+    bless_check,
     default_config_path,
     version,
 )
@@ -62,5 +63,6 @@ __all__ = [
     "Usage",
     "ValidationSummary",
     "default_config_path",
+    "bless_check",
     "version",
 ]

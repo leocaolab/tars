@@ -1,15 +1,14 @@
-//! `tars eval` — corpus replay + (later) judge / diff.
+//! `tars eval` — corpus replay + judge + diff.
 //!
 //! See `docs/eval-and-arc-llm-roadmap.md §1.3` for the design intent:
 //! turn "is prompt A better than prompt B?" into a reproducible run +
 //! a saved artifact two future runs can be diffed against.
 //!
-//! V1 subcommands:
+//! Subcommands (all shipped):
 //!   `tars eval run --corpus <dir>` — replay corpus through a pipeline
-//!
-//! Future (deliberately not in V1):
 //!   `tars eval judge` — run a Judge over an eval-run's outputs
-//!   `tars eval diff`  — compare two eval-runs
+//!   `tars eval diff`  — compare two eval-runs (operational deltas +
+//!                       McNemar on shared `trajectory-match` checks)
 //!
 //! ## Corpus directory layout
 //!
@@ -152,6 +151,25 @@ pub enum EvalCommand {
     /// incest refuses a judge whose provider matches the run's. See
     /// Doc 18 §7.
     Judge(EvalJudgeArgs),
+    /// Bless an eval run's outputs — the approval loop (Doc 28). With
+    /// `--select <jsonpath>` it captures the selected fields of each
+    /// case's `output.txt` into `<case>/output.bless.json`; without, it
+    /// checks each output against its committed bless and reports drift.
+    Bless(EvalBlessArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct EvalBlessArgs {
+    /// Eval-run directory (contains manifest.json + per-case output.txt).
+    pub run: PathBuf,
+    /// JSONPath-subset field to bless, repeatable (e.g. `--select '$.severity'`).
+    /// When present → record mode; when absent → check mode.
+    #[arg(long = "select")]
+    pub select: Vec<String>,
+    /// Write the bless directly (accept). Without it, record mode stages a
+    /// `*.bless.json.new` for review; the committed file is never clobbered.
+    #[arg(long)]
+    pub accept: bool,
 }
 
 #[derive(Args, Debug)]
@@ -688,7 +706,78 @@ pub async fn execute(args: EvalArgs, config_path: Option<PathBuf>) -> Result<()>
         EvalCommand::Diff(a) => run_diff(a),
         EvalCommand::MigrateChecks(a) => run_migrate_checks(a),
         EvalCommand::Judge(a) => run_judge(a, config_path).await,
+        EvalCommand::Bless(a) => run_bless(a),
     }
+}
+
+// ─── eval bless (Doc 28) ──────────────────────────────────────────────
+
+/// `tars eval bless <run>` — the approval loop over an eval run's per-case
+/// outputs. With `--select` it *records* (captures the selected fields into
+/// `<case>/output.bless.json`); without, it *checks* each case's output against
+/// its committed bless and reports drift (the Doc 18 §4.4 golden loop).
+fn run_bless(args: EvalBlessArgs) -> Result<()> {
+    let manifest = load_manifest(&args.run)?;
+    let selectors: Vec<&str> = args.select.iter().map(String::as_str).collect();
+    let recording = !selectors.is_empty();
+    println!(
+        "── eval bless: {} cases in {} ({})",
+        manifest.cases.len(),
+        args.run.display(),
+        if recording { "record" } else { "check" }
+    );
+
+    let mut drift_cases = 0usize;
+    for case in &manifest.cases {
+        let case_dir = args.run.join(&case.case_id);
+        let output = read_optional_text(&case_dir.join("output.txt"))?.unwrap_or_default();
+        // Tolerant decode: an eval output may be chatty prose around JSON.
+        let value: serde_json::Value =
+            match tars_types::decode_json(&output, tars_types::StructuredOutputMode::None) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("  {} … skipped (not JSON: {e})", case.case_id);
+                    continue;
+                }
+            };
+        let bless_path = case_dir.join("output.bless.json");
+
+        if recording {
+            let bless = tars_types::Bless::capture(&value, &selectors, None)
+                .with_context(|| format!("capturing bless for case {}", case.case_id))?;
+            if args.accept {
+                bless.save(&bless_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("  {} … blessed ({} fields)", case.case_id, bless.asserts.len());
+            } else {
+                let pending = bless.save_pending(&bless_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!("  {} … staged {} (review + --accept)", case.case_id, pending.display());
+            }
+        } else if bless_path.exists() {
+            let bless = tars_types::Bless::load(&bless_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let outcome = bless.check(&value).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if outcome.is_pass() {
+                println!("  {} … ok", case.case_id);
+            } else {
+                drift_cases += 1;
+                for d in &outcome.drifts {
+                    println!(
+                        "  {} … DRIFT {} : blessed {} → got {}",
+                        case.case_id,
+                        d.selector,
+                        d.expected,
+                        d.actual.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "<missing>".into()),
+                    );
+                }
+            }
+        } else {
+            println!("  {} … no bless (run with --select to create)", case.case_id);
+        }
+    }
+
+    if !recording && drift_cases > 0 {
+        anyhow::bail!("{drift_cases} case(s) drifted from their bless");
+    }
+    Ok(())
 }
 
 // ─── eval judge ───────────────────────────────────────────────────────
@@ -1657,6 +1746,10 @@ async fn run_worker_case(
         cwd: Some(sandbox.to_path_buf()),
         permissions: Default::default(),
         readable_roots: Vec::new(),
+        // Eval harness: tools are already jailed to the eval `sandbox` dir via
+        // `cwd` + `with_root`; the OS-confinement policy stays unconfined
+        // (DangerFullAccess) here, unchanged from before M4.
+        sandbox: Default::default(),
     };
     match worker.execute(ctx, req).await {
         Ok(result) => {

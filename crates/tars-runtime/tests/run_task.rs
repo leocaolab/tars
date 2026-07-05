@@ -333,6 +333,7 @@ async fn reject_verdict_aborts_task_when_max_replans_is_zero() {
         RunTaskConfig {
             max_refinements_per_step: 2,
             max_replans: 0,
+            sandbox: Default::default(),
         },
         CancellationToken::new(),
     )
@@ -389,6 +390,7 @@ async fn refine_exhausted_aborts_with_attempt_count() {
         RunTaskConfig {
             max_refinements_per_step: 1,
             max_replans: 0,
+            sandbox: Default::default(),
         },
         CancellationToken::new(),
     )
@@ -768,6 +770,7 @@ async fn replan_on_reject_recovers_with_second_plan() {
         RunTaskConfig {
             max_refinements_per_step: 2,
             max_replans: 2,
+            sandbox: Default::default(),
         },
         CancellationToken::new(),
     )
@@ -846,6 +849,7 @@ async fn replan_exhausted_after_max_replans_consecutive_rejects() {
         RunTaskConfig {
             max_refinements_per_step: 2,
             max_replans: 2,
+            sandbox: Default::default(),
         },
         CancellationToken::new(),
     )
@@ -1034,6 +1038,7 @@ async fn cancel_on_reject_terminates_in_flight_sibling_workers() {
         RunTaskConfig {
             max_refinements_per_step: 0, // single attempt — Reject is terminal
             max_replans: 0,              // first Reject ⇒ ReplanExhausted{replans:0}
+            sandbox: Default::default(),
         },
         CancellationToken::new(),
     );

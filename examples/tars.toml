@@ -1,0 +1,34 @@
+# Example config for the structured-output / schema-validation demos.
+#
+# Two providers:
+#   - `qwen_coder_local` : the real local LM Studio backend (needs LM Studio
+#     running on 127.0.0.1:1234). Used only during RECORDING.
+#   - `cassette_schema`  : record-once / replay-forever (VCR) over it. This is
+#     what the examples talk to by default, so they run deterministically
+#     WITHOUT a live model once the cassette is recorded.
+#
+# Record (needs LM Studio, writes the cassette):
+#   TARS_CASSETTE_RECORD=1 python3 examples/python/structured-output/schema_validation.py
+# Replay (no live model — the committed cassette answers):
+#   python3 examples/python/structured-output/schema_validation.py
+#
+# A request the recording doesn't cover (e.g. a changed prompt) is a cassette
+# MISS → a hard error, never a silently-fabricated answer.
+
+[providers.qwen_coder_local]
+type = "openai_compat"
+default_model = "qwen/qwen3-coder-30b:2"
+base_url = "http://127.0.0.1:1234/v1"
+
+[providers.cassette_schema]
+type = "cassette"
+# Path is resolved from the process cwd — run the examples from the repo root.
+path = "examples/cassettes/schema-validation.cassette.json"
+record_from = "qwen_coder_local"
+
+# Cassette for the `tars eval run` + `tars eval diff` A/B demo. Its own file so
+# the eval corpus recordings don't mix with the schema-validation one.
+[providers.cassette_eval]
+type = "cassette"
+path = "examples/cassettes/eval.cassette.json"
+record_from = "qwen_coder_local"

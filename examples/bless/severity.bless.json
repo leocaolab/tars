@@ -1,0 +1,10 @@
+{
+  "codec": "json",
+  "asserts": [
+    {
+      "selector": "$.severity",
+      "expected": 8,
+      "match": "exact"
+    }
+  ]
+}

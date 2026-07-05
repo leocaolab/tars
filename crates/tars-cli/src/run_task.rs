@@ -100,8 +100,17 @@ pub struct RunTaskArgs {
     pub tools_root: Option<PathBuf>,
 }
 
-pub async fn execute(args: RunTaskArgs, config_path: Option<PathBuf>) -> Result<()> {
+pub async fn execute(
+    args: RunTaskArgs,
+    config_path: Option<PathBuf>,
+    sandbox_flag: Option<tars_tools::SandboxMode>,
+) -> Result<()> {
     let cfg = config_loader::load(config_path)?;
+    // Resolve the effective OS-confinement policy (D5/D6): `[sandbox]` TOML +
+    // `--sandbox` flag, flag wins on `mode`. Absent both ⇒ DangerFullAccess
+    // (unconfined — today's behaviour). Threaded into every step's tools via
+    // RunTaskConfig → RunPlanConfig → WorkerContext/CriticContext → ToolContext.
+    let sandbox = tars_config::resolve_policy(cfg.sandbox.as_ref(), sandbox_flag);
     let registry = build_registry_with_breaker(&cfg, args.dispatch.breaker)?;
     let dispatch = build_dispatch(&cfg, &registry, &args.dispatch)?;
 
@@ -142,6 +151,7 @@ pub async fn execute(args: RunTaskArgs, config_path: Option<PathBuf>) -> Result<
         // first Critic Reject = task fail. Programmatic callers (and the
         // new run_task integration tests) opt in via the field directly.
         max_replans: 0,
+        sandbox,
     };
     let cancel = CancellationToken::new();
 

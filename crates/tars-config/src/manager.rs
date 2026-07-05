@@ -11,6 +11,7 @@ use crate::builtin::merge_builtin_with_user;
 use crate::error::{ConfigError, ValidationError};
 use crate::providers::ProvidersConfig;
 use crate::routing::RoutingConfig;
+use crate::sandbox::SandboxConfig;
 
 /// Top-level configuration. Future fields (pipeline, cache, agents,
 /// tools, tenants, secrets, observability, deployment) land here as
@@ -26,6 +27,14 @@ pub struct Config {
     /// dispatch (existing behaviour).
     #[serde(default)]
     pub routing: RoutingConfig,
+
+    /// M4 (D6): user security config → `tars_sandbox::SandboxPolicy`, threaded
+    /// into `ToolContext.sandbox`. **Optional** — absent `[sandbox]` = `None` =
+    /// today's behaviour (unconfined / `DangerFullAccess`). Present = opt into
+    /// confinement. See [`crate::sandbox`] + [`crate::resolve_policy`] (the
+    /// `--sandbox` flag overrides the mode here).
+    #[serde(default)]
+    pub sandbox: Option<SandboxConfig>,
 
     /// IDs that came from the user's TOML, captured *before* the
     /// builtin-merge step so callers can distinguish "explicitly
