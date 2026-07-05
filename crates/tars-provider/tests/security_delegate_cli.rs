@@ -11,7 +11,7 @@
 //! We deliberately do NOT call `SandboxPolicy::wrap` directly — the whole point
 //! is to exercise `RealSubprocessRunner::run`, the production seam.
 //!
-//! macOS-only (uses Seatbelt via `/usr/bin/sandbox-exec`).
+//! Runs on macOS (Seatbelt via `/usr/bin/sandbox-exec`) and Linux (bubblewrap).
 //!
 //! ## Why this test re-execs itself
 //! The runner gates the sandbox on the process env var `TARS_CLAUDE_SANDBOX`,
@@ -98,7 +98,15 @@ async fn escape_blocked_async() {
     //    attempts are `|| :`-guarded so the script still exits 0 and emits its
     //    JSON even when the jail denies the writes (EPERM). ──
     let script = mock_cli_script(&outside_create, &outside_victim, &inside_file);
-    let script_path = outside_dir.join("mock_claude.sh"); // outside worktree — reads/exec are broad
+    // The mock lives INSIDE the worktree so the exec'd binary is reachable under
+    // BOTH jails: macOS Seatbelt exposes the whole fs (read is broad, so anywhere
+    // works), but Linux bubblewrap is a mount namespace whose `--tmpfs /tmp` masks
+    // the real `/tmp` — a script placed in the `_outside` dir (under `/tmp`) would
+    // be invisible and fail `execvp`. The worktree is bind-mounted into both jails,
+    // so it is the one location the binary is guaranteed to exec from. This does not
+    // weaken the escape test: the escape TARGETS (`outside_create`/`outside_victim`)
+    // stay outside the worktree.
+    let script_path = worktree.join("mock_claude.sh");
     std::fs::write(&script_path, script).expect("write mock CLI");
     make_executable(&script_path);
 
