@@ -1,28 +1,41 @@
-//! Result-side, provider-mode-aware JSON decode.
+//! Result-side, provider-mode-aware JSON decode — the full generic seam
+//! for turning an LLM completion into a typed value at the transport
+//! boundary, so no consumer re-implements "scrape JSON out of a chat
+//! response".
 //!
-//! Turns an LLM response's assistant text into a typed
-//! `T: DeserializeOwned` at the transport boundary, so every consumer
-//! doesn't re-implement "scrape JSON out of a completion". The behavior
-//! is keyed off the [`StructuredOutputMode`] the request/provider used:
+//! Three layers, each generic (no domain tag values, no domain types):
 //!
-//! - Modes that make the provider emit **clean JSON** in `text`
-//!   ([`StructuredOutputMode::StrictSchema`] /
-//!   [`StructuredOutputMode::JsonObjectMode`]) → parse `text` directly.
-//! - Modes where `text` may be **chatty** free-form completion
-//!   ([`StructuredOutputMode::None`] /
-//!   [`StructuredOutputMode::ToolUseEmulation`]) → strip code fences and
-//!   scan for the first balanced JSON value embedded in the prose, then
-//!   parse that.
+//! 1. [`decode_json`] — bare decode of a response's text into
+//!    `T: DeserializeOwned`, strategy keyed off [`StructuredOutputMode`].
+//! 2. [`JsonAgentResponse`] + [`decode`] — the same, but the response may
+//!    be wrapped in a consumer-declared envelope tag
+//!    (`<tag>…</tag>`) and the caller may opt into a lossy
+//!    integer-clamp recovery via [`DecodeOpts`].
+//! 3. [`JsonValueType`] — a Python-style JSON type tag, handy for a
+//!    consumer's own "expected X, got Y" error messages.
 //!
-//! Deliberately generic: no wrapper-tag/envelope extraction, no lossy
-//! numeric recovery, no domain validation — those are the consumer's job.
+//! Mode dispatch:
+//! - [`StrictSchema`](StructuredOutputMode::StrictSchema) /
+//!   [`JsonObjectMode`](StructuredOutputMode::JsonObjectMode): the
+//!   provider guarantees a **clean JSON document** → parse directly.
+//! - [`None`](StructuredOutputMode::None) /
+//!   [`ToolUseEmulation`](StructuredOutputMode::ToolUseEmulation): the
+//!   text may be **chatty prose** with JSON embedded (optionally inside a
+//!   ```` ```json ```` fence) → strip fences, scan for the first balanced
+//!   JSON value, parse that.
+//!
+//! Deliberately generic: the envelope-tag STRINGS and the clamp opt-in
+//! are the consumer's convention; the extraction/recovery MECHANISM is
+//! here. No wrapper-tag values, no domain validation.
 
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 use crate::capabilities::StructuredOutputMode;
 use crate::response::ChatResponse;
 
-/// Typed failure of [`decode_json`] / [`ChatResponse::json`].
+/// Typed failure of the decode family ([`decode_json`] / [`decode`] /
+/// [`ChatResponse::json`]).
 #[derive(Debug, thiserror::Error)]
 pub enum TarsJsonError {
     /// The response text was empty — the stream produced no assistant
@@ -30,6 +43,14 @@ pub enum TarsJsonError {
     /// completion). Distinct from "text present but no JSON in it".
     #[error("response text was empty; nothing to decode")]
     EmptyStream,
+
+    /// The response declared one or more envelope [`wrapper_tags`] but
+    /// none of them (`<tag>…</tag>`) was found in the text. `tried` is
+    /// the tags that were looked for, in order.
+    ///
+    /// [`wrapper_tags`]: JsonAgentResponse::wrapper_tags
+    #[error("no envelope block found; expected one of {tried:?}")]
+    MissingBlock { tried: Vec<String> },
 
     /// Chatty (`None` / `ToolUseEmulation`) text was scanned but no
     /// balanced JSON value (`{…}` or `[…]`) parsed out of it. `attempts`
@@ -59,8 +80,8 @@ pub enum TarsJsonError {
 impl TarsJsonError {
     /// Map a `serde_json` failure to the right variant using its
     /// [`category`](serde_json::error::Category): a `Data` category means
-    /// the JSON was well-formed but didn't fit `T` (schema mismatch);
-    /// `Syntax`/`Eof`/`Io` mean the bytes weren't valid JSON.
+    /// the JSON was well-formed but didn't fit the target type (schema
+    /// mismatch); `Syntax`/`Eof`/`Io` mean the bytes weren't valid JSON.
     fn from_serde(source: serde_json::Error) -> Self {
         match source.classify() {
             serde_json::error::Category::Data => Self::Schema { source },
@@ -69,46 +90,181 @@ impl TarsJsonError {
     }
 }
 
+/// A JSON value's type, named the Python way (`NoneType` / `bool` /
+/// `int` / `float` / `str` / `list` / `dict`). Generic helper for a
+/// consumer that wants a stable "expected an object, got a list"-style
+/// message without hand-matching [`serde_json::Value`] everywhere.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JsonValueType {
+    Null,
+    Bool,
+    Integer,
+    Float,
+    String,
+    Array,
+    Object,
+}
+
+impl JsonValueType {
+    /// Classify a [`serde_json::Value`]. A number is [`Integer`] unless it
+    /// was parsed as a float (`is_f64`), in which case it is [`Float`].
+    ///
+    /// [`Integer`]: JsonValueType::Integer
+    /// [`Float`]: JsonValueType::Float
+    pub fn of(v: &Value) -> Self {
+        match v {
+            Value::Null => Self::Null,
+            Value::Bool(_) => Self::Bool,
+            Value::Number(n) => {
+                if n.is_f64() {
+                    Self::Float
+                } else {
+                    Self::Integer
+                }
+            }
+            Value::String(_) => Self::String,
+            Value::Array(_) => Self::Array,
+            Value::Object(_) => Self::Object,
+        }
+    }
+
+    /// The Python type name for this JSON type.
+    pub fn py_name(&self) -> &'static str {
+        match self {
+            Self::Null => "NoneType",
+            Self::Bool => "bool",
+            Self::Integer => "int",
+            Self::Float => "float",
+            Self::String => "str",
+            Self::Array => "list",
+            Self::Object => "dict",
+        }
+    }
+}
+
+impl std::fmt::Display for JsonValueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.py_name())
+    }
+}
+
+/// Options for [`decode`]. Defaults are the safe, lossless choices;
+/// every recovery is opt-in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DecodeOpts {
+    /// When `true`, before the final deserialize, walk the parsed JSON and
+    /// clamp any integer above `i64::MAX` down to `i64::MAX`. This is a
+    /// **lossy** recovery for models that emit out-of-range integers
+    /// (e.g. a bogus 20-digit id) into a field that only holds an
+    /// `i64`/`i32`. Off by default — a consumer opts in per call.
+    pub clamp_ints: bool,
+}
+
+impl DecodeOpts {
+    /// Opts with integer clamping enabled.
+    pub fn clamping() -> Self {
+        Self { clamp_ints: true }
+    }
+}
+
+/// A response type that may arrive wrapped in a declared envelope tag.
+///
+/// The generic contract behind [`decode`]: a consumer implements this for
+/// its own response type and supplies the envelope [`wrapper_tags`] its
+/// convention uses (e.g. an agent that wraps its JSON in
+/// `<some_report>…</some_report>`). The **tag strings are the consumer's
+/// convention**; the extraction mechanism in [`decode`] is generic.
+///
+/// The default [`wrapper_tags`] is empty → the response is bare JSON.
+///
+/// [`wrapper_tags`]: JsonAgentResponse::wrapper_tags
+pub trait JsonAgentResponse: DeserializeOwned {
+    /// Envelope tags this response may be wrapped in, tried in order,
+    /// first match wins. Each entry may be written with or without
+    /// angle brackets (`"<fix_report>"` and `"fix_report"` are
+    /// equivalent). List a newer tag first and legacy aliases after it to
+    /// accept both. Empty (the default) means bare JSON — no envelope.
+    fn wrapper_tags() -> &'static [&'static str] {
+        &[]
+    }
+}
+
 /// Upper bound on candidate `{`/`[` start positions the chatty-text
 /// scraper will try before giving up. Keeps a pathological completion
 /// full of stray braces from turning decode into a quadratic scan.
 const MAX_SCRAPE_ATTEMPTS: usize = 50;
 
-/// Decode `text` into `T`, choosing the strategy from `mode`.
+/// Decode `text` into `T`, choosing the strategy from `mode`. No envelope
+/// unwrapping, no clamp — the bare convenience over the full [`decode`].
 ///
 /// - Native-JSON modes ([`StrictSchema`](StructuredOutputMode::StrictSchema)
-///   / [`JsonObjectMode`](StructuredOutputMode::JsonObjectMode)): the
-///   provider guarantees `text` is a clean JSON document, so parse it
-///   directly. Trailing/leading whitespace is tolerated.
+///   / [`JsonObjectMode`](StructuredOutputMode::JsonObjectMode)): parse
+///   `text` directly (whitespace tolerated).
 /// - Chatty modes ([`None`](StructuredOutputMode::None) /
-///   [`ToolUseEmulation`](StructuredOutputMode::ToolUseEmulation)): the
-///   text may be prose with the JSON embedded (optionally inside a
-///   ```` ```json ```` fence). Strip fences, then scan for the first
-///   balanced JSON value and parse it.
+///   [`ToolUseEmulation`](StructuredOutputMode::ToolUseEmulation)): strip
+///   fences, scan for the first balanced JSON value, parse it.
 ///
-/// Empty (whitespace-only) text is [`TarsJsonError::EmptyStream`] in
-/// every mode — there is nothing to decode.
+/// Empty (whitespace-only) text is [`TarsJsonError::EmptyStream`].
 pub fn decode_json<T: DeserializeOwned>(
     text: &str,
     mode: StructuredOutputMode,
 ) -> Result<T, TarsJsonError> {
+    let value = parse_value(text, mode)?;
+    serde_json::from_value::<T>(value).map_err(TarsJsonError::from_serde)
+}
+
+/// Decode `text` into a [`JsonAgentResponse`], composing the full seam:
+///
+/// 1. strip an outer code fence,
+/// 2. if `T::wrapper_tags()` is non-empty, extract the substring between
+///    the first matching `<tag>…</tag>` (→ [`TarsJsonError::MissingBlock`]
+///    if none match); otherwise use the text as-is,
+/// 3. dispatch on `mode` (native → direct parse; chatty → fence-scrape),
+/// 4. if `opts.clamp_ints`, clamp out-of-`i64`-range integers before the
+///    final deserialize.
+pub fn decode<T: JsonAgentResponse>(
+    text: &str,
+    mode: StructuredOutputMode,
+    opts: DecodeOpts,
+) -> Result<T, TarsJsonError> {
+    let body = strip_code_fences(text);
+
+    let tags = T::wrapper_tags();
+    let inner = if tags.is_empty() {
+        body
+    } else {
+        extract_tag_block(body, tags).ok_or_else(|| TarsJsonError::MissingBlock {
+            tried: tags.iter().map(|t| (*t).to_string()).collect(),
+        })?
+    };
+
+    let mut value = parse_value(inner, mode)?;
+    if opts.clamp_ints {
+        clamp_ints_in_place(&mut value);
+    }
+    serde_json::from_value::<T>(value).map_err(TarsJsonError::from_serde)
+}
+
+/// Parse `text` to a [`serde_json::Value`] using the `mode` strategy.
+/// Shared front half of both decode entry points; the caller does the
+/// final `from_value::<T>` (so a clamp can slot in between).
+fn parse_value(text: &str, mode: StructuredOutputMode) -> Result<Value, TarsJsonError> {
     if text.trim().is_empty() {
         return Err(TarsJsonError::EmptyStream);
     }
     match mode {
         // Provider guarantees a clean JSON document in `text`.
         StructuredOutputMode::StrictSchema | StructuredOutputMode::JsonObjectMode => {
-            serde_json::from_str::<T>(text.trim()).map_err(TarsJsonError::from_serde)
+            serde_json::from_str::<Value>(text.trim()).map_err(TarsJsonError::from_serde)
         }
         // `text` may be chatty free-form; scrape the JSON out of it.
-        StructuredOutputMode::None | StructuredOutputMode::ToolUseEmulation => scrape_json(text),
+        StructuredOutputMode::None | StructuredOutputMode::ToolUseEmulation => scrape_value(text),
     }
 }
 
 /// Strip an optional leading/trailing Markdown code fence, then scan the
-/// text for the first balanced JSON value (`{…}` or `[…]`) that parses
-/// as `T`.
-fn scrape_json<T: DeserializeOwned>(text: &str) -> Result<T, TarsJsonError> {
+/// text for the first balanced JSON value (`{…}` or `[…]`) that parses.
+fn scrape_value(text: &str) -> Result<Value, TarsJsonError> {
     let body = strip_code_fences(text);
     let bytes = body.as_bytes();
 
@@ -126,26 +282,19 @@ fn scrape_json<T: DeserializeOwned>(text: &str) -> Result<T, TarsJsonError> {
                 continue;
             }
         };
-        // Found a candidate start. Try to close it with a balanced scan.
         if attempts >= MAX_SCRAPE_ATTEMPTS {
             break;
         }
         attempts += 1;
         if let Some(end) = find_balanced(bytes, i, open, close) {
             let candidate = &body[i..=end];
-            match serde_json::from_str::<T>(candidate) {
+            match serde_json::from_str::<Value>(candidate) {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    // Well-formed JSON that just didn't fit `T` is a
-                    // schema mismatch, not "wrong braces" — report it
-                    // rather than keep scanning past the real payload.
-                    if matches!(e.classify(), serde_json::error::Category::Data) {
-                        return Err(TarsJsonError::Schema { source: e });
-                    }
+                    // The balanced region wasn't valid JSON (e.g. a `{` in
+                    // prose). Remember why and keep looking — a later
+                    // candidate may be the real payload.
                     last_err = Some(e);
-                    // Skip past this opener and keep looking — the
-                    // balanced region wasn't valid JSON (e.g. a `{` in
-                    // prose), so a later candidate may be the real one.
                     i += 1;
                     continue;
                 }
@@ -160,6 +309,46 @@ fn scrape_json<T: DeserializeOwned>(text: &str) -> Result<T, TarsJsonError> {
     match last_err {
         Some(source) => Err(TarsJsonError::InvalidJson { source }),
         None => Err(TarsJsonError::NoJsonObject { attempts }),
+    }
+}
+
+/// Extract the substring between the first matching `<tag>…</tag>` in
+/// `text`. Tags are tried in order; the first whose open **and** close
+/// markers both appear wins. Each `tag` may be written with or without
+/// angle brackets. Returns `None` if no tag matched.
+fn extract_tag_block<'a>(text: &'a str, tags: &[&str]) -> Option<&'a str> {
+    for tag in tags {
+        let name = tag.trim().trim_start_matches('<').trim_end_matches('>');
+        if name.is_empty() {
+            continue;
+        }
+        let open = format!("<{name}>");
+        let close = format!("</{name}>");
+        if let Some(os) = text.find(&open) {
+            let after = os + open.len();
+            if let Some(rel) = text[after..].find(&close) {
+                return Some(text[after..after + rel].trim());
+            }
+        }
+    }
+    None
+}
+
+/// Recursively clamp every integer above `i64::MAX` down to `i64::MAX`.
+/// Only unsigned integers that overflow `i64` are affected; signed
+/// integers, floats, and every non-number value are left untouched.
+fn clamp_ints_in_place(v: &mut Value) {
+    match v {
+        Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                if u > i64::MAX as u64 {
+                    *n = serde_json::Number::from(i64::MAX);
+                }
+            }
+        }
+        Value::Array(arr) => arr.iter_mut().for_each(clamp_ints_in_place),
+        Value::Object(map) => map.values_mut().for_each(clamp_ints_in_place),
+        _ => {}
     }
 }
 
@@ -240,6 +429,7 @@ impl ChatResponse {
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use serde_json::json;
 
     #[derive(Debug, Deserialize, PartialEq)]
     struct Point {
@@ -247,7 +437,7 @@ mod tests {
         y: i32,
     }
 
-    // ── strict / native-JSON modes ──────────────────────────────────
+    // ── decode_json: strict / native-JSON modes ─────────────────────
 
     #[test]
     fn strict_mode_parses_clean_json_directly() {
@@ -283,7 +473,7 @@ mod tests {
         assert!(matches!(err, TarsJsonError::InvalidJson { .. }), "got {err:?}");
     }
 
-    // ── chatty (None) fence-scrape fallback ─────────────────────────
+    // ── decode_json: chatty (None) fence-scrape fallback ────────────
 
     #[test]
     fn none_mode_scrapes_bare_json() {
@@ -314,8 +504,6 @@ mod tests {
 
     #[test]
     fn none_mode_skips_stray_brace_before_real_object() {
-        // A `{` in prose that isn't valid JSON must not abort the scan;
-        // the real object comes later.
         let text = "note: use {curly} braces. payload: {\"x\":15,\"y\":16}";
         let p: Point = decode_json(text, StructuredOutputMode::None).unwrap();
         assert_eq!(p, Point { x: 15, y: 16 });
@@ -346,7 +534,7 @@ mod tests {
         assert_eq!(p, Point { x: 21, y: 22 });
     }
 
-    // ── error cases ─────────────────────────────────────────────────
+    // ── decode_json: error cases ────────────────────────────────────
 
     #[test]
     fn empty_text_is_empty_stream_in_every_mode() {
@@ -373,7 +561,6 @@ mod tests {
 
     #[test]
     fn none_mode_valid_json_wrong_shape_is_schema_error() {
-        // Well-formed JSON object that doesn't match `Point`.
         let err =
             decode_json::<Point>(r#"answer: {"foo":1,"bar":2}"#, StructuredOutputMode::None)
                 .unwrap_err();
@@ -396,22 +583,15 @@ mod tests {
 
     #[test]
     fn none_mode_attempts_are_bounded() {
-        // Many stray non-JSON `{` openers followed by no valid payload:
-        // the scan must stop at MAX_SCRAPE_ATTEMPTS, not scan them all.
         let text = "{x ".repeat(200);
         let err = decode_json::<Point>(&text, StructuredOutputMode::None).unwrap_err();
         match err {
             TarsJsonError::NoJsonObject { attempts } => {
                 assert!(attempts <= MAX_SCRAPE_ATTEMPTS, "attempts={attempts}");
             }
-            // `{x {x {x…` never balances → find_balanced returns None on
-            // the first opener and the scan stops early. Either bounded
-            // outcome is acceptable; both prove no unbounded scan.
             other => panic!("expected NoJsonObject, got {other:?}"),
         }
     }
-
-    // ── ChatResponse::json convenience ──────────────────────────────
 
     #[test]
     fn chat_response_json_method_decodes_text() {
@@ -421,5 +601,182 @@ mod tests {
         };
         let p: Point = resp.json(StructuredOutputMode::None).unwrap();
         assert_eq!(p, Point { x: 1, y: 2 });
+    }
+
+    // ── decode: wrapper-tag envelope extraction ─────────────────────
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Wrapped {
+        x: i32,
+        y: i32,
+    }
+    impl JsonAgentResponse for Wrapped {
+        fn wrapper_tags() -> &'static [&'static str] {
+            &["<report>"]
+        }
+    }
+
+    #[test]
+    fn decode_extracts_json_from_envelope_tag() {
+        let text = "Preamble.\n<report>{\"x\":1,\"y\":2}</report>\nEpilogue.";
+        let w: Wrapped = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
+        assert_eq!(w, Wrapped { x: 1, y: 2 });
+    }
+
+    #[test]
+    fn decode_missing_envelope_tag_is_missing_block() {
+        let text = "no envelope here, just {\"x\":1,\"y\":2}";
+        let err =
+            decode::<Wrapped>(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap_err();
+        match err {
+            TarsJsonError::MissingBlock { tried } => {
+                assert_eq!(tried, vec!["<report>".to_string()])
+            }
+            other => panic!("expected MissingBlock, got {other:?}"),
+        }
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Aliased {
+        v: i32,
+    }
+    impl JsonAgentResponse for Aliased {
+        // New tag first, legacy alias second — accept both.
+        fn wrapper_tags() -> &'static [&'static str] {
+            &["<result>", "<legacy>"]
+        }
+    }
+
+    #[test]
+    fn decode_first_matching_tag_wins() {
+        // Both tags present → the first listed (`<result>`) wins.
+        let text = "<legacy>{\"v\":1}</legacy>\n<result>{\"v\":2}</result>";
+        let a: Aliased = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
+        assert_eq!(a, Aliased { v: 2 });
+    }
+
+    #[test]
+    fn decode_falls_back_to_legacy_alias_tag() {
+        // Only the legacy alias present → still extracted.
+        let text = "chatter <legacy>{\"v\":9}</legacy> chatter";
+        let a: Aliased = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
+        assert_eq!(a, Aliased { v: 9 });
+    }
+
+    #[test]
+    fn decode_tag_written_without_brackets_is_equivalent() {
+        // The trait may list "report" instead of "<report>".
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Bare {
+            x: i32,
+            y: i32,
+        }
+        impl JsonAgentResponse for Bare {
+            fn wrapper_tags() -> &'static [&'static str] {
+                &["report"]
+            }
+        }
+        let text = "<report>{\"x\":3,\"y\":4}</report>";
+        let b: Bare = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
+        assert_eq!(b, Bare { x: 3, y: 4 });
+    }
+
+    #[test]
+    fn decode_empty_wrapper_tags_means_bare_json() {
+        // Default wrapper_tags() = [] → behaves like decode_json.
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct BareResp {
+            x: i32,
+            y: i32,
+        }
+        impl JsonAgentResponse for BareResp {}
+        let b: BareResp = decode(
+            "prefix {\"x\":5,\"y\":6} suffix",
+            StructuredOutputMode::None,
+            DecodeOpts::default(),
+        )
+        .unwrap();
+        assert_eq!(b, BareResp { x: 5, y: 6 });
+    }
+
+    #[test]
+    fn decode_extracts_fenced_json_inside_envelope() {
+        // Envelope whose body is itself a ```json fence.
+        let text = "<report>```json\n{\"x\":7,\"y\":8}\n```</report>";
+        let w: Wrapped = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
+        assert_eq!(w, Wrapped { x: 7, y: 8 });
+    }
+
+    // ── decode: opt-in integer clamp ────────────────────────────────
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct HasId {
+        id: i64,
+    }
+    impl JsonAgentResponse for HasId {}
+
+    #[test]
+    fn clamp_off_by_default_overflow_int_is_schema_error() {
+        // u64::MAX doesn't fit i64 → Schema error when clamp is off.
+        let text = r#"{"id": 18446744073709551615}"#;
+        let err =
+            decode::<HasId>(text, StructuredOutputMode::StrictSchema, DecodeOpts::default())
+                .unwrap_err();
+        assert!(matches!(err, TarsJsonError::Schema { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn clamp_on_recovers_overflow_int_to_i64_max() {
+        let text = r#"{"id": 18446744073709551615}"#;
+        let h: HasId =
+            decode(text, StructuredOutputMode::StrictSchema, DecodeOpts::clamping()).unwrap();
+        assert_eq!(h, HasId { id: i64::MAX });
+    }
+
+    #[test]
+    fn clamp_on_leaves_in_range_ints_and_floats_untouched() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Mix {
+            a: i64,
+            b: f64,
+            c: i64,
+        }
+        impl JsonAgentResponse for Mix {}
+        // a in range, b float, c negative — none should be clamped.
+        let text = r#"{"a": 42, "b": 3.5, "c": -100}"#;
+        let m: Mix =
+            decode(text, StructuredOutputMode::StrictSchema, DecodeOpts::clamping()).unwrap();
+        assert_eq!(m, Mix { a: 42, b: 3.5, c: -100 });
+    }
+
+    #[test]
+    fn clamp_walks_nested_arrays_and_objects() {
+        let mut v = json!({
+            "outer": [ {"n": 18446744073709551615u64}, {"n": 5} ],
+            "flat": 5
+        });
+        clamp_ints_in_place(&mut v);
+        assert_eq!(v["outer"][0]["n"], json!(i64::MAX));
+        assert_eq!(v["outer"][1]["n"], json!(5));
+        assert_eq!(v["flat"], json!(5));
+    }
+
+    // ── JsonValueType ───────────────────────────────────────────────
+
+    #[test]
+    fn json_value_type_classifies_and_names() {
+        assert_eq!(JsonValueType::of(&json!(null)), JsonValueType::Null);
+        assert_eq!(JsonValueType::of(&json!(true)), JsonValueType::Bool);
+        assert_eq!(JsonValueType::of(&json!(7)), JsonValueType::Integer);
+        assert_eq!(JsonValueType::of(&json!(-7)), JsonValueType::Integer);
+        assert_eq!(JsonValueType::of(&json!(1.5)), JsonValueType::Float);
+        assert_eq!(JsonValueType::of(&json!("s")), JsonValueType::String);
+        assert_eq!(JsonValueType::of(&json!([1, 2])), JsonValueType::Array);
+        assert_eq!(JsonValueType::of(&json!({"k": 1})), JsonValueType::Object);
+
+        assert_eq!(JsonValueType::Object.to_string(), "dict");
+        assert_eq!(JsonValueType::Array.py_name(), "list");
+        assert_eq!(JsonValueType::Null.py_name(), "NoneType");
+        assert_eq!(JsonValueType::Integer.to_string(), "int");
     }
 }
