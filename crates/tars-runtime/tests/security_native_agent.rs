@@ -32,7 +32,7 @@
 //! is compiled out (Linux `bwrap` confinement is a separate validation debt,
 //! tracking doc §7).
 
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 
 use std::sync::Arc;
 

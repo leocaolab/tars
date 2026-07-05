@@ -22,7 +22,7 @@
 //! re-exec'd child (marked by [`CHILD_MARKER`]) runs the real assertions; the
 //! env stays isolated to that one child process (guardrail: no global mutation).
 
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
