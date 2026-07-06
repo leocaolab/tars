@@ -132,8 +132,12 @@ mod tests {
 
         // `B` is a synthetic PID that isn't a real process; the kill
         // syscall just gets ESRCH and is ignored. The contract under test
-        // is that the registry is emptied.
+        // is that `kill_all_spawned` drains what it reaped — assert `B`
+        // specifically is gone rather than global emptiness: the registry is
+        // process-global and cargo runs tests in parallel, so another test
+        // spawning + `register`ing a real PID between the drain and this check
+        // would make an `is_empty()` assertion racily fail (it did).
         kill_all_spawned();
-        assert!(SPAWNED.lock().unwrap().is_empty());
+        assert!(!SPAWNED.lock().unwrap().contains(&B));
     }
 }
