@@ -249,68 +249,6 @@ Design: [30 — OpenAI dialects](docs/architecture/30-openai-dialect.md) ·
 
 ---
 
-## The Agent abstraction
-
-> An **Agent** is a set of capabilities (skills) that you hand a **task** to.
-> ([Doc 20](docs/architecture/20-agent-abstraction.md))
-
-The contract lives in **`tars-model`** (pure, depends only on `tars-types`):
-`trait Agent { id, role, skills, run(task) }` + `Task` (the recursive unit of
-intent) + `Permissions` / `AgentContext`. `run` takes a **Task** — user intent —
-not a `ChatRequest`; turning a task into LLM calls is a *native* agent's internal
-job, so an agent that uses no LLM stays first-class.
-
-- **`TarsAgent`** (`tars-runtime`) — LLM-backed: turns the task into a prompt and
-  drives a white-box tool loop over a *pure-inference* provider. Swap the provider
-  and the same agent is a "gemini agent" or a "claude_cli agent" — **tars owns the
-  loop, tools, `cwd`, and the sandbox**, not the CLI's internal black box.
-- **user agents** — anything that implements `Agent::run(task)`.
-- **`EnsembleAgent`** runs one task on N agents concurrently and takes the first
-  success (a tail-latency hedge at *task* granularity).
-
-**Scope (see Philosophy · Bets 2–3).** `TarsAgent` drives a **bounded, white-box tool
-loop** — tars owns the loop, tools, `cwd`, and sandbox. It is *not* an autonomous
-planner that decomposes an open-ended goal on its own: a `Task` splits into sub-`Task`s
-because *your code* (or an orchestrator) says so, not because the runtime went planning.
-The planner — your own, or a black-box CLI delegate — runs *on top of* this typed,
-sandboxed execution layer.
-
----
-
-## Model knowledge base
-
-Model ids, prices, context windows, modalities, and thinking behavior change
-faster than releases — so they're **data**, in
-[`crates/tars-config/data/models.toml`](crates/tars-config/data/models.toml), not
-string literals in code. Built-in defaults, per-model pricing (cost is resolved
-from the reply's actual model), and provider quirks (e.g. Gemini 2.5 uses a numeric
-`thinkingBudget`, 3.x uses `thinkingLevel`, thinking-only models reject "off") all
-read from it. Ship a new model or fix a stale default with a one-line data edit.
-
----
-
-## A couple of mechanics worth knowing
-
-**Atomic Turn rollback via `Drop` guard.** `Session::send` builds turns through a
-`TurnGuard` that rolls back on `Drop`; success calls `commit()` (`mem::forget`).
-`?` early-returns, panics, and tokio cancellation are all handled uniformly —
-there's no `armed = false` flag to forget and silently keep a half-Turn.
-
-**Capability pre-flight before routing.** The routing layer runs
-`ChatRequest::compatibility_check(&Capabilities)` against each candidate *before*
-dispatch — tool-use vs. a non-tool model, oversized prompt, unsupported thinking/
-vision — so an incompatible request fails **without** burning a network round-trip.
-It aggregates *all* reasons (typed, no early-exit); `ProviderError::NoCompatibleCandidate`
-carries the full skipped list.
-
-**Typed errors, not strings.** `TarsError` → `TarsConfigError` /
-`TarsProviderError` / `TarsRuntimeError`, with subclasses (e.g.
-`TarsRoutingExhaustedError` exposing `skipped_candidates`) where structured access
-matters. `e.kind == "rate_limited"` carries `retry_after`; `e.is_retriable` tells
-you whether the pipeline already exhausted retries.
-
----
-
 ## Documentation
 
 - **[USER-GUIDE.md](docs/USER-GUIDE.md)** — 5-minute orientation for calling tars
@@ -319,8 +257,7 @@ you whether the pipeline already exhausted retries.
   AutoGen / NVIDIA NIM.
 - **[Architecture docs](docs/README.md)** — design rationale and trade-offs, by
   subsystem (provider, pipeline, cache, agent runtime, tools, security,
-  observability, storage, …); plus [Doc 33 — why TARS does not support
-  MCP](docs/architecture/33-no-mcp.md). English, with Chinese mirrors under
+  observability, storage, …). English, with Chinese mirrors under
   [`docs/architecture/zh/`](docs/architecture/zh/).
 
 ---
