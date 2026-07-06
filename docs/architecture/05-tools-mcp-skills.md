@@ -1,16 +1,18 @@
-# Doc 05 — Tool / MCP / Skill Integration Design
+# Doc 05 — Tool / Skill Integration Design
 
-> Scope: define the unified abstraction for external capabilities the Agent can invoke — local tools, MCP servers, composite Skills — along with permission model, invocation lifecycle, and side-effect tracking.
+> Scope: define the unified abstraction for external capabilities the Agent can invoke — local tools and composite Skills — along with permission model, invocation lifecycle, and side-effect tracking.
 >
 > Upstream: invoked by Doc 04 Agent Runtime (`AgentContext::tool_registry`).
 >
-> Downstream: may invoke Doc 01 LlmProvider (if a Skill includes LLM steps), external processes (MCP / CLI), HTTP APIs.
+> Downstream: may invoke Doc 01 LlmProvider (if a Skill includes LLM steps), external processes (CLI), HTTP APIs.
+
+> **MCP is not supported — decision in [Doc 33](33-no-mcp.md).** This doc once made MCP a first-class transport for Tools; that framing is dead (see §5). Tools come from Rust built-ins and HTTP APIs; Skills compose them.
 
 ---
 
-## 1. Relationship between the three concepts
+## 1. Relationship between the two concepts
 
-Many frameworks conflate Tool / MCP / Skill, which entangles permission model, lifecycle, and invocation semantics. This doc strictly distinguishes three layers of abstraction:
+Many frameworks conflate Tool and Skill, which entangles permission model, lifecycle, and invocation semantics. This doc strictly distinguishes two layers of abstraction:
 
 ```
                     ┌──────────────────────┐
@@ -24,24 +26,22 @@ Many frameworks conflate Tool / MCP / Skill, which entangles permission model, l
                     │ (Atomic Function)    │   e.g. "read file" / "execute SQL"
                     └──────────┬───────────┘
                                │ implementation may come from
-                ┌──────────────┼──────────────┐
-                ▼              ▼              ▼
-         ┌──────────┐   ┌────────────┐  ┌──────────┐
-         │ Built-in │   │ MCP Server │  │ HTTP API │
-         │ (Rust fn)│   │ (subproc)  │  │ (REST)   │
-         └──────────┘   └────────────┘  └──────────┘
+                     ┌─────────┴─────────┐
+                     ▼                   ▼
+              ┌──────────┐        ┌──────────┐
+              │ Built-in │        │ HTTP API │
+              │ (Rust fn)│        │ (REST)   │
+              └──────────┘        └──────────┘
 ```
 
 | Concept | Abstraction level | Caller | Visibility | Example |
 |---|---|---|---|---|
 | **Tool** | atomic function | Agent (Worker / Orchestrator) | LLM references it by name in tool_use | `read_file(path)`, `query_postgres(sql)` |
-| **MCP Server** | source/container of Tools | internal to ToolRegistry | Tools are discovered and invoked via the MCP protocol | `mcp-filesystem`, `mcp-github` |
 | **Skill** | composite capability | Agent (typically Orchestrator), referenced by PlanIssued | LLM does not see Skill internals; it sees a higher-level capability | "review this PR" (internally read_file + AST parsing + LLM reasoning + writing comments) |
 
 **Core distinctions**:
 - A Tool is **atomic** — one call, one result, no LLM involvement (unless the Tool implementation happens to wrap an LLM)
 - A Skill is **composite** — may orchestrate multiple Tool calls + LLM reasoning + intermediate state
-- MCP is a **protocol**, not a concept — it defines "how remote Tools are discovered and invoked", and is one transport mechanism for Tools
 
 ---
 
@@ -49,19 +49,17 @@ Many frameworks conflate Tool / MCP / Skill, which entangles permission model, l
 
 | Goal | Description |
 |---|---|
-| **Three layers stay clean** | Tool / Skill / MCP each have independent traits, lifecycles, and permission models, and don't pollute each other |
+| **Two layers stay clean** | Tool and Skill each have independent traits, lifecycles, and permission models, and don't pollute each other |
 | **Strict Tool schema** | Input/output uses JSON Schema strict mode, consistent with provider-side structured output in Doc 01 §9 |
 | **Idempotency required** | Every Tool invocation accepts an idempotency_key, satisfying the replay contract in Doc 04 §7 |
 | **Side-effect classification mandatory** | Each Tool declares a SideEffectKind (Doc 04 §4.4); Runtime decides whether it can run during intermediate steps based on this |
 | **IAM gating** | Every Tool has minimum scope requirements; if the Principal does not satisfy them, the call is rejected up front |
-| **MCP subprocess reuse** | Long-lived MCP servers are shared across requests, mirroring Doc 01 §6.2 CLI mode |
 | **Skill portability** | Skill definition is decoupled from concrete Tool implementations; the same Skill behaves consistently across different Tool implementations |
 | **Streaming output** | Long-running Tools (grep over a large codebase / running a test suite) support stream output, not all-or-nothing return |
 
 **Anti-goals**:
 - Don't let the LLM freely choose Tools / Skills — the callable set is bounded by the Orchestrator in code
 - Don't do prompt assembly at the Tool layer — if a Skill calls an LLM internally, it goes through the Doc 02 Pipeline
-- Don't allow MCP servers to receive external traffic directly — all MCP calls go through this process's ToolRegistry
 - Don't expose a Tool's internal idempotency state to the LLM — the LLM sees a clean "call + result"
 
 ---
@@ -107,7 +105,7 @@ pub struct ToolDescriptor {
     pub idempotent: bool,                    // naturally idempotent (read-class typically yes)
     pub typical_latency: Duration,           // for budget estimation and timeout setting
     pub timeout: Duration,                   // hard upper bound
-    pub source: ToolSource,                  // Built-in / Mcp / Http / Subprocess
+    pub source: ToolSource,                  // Built-in / Http / Subprocess
     pub version: SemanticVersion,
 }
 
@@ -147,7 +145,7 @@ pub enum ToolError {
     /// Resource missing / state error and similar business-level errors; the LLM can learn from them
     BusinessError { code: String, message: String, retriable: bool },
     
-    /// Tool implementation internal error (MCP server crash / network jitter)
+    /// Tool implementation internal error (subprocess crash / network jitter)
     Infrastructure { source: Box<dyn StdError + Send + Sync> },
     
     /// Side effect succeeded but response was lost (network dropped before ack)
@@ -332,140 +330,23 @@ async fn check_iam(tool: &dyn Tool, principal: &Principal) -> Result<(), ToolErr
 
 ---
 
-## 5. MCP integration
+## 5. MCP — not supported
 
-### 5.1 MCP protocol summary
+TARS does not integrate MCP. It is neither a **client** (consuming third-party MCP
+servers as a Tool source) nor, by default, a **server**. Tools come only from **Rust
+built-ins** and **HTTP APIs** (§3–§4); Skills compose them (§6). There is no `Mcp`
+tool source, no `McpToolProvider`, no stdio-MCP subprocess manager.
 
-Model Context Protocol (proposed by Anthropic) defines three resource types:
-- **Tools**: invokable functions (same semantics as Tool in §3 of this doc)
-- **Resources**: readable data (URI-addressed)
-- **Prompts**: reusable prompt templates
+The full rationale — no clean success case; MCP is a flat `Json → Text` bag with **no
+composition law** (not intelligent, not expressive, not richly extensible); its value
+is inversely proportional to agent capability; and the real value is a
+**protocol-agnostic sandboxed boundary TARS already owns** — is in
+**[Doc 33 — Why TARS Does Not Support MCP](33-no-mcp.md)** and is not repeated here.
 
-Transports:
-- **stdio**: subprocess + JSON-RPC over stdin/stdout
-- **SSE**: HTTP server-sent events
-- **HTTP**: pure REST
-
-Our Runtime mainly consumes **Tools**, with limited support for Resources and Prompts (see §5.4).
-
-### 5.2 MCP Server adaptation
-
-An MCP server is one source of Tools, adapted to the `Tool` trait by `McpToolProvider`:
-
-```rust
-pub struct McpToolProvider {
-    server_id: McpServerId,
-    transport: McpTransport,
-    discovered_tools: Arc<RwLock<HashMap<String, McpToolHandle>>>,
-}
-
-pub enum McpTransport {
-    Stdio { 
-        binary: PathBuf, 
-        args: Vec<String>,
-        env: HashMap<String, String>,
-    },
-    Sse { url: Url, auth: Auth },
-    Http { url: Url, auth: Auth },
-}
-
-impl McpToolProvider {
-    /// At startup, call MCP list_tools and register the server-provided tools to ToolRegistry
-    pub async fn discover(&self) -> Result<Vec<ToolDescriptor>, McpError>;
-    
-    /// Wrap each MCP tool as a Rust Tool implementation
-    pub fn wrap_as_tool(&self, mcp_handle: McpToolHandle) -> Arc<dyn Tool> {
-        Arc::new(McpToolAdapter { 
-            provider: self.clone(),
-            handle: mcp_handle,
-        })
-    }
-}
-
-struct McpToolAdapter {
-    provider: McpToolProvider,
-    handle: McpToolHandle,
-}
-
-#[async_trait]
-impl Tool for McpToolAdapter {
-    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) 
-        -> Result<ToolOutput, ToolError> 
-    {
-        // 1. Send call_tool request via the provider's transport
-        let response = self.provider.call_tool(&self.handle.name, args, &ctx).await?;
-        
-        // 2. Translate MCP response to ToolOutput, validate output schema
-        Ok(ToolOutput {
-            result: response.content,
-            side_effects: response.declared_side_effects,
-            usage: ToolUsage::from_mcp(&response.usage),
-        })
-    }
-}
-```
-
-### 5.3 Subprocess management for stdio MCP servers
-
-Stdio MCP server lifecycle management is fully isomorphic to Doc 01 §6.2 Claude CLI — long-lived, reused per session, killed on idle timeout, kill_on_drop:
-
-```rust
-pub struct StdioMcpProcess {
-    config: McpStdioConfig,
-    sessions: Arc<DashMap<SessionId, Arc<McpSession>>>,
-}
-
-struct McpSession {
-    child: Mutex<tokio::process::Child>,           // .kill_on_drop(true)
-    stdin_tx: mpsc::Sender<JsonRpcRequest>,
-    response_dispatcher: broadcast::Sender<JsonRpcResponse>,
-    last_used: AtomicInstant,
-    janitor: JoinHandle<()>,
-}
-```
-
-**Key decisions** (consistent with Doc 01 §6.2):
-- **One subprocess per SessionId** — MCP state is shared within a session, isolated across sessions
-- **Kill on 5-minute idle** — avoid leaks
-- **Multi-tenant must use independent HOME** — MCP server auth state (e.g. OAuth tokens) is tenant-isolated
-- **kill_on_drop(true)** as a safety net
-- **Cancel safety**: when an in-flight tool call is dropped, send a JSON-RPC `cancelled` notification to the server
-
-### 5.4 Limited support for Resources and Prompts
-
-| MCP concept | Runtime support | Rationale |
-|---|---|---|
-| Tools | Full | core use case |
-| Resources | Skill-internal use only | LLM does not access URIs directly; a Skill implementation may read a resource and inject it into the prompt |
-| Prompts | Not integrated | Prompt assembly is the responsibility of Doc 04 §11 PromptBuilder; we don't let MCP servers decide prompts |
-
-**Why we don't let MCP provide prompts**: an MCP server is **partially trusted external code** — letting it define system prompts hands over control of "how our Agent thinks". Prompts must be assembled in our own code.
-
-### 5.5 MCP server security boundary
-
-An MCP server is **partially trusted code** — it may be community-maintained, third-party, or user-installed. Treatment:
-
-1. **MCP servers must not execute in the main process address space** — they must be subprocesses or remote
-2. **Stdio MCP servers must have an allowed-binary whitelist** — arbitrary path execution is disallowed
-3. **HTTP/SSE MCP server URLs must be explicitly declared in config** — no dynamic URL discovery
-4. **MCP-server-declared tools still require explicit enablement in our ToolRegistry** — no auto-register
-5. **MCP tool required_scopes are overridden by config** — scopes declared by the MCP server itself are only hints; final permissions are determined by local config
-
-```toml
-[mcp_servers.filesystem]
-type = "stdio"
-binary = "/usr/local/bin/mcp-filesystem"
-args = ["--root", "/srv/projects"]
-auth = { kind = "delegate", per_tenant_home = true }
-
-[mcp_servers.filesystem.tools.read_file]
-enabled = true
-required_scopes = ["fs:read"]                # overrides server's own declaration
-override_timeout_secs = 30
-
-[mcp_servers.filesystem.tools.delete_file]
-enabled = false                               # fully disabled, even though the server provides it
-```
+If reaching a closed LLM host (Claude Desktop / Cursor) ever warrants it, an MCP
+*server* adapter may live as a throwaway seam at the **outermost** boundary
+([Doc 33 §7](33-no-mcp.md)) — collapse `T → Json → Text` and discard — but it is
+unbuilt and is not part of this design.
 
 ---
 
@@ -740,22 +621,16 @@ id = "fs.read_file"
 required_scopes = ["fs:read"]
 timeout_secs = 5
 
-# MCP Server
-[mcp_servers.github]
-type = "stdio"
-binary = "/usr/local/bin/mcp-github"
-args = []
-mode = "long_lived"
-session_idle_timeout_secs = 300
-auth = { kind = "delegate", per_tenant_home = true }
-
-[mcp_servers.github.tools.create_issue]
-enabled = true
+# HTTP API Tool (GitHub REST)
+[[tools.http]]
+id = "github.create_issue"
+base_url = "https://api.github.com"
 required_scopes = ["github:write"]
 side_effect_override = "Irreversible"        # forced upgrade to irreversible, only allowed in commit phase
 
-[mcp_servers.github.tools.read_repo]
-enabled = true
+[[tools.http]]
+id = "github.read_repo"
+base_url = "https://api.github.com"
 required_scopes = ["github:read"]
 
 # Skill
@@ -816,16 +691,7 @@ Every Tool implementation runs the same schema validation suite:
 - fields described in output_schema all present in actual output
 - input/output round-trip successfully with serde
 
-### 10.3 MCP integration tests
-
-Spin up a reference MCP server (filesystem reference impl) and verify:
-- discovery lists all declared tools
-- list_for filters by IAM
-- invoke succeeds end-to-end
-- subprocess is killed after idle timeout
-- subprocess auto-restarts on next invoke after a crash
-
-### 10.4 Idempotency tests
+### 10.3 Idempotency tests
 
 ```rust
 #[tokio::test]
@@ -845,7 +711,7 @@ async fn duplicate_invocation_returns_cached_output() {
 }
 ```
 
-### 10.5 Side-effect gate tests
+### 10.4 Side-effect gate tests
 
 ```rust
 #[tokio::test]
@@ -871,20 +737,16 @@ async fn irreversible_tool_rejected_outside_commit_phase() {
 ## 11. Anti-pattern checklist
 
 1. **Don't let the LLM decide which Skill to invoke** — the Orchestrator bounds the callable set in code; the LLM only chooses Tools within that set.
-2. **Don't directly trust the scopes declared by an MCP server** — local config overrides.
-3. **Don't spawn MCP subprocesses outside ToolRegistry** — all subprocess lifecycles are managed centrally.
-4. **Don't let Tools hold mutable state across calls** — externalize state (DB / cache).
-5. **Don't read env vars inside Tool implementations** — inject configuration via ToolContext.
-6. **Don't hard-code Tool name strings inside Skill implementations** — declare via `required_tools` and obtain by injection.
-7. **Don't initiate LLM calls inside a Tool without going through the Pipeline** — if a Tool needs an LLM, it must go through ctx.llm_service.
-8. **Don't let MCP control system behavior via Resources / Prompts** — Resources are Skill-internal only; Prompts are not integrated.
-9. **Don't reuse the same idempotency_key across trajectories** — keys must include trajectory_id to avoid false hits.
-10. **Don't have declarative skills express conditional branches / loops** — at that complexity, switch to SubAgent or native.
-11. **Don't ignore cancel on Tool calls** — long-running tasks must listen on cancel.cancelled().
-12. **Don't invoke an Irreversible Tool before the commit phase** — Runtime forces a reject, but the Skill design itself should avoid this.
-13. **Don't display an MCP tool's description directly to the end user** — it may be untrusted content (prompt injection attack surface).
-14. **Don't have Tool output_schema use `additionalProperties: true`** — every field must be explicitly declared, otherwise downstream Agents get unpredictable structures.
-15. **Don't reuse the LLM cache to cache Tool output** — the two stores are independent with different semantics (LLM cache keys on prompt hash, Tool cache keys on idempotency_key).
+2. **Don't let Tools hold mutable state across calls** — externalize state (DB / cache).
+3. **Don't read env vars inside Tool implementations** — inject configuration via ToolContext.
+4. **Don't hard-code Tool name strings inside Skill implementations** — declare via `required_tools` and obtain by injection.
+5. **Don't initiate LLM calls inside a Tool without going through the Pipeline** — if a Tool needs an LLM, it must go through ctx.llm_service.
+6. **Don't reuse the same idempotency_key across trajectories** — keys must include trajectory_id to avoid false hits.
+7. **Don't have declarative skills express conditional branches / loops** — at that complexity, switch to SubAgent or native.
+8. **Don't ignore cancel on Tool calls** — long-running tasks must listen on cancel.cancelled().
+9. **Don't invoke an Irreversible Tool before the commit phase** — Runtime forces a reject, but the Skill design itself should avoid this.
+10. **Don't have Tool output_schema use `additionalProperties: true`** — every field must be explicitly declared, otherwise downstream Agents get unpredictable structures.
+11. **Don't reuse the LLM cache to cache Tool output** — the two stores are independent with different semantics (LLM cache keys on prompt hash, Tool cache keys on idempotency_key).
 
 ---
 
@@ -896,7 +758,7 @@ async fn irreversible_tool_rejected_outside_commit_phase() {
 - Provide a complete ToolContext on every call (with idempotency_key, trajectory, principal)
 - Don't assume Tool call ordering — concurrent tool calls must handle interleaving correctly
 
-### Downstream (MCP Server / HTTP API / Built-in) contract
+### Downstream (HTTP API / Built-in) contract
 
 - Must correctly process inputs that conform to input_schema
 - Output must conform to output_schema (Runtime validates)
@@ -914,12 +776,9 @@ async fn irreversible_tool_rejected_outside_commit_phase() {
 
 ## 13. TODOs and open questions
 
-- [ ] MCP protocol version evolution strategy (how to maintain compatibility with old servers when v1 → v2)
 - [ ] Skill version management (can different versions of the same Skill coexist, and how is routing done)
 - [ ] Declarative Skill executor selection (custom mini DSL vs reusing Step Functions / Argo Workflows)
-- [ ] Cross-process / cross-node Tool call tracing (propagate OTel context into MCP)
-- [ ] MCP server resource quotas (CPU / memory / file handles) — cgroups vs nsjail vs trust
+- [ ] Cross-process / cross-node Tool call tracing (propagate OTel context across process/node boundaries)
 - [ ] Tool cost-billing dimensions (per call / per duration / per data volume)
 - [ ] Whether intermediate artifacts produced inside a Skill should be persisted to ContentStore (debug value vs storage cost)
-- [ ] MCP server health check protocol (heartbeat / circuit breaker)
 - [ ] **RAG / Vector Store integration section**: the doc currently states no built-in vector store (positioned as application-layer), but should add a section on "hooks for Tool/Skill integration with vector retrieval". Personal mode recommends in-process mmap solutions (faiss-rs / lance) to avoid spinning up a standalone vector DB process; Team/SaaS mode recommends Qdrant/Milvus as an external service tool.

@@ -1,16 +1,18 @@
-# 文档 05 — Tool / MCP / Skill 接入设计
+# 文档 05 — Tool / Skill 接入设计
 
-> 范围：定义 Agent 可调用的外部能力——本地工具、MCP server、复合 Skill——的统一抽象，权限模型，调用生命周期，副作用追踪。
+> 范围：定义 Agent 可调用的外部能力——本地工具与复合 Skill——的统一抽象，权限模型，调用生命周期，副作用追踪。
 >
 > 上游：被 Doc 04 Agent Runtime 调用（`AgentContext::tool_registry`）。
 >
-> 下游：可能调用 Doc 01 LlmProvider（Skill 内部如果含 LLM 步骤）、外部进程（MCP / CLI）、HTTP API。
+> 下游：可能调用 Doc 01 LlmProvider（Skill 内部如果含 LLM 步骤）、外部进程（CLI）、HTTP API。
+
+> **不支持 MCP —— 定论见 [Doc 33](33-no-mcp.md)。** 本文档曾把 MCP 当作 Tool 的一等 transport；那个定性已死（见 §5）。Tool 来自 Rust 内置和 HTTP API；Skill 负责编排。
 
 ---
 
-## 1. 三个概念的关系
+## 1. 两个概念的关系
 
-很多框架把 Tool / MCP / Skill 混为一谈，导致权限模型 / 生命周期 / 调用语义全部纠缠。本文档严格区分三层抽象：
+很多框架把 Tool 和 Skill 混为一谈，导致权限模型 / 生命周期 / 调用语义全部纠缠。本文档严格区分两层抽象：
 
 ```
                     ┌──────────────────────┐
@@ -24,24 +26,22 @@
                     │ (Atomic Function)    │   例:"读取文件" / "执行 SQL"
                     └──────────┬───────────┘
                                │ 实现可来自
-                ┌──────────────┼──────────────┐
-                ▼              ▼              ▼
-         ┌──────────┐   ┌────────────┐  ┌──────────┐
-         │ Built-in │   │ MCP Server │  │ HTTP API │
-         │ (Rust fn)│   │ (子进程)   │  │ (REST)   │
-         └──────────┘   └────────────┘  └──────────┘
+                     ┌─────────┴─────────┐
+                     ▼                   ▼
+              ┌──────────┐        ┌──────────┐
+              │ Built-in │        │ HTTP API │
+              │ (Rust fn)│        │ (REST)   │
+              └──────────┘        └──────────┘
 ```
 
 | 概念 | 抽象层级 | 调用者 | 可见性 | 示例 |
 |---|---|---|---|---|
 | **Tool** | 原子函数 | Agent (Worker / Orchestrator) | LLM 在 tool_use 中按名引用 | `read_file(path)`, `query_postgres(sql)` |
-| **MCP Server** | Tool 的来源/容器 | ToolRegistry 内部 | Tool 通过 MCP 协议被发现和调用 | `mcp-filesystem`, `mcp-github` |
 | **Skill** | 复合能力 | Orchestrator 在 PlanIssued 中引用 | LLM 不直接看到 Skill 内部，看到的是更高层的 capability | "审查这个 PR"（内部含 read_file + AST 解析 + LLM 推理 + 写评论） |
 
 **核心区分**：
 - Tool 是**原子的**——一次调用，一个结果，无 LLM 介入（除非 Tool 实现刚好包了 LLM）
 - Skill 是**复合的**——可以编排多个 Tool 调用 + LLM 推理 + 中间状态
-- MCP 是**协议**而非概念——它定义了"远程 Tool 怎么发现和调用"，是 Tool 的运输方式之一
 
 ---
 
@@ -49,19 +49,17 @@
 
 | 目标 | 说明 |
 |---|---|
-| **三层清晰** | Tool / MCP / Skill 各有独立的 trait、生命周期、权限模型，不互相污染 |
+| **两层清晰** | Tool 和 Skill 各有独立的 trait、生命周期、权限模型，不互相污染 |
 | **Tool schema 严格** | 输入输出走 JSON Schema strict mode，与 Doc 01 §9 Provider 端 structured output 一致 |
 | **Idempotency 必填** | 所有 Tool 调用接受 idempotency_key，满足 Doc 04 §7 replay 契约 |
 | **副作用分类强制** | 每个 Tool 声明 SideEffectKind（Doc 04 §4.4），Runtime 据此决定能否在中间步骤执行 |
 | **IAM gating** | 每个 Tool 有最小权限要求，Principal 不满足时调用前拒绝 |
-| **MCP 子进程复用** | 长生命周期 MCP server，跨请求共享，参考 Doc 01 §6.2 CLI 模式 |
 | **Skill 可移植** | Skill 定义与具体 Tool 实现解耦，相同 Skill 在不同 Tool 实现下表现一致 |
 | **流式输出** | 长时间 Tool（grep 大代码库 / 跑测试套件）支持 stream，不是一锤子返回 |
 
 **反目标**：
 - 不让 LLM 自由选择 Tool / Skill——可调用集合由 Orchestrator 在代码里圈定
 - 不在 Tool 层做 prompt 拼装——Skill 内部如果调 LLM，走 Doc 02 Pipeline
-- 不允许 MCP server 直接接收外网流量——所有 MCP 调用经过本进程的 ToolRegistry
 - 不暴露 Tool 的内部 idempotency 状态给 LLM——LLM 看到的是干净的"调用 + 结果"
 
 ---
@@ -107,7 +105,7 @@ pub struct ToolDescriptor {
     pub idempotent: bool,                    // 是否天然幂等 (read 类一般是)
     pub typical_latency: Duration,           // 用于 budget 估算和超时设置
     pub timeout: Duration,                   // 硬上限
-    pub source: ToolSource,                  // Built-in / Mcp / Http / Subprocess
+    pub source: ToolSource,                  // Built-in / Http / Subprocess
     pub version: SemanticVersion,
 }
 
@@ -147,7 +145,7 @@ pub enum ToolError {
     /// 资源不存在 / 状态错误等业务级错误,LLM 可以学习
     BusinessError { code: String, message: String, retriable: bool },
     
-    /// 工具实现内部错误 (MCP server crash / network 抖动)
+    /// 工具实现内部错误 (子进程 crash / network 抖动)
     Infrastructure { source: Box<dyn StdError + Send + Sync> },
     
     /// 副作用执行成功但响应丢失 (网络断在 ack 之前)
@@ -332,140 +330,19 @@ async fn check_iam(tool: &dyn Tool, principal: &Principal) -> Result<(), ToolErr
 
 ---
 
-## 5. MCP 集成
+## 5. MCP —— 不支持
 
-### 5.1 MCP 协议简述
+TARS 不集成 MCP。既不做 **client**(把第三方 MCP server 当 Tool 来源消费),默认也不做
+**server**。Tool 只来自 **Rust 内置**和 **HTTP API**(§3–§4);Skill 负责编排它们(§6)。没有
+`Mcp` tool 来源,没有 `McpToolProvider`,没有 stdio-MCP 子进程管理器。
 
-Model Context Protocol（Anthropic 提出）定义三类资源：
-- **Tools**：可调用函数（与本文 §3 的 Tool 同语义）
-- **Resources**：可读数据（URI 寻址）
-- **Prompts**：可复用 prompt 模板
+完整理由——没有干净的成功案例;MCP 是一个扁平的 `Json → Text` 袋子,**没有复合律**(不智能、
+不多样、不可真扩展);它的价值与 agent 能力成反比;而真正值钱的是一个 **协议无关、TARS 已经拥有
+的沙箱边界**——在 **[Doc 33 — 为什么 TARS 不做 MCP](33-no-mcp.md)** 里,这里不再重复。
 
-传输方式：
-- **stdio**：子进程 + JSON-RPC over stdin/stdout
-- **SSE**：HTTP server-sent events
-- **HTTP**：纯 REST
-
-我们的 Runtime 主要消费 **Tools**，对 Resources 和 Prompts 提供有限支持（详见 §5.4）。
-
-### 5.2 MCP Server 适配
-
-MCP server 是 Tool 的来源之一，由 `McpToolProvider` 适配为 `Tool` trait：
-
-```rust
-pub struct McpToolProvider {
-    server_id: McpServerId,
-    transport: McpTransport,
-    discovered_tools: Arc<RwLock<HashMap<String, McpToolHandle>>>,
-}
-
-pub enum McpTransport {
-    Stdio { 
-        binary: PathBuf, 
-        args: Vec<String>,
-        env: HashMap<String, String>,
-    },
-    Sse { url: Url, auth: Auth },
-    Http { url: Url, auth: Auth },
-}
-
-impl McpToolProvider {
-    /// 启动时调 MCP list_tools 把 server 提供的工具注册到 ToolRegistry
-    pub async fn discover(&self) -> Result<Vec<ToolDescriptor>, McpError>;
-    
-    /// 把每个 MCP tool 包装成 Rust Tool 实现
-    pub fn wrap_as_tool(&self, mcp_handle: McpToolHandle) -> Arc<dyn Tool> {
-        Arc::new(McpToolAdapter { 
-            provider: self.clone(),
-            handle: mcp_handle,
-        })
-    }
-}
-
-struct McpToolAdapter {
-    provider: McpToolProvider,
-    handle: McpToolHandle,
-}
-
-#[async_trait]
-impl Tool for McpToolAdapter {
-    async fn invoke(&self, args: serde_json::Value, ctx: ToolContext) 
-        -> Result<ToolOutput, ToolError> 
-    {
-        // 1. 通过 provider 的 transport 发 call_tool 请求
-        let response = self.provider.call_tool(&self.handle.name, args, &ctx).await?;
-        
-        // 2. 翻译 MCP 响应为 ToolOutput,校验 output schema
-        Ok(ToolOutput {
-            result: response.content,
-            side_effects: response.declared_side_effects,
-            usage: ToolUsage::from_mcp(&response.usage),
-        })
-    }
-}
-```
-
-### 5.3 Stdio MCP Server 的子进程管理
-
-Stdio MCP server 的生命周期管理与 Doc 01 §6.2 Claude CLI 完全同型——长生命周期、按 session 复用、空闲超时杀进程、kill_on_drop：
-
-```rust
-pub struct StdioMcpProcess {
-    config: McpStdioConfig,
-    sessions: Arc<DashMap<SessionId, Arc<McpSession>>>,
-}
-
-struct McpSession {
-    child: Mutex<tokio::process::Child>,           // .kill_on_drop(true)
-    stdin_tx: mpsc::Sender<JsonRpcRequest>,
-    response_dispatcher: broadcast::Sender<JsonRpcResponse>,
-    last_used: AtomicInstant,
-    janitor: JoinHandle<()>,
-}
-```
-
-**关键决策**（与 Doc 01 §6.2 一致）：
-- **每个 SessionId 一个子进程**——会话内 MCP 状态共享，跨会话隔离
-- **空闲 5 分钟杀进程**——避免泄漏
-- **多租户必须独立 HOME**——MCP server 的 auth state（如 OAuth token）按租户隔离
-- **kill_on_drop(true)** 兜底
-- **Cancel 安全**：进行中的 tool 调用 Drop 时发 JSON-RPC `cancelled` notification 给 server
-
-### 5.4 Resources 与 Prompts 的有限支持
-
-| MCP 概念 | Runtime 支持 | 理由 |
-|---|---|---|
-| Tools | ✅ 完整 | 核心用例 |
-| Resources | ⚠️ 仅在 Skill 内部使用 | LLM 不直接访问 URI；Skill 实现可以读 resource 然后注入 prompt |
-| Prompts | ❌ 不集成 | Prompt 拼装是 Doc 04 §11 PromptBuilder 的职责，不让 MCP server 决定 prompt |
-
-**为什么不让 MCP 提供 prompt**：MCP server 是不可信的外部代码——让它定义 system prompt 等于把"我们 Agent 怎么思考"的控制权交出去。Prompt 必须在我们自己的代码里拼装。
-
-### 5.5 MCP Server 的安全边界
-
-MCP server 是**部分可信代码**——可能是社区维护的、第三方提供的、用户自己装的。对待方式：
-
-1. **不允许 MCP server 在主进程地址空间执行**——必须是子进程或远程
-2. **Stdio MCP server 必须配置允许的 binary 白名单**——不允许任意路径执行
-3. **HTTP/SSE MCP server 的 URL 必须在配置中显式声明**——不允许 dynamic URL discovery
-4. **MCP server 声明的 tool 仍要在我们的 ToolRegistry 中显式启用**——不能 auto-register
-5. **MCP tool 的 required_scopes 由配置覆盖**——MCP server 自己声明的 scope 仅作 hint，最终权限以本地配置为准
-
-```toml
-[mcp_servers.filesystem]
-type = "stdio"
-binary = "/usr/local/bin/mcp-filesystem"
-args = ["--root", "/srv/projects"]
-auth = { kind = "delegate", per_tenant_home = true }
-
-[mcp_servers.filesystem.tools.read_file]
-enabled = true
-required_scopes = ["fs:read"]                # 覆盖 server 自己的声明
-override_timeout_secs = 30
-
-[mcp_servers.filesystem.tools.delete_file]
-enabled = false                               # 完全禁用,即使 server 提供
-```
+如果哪天为了够到闭源 LLM host(Claude Desktop / Cursor)值得开个口,可以在**最外层**边界放一个
+一次性的 MCP *server* adapter([Doc 33 §7](33-no-mcp.md))——把 `T → Json → Text` 塌掉即弃——
+但它未实现,也不属于本设计。
 
 ---
 
@@ -740,22 +617,16 @@ id = "fs.read_file"
 required_scopes = ["fs:read"]
 timeout_secs = 5
 
-# MCP Server
-[mcp_servers.github]
-type = "stdio"
-binary = "/usr/local/bin/mcp-github"
-args = []
-mode = "long_lived"
-session_idle_timeout_secs = 300
-auth = { kind = "delegate", per_tenant_home = true }
-
-[mcp_servers.github.tools.create_issue]
-enabled = true
+# HTTP API Tool (GitHub REST)
+[[tools.http]]
+id = "github.create_issue"
+base_url = "https://api.github.com"
 required_scopes = ["github:write"]
 side_effect_override = "Irreversible"        # 强制升级为不可逆,只能在 commit phase
 
-[mcp_servers.github.tools.read_repo]
-enabled = true
+[[tools.http]]
+id = "github.read_repo"
+base_url = "https://api.github.com"
 required_scopes = ["github:read"]
 
 # Skill
@@ -816,16 +687,7 @@ async fn read_file_returns_business_error_on_missing() {
 - output_schema 描述的字段在实际 output 中都存在
 - input/output 都能成功 round-trip serde
 
-### 10.3 MCP 集成测试
-
-启动一个 reference MCP server (filesystem reference impl)，验证：
-- discovery 列出所有声明的 tool
-- list_for 按 IAM 过滤
-- invoke 端到端成功
-- subprocess 在空闲超时后被 kill
-- subprocess crash 后下次 invoke 自动重启
-
-### 10.4 Idempotency 测试
+### 10.3 Idempotency 测试
 
 ```rust
 #[tokio::test]
@@ -845,7 +707,7 @@ async fn duplicate_invocation_returns_cached_output() {
 }
 ```
 
-### 10.5 副作用 Gate 测试
+### 10.4 副作用 Gate 测试
 
 ```rust
 #[tokio::test]
@@ -871,20 +733,16 @@ async fn irreversible_tool_rejected_outside_commit_phase() {
 ## 11. 反模式清单
 
 1. **不要让 LLM 决定调用哪个 Skill**——Orchestrator 在代码里圈定可调用集合，LLM 只在集合内选 Tool。
-2. **不要把 MCP server 声明的 scope 直接信任**——本地配置覆盖。
-3. **不要在 ToolRegistry 之外直接 spawn MCP 子进程**——所有子进程生命周期统一管理。
-4. **不要让 Tool 持有跨调用的可变状态**——状态外置（DB / cache）。
-5. **不要在 Tool 实现里读 env vars**——通过 ToolContext 注入配置。
-6. **不要把 Skill 实现得依赖 Tool 名字字符串硬编码**——通过 `required_tools` 声明 + 注入获取。
-7. **不要在 Tool 内部启动 LLM 调用而不走 Pipeline**——Tool 实现里如果要用 LLM，必须通过 ctx.llm_service。
-8. **不要把 Resources / Prompts 交给 MCP 控制系统行为**——Resources 仅供 Skill 内部使用，Prompts 完全不集成。
-9. **不要用同一个 idempotency_key 跨 trajectory**——key 必须包含 trajectory_id，避免误命中。
-10. **不要让 declarative skill 表达条件分支 / 循环**——这种复杂度上 SubAgent 或 native。
-11. **不要忽略 Tool 调用的 cancel**——长任务必须监听 cancel.cancelled()。
-12. **不要在 commit phase 之前调用 Irreversible Tool**——Runtime 强制 reject，但更应该在 Skill 设计时就避免。
-13. **不要把 MCP tool 的 description 直接展示给最终用户**——可能是不可信内容（prompt injection 攻击面）。
-14. **不要让 Tool 的 output_schema 用 `additionalProperties: true`**——所有字段必须显式声明，否则下游 Agent 拿到不可预期的结构。
-15. **不要复用 LLM cache 来缓存 Tool 输出**——两套 store 独立，语义不同（LLM cache 看 prompt hash，Tool cache 看 idempotency_key）。
+2. **不要让 Tool 持有跨调用的可变状态**——状态外置（DB / cache）。
+3. **不要在 Tool 实现里读 env vars**——通过 ToolContext 注入配置。
+4. **不要把 Skill 实现得依赖 Tool 名字字符串硬编码**——通过 `required_tools` 声明 + 注入获取。
+5. **不要在 Tool 内部启动 LLM 调用而不走 Pipeline**——Tool 实现里如果要用 LLM，必须通过 ctx.llm_service。
+6. **不要用同一个 idempotency_key 跨 trajectory**——key 必须包含 trajectory_id，避免误命中。
+7. **不要让 declarative skill 表达条件分支 / 循环**——这种复杂度上 SubAgent 或 native。
+8. **不要忽略 Tool 调用的 cancel**——长任务必须监听 cancel.cancelled()。
+9. **不要在 commit phase 之前调用 Irreversible Tool**——Runtime 强制 reject，但更应该在 Skill 设计时就避免。
+10. **不要让 Tool 的 output_schema 用 `additionalProperties: true`**——所有字段必须显式声明，否则下游 Agent 拿到不可预期的结构。
+11. **不要复用 LLM cache 来缓存 Tool 输出**——两套 store 独立，语义不同（LLM cache 看 prompt hash，Tool cache 看 idempotency_key）。
 
 ---
 
@@ -896,7 +754,7 @@ async fn irreversible_tool_rejected_outside_commit_phase() {
 - 每次调用提供完整 ToolContext（含 idempotency_key、trajectory、principal）
 - 不假设 Tool 调用顺序——并行 tool call 必须能正确处理交错
 
-### 下游 (MCP Server / HTTP API / Built-in) 契约
+### 下游 (HTTP API / Built-in) 契约
 
 - 输入符合 input_schema 时必须能正确处理
 - 输出符合 output_schema（Runtime 校验）
@@ -914,12 +772,9 @@ async fn irreversible_tool_rejected_outside_commit_phase() {
 
 ## 13. 待办与开放问题
 
-- [ ] MCP 协议的版本演进策略（v1 → v2 时如何兼容老 server）
 - [ ] Skill 的版本管理（同 Skill 不同版本是否可以共存，如何路由）
 - [ ] Declarative Skill 的执行器选型（自研 mini DSL vs 复用 Step Functions / Argo Workflows）
-- [ ] 跨进程 / 跨节点的 Tool 调用追踪（trace 透传 OTel context 进 MCP）
-- [ ] MCP server 的资源限额（CPU / 内存 / 文件句柄）—— cgroups vs nsjail vs 信任
+- [ ] 跨进程 / 跨节点的 Tool 调用追踪（trace 透传 OTel context 跨进程/节点边界）
 - [ ] Tool 的成本计费维度（按调用次数 / 按耗时 / 按数据量）
 - [ ] Skill 内部产生的中间产物是否要持久化到 ContentStore（debug 价值 vs 存储成本）
-- [ ] MCP Server 的健康检查协议（heartbeat / circuit breaker）
 - [ ] **RAG / Vector Store 集成章节**: 目前文档明确不内置 vector store (定位为应用层),但应补一节"Tool/Skill 接入向量检索的钩子"。Personal mode 推荐 in-process mmap 方案 (faiss-rs / lance) 避免起独立 vector DB 进程;Team/SaaS mode 推荐 Qdrant/Milvus 作为外部 service tool。

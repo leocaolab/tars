@@ -1,6 +1,6 @@
 # TARS vs the agent-runtime ecosystem
 
-> One-page positioning. Where TARS differs, where it deliberately doesn't compete, and when it's the wrong tool. Last updated 2026-06.
+> One-page positioning. Where TARS differs, where it deliberately doesn't compete, and when it's the wrong tool. Last updated 2026-07.
 
 The agent-runtime space is crowded. Each system optimizes for a different point in the design space. This doc maps the space honestly — including cases where TARS is the worse choice — so you know whether to adopt TARS, contribute back, or pick another tool.
 
@@ -16,9 +16,11 @@ The agent-runtime space is crowded. Each system optimizes for a different point 
 | Multi-agent debate / role play / chat-style coordination | **AutoGen** or **CrewAI** |
 | LLM-program-synthesis / signature-based prompting | **DSPy** |
 | GPU-served inference + guardrails (NVIDIA stack) | **NVIDIA NIM + NeMo Guardrails** |
-| **Production agent serving with predictable latency, multi-tenancy, observability, and Rust-grade safety** | **TARS** |
+| Ergonomic Rust library for RAG-centric LLM apps | **rig** |
+| Managed, AWS-native production agent plane (no ops) | **AWS Bedrock AgentCore** |
+| **An embeddable runtime that scales from local to service, integrates tightly into your software, with predictable latency, multi-tenancy, observability, and Rust-grade safety** | **TARS** |
 
-TARS is the right pick when you want to **run agents like a database**: bounded latency under load, typed errors, audit trails, tenant isolation, and the same code path running locally and in service.
+TARS is the right pick when you want to **run agents like a database** — bounded latency under load, typed errors, audit trails, tenant isolation, the same code path running locally and in service — and you want to **compile that runtime directly into your own binary/app** rather than deploy onto someone's managed plane.
 
 ---
 
@@ -120,6 +122,42 @@ TARS is the right pick when you want to **run agents like a database**: bounded 
 
 **When to pick TARS**: you've outgrown the role/goal/backstory abstraction and need the underlying control surface.
 
+### vs rig
+
+The closest thing to TARS in the ecosystem — same language, same "one trait, many providers" instinct — so this is the most pointed comparison in this doc.
+
+**rig's strengths**: the most prominent Rust LLM framework (~6.7k stars; real production users — Cloudflare, Neon, Nethermind, St. Jude). One unified API across **20+ providers**, **10+ vector-store integrations**, type-safe tools and structured extraction (`Extractor`), and an ergonomic builder. Its center of gravity is **RAG + embeddings + vector stores** — spinning up "attach a knowledge base, answer over it" is a few lines.
+
+**rig's scope choice**: it's a **library you embed** to *build* an app. RAG/retrieval is first-class; serving concerns (multi-tenancy, cache/breaker/budget as a pipeline, observability, sandboxing) are yours to add.
+
+**Where rig is the better tool**: your app is **RAG-centric** — vector search, embeddings, "load a corpus and answer over it." TARS is deliberately **not** a retrieval framework (same stance as vs LlamaIndex); rig's vector-store ecosystem and embeddings API are ahead, and its adoption/integration count is larger.
+
+**Where TARS differs** (same embeddable delivery model — you compile it into your binary — but a different center of gravity):
+
+- **Serving primitives as the core, not add-ons**: the middleware pipeline (telemetry → auth/IAM → budget → cache → guard → routing → breaker), multi-tenancy enforced at every layer, MELT observability by construction, typed **retry-class** errors (`Permanent` / `Retryable` / `RateLimited` / `Auth`).
+- **Providers rig doesn't have**: **subscription-CLI delegates** (claude / gemini / codex / opencode / antigravity) that reuse your existing session — and **each black-box CLI runs OS write-jailed** (Seatbelt / bubblewrap). Plus **keyless Bedrock** and model-KB-as-data.
+- **Beyond Rust**: first-class **Python + Node bindings** (PyO3 / napi-rs) — rig is Rust-only.
+
+**When to pick rig over TARS**: you're writing a Rust app, retrieval is the heart of it, and you want the ecosystem and lowest friction to a working RAG agent.
+
+**When to pick TARS over rig**: you're *serving* agents — tenant isolation, observability, retry/breaker, budget enforcement — or you need to sandbox black-box CLI delegates, or you need to drive the same runtime from Python/Node.
+
+### vs AWS Bedrock AgentCore
+
+AgentCore aims at the same destination as TARS — a **production agent runtime** with isolation, identity, and observability — but by the opposite delivery model, so the contrast is the sharpest way to say what TARS is.
+
+**AgentCore's strengths**: AWS's managed production-agent platform (GA Oct 2025). Twelve components — **Runtime** (serverless, session isolation, industry-leading 8-hour execution windows, A2A support), **Memory**, **Identity** (Cognito/Auth0, token vault, on-behalf-of), **Gateway** (turn APIs / Lambda into tools), Code Interpreter, Browser, Observability, and more. **Framework-agnostic**: bring LangGraph / CrewAI / your own agent and deploy it onto the plane.
+
+**Delivery model — the whole difference**: AgentCore is a **managed cloud plane you deploy *onto***. AWS owns the runtime, the isolation, the scaling, the box. TARS is an **embeddable runtime you compile *into*** your own binary/service; **the same `Pipeline` runs identically on a laptop (in-mem L1) and in a service (Redis L2 + S3 L3)** — local-to-cloud is one code path, not a deploy target.
+
+**Where AgentCore is the better tool**: you're all-in on AWS, want **zero ops**, want 8-hour serverless sessions and managed identity/memory today, and are fine being AWS-resident.
+
+**Where TARS differs**: **self-host anywhere**, no cloud lock-in, provider-neutral (one trait over direct API + OpenAI-compatible + subscription CLIs + **Bedrock as just one backend** + local models), OS write-jail for black-box CLIs, model-KB-as-data, Python/Node bindings. Honest gaps the other way: AgentCore ships **A2A** and a managed control plane today; **TARS doesn't do A2A yet**.
+
+**When to pick AgentCore over TARS**: you want a managed, AWS-native plane and don't want to run infrastructure.
+
+**When to pick TARS over AgentCore**: you want the runtime **embedded in your own software**, portable local-to-cloud, provider- and cloud-neutral, with Rust safety and CLI sandboxing.
+
 ### vs NVIDIA NIM + NeMo Guardrails
 
 **NVIDIA NIM's strengths**: optimized inference serving for NVIDIA GPUs. TensorRT-LLM under the hood. Best-in-class throughput/latency for self-hosted models on NVIDIA hardware. Production-grade gRPC/HTTP server.
@@ -147,6 +185,27 @@ TARS Provider       ← provider abstraction layer
 ```
 
 **TARS is not trying to replace NIM**. NIM owns GPU-side inference; TARS owns the orchestration above it.
+
+---
+
+## The 2026 landscape at a glance
+
+"How many agentic runtimes are there?" has no single number — it depends on which layer you count. There are three, and **TARS competes in only one of them**:
+
+| System | Layer | Lang | Center of gravity | Delivery model |
+|---|---|---|---|---|
+| **AWS Bedrock AgentCore** | Managed plane | polyglot | production runtime + memory/identity/gateway | deploy **onto** it (AWS-hosted) |
+| MS Copilot Studio · Vertex AI Agent Builder · OpenAI Agent Platform · Salesforce Agentforce · ServiceNow · watsonx Orchestrate | Managed / low-code | polyglot | hosted enterprise agents | deploy onto it |
+| **LangGraph** | OSS SDK | Py/JS | stateful graph orchestration | embed to build |
+| **Microsoft Agent Framework** (SK + AutoGen, merged Apr 2026) | OSS SDK | .NET/Py | enterprise multi-agent | embed to build |
+| CrewAI · LlamaIndex · Pydantic AI · Claude Agent SDK · Google ADK · OpenAI Agents SDK | OSS SDK | mostly Py/TS | role-based / RAG / typed / provider-first | embed to build |
+| **Mastra** · Vercel AI SDK | Language-native | TS | de-facto TypeScript agents | embed to build |
+| **rig** | Language-native | Rust | RAG-centric LLM library | embed to build |
+| **TARS** | Language-native | Rust | **embeddable production runtime, local→service** | **compile into** your binary/service |
+
+**Interop (A2A).** Agent-to-agent (A2A) has crossed 150+ organisations, with native support in Azure AI Foundry, AWS AgentCore, and Google Cloud. **TARS doesn't do A2A yet** — you reach an agent in-process or through its own service surface, not an A2A handshake. Honest gap.
+
+**Where TARS actually sits.** It's the only entry that is *simultaneously* (a) **embeddable** — compiled into your own binary/service, not deployed onto a managed plane; (b) **one code path local→cloud** — the same `Pipeline` runs in-mem on a laptop and Redis+S3 in a service; (c) **serving-grade by construction** — multi-tenancy, cache/breaker/budget, MELT, typed retry-class errors are the *core*, not add-ons; (d) **sandboxes black-box CLI agents** (OS write-jail). rig shares (a) and Rust safety but is a RAG library; AgentCore shares the production-runtime ambition but is a managed AWS plane you deploy onto.
 
 ---
 

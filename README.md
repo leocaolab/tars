@@ -40,6 +40,76 @@ production with the predictability of a database**, use TARS.
 
 ---
 
+## Philosophy
+
+The goals are **performance, extensibility, and security** — and the design falls out of
+a few deliberate bets. They say, more honestly than any feature list, both what TARS *is*
+and what it refuses to be.
+
+### Bet 1 — Correctness is a type-system property, not a matter of discipline
+
+This is where TARS is genuinely unlike the rest of the field: it is a **functional,
+strongly-typed** runtime in a space that is stringly-typed to the bone. Elsewhere a
+rate-limit is a substring you grep out of an exception, a tool result is a dict you hope
+has the right keys, and a "structured output" is a blob you re-parse at every call site
+and pray over. TARS refuses all of it.
+
+- **Errors are typed values, not strings.** `TarsError → Permanent / Retryable /
+  RateLimited / Auth` is a real sum type; `retry_after` is a field, not a regex. You
+  match on the variant and the compiler makes you handle it — and no sentinel token
+  (`parse_failed`, `unknown`) ever leaks to a human; the raw truth does.
+- **Parse, don't validate.** `json_decode` takes *your* `T` and returns a valid `T` or a
+  typed error — you can never hold an ill-formed one. The strong type is yours; TARS is
+  the generic engine that hands it back intact.
+- **The pipeline is an algebra.** telemetry → auth → budget → cache → guard → routing →
+  breaker *compose*; capability checks run pre-flight, so an incompatible request fails
+  typed and offline instead of burning a network round-trip.
+- **Correctness by construction.** A Turn commits or rolls back on `Drop` — there is no
+  `armed = false` flag to forget. The invariant is held by the type system, not by a
+  reviewer's attention.
+
+This is also precisely **why we don't support MCP.** MCP is the opposite bet — a flat
+`Json → Text` bag with no composition law, where the meaning lives in prose an LLM guesses
+at; and in 2026 it is insecure and unscalable besides (OWASP publishes a whole *MCP Top
+10*; its stateful transport fights a load balancer). Letting that into the core would
+dissolve the one property that makes TARS worth building.
+See [Doc 33 — Why TARS does not support MCP](docs/architecture/33-no-mcp.md).
+
+### Bet 2 — Agents belong *embedded in software*, not floating above it
+
+The durable, valuable place for an agent is **inside** your service — compiled into your
+binary, next to your IAM role, your connection pools, your telemetry — where execution is
+**deterministic, more efficient, and easier to maintain**. The model supplies intent;
+typed Rust performs the act; every call is sandboxed, budgeted, and audited. An embedded
+agent you can reason about beats an autonomous one you can only watch.
+
+### Bet 3 — No autonomous, agent-driven planning — and we say so plainly
+
+Open-ended, self-directed planning — "here is a vague goal, go decide the steps yourself,"
+for things like exploratory coding or research — is **deliberately out of scope**. We
+haven't found a case where wrapping that in TARS beats the tool already built for it. If
+your task genuinely needs a planning agent, **use Claude or Codex directly** — that's what
+they're excellent at. TARS owns the layer *underneath*: the typed, sandboxed, multi-tenant
+execution a planner — yours, or a CLI delegate — runs on top of. Better a sharp boundary
+than a fuzzy "does everything."
+
+### Bet 4 — Skeptical of RAG, and of semantic vectors in general
+
+Vector search buys *fuzzy, approximate* recall — and TARS's whole thesis is that fuzzy and
+approximate is the problem, not the tool. Embedding similarity is **not accuracy**: it
+returns plausible neighbours, misses exact matches, and can't answer a precise or
+structured question the way a `SELECT … WHERE`, a `grep`, or a real index can. It's also
+usually **not necessary**: a capable agent retrieves the way it does everything else —
+search, read, refine, in exact steps — without a pre-baked embedding store. The one thing
+vectors genuinely give you is sub-100 ms approximate lookup at scale, and agentic
+workflows are **not latency-bound** the way a search box is — in most cases we don't need
+the answer *this instant*. So we won't trade determinism and precision for speed we don't
+need, nor take on a whole stateful vector subsystem to maintain (the same wrapper-sprawl
+tax as MCP). TARS is deliberately **not a retrieval framework**; if you truly need RAG,
+wire it in as one tool.
+
+---
+
 ## What you get
 
 - **One trait, a dozen providers.** Direct API (OpenAI, Anthropic, Gemini,
@@ -227,6 +297,13 @@ job, so an agent that uses no LLM stays first-class.
 - **`EnsembleAgent`** runs one task on N agents concurrently and takes the first
   success (a tail-latency hedge at *task* granularity).
 
+**Scope (see Philosophy · Bets 2–3).** `TarsAgent` drives a **bounded, white-box tool
+loop** — tars owns the loop, tools, `cwd`, and sandbox. It is *not* an autonomous
+planner that decomposes an open-ended goal on its own: a `Task` splits into sub-`Task`s
+because *your code* (or an orchestrator) says so, not because the runtime went planning.
+The planner — your own, or a black-box CLI delegate — runs *on top of* this typed,
+sandboxed execution layer.
+
 ---
 
 ## Model knowledge base
@@ -270,15 +347,10 @@ you whether the pipeline already exhausted retries.
 - **[Comparison](docs/comparison.md)** — TARS vs LangChain / LiteLLM / Letta /
   AutoGen / NVIDIA NIM.
 - **[Architecture docs](docs/README.md)** — design rationale and trade-offs, by
-  subsystem (provider, pipeline, cache, agent runtime, tools/MCP, security,
-  observability, storage, …). English, with Chinese mirrors under
+  subsystem (provider, pipeline, cache, agent runtime, tools, security,
+  observability, storage, …); plus [Doc 33 — why TARS does not support
+  MCP](docs/architecture/33-no-mcp.md). English, with Chinese mirrors under
   [`docs/architecture/zh/`](docs/architecture/zh/).
-
-The workspace is ~14 crates (`tars-types`, `tars-config`, `tars-provider`,
-`tars-sandbox`, `tars-bedrock`, `tars-pipeline`, `tars-cache`, `tars-model`,
-`tars-runtime`, `tars-tools`, `tars-melt`, `tars-storage`, `tars-cli`, `tars-py`,
-`tars-node`). Builds clean on stable Rust 1.85+; CI runs `cargo test --workspace`
-+ clippy `-Dwarnings`.
 
 ---
 
