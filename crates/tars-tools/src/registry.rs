@@ -80,17 +80,27 @@ impl ToolRegistry {
     }
 
     /// Project the registry into [`ToolSpec`]s ready for
-    /// [`tars_types::ChatRequest::tools`]. Order is unspecified —
-    /// callers that need a stable order should sort.
+    /// [`tars_types::ChatRequest::tools`], in a DETERMINISTIC order (sorted by
+    /// tool name). The backing store is a `HashMap`, whose iteration order
+    /// varies run-to-run; an unsorted projection makes `ChatRequest.tools`
+    /// non-deterministic, which in turn makes anything derived from the request
+    /// — the cassette/cache `request_fingerprint` above all — unstable even on
+    /// the same machine (the SAME logical fixer call hashes differently each
+    /// run and MISSes replay). Tool order carries no meaning to the model (the
+    /// tool set is a set), so sorting is a free way to make every request, and
+    /// thus every fingerprint, reproducible.
     pub fn to_tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools
+        let mut specs: Vec<ToolSpec> = self
+            .tools
             .values()
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 input_schema: t.input_schema().clone(),
             })
-            .collect()
+            .collect();
+        specs.sort_by(|a, b| a.name.cmp(&b.name));
+        specs
     }
 
     /// Dispatch one LLM-emitted tool call into the [`Message::Tool`]
@@ -311,6 +321,29 @@ mod tests {
         let mut names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
         names.sort();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn to_tool_specs_is_deterministically_ordered() {
+        // The backing store is a HashMap (random iteration order). The
+        // projection MUST be name-sorted so `ChatRequest.tools` — and every
+        // fingerprint/cache derived from it — is stable run to run. Register in
+        // a deliberately non-sorted order and across two independent registries
+        // to defeat any incidental ordering.
+        let names_in = ["fs.read_file", "bash.run", "ast.find", "fs.glob", "cargo.dep_source"];
+        let build = || {
+            let mut reg = ToolRegistry::new();
+            for n in names_in {
+                reg.register_owned(EchoTool::ok(n, "x")).unwrap();
+            }
+            reg.to_tool_specs().into_iter().map(|s| s.name).collect::<Vec<_>>()
+        };
+        let a = build();
+        let b = build();
+        let mut want = names_in.map(String::from).to_vec();
+        want.sort();
+        assert_eq!(a, want, "projection must be sorted by name");
+        assert_eq!(a, b, "two builds must produce the identical order");
     }
 
     #[tokio::test]
