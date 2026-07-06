@@ -147,6 +147,7 @@ impl BlackboardStore for ReviewBoard {
         at: i64,
         version: Option<&str>,
         _reason: Option<&str>,
+        _role: Option<&str>,
     ) -> Result<bool, BbError> {
         let n = conn.execute(
             "INSERT INTO review_events (id, run, kind, at, version) VALUES (?1, ?2, ?3, ?4, ?5)
