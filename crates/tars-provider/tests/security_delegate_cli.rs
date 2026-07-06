@@ -82,11 +82,13 @@ async fn escape_blocked_async() {
     let worktree = fresh_dir(&format!("{tag}_wt"));
     let inside_file = worktree.join("inside.txt");
 
-    // ── outside area: canonical dir OUTSIDE the worktree that the delegate
-    //    must not be able to touch. Canonicalize the dir so both the
-    //    "must-not-create" and "must-survive" absolute paths are real paths
-    //    (macOS `/tmp`→`/private/tmp`), matching the Seatbelt jail's view. ──
-    let outside_dir = fresh_dir(&format!("{tag}_outside"));
+    // ── outside area: canonical dir OUTSIDE the delegate's writable set that
+    //    it must not be able to touch. It lives under $HOME (see
+    //    `fresh_denied_dir`), NOT under $TMPDIR: the codex-model jail now grants
+    //    the real $TMPDIR + /tmp as writable, so the escape target must be
+    //    somewhere still denied. Canonicalized so the absolute paths are real
+    //    paths (macOS `/tmp`→`/private/tmp`), matching the Seatbelt jail's view. ──
+    let outside_dir = fresh_denied_dir(&format!("{tag}_outside"));
     let outside_create = outside_dir.join("escaped.txt"); // delegate tries to CREATE → must fail
     let outside_victim = outside_dir.join("victim.txt"); // pre-existing → delegate tries to rm
     std::fs::write(&outside_victim, b"i must survive").expect("seed outside victim");
@@ -117,6 +119,12 @@ async fn escape_blocked_async() {
         exclude_dynamic_sections: false,
         extra_args: Vec::new(),
         cwd: Some(worktree.clone()),
+        // Unconfined policy: this test drives the LEGACY `TARS_CLAUDE_SANDBOX=1`
+        // env-gate path (set on the re-exec'd child), which must keep working
+        // for back-compat. `DangerFullAccess` here proves the env gate still
+        // jails the spawn even when no explicit `[sandbox]`/`--sandbox` policy
+        // is set (the G10 policy path is exercised by provider unit tests).
+        sandbox: tars_sandbox::SandboxPolicy::default(),
     };
 
     // ── drive the REAL production path ───────────────────────────────────
@@ -189,11 +197,26 @@ fn mock_cli_script(outside_create: &Path, outside_victim: &Path, inside_file: &P
 
 /// Create a fresh directory under the temp dir and return its CANONICAL path
 /// (macOS `/tmp`→`/private/tmp`, so it matches the Seatbelt jail's real-path view).
+/// Used for the worktree — which the jail DOES make writable.
 fn fresh_dir(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(name);
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).expect("create dir");
     std::fs::canonicalize(&p).expect("canonicalize dir")
+}
+
+/// A fresh dir GUARANTEED outside the delegate's writable set, for the escape
+/// target. The codex-model jail's writable set is: the worktree + real `$TMPDIR`
+/// + `/tmp` + the CLI's own state dir (none for claude). `$HOME` at large is
+/// denied, so a dir under `$HOME` is a genuine "outside" — UNLIKE `$TMPDIR`,
+/// which this test used to use back when the jail denied tmp (a policy we have
+/// deliberately reversed to match codex, so the target had to move here).
+fn fresh_denied_dir(name: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").expect("HOME must be set for the escape test");
+    let p = PathBuf::from(home).join(".tars-sandbox-it").join(name);
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).expect("create denied dir");
+    std::fs::canonicalize(&p).expect("canonicalize denied dir")
 }
 
 fn make_executable(path: &Path) {

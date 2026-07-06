@@ -15,14 +15,35 @@ use std::collections::HashMap;
 
 use tars_types::{Auth, HttpProviderExtras, ProviderId};
 
+use crate::model_kb::MODEL_KB;
 use crate::providers::ProviderConfig;
+
+/// Resolve the built-in default model for an API provider from the model
+/// KB (`data/models.toml`) — the single source of truth for defaults.
+///
+/// Fail-loud: a built-in provider MUST have a KB default. A missing one
+/// is an authoring bug in `models.toml`, caught by the KB unit test and
+/// panicked here rather than shipping a silently-empty default_model.
+fn kb_default(provider: &str) -> String {
+    MODEL_KB
+        .default_model(provider)
+        .unwrap_or_else(|| {
+            panic!(
+                "built-in provider `{provider}` has no default in data/models.toml \
+                 (defaults are DATA — add a `[providers.{provider}] default = ...`)"
+            )
+        })
+        .to_string()
+}
 
 /// Returns provider configs for the well-known LLM backends. Each
 /// entry uses an env-var auth reference so users only need to export
 /// the appropriate env var (no inline secrets in defaults).
 ///
-/// `default_model` is set to the most useful model in each family at
-/// time of writing. Users override per-provider in their config.
+/// `default_model` for each API provider is resolved from the model KB
+/// (`data/models.toml`, via [`kb_default`]) — the single source of truth,
+/// so bumping a default is a data edit, not a code change. Users override
+/// per-provider in their config.
 pub fn built_in_provider_defaults() -> HashMap<ProviderId, ProviderConfig> {
     [
         (ProviderId::new("openai"), default_openai()),
@@ -39,14 +60,14 @@ pub fn built_in_provider_defaults() -> HashMap<ProviderId, ProviderConfig> {
     .collect()
 }
 
-/// Default OpenAI: `OPENAI_API_KEY`, `gpt-4o`, plus the standard
+/// Default OpenAI: `OPENAI_API_KEY`, KB default (`gpt-5.4`), plus the standard
 /// `OpenAI-Organization` / `OpenAI-Project` env-headers (set if
 /// exported, ignored otherwise).
 pub fn default_openai() -> ProviderConfig {
     ProviderConfig::Openai {
         base_url: None,
         auth: Auth::env("OPENAI_API_KEY"),
-        default_model: "gpt-4o".into(),
+        default_model: kb_default("openai"),
         extras: HttpProviderExtras {
             env_http_headers: [
                 ("OpenAI-Organization".into(), "OPENAI_ORGANIZATION".into()),
@@ -59,24 +80,25 @@ pub fn default_openai() -> ProviderConfig {
     }
 }
 
-/// Default Anthropic: `ANTHROPIC_API_KEY`, claude-opus-4-7, default
+/// Default Anthropic: `ANTHROPIC_API_KEY`, KB default (`claude-opus-4-8`), default
 /// API version. `anthropic-version` header is supplied by the adapter.
 pub fn default_anthropic() -> ProviderConfig {
     ProviderConfig::Anthropic {
         base_url: None,
         api_version: None,
         auth: Auth::env("ANTHROPIC_API_KEY"),
-        default_model: "claude-opus-4-7".into(),
+        default_model: kb_default("anthropic"),
         extras: HttpProviderExtras::default(),
     }
 }
 
-/// Default Gemini: `GEMINI_API_KEY`, gemini-2.5-pro.
+/// Default Gemini: `GEMINI_API_KEY`, KB default (`gemini-3.5-flash` —
+/// NOT thinking-only, so a thinking-off default actually works).
 pub fn default_gemini() -> ProviderConfig {
     ProviderConfig::Gemini {
         base_url: None,
         auth: Auth::env("GEMINI_API_KEY"),
-        default_model: "gemini-2.5-pro".into(),
+        default_model: kb_default("gemini"),
         extras: HttpProviderExtras::default(),
     }
 }
@@ -94,7 +116,7 @@ pub fn default_deepseek() -> ProviderConfig {
     ProviderConfig::OpenaiCompat {
         base_url: "https://api.deepseek.com".into(),
         auth: Auth::env("DEEPSEEK_API_KEY"),
-        default_model: "deepseek-v4-flash".into(),
+        default_model: kb_default("deepseek"),
         extras: HttpProviderExtras::default(),
         capabilities: Default::default(),
     }

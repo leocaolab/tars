@@ -160,6 +160,29 @@ pub enum ProviderConfig {
         extras: HttpProviderExtras,
     },
 
+    /// AWS Bedrock via the unified Converse API (Doc 31). **Keyless** —
+    /// there is intentionally NO `auth` field: credential resolution is
+    /// delegated wholesale to the AWS SDK's default chain (env / profile /
+    /// SSO / ECS / EC2 IMDS) and every request is SigV4-signed by the SDK.
+    /// `region` + `model` are required; `profile` is the laptop-only knob
+    /// (omit on AWS, where the ambient workload role wins).
+    ///
+    /// Only built when tars-provider is compiled with the `bedrock`
+    /// feature (which pulls in the heavy AWS SDK); otherwise the registry
+    /// returns a clear "rebuild with --features bedrock" error.
+    Bedrock {
+        #[serde(deserialize_with = "de_trimmed_string")]
+        region: String,
+        #[serde(deserialize_with = "de_trimmed_string")]
+        model: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "de_trimmed_opt_string"
+        )]
+        profile: Option<String>,
+    },
+
     /// vLLM local server (sub-case of openai_compat with sensible defaults).
     Vllm {
         #[serde(
@@ -343,6 +366,37 @@ pub enum ProviderConfig {
         default_model: String,
     },
 
+    /// opencode CLI delegate (Doc 32 M2). Shells out to
+    /// `opencode run --format json --model <provider/model> <prompt>`.
+    /// `default_model` is opencode's `provider/model` form
+    /// (e.g. `anthropic/claude-sonnet-4-5`).
+    Opencode {
+        #[serde(
+            default = "default_opencode_executable",
+            deserialize_with = "de_trimmed_string"
+        )]
+        executable: String,
+        #[serde(default = "default_cli_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(deserialize_with = "de_trimmed_string")]
+        default_model: String,
+    },
+
+    /// Antigravity (`agy`) CLI delegate (Doc 32 M3). Shells out to
+    /// `agy -p "<prompt>" --model <model> --dangerously-skip-permissions
+    /// --add-dir <cwd>` and reads the plain-text answer from stdout.
+    Antigravity {
+        #[serde(
+            default = "default_antigravity_executable",
+            deserialize_with = "de_trimmed_string"
+        )]
+        executable: String,
+        #[serde(default = "default_cli_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(deserialize_with = "de_trimmed_string")]
+        default_model: String,
+    },
+
     /// In-process mock — for tests and dry-run config validation.
     Mock {
         /// What the mock should reply with.
@@ -384,6 +438,14 @@ fn default_gemini_executable() -> String {
 
 fn default_codex_executable() -> String {
     "codex".into()
+}
+
+fn default_opencode_executable() -> String {
+    "opencode".into()
+}
+
+fn default_antigravity_executable() -> String {
+    "agy".into()
 }
 
 fn default_cli_timeout_secs() -> u64 {
@@ -539,7 +601,12 @@ impl ProviderConfig {
             | ClaudeSdk { default_model, .. }
             | GeminiCli { default_model, .. }
             | CodexCli { default_model, .. }
+            | Opencode { default_model, .. }
+            | Antigravity { default_model, .. }
             | Cassette { default_model, .. } => default_model,
+            // Bedrock names its model field `model` (Doc 31), not
+            // `default_model` — its own arm.
+            Bedrock { model, .. } => model,
             Mock { .. } => "mock-model",
         }
     }
@@ -674,6 +741,20 @@ impl ProviderConfig {
                 }
                 check_default_model(default_model, sink);
             }
+            ProviderConfig::Bedrock { region, model, .. } => {
+                // Keyless by design (Doc 31 §5): unlike Anthropic/OpenAI/
+                // Gemini above, we deliberately do NOT reject a missing
+                // auth field — Bedrock has none. The only config-time
+                // checks are the two non-empty strings the SDK needs.
+                if region.trim().is_empty() {
+                    sink.push(ValidationError::new(key("region"), "must not be empty"));
+                }
+                // Bedrock's model field is `model`, so key the error there
+                // rather than reuse the `default_model`-keyed helper.
+                if model.trim().is_empty() {
+                    sink.push(ValidationError::new(key("model"), "must not be empty"));
+                }
+            }
             ProviderConfig::Vllm {
                 base_url,
                 default_model,
@@ -703,6 +784,16 @@ impl ProviderConfig {
                 ..
             }
             | ProviderConfig::GeminiCli {
+                executable,
+                timeout_secs,
+                default_model,
+            }
+            | ProviderConfig::Opencode {
+                executable,
+                timeout_secs,
+                default_model,
+            }
+            | ProviderConfig::Antigravity {
                 executable,
                 timeout_secs,
                 default_model,
@@ -994,6 +1085,71 @@ mod tests {
     }
 
     #[test]
+    fn opencode_defaults_executable_and_timeout() {
+        let toml_str = r#"
+            type = "opencode"
+            default_model = "anthropic/claude-sonnet-4-5"
+        "#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
+        match &cfg {
+            ProviderConfig::Opencode {
+                executable,
+                timeout_secs,
+                default_model,
+            } => {
+                assert_eq!(executable, "opencode");
+                assert_eq!(*timeout_secs, 300);
+                assert_eq!(default_model, "anthropic/claude-sonnet-4-5");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert_eq!(cfg.default_model(), "anthropic/claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn antigravity_defaults_executable_and_timeout() {
+        let toml_str = r#"
+            type = "antigravity"
+            default_model = "gemini-2.5-pro"
+        "#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
+        match cfg {
+            ProviderConfig::Antigravity {
+                executable,
+                timeout_secs,
+                default_model,
+            } => {
+                assert_eq!(executable, "agy");
+                assert_eq!(timeout_secs, 300);
+                assert_eq!(default_model, "gemini-2.5-pro");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opencode_and_antigravity_validate_empty_default_model() {
+        for cfg in [
+            ProviderConfig::Opencode {
+                executable: "opencode".into(),
+                timeout_secs: 300,
+                default_model: String::new(),
+            },
+            ProviderConfig::Antigravity {
+                executable: "agy".into(),
+                timeout_secs: 300,
+                default_model: String::new(),
+            },
+        ] {
+            let id = ProviderId::new("d");
+            let mut errs = Vec::new();
+            cfg.validate_self(&id, &mut errs);
+            assert_eq!(errs.len(), 1, "expected one error, got {errs:?}");
+            assert_eq!(errs[0].key, "providers.d.default_model");
+        }
+    }
+
+    #[test]
     fn codex_cli_sandbox_kebab_case_round_trips() {
         // Pin the wire-format so a future renames-by-mistake breaks
         // loudly rather than silently downgrading sandbox.
@@ -1046,6 +1202,80 @@ mod tests {
             "message should mention api key, got: {}",
             errs[0].message
         );
+    }
+
+    #[test]
+    fn bedrock_parses_keyless_and_validates_without_auth() {
+        // E2E-5 (config half): a `type = "bedrock"` block with NO auth
+        // field must parse into `Bedrock`, validate cleanly (Bedrock is
+        // keyless — no Auth::None rejection), and report `model` as its
+        // default model.
+        let toml_str = r#"
+            type = "bedrock"
+            region = "us-east-1"
+            model = "us.anthropic.claude-sonnet-4-5-v1:0"
+        "#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
+        match &cfg {
+            ProviderConfig::Bedrock {
+                region,
+                model,
+                profile,
+            } => {
+                assert_eq!(region, "us-east-1");
+                assert_eq!(model, "us.anthropic.claude-sonnet-4-5-v1:0");
+                assert!(profile.is_none());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        assert_eq!(cfg.default_model(), "us.anthropic.claude-sonnet-4-5-v1:0");
+
+        // Keyless: validation must NOT flag a missing auth field.
+        let id = ProviderId::new("claude_bedrock");
+        let mut errs = Vec::new();
+        cfg.validate_self(&id, &mut errs);
+        assert!(errs.is_empty(), "keyless bedrock must validate clean: {errs:?}");
+    }
+
+    #[test]
+    fn bedrock_optional_profile_round_trips() {
+        let toml_str = r#"
+            type = "bedrock"
+            region = "eu-west-1"
+            model = "amazon.nova-pro-v1:0"
+            profile = "dev"
+        "#;
+        let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
+        // Forward.
+        match &cfg {
+            ProviderConfig::Bedrock { profile, .. } => {
+                assert_eq!(profile.as_deref(), Some("dev"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        // Reverse: serialize + re-parse for bidirectional stability.
+        let reserialized = toml::to_string(&cfg).expect("must serialize");
+        let cfg2: ProviderConfig =
+            toml::from_str(&reserialized).expect("re-parse after serialize must succeed");
+        assert!(matches!(
+            cfg2,
+            ProviderConfig::Bedrock { profile: Some(p), .. } if p == "dev"
+        ));
+    }
+
+    #[test]
+    fn bedrock_flags_empty_region_and_model() {
+        let cfg = ProviderConfig::Bedrock {
+            region: String::new(),
+            model: String::new(),
+            profile: None,
+        };
+        let id = ProviderId::new("b");
+        let mut errs = Vec::new();
+        cfg.validate_self(&id, &mut errs);
+        let keys: Vec<_> = errs.iter().map(|e| e.key.as_str()).collect();
+        assert!(keys.contains(&"providers.b.region"), "got: {keys:?}");
+        assert!(keys.contains(&"providers.b.model"), "got: {keys:?}");
     }
 
     #[test]

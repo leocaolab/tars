@@ -16,8 +16,7 @@
 //! - [`response`]       — ChatResponse + builder for non-streaming consumers
 //! - [`usage`]          — Usage / CostUsd / Pricing
 //! - [`capabilities`]   — Capabilities / StructuredOutputMode / PromptCacheKind
-//! - [`json_decode`]    — result-side, mode-aware JSON decode
-//!                        (`decode` / `decode_json` / `ChatResponse::json`)
+//! - [`json_decode`]    — result-side, mode-aware JSON decode (`decode` / `decode_json` / `ChatResponse::json`)
 //! - [`error`]          — ProviderError + ErrorClass
 //! - [`context`]        — RequestContext for cross-layer plumbing
 //! - [`secret`]         — SecretRef + SecretString (redacting wrapper)

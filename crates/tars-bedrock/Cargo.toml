@@ -1,0 +1,34 @@
+[package]
+name = "tars-bedrock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AWS Bedrock LlmProvider (keyless SigV4, unified Converse API) — Doc 31"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Canonical types only. This crate must NOT depend on tars-provider: the
+# `impl LlmProvider` bridge lives in tars-provider (behind its `bedrock`
+# feature), so tars-provider can depend on this leaf without a cycle.
+tars-types = { path = "../tars-types" }
+
+# AWS SDK — credential chain + SigV4 + typed Converse client.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = { version = "1", features = ["rt-tokio"] }
+aws-smithy-types = "1" # Document (tool JSON), Blob
+
+# Async
+tokio = { workspace = true }
+# Streaming: `Stream` trait + the recv-loop → event generator (M1).
+futures = { workspace = true }
+async-stream = { workspace = true }
+
+# Serde
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serde_json.workspace = true

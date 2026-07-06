@@ -157,6 +157,10 @@ pub trait BlackboardStore: BlackboardDomain {
     /// Append `ev` to `e`'s timeline for `run`, idempotently on
     /// `(key, run, ev)`. `e` is passed whole so the store can stamp any
     /// location it keeps (file/line). Returns `true` iff a new row was inserted.
+    // 8 distinct persisted columns (conn + entity + run + event + timestamp +
+    // the version/reason/role provenance trio). Bundling the provenance trio
+    // into a struct is a clean follow-up, deferred to avoid a cross-impl ripple.
+    #[allow(clippy::too_many_arguments)]
     fn append_event(
         conn: &Connection,
         e: &Self::Entity,

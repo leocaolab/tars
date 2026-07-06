@@ -4,7 +4,7 @@
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](./rust-toolchain.toml)
 
-**Rust-first agent runtime: 10+ LLM providers behind one trait, a composable middleware pipeline, an Agent abstraction you hand tasks to, and Python + Node bindings — observability built in.**
+**Rust-first agent runtime: a dozen LLM providers — API, sandboxed subscription-CLIs, and keyless cloud (Bedrock) — behind one trait; a composable middleware pipeline; an Agent abstraction you hand tasks to; Python + Node bindings — observability built in.**
 
 ---
 
@@ -263,20 +263,25 @@ For a guided tour by role (architect / SDK author / SRE / security), see [docs/a
 
 ## Providers supported
 
-| Provider    | Streaming | Tools | Vision | Thinking | Auth        | Status   |
-|-------------|-----------|-------|--------|----------|-------------|----------|
-| OpenAI      | ✅        | ✅    | ✅     | ✅       | API key     | shipped  |
-| Anthropic   | ✅        | ✅    | ✅     | ✅       | API key     | shipped  |
-| Gemini      | ✅        | ✅    | ✅     | ✅       | API key     | shipped  |
-| Claude CLI  | ✅        | ✅    | ✅     | ✅       | subscription| shipped  |
-| Gemini CLI  | ✅        | ✅    | ✅     | —        | subscription| shipped  |
-| Codex CLI   | ✅        | ✅    | —      | —        | subscription| shipped  |
-| DeepSeek    | ✅        | ✅    | —      | ✅       | API key     | shipped  |
-| vLLM        | ✅        | ✅    | varies | varies   | optional    | shipped  |
-| MLX        | ✅        | varies| —      | varies   | none        | shipped  |
-| llama.cpp  | ✅        | varies| —      | —        | none        | shipped  |
+| Provider        | Streaming | Tools | Vision | Thinking | Auth            | Status          |
+|-----------------|-----------|-------|--------|----------|-----------------|-----------------|
+| OpenAI          | ✅        | ✅    | ✅     | ✅       | API key         | shipped         |
+| Anthropic       | ✅        | ✅    | ✅     | ✅       | API key         | shipped         |
+| Gemini          | ✅        | ✅    | ✅     | ✅       | API key         | shipped         |
+| **Bedrock**     | buffered¹ | ✅    | ✅     | ✅       | AWS IAM (keyless)| shipped (feature)|
+| DeepSeek        | ✅        | ✅    | —      | ✅       | API key         | shipped         |
+| vLLM            | ✅        | ✅    | varies | varies   | optional        | shipped         |
+| MLX             | ✅        | varies| —      | varies   | none            | shipped         |
+| llama.cpp       | ✅        | varies| —      | —        | none            | shipped         |
+| Claude CLI      | ✅        | ✅    | ✅     | ✅       | subscription    | shipped         |
+| Gemini CLI      | ✅        | ✅    | ✅     | —        | subscription    | shipped         |
+| Codex CLI       | buffered¹ | ✅    | —      | —        | subscription    | shipped         |
+| **OpenCode CLI**| ✅        | ✅    | —      | ✅       | subscription/BYO| shipped         |
+| **Antigravity CLI**| text¹  | ✅    | —      | —        | OAuth / env key | shipped         |
 
-CLI providers (`claude_cli` / `gemini_cli` / `codex_cli`) reuse the user's existing subscription session via the vendor's official CLI, so users on Claude Pro / ChatGPT Plus don't need a separate API key. Documented in [docs/architecture/01-llm-provider.md §6](./docs/architecture/01-llm-provider.md). DeepSeek ships as a built-in `openai_compat` provider — available with just `DEEPSEEK_API_KEY`.
+¹ *buffered/text* = the delegate returns the full turn at once (no incremental token stream yet); event content is identical.
+
+Any **OpenAI-compatible** endpoint (Groq, Together, xAI, OpenRouter, LM Studio, Ollama, …) works via `type = "openai_compat"` + `base_url`; per-provider wire quirks are isolated as an `OpenAiDialect` (DeepSeek's thinking toggle is one). **CLI delegates** (`claude_cli` / `gemini_cli` / `codex_cli` / `opencode` / `antigravity`) reuse the user's existing subscription/OAuth session via the vendor's official CLI — no separate API key — and every one runs the black-box agent inside the tars OS sandbox (write-jailed to the worktree). They're best-effort behind routing fallback; the load-bearing production path is DeepSeek + **Bedrock** (keyless, IAM-authed via the AWS credential chain, `--features bedrock`). See [docs/architecture/01-llm-provider.md §6](./docs/architecture/01-llm-provider.md), [32 — CLI delegates](./docs/architecture/32-cli-delegates.md), [31 — Bedrock](./docs/architecture/31-bedrock.md).
 
 ---
 

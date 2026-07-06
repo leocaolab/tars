@@ -6,6 +6,7 @@ members = [
     "crates/tars-model",
     "crates/tars-config",
     "crates/tars-provider",
+    "crates/tars-bedrock",
     "crates/tars-pipeline",
     "crates/tars-cache",
     "crates/tars-melt",
@@ -49,7 +50,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"

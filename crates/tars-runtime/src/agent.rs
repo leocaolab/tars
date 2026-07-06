@@ -311,6 +311,17 @@ pub(crate) async fn drive_llm_call(
     // now we use the test default and inherit cancel.
     let mut req_ctx = RequestContext::test_default();
     req_ctx.cancel = ctx.cancel.clone();
+    // OS-confinement policy (G10) — forward the per-role sandbox so a
+    // CLI-delegate provider jails its subprocess spawn under the same
+    // `[sandbox]`/`--sandbox` policy the agent's tools obey.
+    req_ctx.sandbox = ctx.sandbox.clone();
+    // Worktree cwd (G10 remainder) — thread the per-step working directory so a
+    // CLI-delegate's write-jail is rooted at the SAME tree its sibling tools act
+    // on (`AgentContext.cwd`). Without this the delegate spawn falls back to the
+    // process cwd for its jail root; a delegate is confined either way (default-
+    // confine, Doc 32 FR-3), but threading the worktree scopes the jail to the
+    // intended tree. `None` = no per-step worktree (run_plan today) → process cwd.
+    req_ctx.cwd = ctx.cwd.clone();
 
     let llm = ctx.llm.clone();
 

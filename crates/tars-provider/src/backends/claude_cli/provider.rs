@@ -1,28 +1,30 @@
-//! Provider lifecycle for the Claude CLI backend: builder, `LlmProvider`
-//! impl (delegates the subprocess work to the runner trait), default
-//! capabilities, and the `claude_cli()` convenience constructor. Tests
-//! that exercise the builder / argv shape live at the bottom of this
-//! file; they reach through [`super::argv`] for the pure helpers and
-//! through [`super::subprocess::RealSubprocessRunner`] only for the
-//! production path.
+//! Provider lifecycle for the Claude CLI backend: the builder and the
+//! `claude_cli()` convenience constructor.
+//!
+//! Since Doc 32 M0, the runtime provider is the shared
+//! [`AgentCliBackend`](crate::backends::cli::AgentCliBackend) driven by a
+//! [`ClaudeCliDialect`](crate::backends::cli::ClaudeCliDialect). This module
+//! keeps only the claude-specific **construction** surface — the public
+//! [`ClaudeCliProviderBuilder`] API that `registry.rs` and the smoke test
+//! depend on — and wires the builder's configuration into a dialect + the
+//! real subprocess runner. [`ClaudeCliProvider`] is an alias to
+//! `AgentCliBackend` so the crate-root re-export stays stable.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, Modality, PromptCacheKind, ProviderError, ProviderId,
-    RequestContext, StopReason, StructuredOutputMode,
+    Capabilities, Modality, PromptCacheKind, ProviderId, StructuredOutputMode,
 };
 
-use crate::provider::{LlmEventStream, LlmProvider};
-
-use super::argv::{
-    ClaudeCliEffort, ClaudeCliTools, STRIPPED_ENV_KEYS_UPPER, SubprocessInvocation,
-    SubprocessRunner, serialize_messages_for_cli,
+use crate::backends::cli::{
+    AgentCliBackend, ClaudeCliDialect, ClaudeCliEffort, ClaudeCliTools, RealSubprocessRunner,
+    SubprocessRunner,
 };
-use super::subprocess::{RealSubprocessRunner, extract_result_text, extract_usage};
+
+/// The claude runtime provider is the shared [`AgentCliBackend`]. The alias
+/// preserves the `tars_provider::ClaudeCliProvider` re-export.
+pub type ClaudeCliProvider = AgentCliBackend;
 
 #[derive(Clone, Debug)]
 pub struct ClaudeCliProviderBuilder {
@@ -101,18 +103,16 @@ impl ClaudeCliProviderBuilder {
     /// Build with a substituted runner — for tests.
     pub fn build_with_runner(self, runner: Arc<dyn SubprocessRunner>) -> Arc<ClaudeCliProvider> {
         let caps = self.capabilities.unwrap_or_else(default_capabilities);
-        Arc::new(ClaudeCliProvider {
-            id: self.id,
-            executable: self.executable,
-            timeout: self.timeout,
-            capabilities: caps,
-            tools: self.tools,
-            bare: self.bare,
-            effort: self.effort,
-            exclude_dynamic_sections: self.exclude_dynamic_sections,
-            extra_args: self.extra_args,
-            runner,
-        })
+        let dialect = Arc::new(ClaudeCliDialect::new(
+            self.executable,
+            self.timeout,
+            self.tools,
+            self.bare,
+            self.effort,
+            self.exclude_dynamic_sections,
+            self.extra_args,
+        ));
+        Arc::new(AgentCliBackend::new(self.id, caps, dialect, runner))
     }
 }
 
@@ -141,112 +141,6 @@ fn default_capabilities() -> Capabilities {
     }
 }
 
-pub struct ClaudeCliProvider {
-    id: ProviderId,
-    executable: String,
-    timeout: Duration,
-    capabilities: Capabilities,
-    tools: ClaudeCliTools,
-    bare: bool,
-    effort: Option<ClaudeCliEffort>,
-    exclude_dynamic_sections: bool,
-    extra_args: Vec<String>,
-    runner: Arc<dyn SubprocessRunner>,
-}
-
-#[async_trait]
-impl LlmProvider for ClaudeCliProvider {
-    fn id(&self) -> &ProviderId {
-        &self.id
-    }
-
-    fn capabilities(&self) -> &Capabilities {
-        &self.capabilities
-    }
-
-    // Boundary log — Err exits auto-emit with provider/model context
-    // (see anthropic.stream for the rationale).
-    #[tracing::instrument(
-        name = "claude_cli.stream",
-        skip_all,
-        fields(provider = %self.id, model = %req.model.label()),
-        err(Display),
-    )]
-    async fn stream(
-        self: Arc<Self>,
-        req: ChatRequest,
-        ctx: RequestContext,
-    ) -> Result<LlmEventStream, ProviderError> {
-        let model = req
-            .model
-            .explicit()
-            .ok_or_else(|| {
-                ProviderError::InvalidRequest(
-                    "model must be explicit before reaching CLI provider".into(),
-                )
-            })?
-            .to_string();
-
-        let prompt = serialize_messages_for_cli(&req);
-        let system = req.system.clone();
-
-        let invocation = SubprocessInvocation {
-            executable: self.executable.clone(),
-            model: model.clone(),
-            system,
-            prompt,
-            timeout: self.timeout,
-            stripped_env: STRIPPED_ENV_KEYS_UPPER
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            tools: self.tools.clone(),
-            bare: self.bare,
-            effort: self.effort,
-            exclude_dynamic_sections: self.exclude_dynamic_sections,
-            extra_args: self.extra_args.clone(),
-            // When `--tools default` lets claude run its own Read/Edit/Bash,
-            // those must operate in the request's working dir (the fix
-            // worktree), not arc's process cwd. `None` → inherit parent cwd.
-            cwd: ctx.cwd.clone(),
-        };
-
-        let payload = self.runner.run(invocation).await?;
-        let response_text = extract_result_text(&payload);
-        let usage = extract_usage(&payload);
-
-        let max_chars = req.max_output_tokens.map(|t| (t as usize) * 4);
-        let (truncated, was_truncated) = match max_chars {
-            // Truncate on a UTF-8 char boundary — `cap` (max_output_tokens
-            // * 4) can land mid-codepoint, and byte-indexing `[..cap]`
-            // would panic. `truncate_utf8` rounds down to the previous
-            // boundary (no ellipsis, so the byte cap is still honored).
-            Some(cap) if response_text.len() > cap => (
-                crate::http_base::truncate_utf8(&response_text, cap).to_string(),
-                true,
-            ),
-            _ => (response_text, false),
-        };
-
-        // Report MaxTokens when WE clipped the output to honor the
-        // caller's budget — otherwise a truncated reply looks like a
-        // natural end-of-turn and consumers won't know it was cut.
-        let stop_reason = if was_truncated {
-            StopReason::MaxTokens
-        } else {
-            StopReason::EndTurn
-        };
-
-        let events: Vec<Result<ChatEvent, ProviderError>> = vec![
-            Ok(ChatEvent::started(model)),
-            Ok(ChatEvent::Delta { text: truncated }),
-            Ok(ChatEvent::Finished { stop_reason, usage }),
-        ];
-
-        Ok(Box::pin(futures::stream::iter(events)))
-    }
-}
-
 /// Convenience builder — the most common path.
 pub fn claude_cli(id: impl Into<ProviderId>) -> Arc<ClaudeCliProvider> {
     ClaudeCliProviderBuilder::new(id).build()
@@ -255,11 +149,16 @@ pub fn claude_cli(id: impl Into<ProviderId>) -> Arc<ClaudeCliProvider> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use serde_json::{Value, json};
     use std::collections::HashSet;
-    use tars_types::{Message, ModelHint};
+    use tars_types::{ChatRequest, Message, ModelHint, ProviderError, RequestContext};
 
-    use super::super::argv::{build_argv, build_argv_with};
+    use crate::backends::cli::SubprocessInvocation;
+    use crate::backends::cli::argv::{
+        STRIPPED_ENV_KEYS_UPPER, build_argv, build_argv_with, serialize_messages_for_cli,
+    };
+    use crate::provider::LlmProvider;
 
     /// Test runner that returns a canned payload and records the invocation.
     struct FakeRunner {
@@ -304,7 +203,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.text, "hello from claude");
-        assert_eq!(resp.usage.input_tokens, 12);
+        // input_tokens is the folded TOTAL prompt: fresh (12) + cache_read (3).
+        assert_eq!(resp.usage.input_tokens, 15);
         assert_eq!(resp.usage.output_tokens, 5);
         assert_eq!(resp.usage.cached_input_tokens, 3);
 
@@ -689,6 +589,7 @@ mod tests {
             exclude_dynamic_sections: true,
             extra_args: vec![],
             cwd: None,
+            sandbox: tars_sandbox::SandboxPolicy::default(),
         };
         let argv = build_argv(&inv);
         let sp = idx(&argv, "--system-prompt");

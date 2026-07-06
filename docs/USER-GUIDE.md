@@ -63,8 +63,15 @@ For the long-lived subscription path, see
 
 Built-in providers (available without writing any config — just export
 the key): `openai`, `anthropic`, `gemini`, `deepseek`, plus the local /
-subscription backends (`claude_cli`, `gemini_cli`, `mlx`, `llamacpp`,
-`vllm`). DeepSeek is reached via its OpenAI-compatible API
+subscription backends (`claude_cli`, `gemini_cli`, `codex_cli`,
+`opencode`, `antigravity`, `mlx`, `llamacpp`, `vllm`). Any
+OpenAI-compatible endpoint (Groq, xAI, OpenRouter, LM Studio, Ollama, …)
+works via `type = "openai_compat"` + `base_url`. For keyless cloud, build
+with `--features bedrock` and use `type = "bedrock"` (region + model, no
+key — authed via the AWS credential chain). The CLI delegates
+(`claude_cli`/`gemini_cli`/`codex_cli`/`opencode`/`antigravity`) run the
+vendor's own agent as a black box, each write-jailed to the worktree by
+the tars OS sandbox. DeepSeek is reached via its OpenAI-compatible API
 (`DEEPSEEK_API_KEY`, default model `deepseek-v4-flash`); request
 `deepseek-v4-pro` for the reasoning model — its chain-of-thought arrives
 on the thinking channel automatically:

@@ -23,14 +23,20 @@
 //!   `HttpProviderBase`. URL builders are inherent methods over the
 //!   adapter's private `base_url`, so they live here rather than in a
 //!   standalone `urls.rs`.
+//! - [`dialect`] — the `OpenAiDialect` behavior seam + `StandardDialect`.
+//!   Per-variant quirks (DeepSeek, LM Studio, …) live in their own impls;
+//!   the default methods delegate to the adapter/mapping code below, so
+//!   `StandardDialect` is byte-for-byte today's behavior.
 //! - [`mapping`] — pure helpers: `translate_openai_batch_status`,
 //!   `parse_openai_batch_results`, `openai_chat_completion_to_chat_response`,
 //!   `parse_openai_usage`, `drain_buffer_into`. Stateless, no I/O —
 //!   the JSON conversion layer.
 
 mod adapter;
+mod dialect;
 mod mapping;
 mod provider;
 
 pub use adapter::OpenAiAdapter;
+pub use dialect::{OpenAiDialect, StandardDialect};
 pub use provider::{OpenAiProvider, OpenAiProviderBuilder, default_openai_capabilities};

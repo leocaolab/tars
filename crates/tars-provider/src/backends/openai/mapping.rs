@@ -15,6 +15,15 @@ use tars_types::{
 use crate::auth::ResolvedAuth;
 use crate::tool_buffer::ToolCallBuffer;
 
+use super::dialect::OpenAiDialect;
+
+/// Cap for raw payloads embedded in parse-error messages. Enough to see
+/// what actually came back on the wire (CLAUDE.md rule #1: a parse
+/// failure must carry the real data, not a bare sentinel) without
+/// dumping a full multi-KB body into an error string. Mirrors the
+/// claude_cli `truncate(_, 300)` convention.
+const RAW_ERR_CAP: usize = 300;
+
 /// Authorization header only (no `Content-Type: application/json`) —
 /// reqwest sets the right multipart `Content-Type` automatically; we
 /// must not preset JSON or the boundary string gets clobbered.
@@ -45,7 +54,12 @@ pub(super) fn translate_openai_batch_status(v: &Value) -> Result<BatchStatus, Pr
     let status = v
         .get("status")
         .and_then(|s| s.as_str())
-        .ok_or_else(|| ProviderError::Parse("batch status: missing `status`".into()))?;
+        .ok_or_else(|| {
+            ProviderError::Parse(format!(
+                "batch status: missing `status`; raw: {}",
+                crate::http_base::truncate(&v.to_string(), RAW_ERR_CAP)
+            ))
+        })?;
 
     let counts = v
         .get("request_counts")
@@ -102,7 +116,12 @@ pub(super) fn translate_openai_batch_status(v: &Value) -> Result<BatchStatus, Pr
 }
 
 /// Parse OpenAI's output file JSONL into [`BatchResultItem`]s.
+///
+/// Each per-line completion body is decoded through the caller's
+/// [`OpenAiDialect`] (`dialect.parse_response`), so a variant's response
+/// quirks apply to batch results exactly as they do to streaming.
 pub(super) fn parse_openai_batch_results(
+    dialect: &dyn OpenAiDialect,
     text: &str,
 ) -> Result<Vec<BatchResultItem>, ProviderError> {
     let mut items = Vec::new();
@@ -111,13 +130,21 @@ pub(super) fn parse_openai_batch_results(
             continue;
         }
         let v: Value = serde_json::from_str(line).map_err(|e| {
-            ProviderError::Parse(format!("batch results line {}: not JSON: {e}", idx + 1))
+            ProviderError::Parse(format!(
+                "batch results line {}: not JSON: {e}; raw: {}",
+                idx + 1,
+                crate::http_base::truncate(line, RAW_ERR_CAP)
+            ))
         })?;
         let custom_id = v
             .get("custom_id")
             .and_then(|s| s.as_str())
             .ok_or_else(|| {
-                ProviderError::Parse(format!("batch results line {}: missing custom_id", idx + 1))
+                ProviderError::Parse(format!(
+                    "batch results line {}: missing custom_id; raw: {}",
+                    idx + 1,
+                    crate::http_base::truncate(line, RAW_ERR_CAP)
+                ))
             })?
             .to_string();
 
@@ -144,19 +171,21 @@ pub(super) fn parse_openai_batch_results(
 
         let response = v.get("response").ok_or_else(|| {
             ProviderError::Parse(format!(
-                "batch results line {}: missing response and no error",
-                idx + 1
+                "batch results line {}: missing response and no error; raw: {}",
+                idx + 1,
+                crate::http_base::truncate(line, RAW_ERR_CAP)
             ))
         })?;
         let body = response.get("body").ok_or_else(|| {
             ProviderError::Parse(format!(
-                "batch results line {}: response missing body",
-                idx + 1
+                "batch results line {}: response missing body; raw: {}",
+                idx + 1,
+                crate::http_base::truncate(line, RAW_ERR_CAP)
             ))
         })?;
         items.push(BatchResultItem {
             item_id: BatchItemId::new(custom_id),
-            result: openai_chat_completion_to_chat_response(body),
+            result: dialect.parse_response(body),
         });
     }
     Ok(items)
@@ -168,7 +197,9 @@ pub(super) fn parse_openai_batch_results(
 ///
 /// **Known gap (Phase 3)**: tool_calls in batch responses are skipped.
 /// Same V1 limitation as the Anthropic backend (`anthropic_message_to_chat_response`).
-fn openai_chat_completion_to_chat_response(body: &Value) -> Result<ChatResponse, ProviderError> {
+pub(super) fn openai_chat_completion_to_chat_response(
+    body: &Value,
+) -> Result<ChatResponse, ProviderError> {
     let model = body
         .get("model")
         .and_then(|m| m.as_str())
@@ -180,9 +211,17 @@ fn openai_chat_completion_to_chat_response(body: &Value) -> Result<ChatResponse,
         .get("choices")
         .and_then(|c| c.as_array())
         .and_then(|a| a.first())
-        .ok_or_else(|| ProviderError::Parse("openai batch response: choices empty".into()))?;
+        .ok_or_else(|| {
+            ProviderError::Parse(format!(
+                "openai batch response: choices empty; raw: {}",
+                crate::http_base::truncate(&body.to_string(), RAW_ERR_CAP)
+            ))
+        })?;
     let message = choice.get("message").ok_or_else(|| {
-        ProviderError::Parse("openai batch response: choice missing message".into())
+        ProviderError::Parse(format!(
+            "openai batch response: choice missing message; raw: {}",
+            crate::http_base::truncate(&body.to_string(), RAW_ERR_CAP)
+        ))
     })?;
 
     if let Some(text) = message.get("content").and_then(|c| c.as_str()) {
@@ -317,5 +356,73 @@ mod usage_tests {
         let u = json!({ "prompt_tokens": 10, "completion_tokens": 5 });
         let usage = parse_openai_usage(u.as_object().unwrap());
         assert_eq!(usage.thinking_tokens, 0);
+    }
+}
+
+#[cfg(test)]
+mod raw_carry_tests {
+    //! CLAUDE.md rule #1: a parse failure must carry the *real* payload
+    //! that came back — not a bare "not JSON"/sentinel that drops the
+    //! truth. These lock in that the raw response substring survives
+    //! into the error string (truncated, never a naked token).
+    use super::*;
+    use super::super::dialect::StandardDialect;
+
+    #[test]
+    fn malformed_batch_line_error_carries_raw() {
+        let bogus = r#"{"custom_id": "abc", "response": OOPS_NOT_JSON}"#;
+        let err = parse_openai_batch_results(&StandardDialect, bogus)
+            .expect_err("malformed JSONL line must be an error");
+        let msg = err.to_string();
+        // The actual bytes that failed to parse are in the message, so a
+        // human sees *what came back*, not a sterile sentinel.
+        assert!(
+            msg.contains("OOPS_NOT_JSON"),
+            "error must carry the raw payload, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn batch_line_missing_response_carries_raw() {
+        let line = r#"{"custom_id": "req-42", "surprise": "no response here"}"#;
+        let err = parse_openai_batch_results(&StandardDialect, line)
+            .expect_err("line without response/error must be an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no response here"),
+            "error must carry the raw payload, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn chat_completion_missing_message_carries_raw() {
+        let body = json!({
+            "model": "gpt-4o",
+            "choices": [{ "finish_reason": "stop", "sentinel_marker": "MARKER_42" }]
+        });
+        let err = openai_chat_completion_to_chat_response(&body)
+            .expect_err("choice without message must be an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MARKER_42"),
+            "error must carry the raw body, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn raw_in_error_is_truncated() {
+        // A huge malformed line must not dump the whole body into the
+        // error; the raw is capped (RAW_ERR_CAP + ellipsis).
+        let huge = format!("{{not json {}", "x".repeat(10_000));
+        let err = parse_openai_batch_results(&StandardDialect, &huge)
+            .expect_err("malformed line must be an error");
+        let msg = err.to_string();
+        assert!(
+            msg.len() < huge.len(),
+            "raw must be truncated, error len {} vs payload {}",
+            msg.len(),
+            huge.len()
+        );
+        assert!(msg.contains('…'), "truncation ellipsis expected, got: {msg}");
     }
 }

@@ -5,6 +5,8 @@
 //! [`ChatEvent`]s, classifies HTTP errors. Reusable in tests without
 //! an `HttpProviderBase`.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -13,14 +15,15 @@ use url::Url;
 
 use tars_types::{
     ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason,
-    StructuredOutputMode, ThinkingMode, Usage,
+    StructuredOutputMode, Usage,
 };
 
 use crate::auth::ResolvedAuth;
 use crate::http_base::{HttpAdapter, HttpProviderExtras, SseEvent, truncate};
 use crate::tool_buffer::ToolCallBuffer;
 
-use super::mapping::{drain_buffer_into, parse_openai_usage};
+use super::dialect::{OpenAiDialect, StandardDialect};
+use super::mapping::drain_buffer_into;
 
 /// Models that require `max_completion_tokens` instead of `max_tokens`.
 /// Mirrors the Python `_max_tokens_kwarg` heuristic — gpt-5 / o1 / o3 / o4.
@@ -36,6 +39,11 @@ pub struct OpenAiAdapter {
     /// json_schema with "This response_format type is unavailable now". The
     /// adapter must emit the form THIS provider accepts, not always json_schema.
     structured_mode: StructuredOutputMode,
+    /// The behavior seam. Standard OpenAI (and every openai_compat endpoint
+    /// without a quirk) uses [`StandardDialect`], whose methods delegate back
+    /// to this adapter's own `*_default` bodies — so routing through the
+    /// dialect is behavior-neutral. Variants override only what differs.
+    dialect: Arc<dyn OpenAiDialect>,
 }
 
 impl OpenAiAdapter {
@@ -44,7 +52,19 @@ impl OpenAiAdapter {
         extras: HttpProviderExtras,
         structured_mode: StructuredOutputMode,
     ) -> Self {
-        Self { base_url, extras, structured_mode }
+        Self {
+            base_url,
+            extras,
+            structured_mode,
+            dialect: Arc::new(StandardDialect),
+        }
+    }
+
+    /// Swap in a non-default dialect (a per-variant `impl OpenAiDialect`).
+    /// The provider builder calls this; `new` alone yields [`StandardDialect`].
+    pub(super) fn with_dialect(mut self, dialect: Arc<dyn OpenAiDialect>) -> Self {
+        self.dialect = dialect;
+        self
     }
 
     /// Decide which "max tokens" parameter the model accepts.
@@ -199,31 +219,14 @@ impl OpenAiAdapter {
         Url::parse(&format!("{trimmed}/batches{suffix}"))
             .map_err(|e| ProviderError::Internal(format!("bad openai batches url: {e}")))
     }
-}
 
-#[async_trait]
-impl HttpAdapter for OpenAiAdapter {
-    fn build_url(&self, _model: &str) -> Result<Url, ProviderError> {
-        let trimmed = self.base_url.trim_end_matches('/');
-        Url::parse(&format!("{trimmed}/chat/completions"))
-            .map_err(|e| ProviderError::Internal(format!("bad base_url: {e}")))
-    }
-
-    fn build_headers(&self, auth: &ResolvedAuth) -> Result<HeaderMap, ProviderError> {
-        let mut h = HeaderMap::new();
-        h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        match auth {
-            ResolvedAuth::Bearer(t) | ResolvedAuth::ApiKey(t) => {
-                let value = HeaderValue::from_str(&format!("Bearer {t}"))
-                    .map_err(|e| ProviderError::Internal(format!("bad auth header: {e}")))?;
-                h.insert(AUTHORIZATION, value);
-            }
-            ResolvedAuth::None => {}
-        }
-        Ok(h)
-    }
-
-    fn translate_request(&self, req: &ChatRequest) -> Result<Value, ProviderError> {
+    /// Standard OpenAI chat/completions body — the [`OpenAiDialect`]
+    /// default (`StandardDialect`) delegates here, so this is exactly the
+    /// pre-dialect behavior.
+    pub(crate) fn build_request_default(
+        &self,
+        req: &ChatRequest,
+    ) -> Result<Value, ProviderError> {
         let model = req
             .model
             .explicit()
@@ -346,25 +349,17 @@ impl HttpAdapter for OpenAiAdapter {
             body["chat_template_kwargs"] = json!({"enable_thinking": enable});
         }
 
-        // DeepSeek's thinking toggle is its OWN openai-compat extension: a
-        // top-level `thinking: {"type": "enabled"|"disabled"}` (what the openai
-        // client merges from `extra_body`) — NOT the vLLM/Qwen
-        // `chat_template_kwargs.enable_thinking` above. Map the generic
-        // `req.thinking` so deepseek-v4-flash (thinking-off by default) can be
-        // flipped on for a benchmark and -pro turned off. Gated on the DeepSeek
-        // host so a stray `thinking` field never reaches OpenAI proper.
-        if self.base_url.contains("deepseek") {
-            let mode = match req.thinking {
-                ThinkingMode::Off => "disabled",
-                ThinkingMode::Auto | ThinkingMode::Budget(_) => "enabled",
-            };
-            body["thinking"] = json!({ "type": mode });
-        }
+        // DeepSeek's own thinking toggle (a top-level `thinking: {type}`) is
+        // NOT emitted here: that is a provider quirk, not standard OpenAI, so it
+        // lives in `DeepSeekDialect::build_request` (Doc 30 §6 C2 / FR-1). This
+        // shared builder never inspects a provider name or base_url string.
 
         Ok(body)
     }
 
-    fn parse_event(
+    /// Standard OpenAI SSE parsing — the [`OpenAiDialect`] default
+    /// (`StandardDialect`) delegates here.
+    pub(crate) fn parse_event_default(
         &self,
         raw: &SseEvent,
         buf: &mut ToolCallBuffer,
@@ -412,7 +407,7 @@ impl HttpAdapter for OpenAiAdapter {
                 .and_then(|c| c.as_array())
                 .is_none_or(|a| a.is_empty());
             if choices_empty {
-                let usage_struct = parse_openai_usage(usage);
+                let usage_struct = self.dialect.parse_usage(usage);
                 // Audit `tars-provider-src-backends-openai-{7,22}`: use
                 // the stop_reason captured by an earlier finish_reason
                 // chunk (typical OpenAI ordering: finish_reason in
@@ -577,7 +572,7 @@ impl HttpAdapter for OpenAiAdapter {
                 if let Some(usage_obj) = v.get("usage").and_then(|u| u.as_object()) {
                     out.push(ChatEvent::Finished {
                         stop_reason: stop,
-                        usage: parse_openai_usage(usage_obj),
+                        usage: self.dialect.parse_usage(usage_obj),
                     });
                 } else {
                     buf.record_pending_stop(stop);
@@ -586,6 +581,41 @@ impl HttpAdapter for OpenAiAdapter {
         }
 
         Ok(out)
+    }
+}
+
+#[async_trait]
+impl HttpAdapter for OpenAiAdapter {
+    fn build_url(&self, _model: &str) -> Result<Url, ProviderError> {
+        let trimmed = self.base_url.trim_end_matches('/');
+        Url::parse(&format!("{trimmed}/chat/completions"))
+            .map_err(|e| ProviderError::Internal(format!("bad base_url: {e}")))
+    }
+
+    fn build_headers(&self, auth: &ResolvedAuth) -> Result<HeaderMap, ProviderError> {
+        let mut h = HeaderMap::new();
+        h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        match auth {
+            ResolvedAuth::Bearer(t) | ResolvedAuth::ApiKey(t) => {
+                let value = HeaderValue::from_str(&format!("Bearer {t}"))
+                    .map_err(|e| ProviderError::Internal(format!("bad auth header: {e}")))?;
+                h.insert(AUTHORIZATION, value);
+            }
+            ResolvedAuth::None => {}
+        }
+        Ok(h)
+    }
+
+    fn translate_request(&self, req: &ChatRequest) -> Result<Value, ProviderError> {
+        self.dialect.build_request(self, req)
+    }
+
+    fn parse_event(
+        &self,
+        raw: &SseEvent,
+        buf: &mut ToolCallBuffer,
+    ) -> Result<Vec<ChatEvent>, ProviderError> {
+        self.dialect.parse_event(self, raw, buf)
     }
 
     fn classify_error(
@@ -755,8 +785,14 @@ mod tests {
         assert!(bare.get("response_format").is_none());
     }
 
+    /// FR-1: the shared body builder (default `StandardDialect`) never emits
+    /// DeepSeek's `thinking` field — not even for a `deepseek` base_url. That
+    /// quirk moved to `DeepSeekDialect`; the shared builder inspects no
+    /// provider name / base_url string. (The DeepSeek-host selection that
+    /// preserves today's behavior is exercised in `provider.rs`.)
     #[test]
-    fn deepseek_thinking_toggle_maps_to_a_top_level_thinking_field() {
+    fn shared_builder_never_emits_thinking_field() {
+        use tars_types::ThinkingMode;
         let req = |t: ThinkingMode| ChatRequest {
             model: tars_types::ModelHint::Explicit("deepseek-v4-flash".into()),
             system: None,
@@ -772,29 +808,20 @@ mod tests {
             thinking: t,
             enable_chat_template_thinking: None,
         };
-        let ds = |t| {
-            OpenAiAdapter::new(
-                "https://api.deepseek.com".into(),
-                HttpProviderExtras::default(),
-                StructuredOutputMode::JsonObjectMode,
-            )
-            .translate_request(&req(t))
-            .unwrap()
-        };
-        // DeepSeek host: Auto/Budget → enabled, Off → disabled.
-        assert_eq!(ds(ThinkingMode::Auto)["thinking"]["type"], "enabled");
-        assert_eq!(ds(ThinkingMode::Budget(1024))["thinking"]["type"], "enabled");
-        assert_eq!(ds(ThinkingMode::Off)["thinking"]["type"], "disabled");
-
-        // Non-DeepSeek host: no `thinking` field leaks (would break OpenAI proper).
-        let openai = OpenAiAdapter::new(
-            DEFAULT_BASE_URL.into(),
-            HttpProviderExtras::default(),
-            StructuredOutputMode::StrictSchema,
-        )
-        .translate_request(&req(ThinkingMode::Auto))
-        .unwrap();
-        assert!(openai.get("thinking").is_none());
+        // Even with a `deepseek` base_url, the default StandardDialect path
+        // emits no `thinking` — the base_url string no longer gates anything.
+        for (base, mode) in [
+            ("https://api.deepseek.com", StructuredOutputMode::JsonObjectMode),
+            (DEFAULT_BASE_URL, StructuredOutputMode::StrictSchema),
+        ] {
+            let body = OpenAiAdapter::new(base.into(), HttpProviderExtras::default(), mode)
+                .translate_request(&req(ThinkingMode::Auto))
+                .unwrap();
+            assert!(
+                body.get("thinking").is_none(),
+                "shared builder must not emit `thinking` (base_url={base})",
+            );
+        }
     }
 
     #[test]

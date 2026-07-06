@@ -22,6 +22,7 @@ use crate::http_base::{
 use crate::provider::{LlmEventStream, LlmProvider};
 
 use super::adapter::OpenAiAdapter;
+use super::dialect::{DeepSeekDialect, OpenAiDialect, StandardDialect};
 use super::mapping::{
     openai_auth_only_headers, parse_openai_batch_results, translate_openai_batch_status,
 };
@@ -29,13 +30,19 @@ use super::mapping::{
 /// Default OpenAI base URL.
 pub(super) const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OpenAiProviderBuilder {
     id: ProviderId,
     base_url: String,
     auth: Auth,
     capabilities: Option<Capabilities>,
     extras: HttpProviderExtras,
+    /// The behavior seam (Doc 30). `None` = no explicit dialect; `build()` then
+    /// infers one from `base_url` (a `deepseek` host → [`DeepSeekDialect`],
+    /// else [`StandardDialect`]) so today's base_url-gated behavior is
+    /// preserved byte-for-byte without a config-schema change. Set explicitly
+    /// via [`OpenAiProviderBuilder::dialect`] to override the inference.
+    dialect: Option<Arc<dyn OpenAiDialect>>,
 }
 
 impl OpenAiProviderBuilder {
@@ -46,7 +53,15 @@ impl OpenAiProviderBuilder {
             auth,
             capabilities: None,
             extras: HttpProviderExtras::default(),
+            dialect: None,
         }
+    }
+
+    builder_setter! {
+        /// Override the OpenAI dialect (per-variant wire behavior). When unset,
+        /// `build()` infers it from `base_url` (a `deepseek` host →
+        /// [`DeepSeekDialect`], else [`StandardDialect`]).
+        dialect: opt Arc<dyn OpenAiDialect>
     }
 
     builder_setter! {
@@ -75,11 +90,22 @@ impl OpenAiProviderBuilder {
         let caps = self
             .capabilities
             .unwrap_or_else(default_openai_capabilities);
-        let adapter = Arc::new(OpenAiAdapter::new(
-            self.base_url,
-            self.extras,
-            caps.supports_structured_output,
-        ));
+        // Resolve the behavior seam. An explicit dialect wins; otherwise infer
+        // from the endpoint. This preserves today's base_url-gated DeepSeek
+        // `thinking` behavior byte-for-byte (the quirk moved into the dialect)
+        // with no config-schema change. An explicit `dialect` config field is a
+        // later, cleaner step (Doc 30 M3).
+        let dialect: Arc<dyn OpenAiDialect> = self.dialect.unwrap_or_else(|| {
+            if self.base_url.contains("deepseek") {
+                Arc::new(DeepSeekDialect)
+            } else {
+                Arc::new(StandardDialect)
+            }
+        });
+        let adapter = Arc::new(
+            OpenAiAdapter::new(self.base_url, self.extras, caps.supports_structured_output)
+                .with_dialect(dialect.clone()),
+        );
         Arc::new(OpenAiProvider {
             id: self.id,
             http,
@@ -87,6 +113,7 @@ impl OpenAiProviderBuilder {
             auth: self.auth,
             adapter,
             capabilities: caps,
+            dialect,
         })
     }
 }
@@ -121,6 +148,10 @@ pub struct OpenAiProvider {
     auth: Auth,
     adapter: Arc<OpenAiAdapter>,
     capabilities: Capabilities,
+    /// The behavior seam (Doc 30). Held here so the non-streaming batch
+    /// results path decodes through the same dialect as streaming. Defaults
+    /// to [`StandardDialect`] and is shared (same `Arc`) with `adapter`.
+    dialect: Arc<dyn OpenAiDialect>,
 }
 
 #[async_trait]
@@ -340,7 +371,7 @@ impl BatchSubmitter for OpenAiProvider {
             return Err(self.adapter.classify_error(status, &h, text));
         }
         let text = resp.text().await.map_err(ProviderError::from)?;
-        parse_openai_batch_results(&text)
+        parse_openai_batch_results(self.dialect.as_ref(), &text)
     }
 
     async fn cancel(&self, id: &BatchJobId, ctx: &RequestContext) -> Result<(), ProviderError> {
@@ -396,5 +427,107 @@ impl OpenAiProvider {
         resp.json::<Value>()
             .await
             .map_err(|e| ProviderError::Parse(format!("batch fetch: response not JSON: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod dialect_seam_tests {
+    use super::*;
+    use tars_types::{Message, ModelHint};
+
+    /// M0 seam: a provider built without an explicit dialect defaults to
+    /// `StandardDialect`, and the public request path routes THROUGH it. The
+    /// dialect-routed body must be byte-identical to the adapter's own
+    /// standard default body — proving the seam is live and behavior-neutral.
+    #[test]
+    fn provider_defaults_to_standard_dialect_and_routes_through_it() {
+        let http =
+            HttpProviderBase::default_arc().expect("failed to create default HTTP provider base");
+        let provider = OpenAiProviderBuilder::new("openai", Auth::None)
+            .build(http, crate::auth::basic());
+
+        let req = ChatRequest {
+            model: ModelHint::Explicit("gpt-4o".into()),
+            system: None,
+            messages: vec![Message::user_text("hi")],
+            tools: vec![],
+            tool_choice: Default::default(),
+            structured_output: None,
+            max_output_tokens: None,
+            temperature: None,
+            stop_sequences: vec![],
+            seed: None,
+            cache_directives: vec![],
+            thinking: Default::default(),
+            enable_chat_template_thinking: None,
+        };
+
+        let via_dialect = provider.adapter.translate_request(&req).unwrap();
+        let direct = provider.adapter.build_request_default(&req).unwrap();
+        assert_eq!(
+            via_dialect, direct,
+            "default dialect must produce the standard body byte-for-byte",
+        );
+        assert_eq!(via_dialect["model"], "gpt-4o");
+        assert_eq!(via_dialect["stream"], true);
+    }
+
+    fn thinking_req(t: tars_types::ThinkingMode) -> ChatRequest {
+        ChatRequest {
+            model: ModelHint::Explicit("deepseek-v4-flash".into()),
+            system: None,
+            messages: vec![Message::user_text("hi")],
+            tools: vec![],
+            tool_choice: Default::default(),
+            structured_output: None,
+            max_output_tokens: None,
+            temperature: None,
+            stop_sequences: vec![],
+            seed: None,
+            cache_directives: vec![],
+            thinking: t,
+            enable_chat_template_thinking: None,
+        }
+    }
+
+    /// Behavior-preservation (M1): a provider built from a `deepseek` base_url
+    /// with no explicit dialect infers `DeepSeekDialect`, so `req.thinking`
+    /// still maps to the top-level `thinking: {type}` field EXACTLY as the old
+    /// base_url-gated adapter branch did.
+    #[test]
+    fn deepseek_base_url_infers_dialect_and_emits_thinking() {
+        use tars_types::ThinkingMode;
+        let http = HttpProviderBase::default_arc().expect("http base");
+        let provider = OpenAiProviderBuilder::new("deepseek", Auth::None)
+            .base_url("https://api.deepseek.com")
+            .build(http, crate::auth::basic());
+
+        let auto = provider
+            .adapter
+            .translate_request(&thinking_req(ThinkingMode::Auto))
+            .unwrap();
+        assert_eq!(auto["thinking"]["type"], "enabled");
+
+        let off = provider
+            .adapter
+            .translate_request(&thinking_req(ThinkingMode::Off))
+            .unwrap();
+        assert_eq!(off["thinking"]["type"], "disabled");
+    }
+
+    /// A non-DeepSeek endpoint infers `StandardDialect` → no `thinking` field
+    /// leaks (would break OpenAI proper).
+    #[test]
+    fn non_deepseek_base_url_emits_no_thinking() {
+        use tars_types::ThinkingMode;
+        let http = HttpProviderBase::default_arc().expect("http base");
+        let provider = OpenAiProviderBuilder::new("openai", Auth::None)
+            .build(http, crate::auth::basic());
+
+        let body = provider
+            .adapter
+            .translate_request(&thinking_req(ThinkingMode::Auto))
+            .unwrap();
+        assert!(body.get("thinking").is_none());
     }
 }

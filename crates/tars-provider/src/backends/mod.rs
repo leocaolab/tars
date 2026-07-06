@@ -12,8 +12,13 @@
 //! - `vllm` etc. = OpenAI-compatible local servers.
 
 pub mod anthropic;
+/// AWS Bedrock (Doc 31). Feature-gated: pulls in the heavy AWS SDK only
+/// when `tars-provider/bedrock` is enabled.
+#[cfg(feature = "bedrock")]
+pub mod bedrock;
 pub mod cassette;
 pub mod claude_cli;
+pub mod cli;
 pub mod claude_sdk;
 pub mod codex_cli;
 pub mod gemini;

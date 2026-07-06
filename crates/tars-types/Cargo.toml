@@ -20,6 +20,10 @@ url.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true  # for ProviderError::from(reqwest::Error)
 uuid.workspace = true     # PipelineEvent.event_id (B-20 W3 enabler)
+# Zero-dep mechanism crate (sits below everything). Carried so RequestContext
+# can hand a SandboxPolicy to subprocess-spawning providers (CLI delegates),
+# the same reason `cwd` lives here (G10 — unify the CLI sandbox on the policy).
+tars-sandbox = { path = "../tars-sandbox" }
 
 [dev-dependencies]
 serde_json.workspace = true

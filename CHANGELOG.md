@@ -19,6 +19,52 @@ is authoritative. This file aggregates.
 
 ---
 
+## 1.0 — provider layer: dialects, sandboxed CLI delegates, Bedrock, model KB — `v1.0.0`
+
+The 1.0 release. The provider layer becomes clean, data-driven, and sandboxed —
+two behavior-driven seams (HTTP-wire dialects, CLI-event dialects) over shared
+cores, plus a keyless cloud path and a model knowledge base that keeps versions
+and prices out of code. Provider tracking: [`docs/provider-layer-tracking.md`](docs/provider-layer-tracking.md).
+
+### OpenAI dialects (Doc 30)
+- `OpenAiDialect` trait + `StandardDialect` — the shared `openai` adapter/mapping
+  is the default; a variant overrides only its quirk (OCP). DeepSeek's `thinking`
+  toggle moved into `DeepSeekDialect`; the shared body builder carries no
+  provider-name branch. Parse failures now **carry the raw payload** (truncated),
+  never a sentinel.
+
+### CLI delegates (Doc 32)
+- `AgentCliBackend` + `CliDialect` — one shared spawn/stream/sandbox backend; each
+  CLI is a small dialect. **claude / gemini / codex / opencode / antigravity** — 5
+  delegates. gemini_cli's previously **unsandboxed** spawn is closed.
+- **Sandboxed by default**: every black-box delegate runs in an OS write-jail
+  (Seatbelt / bubblewrap) — never unconfined. Jail follows codex's model: the
+  worktree + real `$TMPDIR` + `/tmp` + the CLI's own state dir writable, `.git`
+  write-protected; `$HOME`/repo-parent/system stay read-only.
+- Buffered delegates advertise honest caps (`streaming:false`); 4 near-duplicate
+  runners collapsed to one via a declared `OutputFraming`.
+
+### Bedrock (Doc 31) — keyless cloud path
+- `tars-bedrock` (feature-gated): unified `Converse` / `ConverseStream`; auth via
+  the AWS credential chain (SigV4 by the SDK) — no API key at rest; on AWS the
+  workload identity signs. AWS SDK stays out of the default build graph.
+
+### Model knowledge base — versions/prices are DATA, not code
+- `crates/tars-config/data/models.toml` — per-model id/tier/price/context/
+  modalities/thinking, per-provider defaults. `builtin.rs` defaults + gemini's
+  thinking-mode decision now read the KB (2.5 → `thinkingBudget`, 3.x →
+  `thinkingLevel`, thinking-only rejects "off"). Bumping a model = a data edit.
+- **Per-model cost**: the CLI resolves pricing from the response's `actual_model`
+  via the KB — every API model now reports real cost (was `$0`).
+
+### Fixes
+- **claude_cli under-billing**: usage now folds cache into `input_tokens` (tars's
+  documented convention) — a live cache-heavy call no longer trips the cost
+  invariant / silently under-bills.
+- **gemini default**: was the thinking-only `gemini-2.5-pro` (rejected an "off"
+  default); now `gemini-3.5-flash`. Stale defaults (`gpt-4o`, `claude-opus-4-7`)
+  refreshed to current via the KB.
+
 ## Bless store — loadable field-level reference assertions (`tars-types`) — `v0.9.0`
 
 Golden/approval testing for LLM output, sitting on the shipped cassette (Doc 28).

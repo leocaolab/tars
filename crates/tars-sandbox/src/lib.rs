@@ -115,10 +115,9 @@ impl SandboxPolicy {
 
         #[cfg(target_os = "macos")]
         {
-            let profile = seatbelt_profile(&writable, self.network);
+            let profile = seatbelt_profile(&writable, self.network, &work);
             let mut argv = vec!["-p".to_string(), profile, program.to_string()];
             argv.extend(args.iter().cloned());
-            let _ = &work;
             Ok(("/usr/bin/sandbox-exec".to_string(), argv))
         }
         #[cfg(target_os = "linux")]
@@ -140,12 +139,52 @@ fn canon(p: &Path) -> Result<PathBuf, SandboxError> {
     std::fs::canonicalize(p).map_err(|e| SandboxError::Path(format!("{}: {e}", p.display())))
 }
 
+/// The extra writable roots a **workspace-write delegate jail** grants beyond
+/// the workspace itself, matching codex's `WorkspaceWrite`
+/// ([`get_writable_roots_with_cwd`]): the real per-user `$TMPDIR` and `/tmp`.
+/// A CLI delegate (codex's app-server socket, opencode's temp scratch, any
+/// coding agent's `mktemp`) needs these — the old tars jail wrongly denied
+/// them, redirecting `TMPDIR` into the worktree instead. Each entry is included
+/// only when it exists as a directory, so a caller can append the result to
+/// `writable_roots` and hand it straight to [`SandboxPolicy::wrap`] without a
+/// canonicalize failure. `.git` is NOT relevant here — [`SandboxPolicy::wrap`]
+/// write-protects `<workdir>/.git` on top of whatever roots it is given.
+///
+/// [`get_writable_roots_with_cwd`]: https://developers.openai.com/codex/config-reference
+pub fn default_tmp_writable_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    // $TMPDIR (per-user on macOS: `/var/folders/…/T`). Skip empty/unset.
+    if let Some(tmpdir) = std::env::var_os("TMPDIR")
+        && !tmpdir.is_empty()
+    {
+        let p = PathBuf::from(tmpdir);
+        if p.is_dir() {
+            roots.push(p);
+        }
+    }
+    // /tmp on Unix (often a symlink to /private/tmp on macOS — `wrap` canon's it).
+    let slash_tmp = PathBuf::from("/tmp");
+    if slash_tmp.is_dir() {
+        roots.push(slash_tmp);
+    }
+    roots
+}
+
 /// codex-style Seatbelt write-jail: allow broadly, deny all writes, re-allow
-/// writes under the workspace roots (+ std streams / tty). NOT /tmp, NOT
-/// /var/folders, NOT $HOME — host /tmp stays read-only so the delegate can
-/// neither create nor delete files there. Validated on macOS.
+/// writes under the workspace roots (+ std streams / tty), then re-deny
+/// `<workdir>/.git`. The writable roots are exactly what the caller supplies —
+/// for a CLI-delegate spawn that is the worktree **plus** the real `$TMPDIR`,
+/// `/tmp`, and the CLI's own state dir (see
+/// [`default_tmp_writable_roots`] + the delegate spawn), matching codex's
+/// `WorkspaceWrite`. `$HOME` at large stays read-only (nothing re-allows it).
+///
+/// **`.git` write-protection** (codex + claude both do this): even though `.git`
+/// lives under the writable worktree, an agent must not be able to rewrite git
+/// hooks/config to gain host execution. The final `(deny file-write* (subpath
+/// "<workdir>/.git"))` wins under Seatbelt's last-match-wins ordering, so `.git`
+/// is read-only while the rest of the worktree is writable.
 #[cfg(any(target_os = "macos", test))]
-pub fn seatbelt_profile(writable: &[PathBuf], network: bool) -> String {
+pub fn seatbelt_profile(writable: &[PathBuf], network: bool, workdir: &Path) -> String {
     let mut p = String::from("(version 1)\n(allow default)\n");
     if !network {
         p.push_str("(deny network*)\n");
@@ -156,6 +195,10 @@ pub fn seatbelt_profile(writable: &[PathBuf], network: bool) -> String {
     }
     p.push_str("  (literal \"/dev/null\") (literal \"/dev/stdout\") (literal \"/dev/stderr\")\n");
     p.push_str("  (regex #\"^/dev/tty\"))\n");
+    // Re-deny the repo's git dir (last match wins), even though it sits under a
+    // writable worktree root. Deny both `.git` itself and its subtree.
+    let git = workdir.join(".git");
+    p.push_str(&format!("(deny file-write* (subpath \"{}\"))\n", git.display()));
     p
 }
 
@@ -192,6 +235,13 @@ pub fn bwrap_argv(
         a.push(s.clone());
         a.push(s);
     }
+    // Re-mount `<workdir>/.git` read-only ON TOP of the writable worktree bind
+    // so an agent can't rewrite git hooks/config for host execution (matches the
+    // Seatbelt `.git` deny). `--ro-bind-try` is a no-op when there is no `.git`.
+    let git = workdir.join(".git").display().to_string();
+    a.push("--ro-bind-try".into());
+    a.push(git.clone());
+    a.push(git);
     a.push("--chdir".into());
     a.push(workdir.display().to_string());
     a.push("--".into());
@@ -215,19 +265,42 @@ mod tests {
 
     #[test]
     fn seatbelt_write_jail_shape() {
-        let prof = seatbelt_profile(&[PathBuf::from("/wt")], true);
+        let prof = seatbelt_profile(&[PathBuf::from("/wt")], true, Path::new("/wt"));
         assert!(prof.contains("(allow default)"));
         assert!(prof.contains("(deny file-write*)"));
         assert!(prof.contains("(subpath \"/wt\")"));
         assert!(!prof.contains("(deny network*)"));
-        // must NOT re-allow /tmp or /var/folders (the hole a prior test caught)
+        // The profile renders EXACTLY the roots it is handed — /tmp + $TMPDIR are
+        // added by the delegate spawn as writable roots (codex model), NOT baked
+        // into the profile, so a bare `[/wt]` profile still names neither.
         assert!(!prof.contains("/private/tmp"));
         assert!(!prof.contains("/var/folders"));
+        // `.git` under the writable worktree is re-denied (last match wins).
+        assert!(prof.contains("(deny file-write* (subpath \"/wt/.git\"))"));
+        // The `.git` deny is AFTER the allow block so Seatbelt's last-match-wins
+        // ordering makes it override the worktree allow.
+        assert!(prof.find("(allow file-write*").unwrap() < prof.find("/wt/.git").unwrap());
+    }
+
+    #[test]
+    fn seatbelt_renders_extra_writable_roots() {
+        // The delegate spawn appends /tmp + $TMPDIR + state dirs as roots; the
+        // profile must re-allow each as a subpath.
+        let prof = seatbelt_profile(
+            &[PathBuf::from("/wt"), PathBuf::from("/private/tmp"), PathBuf::from("/home/u/.codex")],
+            true,
+            Path::new("/wt"),
+        );
+        assert!(prof.contains("(subpath \"/private/tmp\")"));
+        assert!(prof.contains("(subpath \"/home/u/.codex\")"));
     }
 
     #[test]
     fn seatbelt_network_off() {
-        assert!(seatbelt_profile(&[PathBuf::from("/wt")], false).contains("(deny network*)"));
+        assert!(
+            seatbelt_profile(&[PathBuf::from("/wt")], false, Path::new("/wt"))
+                .contains("(deny network*)")
+        );
     }
 
     #[test]
@@ -238,6 +311,19 @@ mod tests {
         assert!(j.contains("--bind /wt /wt"));
         assert!(j.contains("--chdir /wt"));
         assert!(!j.contains("--unshare-net"));
+        // `.git` re-mounted read-only on top of the writable worktree bind, AFTER
+        // the `--bind /wt /wt` so it wins.
+        assert!(j.contains("--ro-bind-try /wt/.git /wt/.git"));
+        assert!(j.find("--bind /wt /wt").unwrap() < j.find("--ro-bind-try /wt/.git").unwrap());
+    }
+
+    #[test]
+    fn default_tmp_writable_roots_are_existing_dirs() {
+        // /tmp exists on any Unix CI box; every returned root must be a real dir
+        // (so `wrap`'s canonicalize can't fail on them).
+        let roots = default_tmp_writable_roots();
+        assert!(roots.iter().all(|p| p.is_dir()), "all tmp roots must exist: {roots:?}");
+        assert!(roots.iter().any(|p| p == Path::new("/tmp")), "expected /tmp: {roots:?}");
     }
 
     #[test]

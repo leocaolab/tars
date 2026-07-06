@@ -65,6 +65,20 @@ pub struct RequestContext {
     /// Set via [`RequestContext::with_cwd`]; threaded from the worker's
     /// `AgentContext.cwd`.
     pub cwd: Option<PathBuf>,
+    /// OS-confinement policy for providers that spawn a subprocess (the CLI
+    /// delegates — `claude_cli`/`gemini_cli`/`codex_cli`/`opencode`/
+    /// `antigravity`). Resolved once from the `[sandbox]` TOML section +
+    /// `--sandbox` flag (see `tars-config::resolve_policy`) and threaded here
+    /// from the worker's `AgentContext.sandbox`, exactly like [`Self::cwd`].
+    /// HTTP providers ignore it (no subprocess to jail).
+    ///
+    /// Default [`SandboxPolicy::default`] = `DangerFullAccess` = unconfined =
+    /// today's behaviour, so a context built without a policy preserves the
+    /// pre-G10 default. The legacy `TARS_CLAUDE_SANDBOX=1` env gate still
+    /// forces a workspace-write jail when this stays unconfined (back-compat).
+    ///
+    /// Set via [`RequestContext::with_sandbox`].
+    pub sandbox: tars_sandbox::SandboxPolicy,
 }
 
 impl RequestContext {
@@ -87,6 +101,7 @@ impl RequestContext {
             validation_outcome: new_shared_validation_outcome(),
             tags: Vec::new(),
             cwd: None,
+            sandbox: tars_sandbox::SandboxPolicy::default(),
         }
     }
 
@@ -105,6 +120,7 @@ impl RequestContext {
             validation_outcome: new_shared_validation_outcome(),
             tags: Vec::new(),
             cwd: None,
+            sandbox: tars_sandbox::SandboxPolicy::default(),
         }
     }
 
@@ -113,6 +129,15 @@ impl RequestContext {
     /// `current_dir`; threaded from the worker's `AgentContext.cwd`.
     pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Consume `self` and return it with the OS-confinement `sandbox` policy
+    /// set (builder-style move). Subprocess-spawning providers (CLI delegates)
+    /// jail their spawn with this; threaded from the worker's
+    /// `AgentContext.sandbox`.
+    pub fn with_sandbox(mut self, sandbox: tars_sandbox::SandboxPolicy) -> Self {
+        self.sandbox = sandbox;
         self
     }
 

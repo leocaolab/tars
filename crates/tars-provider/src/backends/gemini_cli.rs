@@ -1,71 +1,42 @@
 //! Gemini CLI as an LLM Provider — subscription path.
 //!
-//! Subscription-authenticated path through the user-installed `gemini`
-//! binary (google-gemini/gemini-cli). Same shape as [`claude_cli`]:
-//! we shell out to the user's locally-authenticated CLI and never
-//! touch the credentials.
+//! Since Doc 32 M1 this module is the **gemini construction surface** on top of
+//! the shared CLI-delegate machinery in [`crate::backends::cli`]. It shells out
+//! to the user-installed `gemini` binary
+//! (`gemini -p "<prompt>" -m <model> -o json`), strips the API-mode-trigger env
+//! vars so the subscription path stays active, and maps the buffered JSON
+//! payload onto canonical `ChatEvent`s.
 //!
-//! Binary interface (verified against gemini-cli ≥ 0.x):
+//! ## What M1 changed (the security fix)
 //!
-//! ```text
-//! gemini -p "<prompt>" -m <model> -o json
-//! ```
-//!
-//! Returns a JSON object like:
-//! ```json
-//! {
-//!   "session_id": "…",
-//!   "response": "<text>",
-//!   "stats": {
-//!     "models": {
-//!       "<model-name>": {
-//!         "tokens": { "prompt": N, "candidates": N, "cached": N, "thoughts": N }
-//!       }
-//!     }
-//!   }
-//! }
-//! ```
-//!
-//! **Env strip**: any of the following force the CLI into direct API
-//! mode (which bills the user's API key, not their subscription):
-//! `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`,
-//! `GOOGLE_GENAI_USE_VERTEXAI`. Comparison is case-insensitive — same
-//! Windows hazard the Claude CLI provider warns about.
-//!
-//! Streaming / cancellation are NOT supported in this iteration. The
-//! `gemini` CLI does support `-o stream-json`, but a long-lived
-//! process pool with mid-stream cancel is the next-iteration design
-//! (analogous to Doc 01 §6.2.1 for Claude).
+//! gemini used to spawn through its OWN `RealSubprocessRunner` — a bare
+//! `Command::new` with **no sandbox**, i.e. an unconfined black-box agent
+//! (tracking doc §2). That private runner is **retired**. The runtime provider
+//! is now the shared [`AgentCliBackend`](crate::backends::cli::AgentCliBackend)
+//! driven by a [`GeminiCliDialect`](crate::backends::cli::GeminiCliDialect) and
+//! the shared [`SharedCliRunner`](crate::backends::cli::SharedCliRunner), which
+//! spawns through the shared `tars-sandbox` OS-jail primitive. gemini now gets
+//! the same write-jail as claude (Doc 29 / FR-3) — confined by default, no env
+//! gate required.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use serde_json::Value;
-use tokio::process::Command;
-
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message, Modality, PromptCacheKind,
-    ProviderError, ProviderId, RequestContext, StopReason, StructuredOutputMode, Usage,
+    Capabilities, Modality, PromptCacheKind, ProviderId, StructuredOutputMode,
 };
 
-use crate::provider::{LlmEventStream, LlmProvider};
+use crate::backends::cli::{AgentCliBackend, GeminiCliDialect, SharedCliRunner};
 
-/// Env vars that force `gemini` into direct API / Vertex mode and must
-/// be stripped from the child to keep the subscription path active.
-const STRIPPED_ENV_KEYS_UPPER: &[&str] = &[
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_GENAI_USE_VERTEXAI",
-];
+// Re-export the shared runner trait/invocation under the historical
+// `backends::gemini_cli::…` paths (`lib.rs` re-exports `SubprocessRunner` as
+// `GeminiCliSubprocessRunner`; `build_with_runner` takes it).
+pub use crate::backends::cli::{SubprocessInvocation, SubprocessRunner};
 
-/// Limit on the rendered prompt length passed via `-p`. ARG_MAX is
-/// typically 1MB on Linux/macOS; we cap well below that so other args
-/// and env have headroom. Above this we surface a clean InvalidRequest
-/// rather than letting `execve` fail with E2BIG.
-const MAX_PROMPT_BYTES: usize = 256 * 1024;
+/// The gemini runtime provider is the shared [`AgentCliBackend`]. The alias
+/// preserves the `tars_provider::GeminiCliProvider` re-export.
+pub type GeminiCliProvider = AgentCliBackend;
 
 #[derive(Clone, Debug)]
 pub struct GeminiCliProviderBuilder {
@@ -89,19 +60,21 @@ impl GeminiCliProviderBuilder {
     builder_setter!(timeout: Duration);
     builder_setter!(capabilities: opt Capabilities);
 
+    /// Build with the shared buffered runner
+    /// ([`SharedCliRunner`](crate::backends::cli::SharedCliRunner)) — spawns
+    /// through the OS-jail primitive and frames gemini's single-object JSON.
     pub fn build(self) -> Arc<GeminiCliProvider> {
-        self.build_with_runner(Arc::new(RealSubprocessRunner))
+        let caps = self.capabilities.unwrap_or_else(default_capabilities);
+        let dialect = Arc::new(GeminiCliDialect::new(self.executable, self.timeout));
+        let runner = Arc::new(SharedCliRunner::new(dialect.clone()));
+        Arc::new(AgentCliBackend::new(self.id, caps, dialect, runner))
     }
 
+    /// Build with a substituted runner — for tests (FakeRunner).
     pub fn build_with_runner(self, runner: Arc<dyn SubprocessRunner>) -> Arc<GeminiCliProvider> {
         let caps = self.capabilities.unwrap_or_else(default_capabilities);
-        Arc::new(GeminiCliProvider {
-            id: self.id,
-            executable: self.executable,
-            timeout: self.timeout,
-            capabilities: caps,
-            runner,
-        })
+        let dialect = Arc::new(GeminiCliDialect::new(self.executable, self.timeout));
+        Arc::new(AgentCliBackend::new(self.id, caps, dialect, runner))
     }
 }
 
@@ -125,313 +98,6 @@ fn default_capabilities() -> Capabilities {
     }
 }
 
-pub struct GeminiCliProvider {
-    id: ProviderId,
-    executable: String,
-    timeout: Duration,
-    capabilities: Capabilities,
-    runner: Arc<dyn SubprocessRunner>,
-}
-
-#[async_trait]
-impl LlmProvider for GeminiCliProvider {
-    fn id(&self) -> &ProviderId {
-        &self.id
-    }
-
-    fn capabilities(&self) -> &Capabilities {
-        &self.capabilities
-    }
-
-    // Boundary log — Err exits auto-emit (see anthropic.stream).
-    #[tracing::instrument(
-        name = "gemini_cli.stream",
-        skip_all,
-        fields(provider = %self.id, model = %req.model.label()),
-        err(Display),
-    )]
-    async fn stream(
-        self: Arc<Self>,
-        req: ChatRequest,
-        _ctx: RequestContext,
-    ) -> Result<LlmEventStream, ProviderError> {
-        let model = req
-            .model
-            .explicit()
-            .ok_or_else(|| {
-                ProviderError::InvalidRequest(
-                    "model must be explicit before reaching CLI provider".into(),
-                )
-            })?
-            .to_string();
-
-        let prompt = render_prompt_for_cli(&req);
-        if prompt.len() > MAX_PROMPT_BYTES {
-            return Err(ProviderError::InvalidRequest(format!(
-                "prompt size {} exceeds gemini CLI argv cap {} bytes",
-                prompt.len(),
-                MAX_PROMPT_BYTES
-            )));
-        }
-
-        let invocation = SubprocessInvocation {
-            executable: self.executable.clone(),
-            model: model.clone(),
-            prompt,
-            timeout: self.timeout,
-            stripped_env: STRIPPED_ENV_KEYS_UPPER
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        };
-
-        let payload = self.runner.run(invocation).await?;
-        let response_text = extract_response_text(&payload);
-        let usage = extract_usage(&payload, &model);
-
-        let max_chars = req.max_output_tokens.map(|t| (t as usize) * 4);
-        let truncated = match max_chars {
-            // Char-boundary-safe: `response_text[..cap]` panics if `cap`
-            // falls mid-codepoint (multibyte UTF-8 output).
-            Some(cap) if response_text.len() > cap => {
-                crate::http_base::truncate_utf8(&response_text, cap).to_string()
-            }
-            _ => response_text,
-        };
-
-        let events: Vec<Result<ChatEvent, ProviderError>> = vec![
-            Ok(ChatEvent::started(model)),
-            Ok(ChatEvent::Delta { text: truncated }),
-            Ok(ChatEvent::Finished {
-                stop_reason: StopReason::EndTurn,
-                usage,
-            }),
-        ];
-
-        Ok(Box::pin(futures::stream::iter(events)))
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct SubprocessInvocation {
-    pub executable: String,
-    pub model: String,
-    pub prompt: String,
-    pub timeout: Duration,
-    pub stripped_env: HashSet<String>,
-}
-
-#[async_trait]
-pub trait SubprocessRunner: Send + Sync {
-    async fn run(&self, invocation: SubprocessInvocation) -> Result<Value, ProviderError>;
-}
-
-pub struct RealSubprocessRunner;
-
-#[async_trait]
-impl SubprocessRunner for RealSubprocessRunner {
-    async fn run(&self, inv: SubprocessInvocation) -> Result<Value, ProviderError> {
-        let mut cmd = Command::new(&inv.executable);
-        cmd.arg("-p")
-            .arg(&inv.prompt)
-            .arg("-m")
-            .arg(&inv.model)
-            .arg("-o")
-            .arg("json");
-
-        cmd.env_clear();
-        for (k, v) in std::env::vars() {
-            if !inv.stripped_env.contains(&k.to_uppercase()) {
-                cmd.env(k, v);
-            }
-        }
-
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-
-        let mut child = cmd.spawn().map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => ProviderError::CliSubprocessDied {
-                exit_code: None,
-                stderr: format!("`{}` not found in PATH", inv.executable),
-            },
-            std::io::ErrorKind::PermissionDenied => ProviderError::CliSubprocessDied {
-                exit_code: None,
-                stderr: format!("`{}` not executable: {e}", inv.executable),
-            },
-            _ => ProviderError::CliSubprocessDied {
-                exit_code: None,
-                stderr: format!("spawn failed: {e}"),
-            },
-        })?;
-
-        // Drain stdout/stderr concurrently with the wait so a full pipe
-        // can't deadlock the child, while keeping `child` borrowed (not
-        // moved, as `wait_with_output` would) so we can kill it on
-        // timeout.
-        use tokio::io::AsyncReadExt;
-        let mut stdout_pipe = child.stdout.take();
-        let mut stderr_pipe = child.stderr.take();
-        let mut stdout_buf = Vec::new();
-        let mut stderr_buf = Vec::new();
-        let collect = async {
-            let read_out = async {
-                if let Some(p) = stdout_pipe.as_mut() {
-                    let _ = p.read_to_end(&mut stdout_buf).await;
-                }
-            };
-            let read_err = async {
-                if let Some(p) = stderr_pipe.as_mut() {
-                    let _ = p.read_to_end(&mut stderr_buf).await;
-                }
-            };
-            let (status, _, _) = tokio::join!(child.wait(), read_out, read_err);
-            status
-        };
-
-        let status = match tokio::time::timeout(inv.timeout, collect).await {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                return Err(ProviderError::CliSubprocessDied {
-                    exit_code: None,
-                    stderr: format!("wait failed: {e}"),
-                });
-            }
-            Err(_) => {
-                // Explicit kill — don't rely solely on kill_on_drop's
-                // deferred reap. start_kill signals immediately; we reap
-                // so we don't leave a zombie.
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                return Err(ProviderError::CliSubprocessDied {
-                    exit_code: None,
-                    stderr: format!(
-                        "timed out after {}s (model={})",
-                        inv.timeout.as_secs(),
-                        inv.model
-                    ),
-                });
-            }
-        };
-        let output = std::process::Output {
-            status,
-            stdout: stdout_buf,
-            stderr: stderr_buf,
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            // Char-boundary-safe: a raw `stderr[..500]` panics if byte
-            // 500 lands mid-codepoint.
-            let truncated = crate::http_base::truncate_utf8(&stderr, 500).to_string();
-            return Err(ProviderError::CliSubprocessDied {
-                exit_code: output.status.code(),
-                stderr: truncated,
-            });
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // gemini-cli prepends decorative lines (e.g. "Ripgrep is not available…")
-        // before the JSON. Strip everything before the first `{` so we get a
-        // clean payload to parse.
-        let json_start = stdout.find('{').unwrap_or(0);
-        let json_text = &stdout[json_start..];
-
-        let payload: Value = serde_json::from_str(json_text).map_err(|e| {
-            ProviderError::Parse(format!(
-                "gemini CLI non-JSON stdout: {e} (first 300: {})",
-                truncate(&stdout, 300)
-            ))
-        })?;
-
-        if !payload.is_object() {
-            return Err(ProviderError::Parse(format!(
-                "gemini CLI returned non-object JSON ({:?})",
-                payload
-            )));
-        }
-
-        Ok(payload)
-    }
-}
-
-/// Render a chat request as a single string prompt for the CLI.
-/// Embeds the system prompt as a leading `[system]` block — the CLI
-/// has no `--system-prompt` flag.
-fn render_prompt_for_cli(req: &ChatRequest) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(req.messages.len() + 1);
-    if let Some(sys) = &req.system {
-        parts.push(format!("[system]\n{sys}"));
-    }
-    for m in &req.messages {
-        let (role, content) = match m {
-            Message::User { content } => ("user", content),
-            Message::Assistant { content, .. } => ("assistant", content),
-            Message::Tool { content, .. } => ("tool", content),
-            Message::System { content } => ("system", content),
-        };
-        let flat = flatten_blocks(content);
-        parts.push(format!("[{role}]\n{flat}"));
-    }
-    parts.join("\n\n")
-}
-
-fn flatten_blocks(blocks: &[ContentBlock]) -> String {
-    let mut out: Vec<String> = Vec::new();
-    for b in blocks {
-        match b {
-            ContentBlock::Text { text } => out.push(text.clone()),
-            ContentBlock::Image { mime, .. } => {
-                out.push(format!("[image:{mime}]"));
-            }
-        }
-    }
-    out.join("\n")
-}
-
-fn extract_response_text(payload: &Value) -> String {
-    payload
-        .get("response")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn extract_usage(payload: &Value, model: &str) -> Usage {
-    // RFC 6901: `~` and `/` are reference-token metacharacters and must
-    // be escaped (`~`→`~0`, `/`→`~1`) before interpolation, or a model
-    // name containing them silently mis-resolves to None. Order matters:
-    // `~0` first would double-escape the `/` replacement's intro.
-    let escaped_model = model.replace('~', "~0").replace('/', "~1");
-    let tokens = payload
-        .pointer(&format!("/stats/models/{escaped_model}/tokens"))
-        .and_then(|v| v.as_object());
-    let tokens = match tokens {
-        Some(t) => t,
-        None => return Usage::default(),
-    };
-    Usage {
-        input_tokens: tokens.get("prompt").and_then(|v| v.as_u64()).unwrap_or(0),
-        output_tokens: tokens
-            .get("candidates")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        cached_input_tokens: tokens.get("cached").and_then(|v| v.as_u64()).unwrap_or(0),
-        cache_creation_tokens: 0,
-        thinking_tokens: tokens.get("thoughts").and_then(|v| v.as_u64()).unwrap_or(0),
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let trimmed = crate::http_base::truncate_utf8(s, max);
-    if trimmed.len() == s.len() {
-        s.to_string()
-    } else {
-        format!("{trimmed}…")
-    }
-}
-
 /// Convenience builder.
 pub fn gemini_cli(id: impl Into<ProviderId>) -> Arc<GeminiCliProvider> {
     GeminiCliProviderBuilder::new(id).build()
@@ -440,9 +106,14 @@ pub fn gemini_cli(id: impl Into<ProviderId>) -> Arc<GeminiCliProvider> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use tars_types::ModelHint;
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use tars_types::{ChatEvent, ChatRequest, ModelHint, ProviderError, RequestContext, StopReason};
 
+    use crate::provider::LlmProvider;
+
+    /// Records the invocation and returns a canned gemini JSON payload — the
+    /// FakeRunner pattern, now over the shared `SubprocessRunner`.
     struct FakeRunner {
         payload: Value,
         recorded: std::sync::Mutex<Option<SubprocessInvocation>>,
@@ -465,23 +136,17 @@ mod tests {
         (p, runner)
     }
 
+    /// E2E-1 (FR-5): gemini through `AgentCliBackend` + `GeminiCliDialect`
+    /// produces the same Started → Delta → Finished stream + usage as the
+    /// pre-migration provider.
     #[tokio::test]
     async fn happy_path_returns_text_and_usage() {
         let payload = json!({
             "session_id": "abc",
             "response": "Hello there!",
-            "stats": {
-                "models": {
-                    "gemini-2.5-flash": {
-                        "tokens": {
-                            "prompt": 50,
-                            "candidates": 4,
-                            "cached": 10,
-                            "thoughts": 7,
-                        }
-                    }
-                }
-            }
+            "stats": { "models": { "gemini-2.5-flash": {
+                "tokens": { "prompt": 50, "candidates": 4, "cached": 10, "thoughts": 7 }
+            } } }
         });
         let (provider, runner) = make_provider(payload);
         let resp = provider
@@ -499,7 +164,6 @@ mod tests {
 
         let inv = runner.recorded.lock().unwrap().clone().unwrap();
         assert_eq!(inv.model, "gemini-2.5-flash");
-        // Stripped env list MUST contain the API-mode-trigger keys.
         assert!(inv.stripped_env.contains("GEMINI_API_KEY"));
         assert!(inv.stripped_env.contains("GOOGLE_API_KEY"));
         assert!(inv.stripped_env.contains("GOOGLE_APPLICATION_CREDENTIALS"));
@@ -507,8 +171,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_response_field_yields_empty_text() {
-        let payload = json!({"session_id": "x", "stats": {}});
-        let (provider, _) = make_provider(payload);
+        let (provider, _) = make_provider(json!({"session_id": "x", "stats": {}}));
         let resp = provider
             .complete(
                 ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "hi"),
@@ -520,56 +183,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_usage_metadata_returns_default_usage() {
-        let payload = json!({"response": "ok"});
-        let (provider, _) = make_provider(payload);
-        let resp = provider
-            .complete(
-                ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "hi"),
-                RequestContext::test_default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.usage.input_tokens, 0);
-        assert_eq!(resp.usage.output_tokens, 0);
-    }
-
-    #[tokio::test]
     async fn oversized_prompt_rejected_with_invalid_request() {
-        let payload = json!({"response": "should never run"});
-        let (provider, _) = make_provider(payload);
-        let big = "x".repeat(MAX_PROMPT_BYTES + 1);
-        let err = match provider
+        let (provider, _) = make_provider(json!({"response": "should never run"}));
+        let big = "x".repeat(super::super::cli::dialects::gemini::MAX_PROMPT_BYTES + 1);
+        let err = provider
             .complete(
                 ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), big),
                 RequestContext::test_default(),
             )
             .await
-        {
-            Ok(_) => panic!("expected rejection"),
-            Err(e) => e,
-        };
+            .unwrap_err();
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
     }
 
     #[tokio::test]
     async fn truncates_when_max_output_tokens_exceeded() {
         let big = "x".repeat(1000);
-        let payload = json!({"response": big});
-        let (provider, _) = make_provider(payload);
+        let (provider, _) = make_provider(json!({"response": big}));
         let mut req = ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "hi");
-        req.max_output_tokens = Some(10);
+        req.max_output_tokens = Some(10); // → 40 chars
         let resp = provider
             .complete(req, RequestContext::test_default())
             .await
             .unwrap();
         assert_eq!(resp.text.len(), 40);
+        // Backend clamp flips the stop reason when WE truncated (consistent
+        // with claude; the pre-migration provider left it EndTurn).
+        assert_eq!(resp.stop_reason, Some(StopReason::MaxTokens));
     }
 
     #[tokio::test]
     async fn system_message_is_embedded_as_prefix_block() {
-        let payload = json!({"response": "ok"});
-        let (provider, runner) = make_provider(payload);
+        let (provider, runner) = make_provider(json!({"response": "ok"}));
         let _ = provider
             .complete(
                 ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "x")
@@ -583,12 +228,22 @@ mod tests {
         assert!(inv.prompt.contains("[user]\nx"));
     }
 
-    #[test]
-    fn env_strip_list_uppercase_and_includes_api_key_triggers() {
-        for k in STRIPPED_ENV_KEYS_UPPER {
-            assert_eq!(*k, k.to_uppercase());
-        }
-        assert!(STRIPPED_ENV_KEYS_UPPER.contains(&"GEMINI_API_KEY"));
-        assert!(STRIPPED_ENV_KEYS_UPPER.contains(&"GOOGLE_API_KEY"));
+    #[tokio::test]
+    async fn emits_started_delta_finished_in_order() {
+        let (provider, _) = make_provider(json!({"response": "hi"}));
+        use futures::StreamExt;
+        let events: Vec<ChatEvent> = Arc::clone(&provider)
+            .stream(
+                ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "hi"),
+                RequestContext::test_default(),
+            )
+            .await
+            .unwrap()
+            .map(|e| e.unwrap())
+            .collect()
+            .await;
+        assert!(matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "gemini-2.5-flash"));
+        assert!(matches!(&events[1], ChatEvent::Delta { text } if text == "hi"));
+        assert!(matches!(&events[2], ChatEvent::Finished { .. }));
     }
 }

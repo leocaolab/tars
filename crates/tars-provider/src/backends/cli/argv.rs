@@ -1,14 +1,22 @@
-//! Invocation-shape types and argv construction for the Claude CLI
-//! backend. Holds the "what flags go where" knowledge: the
-//! [`SubprocessRunner`] trait every runner implements, the
-//! [`SubprocessInvocation`] payload, the env-strip table, and the
-//! pure functions ([`build_argv`], [`build_argv_with`],
-//! [`streaming_enabled`]) that translate a builder configuration into
-//! the exact tokens that follow `claude`.
+//! Invocation-shape types and argv construction for the CLI-delegate
+//! backends. This is the SHARED machinery, lifted verbatim out of
+//! `claude_cli/argv.rs` (Doc 32 §7 reuse map) so every CLI dialect can
+//! reuse the [`SubprocessRunner`] trait and the [`SubprocessInvocation`]
+//! payload.
 //!
-//! Pulled out of the original 1328-line `claude_cli.rs` so that the
-//! argv-shape unit tests can exercise this layer without dragging in
-//! `tokio::process::Command` or a real `claude` binary.
+//! Holds the "what flags go where" knowledge: the [`SubprocessRunner`]
+//! trait every runner implements, the [`SubprocessInvocation`] payload,
+//! the env-strip table, and the pure functions ([`build_argv`],
+//! [`build_argv_with`], [`streaming_enabled`]) that translate a builder
+//! configuration into the exact tokens that follow `claude`.
+//!
+//! ## M0 note
+//! The argv builder ([`build_argv_with`]) and the field enums
+//! ([`ClaudeCliTools`], [`ClaudeCliEffort`]) are still claude-flavored —
+//! they were lifted here as the shared base so the `security_delegate_cli`
+//! integration test keeps driving `RealSubprocessRunner::run` with the
+//! same [`SubprocessInvocation`] fields. M1 generalizes the invocation and
+//! moves the per-CLI argv knowledge fully behind each `CliDialect::argv`.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -23,7 +31,7 @@ use tars_types::{ChatRequest, ContentBlock, Message, ProviderError};
 /// Case-insensitive — Windows preserves env var case, so `Anthropic_Api_Key`
 /// would slip past a literal-equality check (the Python comment is exactly
 /// about this hazard).
-pub(super) const STRIPPED_ENV_KEYS_UPPER: &[&str] = &[
+pub(crate) const STRIPPED_ENV_KEYS_UPPER: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
@@ -60,7 +68,7 @@ pub enum ClaudeCliEffort {
 }
 
 impl ClaudeCliEffort {
-    pub(super) fn as_arg(self) -> &'static str {
+    pub(crate) fn as_arg(self) -> &'static str {
         match self {
             Self::Low => "low",
             Self::Medium => "medium",
@@ -96,10 +104,60 @@ pub struct SubprocessInvocation {
     /// operate — set it to the fix worktree so the agent edits the right
     /// tree, not arc's process cwd. `None` = inherit the parent cwd.
     pub cwd: Option<PathBuf>,
+    /// OS-confinement policy for the spawn (G10). Threaded from
+    /// `RequestContext.sandbox` (resolved from the `[sandbox]` section +
+    /// `--sandbox` flag). `DangerFullAccess` (the default) leaves the spawn
+    /// unconfined — in which case the legacy `TARS_CLAUDE_SANDBOX=1` env gate
+    /// still applies a workspace-write jail (back-compat). A confining mode
+    /// here is the real policy path and takes precedence over the env gate.
+    pub sandbox: tars_sandbox::SandboxPolicy,
 }
 
-/// Abstraction for "run `claude` and get back its JSON payload".
-/// Production impl spawns a real subprocess; tests substitute a fake.
+impl SubprocessInvocation {
+    /// Build a CLI-neutral invocation for a **non-claude** dialect: only the
+    /// fields the shared spawn machinery actually needs (executable, model,
+    /// prompt, timeout, env-strip table, cwd). The claude-specific argv knobs
+    /// (`system`/`tools`/`bare`/`effort`/`exclude_dynamic_sections`/
+    /// `extra_args`) are inert for these dialects — each builds its own argv in
+    /// [`CliDialect::argv`](super::dialect::CliDialect::argv) and its paired
+    /// runner. This is the M1 seam: the invocation is still claude-shaped, so
+    /// gemini/codex fill the neutral fields and leave the claude knobs at their
+    /// defaults. Doc 32 M4/G10 generalizes the invocation so the inert fields
+    /// go away entirely.
+    pub fn neutral(
+        executable: String,
+        model: String,
+        prompt: String,
+        timeout: Duration,
+        stripped_env: HashSet<String>,
+        cwd: Option<PathBuf>,
+        sandbox: tars_sandbox::SandboxPolicy,
+    ) -> Self {
+        Self {
+            executable,
+            model,
+            system: None,
+            prompt,
+            timeout,
+            stripped_env,
+            tools: ClaudeCliTools::Disabled,
+            bare: false,
+            effort: None,
+            exclude_dynamic_sections: false,
+            extra_args: Vec::new(),
+            cwd,
+            sandbox,
+        }
+    }
+}
+
+/// Abstraction for "run a delegate CLI and get back its JSON payload".
+/// The production impls spawn a real subprocess (through the shared
+/// [`build_sandboxed_command`](super::subprocess::build_sandboxed_command)
+/// OS-jail primitive); tests substitute a fake. Each CLI has its own runner
+/// because the output framing differs (claude/gemini: one buffered JSON
+/// object; codex: a JSONL array), but they all share the sandbox + env-strip
+/// + spawn machinery.
 #[async_trait]
 pub trait SubprocessRunner: Send + Sync {
     async fn run(&self, invocation: SubprocessInvocation) -> Result<Value, ProviderError>;
@@ -141,7 +199,7 @@ pub(crate) fn streaming_enabled() -> bool {
 // `streaming_enabled()` exactly once — see `RealSubprocessRunner::run`).
 // This convenience wrapper remains for the argv unit tests.
 #[allow(dead_code)]
-pub(super) fn build_argv(inv: &SubprocessInvocation) -> Vec<String> {
+pub(crate) fn build_argv(inv: &SubprocessInvocation) -> Vec<String> {
     build_argv_with(inv, streaming_enabled())
 }
 
@@ -150,7 +208,7 @@ pub(super) fn build_argv(inv: &SubprocessInvocation) -> Vec<String> {
 /// out so tests can exercise both modes without process-global env
 /// mutation (workspace forbids `unsafe`; Rust 2024 makes `env::set_var`
 /// `unsafe`).
-pub(super) fn build_argv_with(inv: &SubprocessInvocation, streaming: bool) -> Vec<String> {
+pub(crate) fn build_argv_with(inv: &SubprocessInvocation, streaming: bool) -> Vec<String> {
     let mut argv: Vec<String> = vec![
         "-p".into(),
         "-".into(),
@@ -259,7 +317,7 @@ pub(super) fn build_argv_with(inv: &SubprocessInvocation, streaming: bool) -> Ve
 /// transcript should prefer a structured backend (HTTP / claude_sdk).
 /// For the single-turn case this backend is mainly used for, the risk
 /// is moot — there are no intermediate boundaries to spoof.
-pub(super) fn serialize_messages_for_cli(req: &ChatRequest) -> String {
+pub(crate) fn serialize_messages_for_cli(req: &ChatRequest) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(req.messages.len());
     for m in &req.messages {
         let (role, content) = match m {

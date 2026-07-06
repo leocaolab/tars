@@ -658,6 +658,12 @@ async fn drain_one_call(
     // agent edits the wrong tree. Forward the agent's working dir so the
     // provider can set the subprocess `current_dir`.
     req_ctx.cwd = ctx.cwd.clone();
+    // OS-confinement policy (G10). A CLI-delegate provider spawns a subprocess
+    // that runs its OWN Read/Edit/Bash; forward the per-role sandbox so that
+    // spawn is jailed by the same `[sandbox]`/`--sandbox` policy the worker's
+    // own tools obey — unifying the delegate spawn onto the real policy path
+    // (the legacy `TARS_CLAUDE_SANDBOX` env gate still works as a fallback).
+    req_ctx.sandbox = ctx.sandbox.clone();
 
     let llm: Arc<dyn LlmService> = ctx.llm.clone();
 

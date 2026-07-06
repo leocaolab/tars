@@ -49,6 +49,8 @@ pub use tool_buffer::ToolCallBuffer;
 
 // Re-export concrete backends at the crate root for ergonomic use.
 pub use backends::anthropic::{AnthropicAdapter, AnthropicProvider, AnthropicProviderBuilder};
+#[cfg(feature = "bedrock")]
+pub use backends::bedrock::{BedrockProvider, BedrockProviderBuilder};
 pub use backends::claude_cli::{
     ClaudeCliEffort, ClaudeCliProvider, ClaudeCliProviderBuilder, ClaudeCliTools,
     SubprocessRunner as ClaudeCliSubprocessRunner, claude_cli,

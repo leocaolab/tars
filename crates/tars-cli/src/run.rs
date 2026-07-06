@@ -126,7 +126,11 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
 
     let outcome = outcome?;
     if !args.no_summary {
-        print_summary(dispatch.cost_provider.as_ref(), &outcome);
+        print_summary(
+            dispatch.cost_provider.as_ref(),
+            &dispatch.model_label,
+            &outcome,
+        );
         if let Some(logger) = &trajectory_logger {
             eprintln!("── trajectory: {}", logger.id());
         }
@@ -426,6 +430,11 @@ fn build_request(args: &RunArgs, model: &str, prompt: &str) -> ChatRequest {
 /// What we collected by the time the stream ended.
 #[derive(Debug, Default)]
 pub struct StreamOutcome {
+    /// The model that actually served this response, taken from the
+    /// `Started` event. This is the honest key for per-model pricing:
+    /// a provider may route `--model foo` to a concrete `foo-2025-xx`,
+    /// and cost must be attributed to what actually answered.
+    pub actual_model: String,
     pub usage: Usage,
     pub stop_reason: Option<tars_types::StopReason>,
     /// True if we ever wrote *something* to stdout. Lets us print
@@ -457,8 +466,12 @@ async fn drain_stream_to_stdout(
 
     while let Some(ev) = stream.next().await {
         match ev.context("stream error")? {
-            ChatEvent::Started { cache_hit, .. } => {
+            ChatEvent::Started {
+                cache_hit,
+                actual_model,
+            } => {
                 outcome.cache_hit = cache_hit;
+                outcome.actual_model = actual_model;
             }
             ChatEvent::Delta { text } => {
                 out.write_all(text.as_bytes()).context("stdout write")?;
@@ -486,8 +499,12 @@ async fn drain_stream_to_stdout(
     Ok(outcome)
 }
 
-fn print_summary(provider: &dyn tars_provider::LlmProvider, outcome: &StreamOutcome) {
-    let cost = provider.cost(&outcome.usage);
+fn print_summary(
+    provider: &dyn tars_provider::LlmProvider,
+    requested_model: &str,
+    outcome: &StreamOutcome,
+) {
+    let cost = cost_for_outcome(provider, requested_model, outcome);
     if outcome.wrote_anything {
         // Push the summary onto its own line so it doesn't glue to the response.
         let _ = writeln!(std::io::stdout());
@@ -509,6 +526,42 @@ fn print_summary(provider: &dyn tars_provider::LlmProvider, outcome: &StreamOutc
         outcome.usage.cached_input_tokens,
         format_cost(cost),
     );
+}
+
+/// USD cost for a finished stream, priced by the model that ACTUALLY
+/// served it (`outcome.actual_model`) rather than a per-provider rate.
+///
+/// Every backend builds its `Capabilities` with `Pricing::default()`
+/// (all zeros) — a deliberate choice, since a provider serves many
+/// models at different rates, so there is no single honest per-provider
+/// price. The real per-model rates live in the model KB
+/// (`data/models.toml`), keyed by model id. Resolution order:
+///
+/// 1. `actual_model` — the id the provider reported serving. Most
+///    precise: a routing/tier layer may serve a different model than
+///    asked for, and cost must follow what answered.
+/// 2. `requested_model` — the model we asked for (`--model` / the
+///    provider's `default_model`). This is the fallback for providers
+///    that echo a dated snapshot id: OpenAI answers `gpt-5.4` as
+///    `gpt-5.4-2026-03-05`, which is not a KB id, but the requested
+///    `gpt-5.4` is — and it is the same model family / price. Keyed off
+///    the requested label rather than string-munging the date, so it
+///    stays correct as snapshots roll.
+/// 3. `provider.cost()` — the provider's own per-provider rate. Correct
+///    `$0` for subscription/local backends (local servers, CLI backends,
+///    custom deployments — none of which are in the KB).
+///
+/// Never panics.
+fn cost_for_outcome(
+    provider: &dyn tars_provider::LlmProvider,
+    requested_model: &str,
+    outcome: &StreamOutcome,
+) -> CostUsd {
+    tars_config::MODEL_KB
+        .pricing(&outcome.actual_model)
+        .or_else(|| tars_config::MODEL_KB.pricing(requested_model))
+        .map(|p| p.cost_for(&outcome.usage))
+        .unwrap_or_else(|| provider.cost(&outcome.usage))
 }
 
 fn format_cost(cost: CostUsd) -> String {
@@ -566,5 +619,78 @@ mod tests {
         assert_eq!(format_cost(CostUsd(0.0)), "$0 (free)");
         assert_eq!(format_cost(CostUsd(0.000_012)), "$0.000012");
         assert_eq!(format_cost(CostUsd(0.0123)), "$0.0123");
+    }
+
+    fn outcome_for(model: &str, input: u64, output: u64) -> StreamOutcome {
+        StreamOutcome {
+            actual_model: model.into(),
+            usage: Usage {
+                input_tokens: input,
+                output_tokens: output,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cost_uses_kb_pricing_for_a_known_actual_model() {
+        // A provider whose own `Pricing` is the all-zeros default (the
+        // reality for openai/anthropic/deepseek backends) must STILL
+        // report real cost, because pricing is resolved per-model from
+        // the KB via `actual_model`. `gpt-5.4` is a KB model at
+        // $2.50/1M input, so 1M input tokens = $2.50.
+        use tars_provider::LlmProvider as _;
+        let provider =
+            tars_provider::MockProvider::new("openai", tars_provider::CannedResponse::text("hi"));
+        // Sanity: the provider's own per-provider price really is $0.
+        assert_eq!(
+            provider.cost(&outcome_for("gpt-5.4", 1_000_000, 0).usage),
+            CostUsd(0.0)
+        );
+
+        let cost =
+            cost_for_outcome(provider.as_ref(), "gpt-5.4", &outcome_for("gpt-5.4", 1_000_000, 0));
+        assert!(
+            (cost.as_f64() - 2.50).abs() < 1e-9,
+            "expected KB-priced $2.50 for 1M gpt-5.4 input tokens, got {}",
+            cost.as_f64()
+        );
+    }
+
+    #[test]
+    fn cost_falls_back_to_requested_model_for_a_dated_snapshot() {
+        // OpenAI answers `gpt-5.4` with a dated snapshot id like
+        // `gpt-5.4-2026-03-05` that is NOT itself a KB id. Pricing must
+        // still resolve via the requested `gpt-5.4` label (same family
+        // / price) rather than collapsing to $0.
+        let provider =
+            tars_provider::MockProvider::new("openai", tars_provider::CannedResponse::text("hi"));
+        let cost = cost_for_outcome(
+            provider.as_ref(),
+            "gpt-5.4",
+            &outcome_for("gpt-5.4-2026-03-05", 1_000_000, 0),
+        );
+        assert!(
+            (cost.as_f64() - 2.50).abs() < 1e-9,
+            "dated snapshot should price via requested gpt-5.4 ($2.50), got {}",
+            cost.as_f64()
+        );
+    }
+
+    #[test]
+    fn cost_falls_back_to_provider_pricing_for_unknown_model_without_panicking() {
+        // A model absent from the KB (local server / CLI backend /
+        // custom deployment) — neither actual nor requested id is in the
+        // KB — must not panic; it falls back to the provider's own
+        // `cost()`, the correct $0 for a subscription/zero-priced backend.
+        let provider =
+            tars_provider::MockProvider::new("local", tars_provider::CannedResponse::text("hi"));
+        let cost = cost_for_outcome(
+            provider.as_ref(),
+            "some-unlisted-local-model-xyz",
+            &outcome_for("some-unlisted-local-model-xyz", 1_000_000, 1_000_000),
+        );
+        assert_eq!(cost, CostUsd(0.0));
     }
 }

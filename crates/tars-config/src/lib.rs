@@ -24,6 +24,7 @@
 pub mod builtin;
 pub mod error;
 pub mod manager;
+pub mod model_kb;
 pub mod paths;
 pub mod providers;
 pub mod routing;
@@ -35,6 +36,10 @@ pub use builtin::{
 };
 pub use error::ConfigError;
 pub use manager::{Config, ConfigManager};
+pub use model_kb::{
+    KbModality, ModelEntry, ModelKb, ModelStatus, ModelTier, ProviderModels, Thinking,
+    ThinkingParam, MODEL_KB,
+};
 pub use paths::default_config_path;
 pub use providers::{
     CapabilitiesOverrides, ClaudeCliEffortConfig, ClaudeCliToolsConfig, ClaudeCliToolsKeyword,

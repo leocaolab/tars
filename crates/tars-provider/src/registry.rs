@@ -21,6 +21,9 @@ use tars_types::{Auth, ProviderId};
 use crate::auth::AuthResolver;
 use crate::backends::anthropic::AnthropicProviderBuilder;
 use crate::backends::cassette::CassetteProvider;
+use crate::backends::cli::{
+    AgentCliBackend, AntigravityDialect, OpenCodeDialect, SharedCliRunner,
+};
 use crate::backends::claude_cli::ClaudeCliProviderBuilder;
 use crate::backends::claude_sdk::ClaudeSdkProviderBuilder;
 use crate::backends::codex_cli::{CodexCliProviderBuilder, SandboxMode};
@@ -43,6 +46,17 @@ pub enum RegistryError {
     /// Failure constructing the underlying HTTP base.
     #[error("http base init: {0}")]
     HttpBaseInit(String),
+    /// A provider was declared whose backend is behind a disabled cargo
+    /// feature. Carries the provider id + the feature to rebuild with, so
+    /// the operator gets an actionable message rather than a silent drop.
+    #[error(
+        "provider {id}: backend requires the `{feature}` cargo feature — \
+         rebuild tars with `--features tars-provider/{feature}`"
+    )]
+    FeatureDisabled {
+        id: ProviderId,
+        feature: &'static str,
+    },
 }
 
 /// Built map of providers, indexed by id. Cheap to clone (everything is Arc).
@@ -156,6 +170,21 @@ impl ProviderRegistry {
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
     }
+}
+
+/// Capabilities for a black-box CLI-delegate provider (opencode/antigravity).
+/// Text-only, no structured/tool surface exposed back to TARS (the delegate
+/// runs its OWN agent loop), subscription-billed, prompt cache delegated to the
+/// binary. Output cap is post-clamped by the backend (these CLIs take no
+/// `--max-output-tokens`).
+fn cli_delegate_capabilities() -> tars_types::Capabilities {
+    let mut caps = tars_types::Capabilities::text_only_baseline(tars_types::Pricing::default());
+    caps.max_context_tokens = 200_000;
+    caps.max_output_tokens = 64_000;
+    caps.supports_cancel = false; // spawn-per-call; cancel is via Drop only
+    caps.prompt_cache = tars_types::PromptCacheKind::Delegated;
+    caps.streaming = false;
+    caps
 }
 
 /// Build a single provider from its [`ProviderConfig`] variant.
@@ -288,6 +317,31 @@ fn build_one(
             auth_resolver,
         ),
 
+        // AWS Bedrock (Doc 31). Keyless: the arm ignores `http` and
+        // `auth_resolver` (Bedrock owns its transport + SigV4 auth via the
+        // AWS SDK). Only built when the `bedrock` feature is on; the AWS-
+        // specific work lives in the `tars-bedrock` leaf crate, adapted to
+        // `LlmProvider` by `backends::bedrock` (kept here to avoid a crate
+        // cycle — see that module's docs).
+        #[cfg(feature = "bedrock")]
+        ProviderConfig::Bedrock {
+            region,
+            model,
+            profile,
+        } => crate::backends::bedrock::BedrockProviderBuilder::new(id, region.clone(), model.clone())
+            .profile(profile.clone())
+            .build(),
+
+        // Same variant, feature OFF: fail with an actionable message
+        // instead of silently dropping the provider.
+        #[cfg(not(feature = "bedrock"))]
+        ProviderConfig::Bedrock { .. } => {
+            return Err(RegistryError::FeatureDisabled {
+                id,
+                feature: "bedrock",
+            });
+        }
+
         ProviderConfig::ClaudeCli {
             executable,
             timeout_secs,
@@ -374,6 +428,46 @@ fn build_one(
                 .sandbox(runtime_sandbox)
                 .skip_git_repo_check(*skip_git_repo_check)
                 .build()
+        }
+
+        // opencode (Doc 32 M2): the shared AgentCliBackend driven by an
+        // OpenCodeDialect; its runner spawns through the tars-sandbox OS jail.
+        ProviderConfig::Opencode {
+            executable,
+            timeout_secs,
+            default_model: _,
+        } => {
+            let dialect = Arc::new(OpenCodeDialect::new(
+                executable.clone(),
+                Duration::from_secs(*timeout_secs),
+            ));
+            let runner = Arc::new(SharedCliRunner::new(dialect.clone()));
+            Arc::new(AgentCliBackend::new(
+                id,
+                cli_delegate_capabilities(),
+                dialect,
+                runner,
+            ))
+        }
+
+        // Antigravity (Doc 32 M3): the shared AgentCliBackend driven by an
+        // AntigravityDialect (the first OutputMode::Text dialect); sandboxed.
+        ProviderConfig::Antigravity {
+            executable,
+            timeout_secs,
+            default_model: _,
+        } => {
+            let dialect = Arc::new(AntigravityDialect::new(
+                executable.clone(),
+                Duration::from_secs(*timeout_secs),
+            ));
+            let runner = Arc::new(SharedCliRunner::new(dialect.clone()));
+            Arc::new(AgentCliBackend::new(
+                id,
+                cli_delegate_capabilities(),
+                dialect,
+                runner,
+            ))
         }
 
         ProviderConfig::Mock { canned_response } => {
@@ -480,6 +574,57 @@ mod tests {
         // user entries survived the round-trip.
         assert!(mapped.get(&ProviderId::new("a")).is_some());
         assert!(mapped.get(&ProviderId::new("b")).is_some());
+    }
+
+    /// Caps honesty (Doc 32 M4): every CLI delegate runs through
+    /// `AgentCliBackend`, which drains the delegate's stdout to completion
+    /// and only then emits ChatEvents. None deliver tokens incrementally and
+    /// none can be cancelled mid-turn, so all 5 dialects MUST advertise
+    /// `streaming: false` and `supports_cancel: false`. Guards against a
+    /// delegate re-declaring a liveness capability its buffered runtime path
+    /// does not deliver.
+    #[test]
+    fn every_cli_delegate_advertises_buffered_caps() {
+        let cfg = ConfigManager::load_from_str(
+            r#"
+            [providers.claude]
+            type = "claude_cli"
+            default_model = "opus"
+
+            [providers.gemini]
+            type = "gemini_cli"
+            default_model = "gemini-2.5-pro"
+
+            [providers.codex]
+            type = "codex_cli"
+            default_model = "gpt-5-codex"
+
+            [providers.opencode]
+            type = "opencode"
+            default_model = "anthropic/claude-sonnet-4-5"
+
+            [providers.antigravity]
+            type = "antigravity"
+            default_model = "gemini-2.5-pro"
+            "#,
+        )
+        .unwrap();
+        let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
+
+        for id in ["claude", "gemini", "codex", "opencode", "antigravity"] {
+            let p = reg
+                .get(&ProviderId::new(id))
+                .unwrap_or_else(|| panic!("delegate `{id}` should be built"));
+            let caps = p.capabilities();
+            assert!(
+                !caps.streaming,
+                "delegate `{id}` is buffered (emit-after-turn) but advertises streaming: true"
+            );
+            assert!(
+                !caps.supports_cancel,
+                "delegate `{id}` cannot be cancelled mid-turn but advertises supports_cancel: true"
+            );
+        }
     }
 
     #[tokio::test]
@@ -636,6 +781,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.text, "hello from config");
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn bedrock_builds_from_keyless_config_when_feature_on() {
+        // E2E-5 (build half): a keyless `type = "bedrock"` block builds a
+        // live `Arc<dyn LlmProvider>` when the `bedrock` feature is on.
+        // No AWS call — construction is lazy (client built on first use).
+        let cfg = ConfigManager::load_from_str(
+            r#"
+            [providers.claude_bedrock]
+            type = "bedrock"
+            region = "us-east-1"
+            model = "us.anthropic.claude-sonnet-4-5-v1:0"
+            "#,
+        )
+        .unwrap();
+        let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
+        let p = reg
+            .get(&ProviderId::new("claude_bedrock"))
+            .expect("bedrock provider built");
+        assert_eq!(p.id().as_str(), "claude_bedrock");
+        // Its configured default model is captured for tier resolution.
+        assert_eq!(
+            reg.default_model(&ProviderId::new("claude_bedrock")),
+            Some("us.anthropic.claude-sonnet-4-5-v1:0")
+        );
+    }
+
+    #[cfg(not(feature = "bedrock"))]
+    #[test]
+    fn bedrock_config_without_feature_errors_actionably() {
+        // Without the feature, a declared bedrock provider must fail the
+        // build with a clear FeatureDisabled error — never a silent drop.
+        let cfg = ConfigManager::load_from_str(
+            r#"
+            [providers.claude_bedrock]
+            type = "bedrock"
+            region = "us-east-1"
+            model = "us.anthropic.claude-sonnet-4-5-v1:0"
+            "#,
+        )
+        .unwrap();
+        match ProviderRegistry::from_config(&cfg.providers, http(), basic()) {
+            Err(RegistryError::FeatureDisabled { id, feature }) => {
+                assert_eq!(id.as_str(), "claude_bedrock");
+                assert_eq!(feature, "bedrock");
+            }
+            Err(other) => panic!("expected FeatureDisabled, got {other:?}"),
+            Ok(_) => panic!("expected FeatureDisabled error, got a built registry"),
+        }
+    }
+
+    #[test]
+    fn builds_opencode_and_antigravity_cli_delegates() {
+        // Doc 32 M2/M3: both new CLI delegates build into live providers via
+        // the shared AgentCliBackend, and their configured default models are
+        // captured for tier resolution.
+        let cfg = ConfigManager::load_from_str(
+            r#"
+            [providers.oc]
+            type = "opencode"
+            default_model = "anthropic/claude-sonnet-4-5"
+
+            [providers.agy]
+            type = "antigravity"
+            default_model = "gemini-2.5-pro"
+            "#,
+        )
+        .unwrap();
+        let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
+        assert!(reg.get(&ProviderId::new("oc")).is_some());
+        assert!(reg.get(&ProviderId::new("agy")).is_some());
+        assert_eq!(
+            reg.default_model(&ProviderId::new("oc")),
+            Some("anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(reg.default_model(&ProviderId::new("agy")), Some("gemini-2.5-pro"));
     }
 
     #[test]

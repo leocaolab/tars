@@ -68,9 +68,32 @@ fn default_capabilities() -> Capabilities {
     let mut modalities = HashSet::new();
     modalities.insert(Modality::Text);
     modalities.insert(Modality::Image);
+
+    // Source context/output limits + pricing from the model KB
+    // (`data/models.toml`) for Gemini's default model, instead of stale
+    // hardcoded numbers and a zero `Pricing` (the observed "$0 (free)"
+    // budgeting bug). Fields the KB doesn't carry per-row keep the
+    // provider-behavioral defaults below. Falls back to the previous
+    // constants if the default model is somehow absent from the KB.
+    let kb = &tars_config::MODEL_KB;
+    let entry = kb.default_model("gemini").and_then(|id| kb.find(id));
+    let max_context_tokens =
+        entry.and_then(|m| m.context).map(|c| c as u32).unwrap_or(1_048_576);
+    let max_output_tokens =
+        entry.and_then(|m| m.max_output).map(|o| o as u32).unwrap_or(8_192);
+    let pricing = entry
+        .map(|m| {
+            let mut p = m.pricing();
+            // Gemini reports `thoughts_token_count` separately and bills
+            // it at the output rate (see usage.rs / models.toml header).
+            p.thinking_per_million = p.output_per_million;
+            p
+        })
+        .unwrap_or_default();
+
     Capabilities {
-        max_context_tokens: 1_048_576, // Gemini 1.5+ class
-        max_output_tokens: 8_192,
+        max_context_tokens,
+        max_output_tokens,
         supports_tool_use: true,
         supports_parallel_tool_calls: true,
         supports_structured_output: StructuredOutputMode::StrictSchema,
@@ -81,7 +104,7 @@ fn default_capabilities() -> Capabilities {
         streaming: true,
         modalities_in: modalities.clone(),
         modalities_out: HashSet::from([Modality::Text]),
-        pricing: tars_types::Pricing::default(),
+        pricing,
     }
 }
 

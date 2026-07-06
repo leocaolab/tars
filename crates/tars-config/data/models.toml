@@ -1,0 +1,326 @@
+# Model Knowledge Base — DATA, not code.
+#
+# Model IDs, prices, context windows and capabilities change FASTER than tars
+# releases. They must NOT live as string literals in `builtin.rs` / pricing /
+# capabilities code — a hardcoded default goes stale in months (as of 2026-07,
+# the old `gpt-4o` / `claude-opus-4-7` / `gemini-2.5-pro` defaults were all a
+# generation behind, and `gemini-2.5-pro` is thinking-only so it broke the
+# thinking-off default). Update THIS FILE when a model ships or retires — no code
+# change, no recompile.
+#
+# Every row below was verified against the provider's OFFICIAL docs on the date
+# in `verified`. Fields flagged `# VERIFY` disagreed across sources — re-check the
+# official pricing page before relying on the number.
+#
+# Schema (per model): id (exact API string), tier, prices USD/1M tokens
+# (input / output / cached_input), context (input tokens), max_output,
+# thinking ("none" = never reasons | "optional" = toggleable | "only" = mandatory,
+# rejects an "off" signal), modalities (input), status ("ga"|"preview"|
+# "deprecated"), retire (ISO date if deprecated), aliases.
+
+schema_version = 1
+verified = "2026-07-05"
+
+# ─────────────────────────────── OpenAI ───────────────────────────────
+# base: https://api.openai.com/v1  ·  key: OPENAI_API_KEY
+[providers.openai]
+default = "gpt-5.4"          # reasoning defaults to `none` → fast/cheap, toggleable up
+coding_default = "gpt-5.3-codex"
+
+[[providers.openai.models]]
+id = "gpt-5.5"
+tier = "flagship"
+input = 5.00
+output = 30.00
+cached_input = 0.50
+context = 1_050_000
+max_output = 128_000
+thinking = "optional"        # default effort `medium`; supports none..xhigh
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-5.4"
+tier = "mid"
+input = 2.50
+output = 15.00
+cached_input = 0.25
+context = 1_050_000
+max_output = 128_000
+thinking = "optional"        # default effort `none`
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-5.4-mini"
+tier = "fast"
+input = 0.75
+output = 4.50
+cached_input = 0.075
+context = 400_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-5.4-nano"
+tier = "fast"
+input = 0.20
+output = 1.25
+cached_input = 0.02
+context = 400_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-5.3-codex"
+tier = "coding"
+input = 1.75
+output = 14.00
+cached_input = 0.175
+context = 400_000
+max_output = 128_000
+thinking = "only"            # min effort `low`; no `none`
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-4o"
+tier = "legacy"
+thinking = "none"
+modalities = ["text", "vision"]
+status = "deprecated"        # superseded by gpt-5.x; was tars' old default
+
+# ───────────────────────────── Anthropic ──────────────────────────────
+# base: https://api.anthropic.com  ·  key: ANTHROPIC_API_KEY
+# Native usage shape: `input_tokens` is FRESH-only; cache_read / cache_creation
+# are SEPARATE additive fields. Adapters MUST fold into the tars total
+# (input = fresh + cache_read + cache_creation). See usage.rs convention.
+[providers.anthropic]
+default = "claude-opus-4-8"
+
+[[providers.anthropic.models]]
+id = "claude-opus-4-8"
+tier = "flagship"
+input = 5.00
+output = 25.00
+cached_input = 0.50          # cache-read (0.1x); write = 6.25 (5m) / 10.00 (1h)
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"        # adaptive, toggleable; effort defaults `high`
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.anthropic.models]]
+id = "claude-fable-5"
+tier = "flagship"
+input = 10.00
+output = 50.00
+cached_input = 1.00
+context = 1_000_000
+max_output = 128_000
+thinking = "only"            # adaptive always-on; explicit `disabled` → 400
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.anthropic.models]]
+id = "claude-sonnet-5"
+tier = "mid"
+input = 3.00                 # $2.00 intro through 2026-08-31, then $3.00
+output = 15.00               # $10.00 intro through 2026-08-31
+cached_input = 0.30
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.anthropic.models]]
+id = "claude-haiku-4-5"
+tier = "fast"
+input = 1.00
+output = 5.00
+cached_input = 0.10
+context = 200_000
+max_output = 64_000
+thinking = "optional"        # extended thinking via budget_tokens
+modalities = ["text", "vision"]
+status = "ga"
+aliases = ["claude-haiku-4-5-20251001"]
+
+[[providers.anthropic.models]]
+id = "claude-opus-4-7"
+tier = "legacy"
+input = 5.00
+output = 25.00
+cached_input = 0.50
+context = 1_000_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "deprecated"        # legacy; was tars' old default (opus-4-8 supersedes)
+
+# ────────────────────────────── Gemini ────────────────────────────────
+# base: Google Generative Language API  ·  key: GEMINI_API_KEY
+# "Off" knob differs by generation: 3.x uses `thinking_level:"minimal"`,
+# 2.5 uses `thinkingBudget:0`. thinking="only" models REJECT any off signal
+# (this is the gemini-2.5-pro bug). Prices are the ≤200k-token tier.
+[providers.gemini]
+default = "gemini-3.5-flash"  # NOT thinking-only → an Off default actually works
+
+[[providers.gemini.models]]
+id = "gemini-3.5-flash"
+tier = "fast"
+input = 1.50
+output = 9.00
+cached_input = 0.15
+context = 1_000_000
+max_output = 65_000
+thinking = "optional"        # levels minimal/low/medium/high; `minimal` = off
+thinking_param = "level"     # 3.x → thinking_level (docs), not thinkingBudget
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"
+
+[[providers.gemini.models]]
+id = "gemini-3.1-pro-preview"
+tier = "flagship"
+input = 2.00                 # >200k tier: 4.00 in / 18.00 out
+output = 12.00
+cached_input = 0.20
+context = 1_000_000
+max_output = 64_000
+thinking = "only"            # levels low/medium/high; default high; cannot disable
+thinking_param = "level"     # 3.x
+modalities = ["text", "vision", "audio", "video"]
+status = "preview"
+
+[[providers.gemini.models]]
+id = "gemini-3.1-flash-lite"
+tier = "lite"
+input = 0.25
+output = 1.50
+cached_input = 0.025
+context = 1_000_000
+max_output = 64_000
+thinking = "optional"        # default `minimal` (off)
+thinking_param = "level"     # 3.x
+modalities = ["text", "vision", "audio", "video"]
+status = "ga"
+
+[[providers.gemini.models]]
+id = "gemini-2.5-pro"
+tier = "legacy"
+input = 1.25                 # >200k tier: 2.50 / 15.00
+output = 10.00
+cached_input = 0.125
+context = 1_000_000
+thinking = "only"            # thinkingBudget min ~128; 0 REJECTED — the bug source
+thinking_param = "budget"    # 2.5
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"                # previous-gen but still served
+
+[[providers.gemini.models]]
+id = "gemini-2.5-flash"
+tier = "fast"
+input = 0.30
+output = 2.50
+cached_input = 0.03
+context = 1_000_000
+thinking = "optional"        # thinkingBudget:0 disables
+thinking_param = "budget"    # 2.5
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"
+
+[[providers.gemini.models]]
+id = "gemini-2.0-flash"
+tier = "legacy"
+thinking = "optional"
+status = "deprecated"        # SHUT DOWN — 404 on generateContent
+
+# ───────────────────────────── DeepSeek ───────────────────────────────
+# base: https://api.deepseek.com (OpenAI-compatible)  ·  key: DEEPSEEK_API_KEY
+# Thinking is a per-request TOGGLE (not a separate model); CoT returns in
+# `reasoning_content`. cached_input = cache-HIT price.
+[providers.deepseek]
+default = "deepseek-v4-flash"
+
+[[providers.deepseek.models]]
+id = "deepseek-v4-flash"
+tier = "fast"
+input = 0.14
+output = 0.28
+cached_input = 0.0028
+context = 1_000_000
+max_output = 384_000
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+aliases = ["deepseek-chat", "deepseek-reasoner"]  # legacy names, retire 2026-07-24
+
+[[providers.deepseek.models]]
+id = "deepseek-v4-pro"
+tier = "flagship"
+input = 0.435                # VERIFY: official $0.435; one aggregator says 4x ($1.74)
+output = 0.87                # VERIFY
+cached_input = 0.003625      # VERIFY
+context = 1_000_000
+max_output = 384_000
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+# ─────────────────────────────── xAI ──────────────────────────────────
+# base: https://api.x.ai/v1 (OpenAI-compatible)  ·  key: XAI_API_KEY
+# Reasoning is a SEPARATE model variant on xAI (not a toggle).
+[providers.xai]
+default = "grok-4.3"
+
+[[providers.xai.models]]
+id = "grok-4.3"
+tier = "flagship"
+input = 1.25
+output = 2.50
+cached_input = 0.20          # VERIFY on live pricing page
+context = 1_000_000
+thinking = "none"            # standard chat model
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.xai.models]]
+id = "grok-4.20-0309-reasoning"
+tier = "reasoning"
+input = 1.25
+output = 2.50
+cached_input = 0.20          # VERIFY
+context = 1_000_000
+thinking = "only"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.xai.models]]
+id = "grok-4.20-0309-non-reasoning"
+tier = "mid"
+input = 1.25
+output = 2.50
+cached_input = 0.20          # VERIFY
+context = 1_000_000
+thinking = "none"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.xai.models]]
+id = "grok-build-0.1"
+tier = "coding"
+input = 1.00
+output = 2.00
+context = 256_000
+thinking = "none"
+modalities = ["text"]
+status = "ga"
+
+# ───────────── Local (openai_compat) — user picks the model ─────────────
+# LM Studio / vLLM / MLX / llama.cpp / Ollama serve whatever model the user
+# loaded, at a localhost base_url. There is NO fixed default or price here —
+# the model id + capabilities come from the user's config, not this KB.

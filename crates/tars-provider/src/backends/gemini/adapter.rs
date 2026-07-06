@@ -24,6 +24,24 @@ use super::mapping::{map_stop_reason, parse_usage, truncate, urlencoding};
 
 const API_VERSION: &str = "v1beta";
 
+/// Whether a Gemini model can actually turn thinking off (accept
+/// `thinkingBudget: 0`). This is DATA, not a guess: it reads the
+/// `thinking` field of the model row in `data/models.toml` (the model
+/// KB) — a model supports thinking-off iff it is NOT thinking-only.
+///
+/// This replaces the old `model.contains("flash")` substring heuristic,
+/// which both mis-classified a hypothetical thinking-only flash and
+/// couldn't express the real `*-pro` = thinking-only rule without the
+/// name accident. Unknown models fall to `false` (conservative, as
+/// before) so we never emit a budget the API might reject — omitting
+/// `thinkingConfig` is always safe.
+fn model_supports_thinking_off(model: &str) -> bool {
+    tars_config::MODEL_KB
+        .find(model)
+        .map(|m| !m.is_thinking_only())
+        .unwrap_or(false)
+}
+
 /// Resolved auth in the shape this backend uses internally. Gemini's
 /// only supported variant is API key; bearer (ADC) lands in
 /// [`super::provider::GeminiProvider::stream`] as an explicit error.
@@ -255,7 +273,7 @@ impl HttpAdapter for GeminiAdapter {
     }
 
     fn translate_request(&self, req: &ChatRequest) -> Result<Value, ProviderError> {
-        let _ = req.model.explicit().ok_or_else(|| {
+        let model = req.model.explicit().ok_or_else(|| {
             ProviderError::InvalidRequest(format!("model must be explicit, got: {:?}", req.model))
         })?;
 
@@ -297,16 +315,64 @@ impl HttpAdapter for GeminiAdapter {
             );
         }
 
-        // Thinking config (Gemini 2.5+ family).
-        match req.thinking {
-            tars_types::ThinkingMode::Off => {
-                config["thinkingConfig"] = json!({"thinkingBudget": 0});
+        // Thinking config. Off → 0, Auto → -1 (dynamic), Budget(b) → b.
+        //
+        // A `thinkingBudget` of 0 means "no thinking", but a model the KB
+        // marks `thinking = "only"` (e.g. gemini-2.5-pro, gemini-3.1-pro)
+        // REJECTS it with HTTP 400 "Budget 0 is invalid. This model only
+        // works in thinking mode." `model_supports_thinking_off` reads that
+        // flag from `data/models.toml` (not a name heuristic). So when the
+        // requested budget is 0 on a model that can't honor it, we omit
+        // `thinkingConfig` and let the model apply its mandatory thinking —
+        // never sending a value the API rejects. Omitting is crash-safe; a
+        // positive or dynamic (-1) budget is accepted by all models.
+        //
+        // VERIFY (Gemini 3.x): the documented off-knob for 3.x models is
+        // `thinking_level:"minimal"`, not `thinkingBudget:0`. Empirically
+        // `thinkingBudget:0` still works on gemini-3.5-flash (live: thinking
+        // tokens = 0), so this is correct today; if a future 3.x model
+        // rejects the numeric budget, switch 3.x rows to emit thinking_level
+        // (a KB `thinking_param` field would data-drive that).
+        // Which knob this model's generation uses is DATA (models.toml):
+        // Gemini 2.5 = numeric `thinkingBudget`, Gemini 3.x = string
+        // `thinkingLevel` (the documented 3.x knob). Default to Budget for
+        // rows that don't declare one (safe for 2.5-era compat endpoints).
+        let param = tars_config::MODEL_KB
+            .find(model)
+            .and_then(|m| m.thinking_param)
+            .unwrap_or(tars_config::ThinkingParam::Budget);
+        let supports_off = model_supports_thinking_off(model);
+        match param {
+            tars_config::ThinkingParam::Budget => {
+                // Off → 0, Auto → -1 (dynamic), Budget(b) → b.
+                let budget: i64 = match req.thinking {
+                    tars_types::ThinkingMode::Off => 0,
+                    tars_types::ThinkingMode::Auto => -1,
+                    tars_types::ThinkingMode::Budget(b) => i64::from(b),
+                };
+                // Omit budget 0 on a thinking-only model (would 400).
+                if budget != 0 || supports_off {
+                    config["thinkingConfig"] = json!({ "thinkingBudget": budget });
+                }
             }
-            tars_types::ThinkingMode::Auto => {
-                config["thinkingConfig"] = json!({"thinkingBudget": -1});
-            }
-            tars_types::ThinkingMode::Budget(b) => {
-                config["thinkingConfig"] = json!({"thinkingBudget": b});
+            tars_config::ThinkingParam::Level => {
+                // Off → "minimal", Auto → omit (model default level),
+                // Budget(b) → b<=0 "minimal" else "high" (3.x has no numeric
+                // budget, so a positive numeric maps to a high level — lossy).
+                let level: Option<&str> = match req.thinking {
+                    tars_types::ThinkingMode::Off => supports_off.then_some("minimal"),
+                    tars_types::ThinkingMode::Auto => None,
+                    tars_types::ThinkingMode::Budget(b) => {
+                        if b == 0 {
+                            supports_off.then_some("minimal")
+                        } else {
+                            Some("high")
+                        }
+                    }
+                };
+                if let Some(level) = level {
+                    config["thinkingConfig"] = json!({ "thinkingLevel": level });
+                }
             }
         }
 
@@ -770,10 +836,27 @@ mod tests {
         assert!(body["generationConfig"]["responseSchema"].is_object());
     }
 
+    // Thinking-only models (the `*-pro` family) reject `thinkingBudget: 0`
+    // with HTTP 400 "This model only works in thinking mode", so an Off
+    // request must OMIT `thinkingConfig` rather than force a zero budget.
     #[test]
-    fn thinking_off_sets_zero_budget() {
+    fn thinking_off_omits_config_for_thinking_only_model() {
         let req = ChatRequest::user(
             tars_types::ModelHint::Explicit("gemini-2.5-pro".into()),
+            "hi",
+        );
+        let body = adapter().translate_request(&req).unwrap();
+        assert!(
+            body["generationConfig"]["thinkingConfig"].is_null(),
+            "gemini-2.5-pro is thinking-only; thinkingConfig must be omitted, got: {body}"
+        );
+    }
+
+    // Flash models can honor Off, so a zero budget is sent to disable thinking.
+    #[test]
+    fn thinking_off_sets_zero_budget_for_flash() {
+        let req = ChatRequest::user(
+            tars_types::ModelHint::Explicit("gemini-2.5-flash".into()),
             "hi",
         );
         let body = adapter().translate_request(&req).unwrap();
@@ -781,6 +864,25 @@ mod tests {
             body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
             0
         );
+    }
+
+    // Thinking-off support is now DATA-driven from the model KB
+    // (`data/models.toml`), not a `contains("flash")` substring guess.
+    #[test]
+    fn model_supports_thinking_off_predicate() {
+        // KB `thinking = "optional"` → can turn thinking off.
+        assert!(model_supports_thinking_off("gemini-2.5-flash"));
+        assert!(model_supports_thinking_off("gemini-3.5-flash"));
+        assert!(model_supports_thinking_off("gemini-3.1-flash-lite"));
+        // KB `thinking = "only"` → cannot (the `*-pro` family). This is
+        // now correct because it's DATA, not because "pro" lacks "flash".
+        assert!(!model_supports_thinking_off("gemini-2.5-pro"));
+        assert!(!model_supports_thinking_off("gemini-3.1-pro-preview"));
+        // Unknown model → conservative false (never emit a budget the
+        // API might reject). The old heuristic wrongly returned TRUE for
+        // any unknown id containing "flash"; the KB returns false.
+        assert!(!model_supports_thinking_off("gemini-flash-latest"));
+        assert!(!model_supports_thinking_off("gemini-pro-latest"));
     }
 
     #[test]

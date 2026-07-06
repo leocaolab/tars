@@ -9,10 +9,21 @@ description = "LLM Provider trait + HTTP/CLI/embedded backends (Doc 01)"
 [lints]
 workspace = true
 
+[features]
+# AWS Bedrock backend (Doc 31). Off by default so the heavy AWS SDK
+# subtree never enters a build that doesn't ask for Bedrock; enabling it
+# pulls in the `tars-bedrock` leaf crate, and the registry's Bedrock build
+# arm is `#[cfg(feature = "bedrock")]`.
+bedrock = ["dep:tars-bedrock"]
+
 [dependencies]
 tars-types = { path = "../tars-types" }
 tars-sandbox = { path = "../tars-sandbox" }
 tars-config = { path = "../tars-config" }
+# Optional: only linked when the `bedrock` feature is on (see [features]).
+# tars-bedrock is a LEAF (depends only on tars-types), so this edge does
+# not cycle — the `impl LlmProvider` bridge lives here in `backends::bedrock`.
+tars-bedrock = { path = "../tars-bedrock", optional = true }
 
 # Async
 tokio = { workspace = true, features = ["fs"] }

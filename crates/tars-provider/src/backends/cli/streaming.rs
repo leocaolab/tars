@@ -1,9 +1,12 @@
-//! Stream-json mode for the Claude CLI subprocess, gated by
+//! Stream-json mode for the delegate CLI subprocess, gated by
 //! `TARS_CLAUDE_CLI_STREAM`. Owns the NDJSON event reader and the
 //! human-readable per-event summary emitted to stderr for
 //! observability. Lives in its own file because it carries the most
 //! complexity (event taxonomy + line-by-line reader + stderr drain)
 //! and isn't on the happy path of the buffered runner.
+//!
+//! Lifted verbatim from `claude_cli/streaming.rs` (Doc 32 §7) as part of
+//! the shared CLI-delegate machinery.
 
 use serde_json::Value;
 
@@ -27,7 +30,7 @@ use super::subprocess::truncate;
 ///
 /// On EOF without a `result` event we fail loud — that's broken-invariant
 /// territory, never a silent empty Value.
-pub(super) async fn run_streaming(
+pub(crate) async fn run_streaming(
     child: &mut tokio::process::Child,
     inv: &SubprocessInvocation,
 ) -> Result<Value, ProviderError> {
