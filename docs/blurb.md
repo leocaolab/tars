@@ -28,9 +28,6 @@ No autonomous agent-**planning** — for open-ended coding/research, use Claude 
 TARS owns the typed, sandboxed execution *underneath*. Skeptical of **RAG** — exact
 retrieval beats fuzzy vectors, and agents aren't latency-bound.
 
-Prototype fast? Use LangChain. Serve agents in production with the predictability of a
-database? **TARS.**
-
 🔗 **github.com/leocaolab/tars**
 
 ---

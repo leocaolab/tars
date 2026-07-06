@@ -11,35 +11,6 @@ base; Python + Node bindings — observability built in.**
 
 ---
 
-## Why TARS exists
-
-Most agent frameworks (LangChain, LlamaIndex, AutoGen) optimize for **rapid
-prototyping in Python**. They're great for that. They're also where production
-teams hit a wall: cache invariants are fuzzy, multi-tenancy isn't a primitive,
-observability is bolted on, error semantics drift between providers, "just swap
-providers" breaks at the edge cases (tool-use semantics, streaming protocols,
-retry behavior), and — once you let an agent run a real CLI — nothing actually
-sandboxes it.
-
-TARS picks the other axis. The core engine is **Rust** — Tokio, Serde, typed
-errors with a real class hierarchy (`Permanent` / `Retryable` / `RateLimited` /
-`Auth`). Python and Node are **first-class bindings**, not wrappers around
-`subprocess.run`. Multi-tenancy is enforced at every layer. Cache hit/miss is
-observable per call. The same `Pipeline` runs identically locally (in-mem L1) and
-in a service (Redis L2 + S3 L3) — same trait, same call sites.
-
-I built it Rust-first because I want a runtime that stays **correct under the
-conditions production actually hits**: fan-out tool-use loops at high
-concurrency, unreliable providers with confusing retry semantics, prompt caches
-that quietly invalidate, multi-tenant isolation where one customer's bad prompt
-can't poison another's cache, and black-box coding-agent CLIs that must not be
-able to touch anything outside the job's worktree.
-
-If you want to prototype fast, use LangChain. If you want to **serve agents in
-production with the predictability of a database**, use TARS.
-
----
-
 ## Philosophy
 
 The goals are **performance, extensibility, and security** — and the design falls out of
