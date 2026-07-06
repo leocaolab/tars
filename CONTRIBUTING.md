@@ -1,9 +1,8 @@
 # Contributing to tars
 
-> **Status:** pre-1.0. The public surface (Rust crates, `tars-py`
-> Python API, CLI) is **not yet stable**; expect breaking changes
-> on minor version bumps until 1.0. SemVer-strict commitment kicks
-> in at 1.0.
+> **Status:** 1.0. The public surface (Rust crates, `tars-py` Python
+> API, CLI) follows **SemVer** from here — breaking changes land on
+> major version bumps, not minors.
 
 ## What contributions are welcome
 

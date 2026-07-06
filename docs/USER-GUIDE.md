@@ -5,9 +5,9 @@ own code. Covers the three common call shapes + when tars is the wrong
 tool. For *why* tars is shaped this way, jump to
 [`architecture/`](./architecture/) — most callers don't need to.
 
-> **Pre-1.0 disclaimer**: API surfaces may change between minor versions
-> until v1.0. The shapes shown here are what currently work; track the
-> [Releases page](../../../releases) for stability commitments.
+> **Stability**: as of **v1.0** the public API follows SemVer — breaking
+> changes land on major bumps, not minors. The shapes shown here are
+> current; track the [Releases page](../../../releases) for changes.
 
 ---
 
@@ -108,7 +108,7 @@ tars-provider = { git = "https://github.com/leocaolab/tars.git", tag = "v0.4.0" 
 tars-types    = { git = "https://github.com/leocaolab/tars.git", tag = "v0.4.0" }
 ```
 
-(Pre-1.0: pin to a specific tag. Each minor version may break.)
+(Pin to a tag for reproducibility; the API follows SemVer from v1.0.)
 
 ## Bootstrap config
 

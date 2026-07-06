@@ -6,6 +6,43 @@ Forward-looking list. Each entry: **what** to do, **why** it's deferred (not "sh
 
 ---
 
+## 1.1 — provider-layer follow-ups (post-1.0)
+
+Deferred out of the 1.0 provider release ([tracking](docs/provider-layer-tracking.md)).
+Each: **what** · **why deferred** · **trigger**.
+
+- **Bedrock M2 — embeddings + image gen.** Wire Bedrock's embedding/image endpoints
+  · no consumer at 1.0 · first embedding/image need on Bedrock.
+- **Bedrock M3 / `Auth` signer seam.** Generalize `Auth` to carry a
+  credential-provider/signer (Doc 29 `IdentityProvider`) instead of resolving the
+  AWS chain outside `Auth` · one signed provider doesn't justify the abstraction ·
+  a second keyless/signed provider (Vertex/ADC).
+- **OpenAiDialect M3 — explicit `dialect` config field.** A `dialect = "…"` knob
+  instead of base_url string inference · inference works today · a provider not
+  disambiguable by base_url.
+- **OpenAiDialect M4 — breadth presets.** First-class `type` presets for
+  Groq/xAI/Ollama · `openai_compat` + base_url already covers them · a real wire
+  quirk (→ its own dialect) or a UX ask.
+- **Per-CLI delegate model/auth config.** Document the model + credential each
+  delegate CLI needs — 1.0 live-test hit codex's account rejecting `gpt-5.3-codex`
+  (→ `gpt-5.5`) and opencode needing a resolvable `provider/model` credential (both
+  account/CLI config, **not** tars bugs) · it's the user's CLI setup · onboarding
+  friction.
+- **KB `# VERIFY` rows.** Confirm `deepseek-v4-pro` price (official vs aggregator
+  disagree 4×), xAI cached-input, and gemini `-latest` alias targets in
+  `data/models.toml` · shipped with the official number + a flag · before relying
+  on those exact prices for billing.
+- **`append_event` provenance bundle.** Bundle `version`/`reason`/`role` into a
+  struct (8 args → 6), retiring `#[allow(clippy::too_many_arguments)]` in
+  `tars-storage/blackboard` · cross-impl ripple not worth it at 1.0 · next touch of
+  the blackboard trait.
+- **Sandbox: explicit vs default `danger-full-access`.** A distinguishing bit so an
+  *explicit* `--sandbox danger-full-access` can run a delegate unconfined (today
+  both default and explicit are jailed — the safe choice) · no real
+  unconfined-delegate need yet · a legitimate broad-write delegate use case.
+
+---
+
 ## Roadmap status — at a glance (2026-05-08)
 
 Per Doc 14's milestone breakdown. Not authoritative — CHANGELOG is —
