@@ -6117,6 +6117,7 @@ dependencies = [
 name = "tars-handle"
 version = "1.1.0"
 dependencies = [
+ "futures",
  "serde",
  "sha2 0.10.9",
  "tars-config",
