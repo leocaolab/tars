@@ -25,13 +25,15 @@ pub enum TarsError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
-    /// A `role` did not resolve to any provider — not a known tier, not a
-    /// literal provider id, no `default` tier candidate, and the registry
-    /// isn't a single-provider registry to fall back to. Carries the role
-    /// and the resolved provider id (if any) so the message is actionable.
+    /// A `role` did not resolve to any provider — not in the flat `[roles]`
+    /// map, not a known tier, not a literal provider id, no `default` tier
+    /// candidate, and the registry isn't a single-provider registry to fall
+    /// back to. Carries the role and the resolved provider id (if any) so the
+    /// message is actionable.
     #[error(
-        "role `{role}` maps to no provider — add a `[roles.tiers]` entry, name a \
-         provider id directly, or declare a `default` tier{}",
+        "role `{role}` maps to no provider — add a `[roles]` entry \
+         (`{role} = \"<provider>\"`), name a provider id directly, or declare a \
+         `default` tier{}",
         .tried.as_ref().map(|p| format!(" (tried provider id `{p}`)")).unwrap_or_default()
     )]
     UnknownRole {

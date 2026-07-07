@@ -3,17 +3,20 @@
 //! observability sink + a cancellation token for one workspace (local) or
 //! tenant×workspace (server).
 //!
-//! Two config layers meet here: the *global* registry (built once from
-//! `~/.tars/config.toml`) and the *workspace* roles
-//! (`<root>/.<tool>/config.toml` `[roles]`). Role resolution walks
-//! workspace → provider id → global registry.
+//! Two config layers meet here: the *global* config (built once from
+//! `~/.tars/config.toml` — its provider registry + tier `routing` + any global
+//! `[roles]`) and the *workspace* `[roles]`
+//! (`<root>/.<tool>/config.toml`, a flat `name → provider id` map). Role
+//! resolution walks workspace `[roles]` → global `[roles]` → tier → literal id
+//! → default tier → sole provider → global registry.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
 
-use tars_config::RoutingConfig;
+use tars_config::{Config, RoutingConfig};
 use tars_pipeline::{EventStores, Pipeline, PipelineOpts};
 use tars_provider::{LlmProvider, ProviderRegistry};
 use tars_runtime::{LocalRuntime, Runtime};
@@ -34,7 +37,12 @@ use crate::paths::{
 /// scope and releases its stores (see [`Drop`]).
 pub struct Tars {
     registry: Arc<ProviderRegistry>,
-    roles: RoutingConfig,
+    /// Flat `[roles]` map (arbitrary name → provider id): workspace entries
+    /// overlaid on the global `[roles]`. Consulted first in [`Tars::resolve`].
+    roles: HashMap<String, ProviderId>,
+    /// Tier-based routing (`ModelTier → provider ids`) from the global config;
+    /// the fallback after the flat `roles` map misses.
+    routing: RoutingConfig,
     /// Per-scope stores. Task 4 consolidates these three separate SQLite
     /// stores behind one MPSC single-writer sink; today they are reused
     /// directly so pipeline + runtime can emit.
@@ -59,13 +67,13 @@ struct PipelineSink {
 }
 
 /// Workspace-layer config: `<root>/.<tool>/config.toml`. Only `[roles]`
-/// (a [`RoutingConfig`]: tier → provider ids) and the `[store]` placement
-/// knob live here — never secrets. Unknown sections are ignored so a
-/// consumer tool can keep its own config alongside.
+/// (a **flat** `name → provider id` map — the shape `arc`/`concer` already
+/// write) and the `[store]` placement knob live here — never secrets. Unknown
+/// sections are ignored so a consumer tool can keep its own config alongside.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct WorkspaceConfig {
-    roles: RoutingConfig,
+    roles: HashMap<String, ProviderId>,
     store: StoreSettings,
 }
 
@@ -101,9 +109,16 @@ impl Tars {
         let ws_cfg = load_workspace_config(tool, &root)?;
         let scope = resolve_scope(tool, &root, &ws_cfg)?;
         let sink = open_sink(&scope)?;
+        // Global config supplies tier `routing` + any global `[roles]`; the
+        // workspace `[roles]` overlay (same name) wins. `Config::get` is safe
+        // here — `ProviderRegistry::global` above already required it loaded.
+        let global = Config::get();
+        let mut roles = global.roles.clone();
+        roles.extend(ws_cfg.roles);
         Ok(Tars {
             registry,
-            roles: ws_cfg.roles,
+            roles,
+            routing: global.routing.clone(),
             sink,
             cancel: CancellationToken::new(),
             root,
@@ -120,9 +135,12 @@ impl Tars {
         let scope = StoreScope::TarsHome(dir);
         let sink = open_sink(&scope)?;
         let root = scope.dir().map(Path::to_path_buf).unwrap_or_default();
+        // No workspace overlay standalone: just the global `[roles]` + routing.
+        let global = Config::get();
         Ok(Tars {
             registry,
-            roles: RoutingConfig::default(),
+            roles: global.roles.clone(),
+            routing: global.routing.clone(),
             sink,
             cancel: CancellationToken::new(),
             root,
@@ -130,9 +148,10 @@ impl Tars {
         })
     }
 
-    /// Resolve `role` → a live provider (§6 C3). Fallback chain:
-    /// (1) `role` as a tier → its first candidate; (2) `role` as a literal
-    /// provider id; (3) the `default` tier's first candidate; (4) the sole
+    /// Resolve `role` → a live provider (§6 C3). Resolution order:
+    /// (1) the flat `[roles]` map (`role` → provider id) — highest priority;
+    /// (2) `role` as a tier → its first candidate; (3) `role` as a literal
+    /// provider id; (4) the `default` tier's first candidate; (5) the sole
     /// provider if the registry has exactly one; else [`TarsError::UnknownRole`].
     pub fn provider(&self, role: &str) -> Result<Arc<dyn LlmProvider>, TarsError> {
         Ok(self.resolve(role)?.1)
@@ -184,22 +203,29 @@ impl Tars {
         &self,
         role: &str,
     ) -> Result<(ProviderId, Arc<dyn LlmProvider>), TarsError> {
-        // 1. role names a tier → first candidate in that tier.
+        // 1. flat `[roles]` map: arbitrary name → provider id (workspace over
+        //    global). Highest priority — this is the shape arc/concer write.
+        if let Some(id) = self.roles.get(role) {
+            if let Some(p) = self.registry.get(id) {
+                return Ok((id.clone(), p));
+            }
+        }
+        // 2. role names a tier → first candidate in that tier.
         if let Some(tier) = parse_tier(role) {
             if let Some(hit) = self.first_in_tier(&tier) {
                 return Ok(hit);
             }
         }
-        // 2. role is a literal provider id.
+        // 3. role is a literal provider id.
         let literal = ProviderId::new(role);
         if let Some(p) = self.registry.get(&literal) {
             return Ok((literal, p));
         }
-        // 3. fall back to the `default` tier.
+        // 4. fall back to the `default` tier.
         if let Some(hit) = self.first_in_tier(&ModelTier::Default) {
             return Ok(hit);
         }
-        // 4. a single-provider registry has an unambiguous answer.
+        // 5. a single-provider registry has an unambiguous answer.
         if self.registry.len() == 1 {
             if let Some(id) = self.registry.ids().next().cloned() {
                 if let Some(p) = self.registry.get(&id) {
@@ -217,7 +243,7 @@ impl Tars {
         &self,
         tier: &ModelTier,
     ) -> Option<(ProviderId, Arc<dyn LlmProvider>)> {
-        let id = self.roles.tiers.get(tier)?.first()?;
+        let id = self.routing.tiers.get(tier)?.first()?;
         let provider = self.registry.get(id)?;
         Some((id.clone(), provider))
     }
@@ -234,10 +260,11 @@ impl Drop for Tars {
     }
 }
 
-/// Map a role string to a [`ModelTier`] (case-insensitive). Deviation from
-/// Doc 06 recorded in the crate docs: `RoutingConfig` keys on the fixed
-/// `ModelTier` enum, so an arbitrary role must name one of these tiers (or
-/// fall through to the literal-provider-id path in [`Tars::resolve`]).
+/// Map a role string to a [`ModelTier`] (case-insensitive). This is only the
+/// *tier* fallback in [`Tars::resolve`]: an arbitrary role name is served first
+/// by the flat `[roles]` map, and only if it misses does the role get matched
+/// against these fixed tier names (`RoutingConfig` keys on the `ModelTier`
+/// enum, not arbitrary strings).
 fn parse_tier(role: &str) -> Option<ModelTier> {
     match role.to_ascii_lowercase().as_str() {
         "reasoning" => Some(ModelTier::Reasoning),

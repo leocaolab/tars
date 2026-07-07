@@ -1,16 +1,22 @@
 //! Integration tests for the [`Tars`] handle (Doc 06 M2/M3).
 //!
 //! All tests share one process-global config (installed once, first-wins)
-//! with a single in-process `mock1` provider, so the global registry builds
-//! deterministically regardless of test order / parallelism.
+//! with two in-process mock providers (`mock1`, `mock2`) and a `default` tier
+//! → `mock1`, so the global registry builds deterministically regardless of
+//! test order / parallelism. Two providers (not one) means the sole-provider
+//! fallback never fires, so each resolution path is exercised genuinely.
+//!
+//! `UnknownRole` needs a *different* global config (no `default` tier, >1
+//! provider) and the config singleton is first-wins per process, so that case
+//! lives in its own integration binary (`tests/unknown_role.rs`).
 
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Mutex;
 
-use tars_config::{Config, ProviderConfig, ProvidersConfig};
+use tars_config::{Config, ProviderConfig, ProvidersConfig, RoutingConfig};
 use tars_handle::{StoreScope, Tars, WorkspaceHandles};
-use tars_types::ProviderId;
+use tars_types::{ModelTier, ProviderId};
 
 /// Install the shared test config once (idempotent — first writer wins).
 fn ensure_config() {
@@ -18,14 +24,20 @@ fn ensure_config() {
         return;
     }
     let mut map: HashMap<ProviderId, ProviderConfig> = HashMap::new();
-    map.insert(
-        ProviderId::new("mock1"),
-        ProviderConfig::Mock {
-            canned_response: "hi".to_string(),
-        },
-    );
+    for name in ["mock1", "mock2"] {
+        map.insert(
+            ProviderId::new(name),
+            ProviderConfig::Mock {
+                canned_response: "hi".to_string(),
+            },
+        );
+    }
+    // Tier routing now lives in the GLOBAL config, not the workspace `[roles]`.
+    let mut tiers = HashMap::new();
+    tiers.insert(ModelTier::Default, vec![ProviderId::new("mock1")]);
     let cfg = Config {
         providers: ProvidersConfig::from_map(map),
+        routing: RoutingConfig { tiers },
         ..Default::default()
     };
     Config::install_global(cfg);
@@ -41,24 +53,50 @@ fn workspace_with_config(body: &str) -> tempfile::TempDir {
 }
 
 #[test]
-fn role_resolves_through_both_layers() {
+fn flat_roles_map_wins_over_the_fallback_chain() {
     ensure_config();
-    // Workspace layer: default tier → the global `mock1` provider.
-    let ws = workspace_with_config("[roles.tiers]\ndefault = [\"mock1\"]\n");
+    // Workspace `[roles]` is a FLAT name → provider id map (arc/concer shape).
+    // `critic` maps to `mock2` even though the `default` tier is `mock1`, so
+    // resolving `critic` to `mock2` proves the flat map takes priority.
+    let ws = workspace_with_config("[roles]\ncritic = \"mock2\"\n");
     let tars = Tars::for_workspace("arc", ws.path()).expect("open workspace");
 
-    // (a) role names the tier → workspace roles → global registry.
-    tars.provider("default").expect("default tier resolves");
+    let critic = tars.provider("critic").expect("flat [roles] entry resolves");
+    assert_eq!(
+        critic.id(),
+        &ProviderId::new("mock2"),
+        "critic must resolve to its mapped provider, not the default tier",
+    );
+}
+
+#[test]
+fn role_resolves_through_the_fallback_chain() {
+    ensure_config();
+    // No workspace `[roles]` — exercise the tier / literal / default fallbacks.
+    let ws = workspace_with_config("");
+    let tars = Tars::for_workspace("arc", ws.path()).expect("open workspace");
+
+    // (a) role names a tier → global routing → registry.
+    assert_eq!(
+        tars.provider("default").expect("default tier resolves").id(),
+        &ProviderId::new("mock1"),
+    );
     // (b) role is a literal provider id.
-    tars.provider("mock1").expect("literal provider id resolves");
+    assert_eq!(
+        tars.provider("mock2").expect("literal provider id resolves").id(),
+        &ProviderId::new("mock2"),
+    );
     // (c) unknown role falls through to the `default` tier candidate.
-    tars.provider("whatever").expect("falls back to default tier");
+    assert_eq!(
+        tars.provider("whatever").expect("falls back to default tier").id(),
+        &ProviderId::new("mock1"),
+    );
 }
 
 #[test]
 fn for_workspace_bootstraps_and_scopes_to_workspace() {
     ensure_config();
-    let ws = workspace_with_config("[roles.tiers]\ndefault = [\"mock1\"]\n");
+    let ws = workspace_with_config("");
     let tars = Tars::for_workspace("arc", ws.path()).expect("open");
 
     let store_dir = ws.path().canonicalize().unwrap().join(".arc").join("tars");
@@ -76,7 +114,9 @@ fn for_workspace_bootstraps_and_scopes_to_workspace() {
 fn store_off_opts_out_of_persistence() {
     ensure_config();
     let ws = workspace_with_config(
-        "[roles.tiers]\ndefault = [\"mock1\"]\n[store]\nenabled = false\n",
+        "[store]
+enabled = false
+",
     );
     let tars = Tars::for_workspace("arc", ws.path()).expect("open");
     assert_eq!(tars.store_scope(), &StoreScope::Off);
@@ -88,8 +128,8 @@ fn store_off_opts_out_of_persistence() {
 #[test]
 fn lifecycle_open_switch_close_keeps_registry_shared() {
     ensure_config();
-    let a = workspace_with_config("[roles.tiers]\ndefault = [\"mock1\"]\n");
-    let b = workspace_with_config("[roles.tiers]\ndefault = [\"mock1\"]\n");
+    let a = workspace_with_config("");
+    let b = workspace_with_config("");
     let handles: WorkspaceHandles = Mutex::new(HashMap::new());
 
     // The global registry is built once and never rebuilt across handles.
@@ -127,7 +167,7 @@ fn lifecycle_open_switch_close_keeps_registry_shared() {
 #[tokio::test]
 async fn runtime_is_usable_for_run_plan() {
     ensure_config();
-    let ws = workspace_with_config("[roles.tiers]\ndefault = [\"mock1\"]\n");
+    let ws = workspace_with_config("");
     let tars = Tars::for_workspace("arc", ws.path()).expect("open");
     let runtime = tars.runtime();
     // Exercise the runtime end-to-end against its scoped event store.
@@ -141,7 +181,7 @@ async fn runtime_is_usable_for_run_plan() {
 #[test]
 fn cancel_before_drop_is_idempotent() {
     ensure_config();
-    let ws = workspace_with_config("[roles.tiers]\ndefault = [\"mock1\"]\n");
+    let ws = workspace_with_config("");
     let tars = Tars::for_workspace("arc", ws.path()).expect("open");
     let token = tars.cancel_token();
     assert!(!token.is_cancelled());

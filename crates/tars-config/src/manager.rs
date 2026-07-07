@@ -1,7 +1,7 @@
 //! Top-level [`Config`] container + [`ConfigManager`] for loading from
 //! a TOML file. v0.1: single-file load, full validation, no hot-reload.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,25 @@ pub struct Config {
     /// dispatch (existing behaviour).
     #[serde(default)]
     pub routing: RoutingConfig,
+
+    /// `[roles]` — a **flat** map of arbitrary role name → provider id, the
+    /// shape real consumers already write (`arc`'s `.arc/config.toml`,
+    /// `concer`'s `.concer/config.toml`):
+    ///
+    /// ```toml
+    /// [roles]
+    /// critic = "deepseek"
+    /// fixer  = "claude_cli"
+    /// ```
+    ///
+    /// Distinct from [`routing`](Self::routing): `routing.tiers` keys on the
+    /// fixed [`ModelTier`](tars_types::ModelTier) enum, whereas `roles` keys on
+    /// free-form names. The [`Tars`](../../tars_handle/struct.Tars.html) handle
+    /// resolves a role through this map *first*, then falls back to the tier /
+    /// literal-id / default / sole-provider chain. Each value should reference a
+    /// declared provider id (checked by [`validate`](Self::validate)).
+    #[serde(default)]
+    pub roles: HashMap<String, ProviderId>,
 
     /// M4 (D6): user security config → `tars_sandbox::SandboxPolicy`, threaded
     /// into `ToolContext.sandbox`. **Optional** — absent `[sandbox]` = `None` =
@@ -69,6 +88,18 @@ impl Config {
         // Routing references must point at known provider IDs.
         let known: HashSet<_> = self.providers.iter().map(|(id, _)| id.clone()).collect();
         self.routing.validate(&known, &mut errs);
+        // Each `[roles]` value must reference a known provider id — same
+        // dangling-reference check the routing tiers get.
+        for (role, id) in &self.roles {
+            if !known.contains(id) {
+                errs.push(ValidationError::new(
+                    format!("roles.{role}"),
+                    format!(
+                        "references unknown provider `{id}` — add a [providers.{id}] section or fix the role mapping"
+                    ),
+                ));
+            }
+        }
         if errs.is_empty() { Ok(()) } else { Err(errs) }
     }
 
@@ -257,6 +288,54 @@ mod tests {
                 .get(&tars_types::ProviderId::new("vllm"))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn flat_roles_table_loads_as_name_to_provider_map() {
+        // The shape real consumers write: a FLAT [roles] table of
+        // arbitrary_name = "provider_id" (NOT [roles.tiers]).
+        let toml_str = r#"
+            [providers.deepseek]
+            type = "openai_compat"
+            base_url = "http://localhost:8000/v1"
+            default_model = "deepseek-chat"
+
+            [roles]
+            critic = "deepseek"
+            fixer  = "mlx"
+        "#;
+        let cfg = ConfigManager::load_from_str(toml_str).expect("flat [roles] must load");
+        assert_eq!(
+            cfg.roles.get("critic"),
+            Some(&tars_types::ProviderId::new("deepseek"))
+        );
+        // `mlx` is a built-in, merged in, so a role pointing at it validates.
+        assert_eq!(
+            cfg.roles.get("fixer"),
+            Some(&tars_types::ProviderId::new("mlx"))
+        );
+    }
+
+    #[test]
+    fn absent_roles_table_is_empty_map() {
+        let cfg = ConfigManager::load_from_str("[providers]\n").expect("loads");
+        assert!(cfg.roles.is_empty(), "absent [roles] = empty map");
+    }
+
+    #[test]
+    fn role_referencing_unknown_provider_fails_validation() {
+        let toml_str = r#"
+            [roles]
+            critic = "no_such_provider"
+        "#;
+        let err = ConfigManager::load_from_str(toml_str).unwrap_err();
+        match err {
+            ConfigError::ValidationFailed { errors } => {
+                assert!(errors.iter().any(|e| e.key == "roles.critic"));
+                assert!(errors.iter().any(|e| e.message.contains("no_such_provider")));
+            }
+            _ => panic!("wrong error variant: {err:?}"),
+        }
     }
 
     #[test]

@@ -12,18 +12,28 @@
 //! let runtime  = tars.runtime();                    // DAG via run_plan
 //! ```
 //!
-//! ## Deviation from Doc 06 (recorded)
+//! ## Role resolution
 //!
-//! Doc 06 §6 C3 types the handle's roles as [`RoutingConfig`] and exposes
-//! `provider(role: &str)`. `RoutingConfig` keys on the fixed four-value
-//! [`ModelTier`](tars_types::ModelTier) enum (`reasoning` / `default` /
-//! `fast` / `local`), **not** arbitrary role strings. So a `role` resolves
-//! by: (1) naming a tier → that tier's first candidate; else (2) naming a
-//! provider id literally; else (3) the `default` tier; else (4) the sole
-//! provider. The workspace `[roles]` table therefore deserializes as a
-//! `RoutingConfig` (`[roles.tiers]`, tier → provider ids). This is the
-//! minimal adaptation that keeps the cited type; no new role abstraction was
-//! invented.
+//! The workspace `[roles]` table is a **flat** map of arbitrary role name →
+//! provider id — the shape real consumers already write (`arc`'s
+//! `.arc/config.toml`, `concer`'s `.concer/config.toml`):
+//!
+//! ```toml
+//! [roles]
+//! critic = "deepseek"
+//! fixer  = "claude_cli"
+//! ```
+//!
+//! `provider(role: &str)` resolves in order: (1) the flat `[roles]` map
+//! (workspace entries overlaid on the global `[roles]`) → provider id → global
+//! registry; else (2) `role` naming a fixed
+//! [`ModelTier`](tars_types::ModelTier) (`reasoning` / `default` / `fast` /
+//! `local`) via the global tier [`RoutingConfig`]; else (3) `role` as a literal
+//! provider id; else (4) the `default` tier; else (5) the sole provider; else
+//! [`TarsError::UnknownRole`]. Tier routing stays a separate concern owned by
+//! the global config's `[routing.tiers]`
+//! ([`RoutingConfig`](tars_config::RoutingConfig)), not the workspace
+//! `[roles]`.
 
 pub mod error;
 pub mod handle;
