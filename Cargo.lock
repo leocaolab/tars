@@ -6005,7 +6005,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tars-bedrock"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-stream",
  "aws-config",
@@ -6019,7 +6019,7 @@ dependencies = [
 
 [[package]]
 name = "tars-cache"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "dirs 5.0.1",
@@ -6037,7 +6037,7 @@ dependencies = [
 
 [[package]]
 name = "tars-cli"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6065,7 +6065,7 @@ dependencies = [
 
 [[package]]
 name = "tars-config"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "dirs 5.0.1",
  "figment",
@@ -6082,7 +6082,7 @@ dependencies = [
 
 [[package]]
 name = "tars-desktop"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -6102,7 +6102,7 @@ dependencies = [
 
 [[package]]
 name = "tars-desktop-app"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "anyhow",
  "serde",
@@ -6116,7 +6116,7 @@ dependencies = [
 
 [[package]]
 name = "tars-handle"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -6138,7 +6138,7 @@ dependencies = [
 
 [[package]]
 name = "tars-melt"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
@@ -6154,7 +6154,7 @@ dependencies = [
 
 [[package]]
 name = "tars-model"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "serde",
@@ -6167,7 +6167,7 @@ dependencies = [
 
 [[package]]
 name = "tars-node"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "futures",
  "napi",
@@ -6190,7 +6190,7 @@ dependencies = [
 
 [[package]]
 name = "tars-pipeline"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -6215,7 +6215,7 @@ dependencies = [
 
 [[package]]
 name = "tars-provider"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -6243,7 +6243,7 @@ dependencies = [
 
 [[package]]
 name = "tars-py"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -6265,7 +6265,7 @@ dependencies = [
 
 [[package]]
 name = "tars-runtime"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6290,11 +6290,11 @@ dependencies = [
 
 [[package]]
 name = "tars-sandbox"
-version = "1.2.3"
+version = "1.2.4"
 
 [[package]]
 name = "tars-server"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -6316,7 +6316,7 @@ dependencies = [
 
 [[package]]
 name = "tars-storage"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6334,7 +6334,7 @@ dependencies = [
 
 [[package]]
 name = "tars-tools"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "async-trait",
  "globset",
@@ -6354,7 +6354,7 @@ dependencies = [
 
 [[package]]
 name = "tars-types"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",
