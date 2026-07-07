@@ -10,6 +10,7 @@ use tars_types::ProviderId;
 use crate::builtin::merge_builtin_with_user;
 use crate::error::{ConfigError, ValidationError};
 use crate::providers::ProvidersConfig;
+use crate::resilience::ResilienceConfig;
 use crate::routing::RoutingConfig;
 use crate::sandbox::SandboxConfig;
 
@@ -63,6 +64,14 @@ pub struct Config {
     #[serde(default)]
     pub web_search: Option<sisurf_core::SearchConfig>,
 
+    /// `[resilience]` — LLM transport retry + circuit-breaker tuning fed into
+    /// every handle-built pipeline. **Optional** — absent = tars's current
+    /// behaviour (default retry, no breaker), so no existing consumer changes.
+    /// See [`crate::resilience`]; the conversion into tars-pipeline's
+    /// `RetryConfig` / `CircuitBreakerConfig` lives in tars-pipeline.
+    #[serde(default)]
+    pub resilience: ResilienceConfig,
+
     /// IDs that came from the user's TOML, captured *before* the
     /// builtin-merge step so callers can distinguish "explicitly
     /// declared by the user" from "ambient builtin default".
@@ -100,6 +109,8 @@ impl Config {
                 ));
             }
         }
+        // `[resilience]` numeric ranges (counts >= 1, durations finite & >= 0).
+        self.resilience.validate(&mut errs);
         if errs.is_empty() { Ok(()) } else { Err(errs) }
     }
 

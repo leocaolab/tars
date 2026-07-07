@@ -38,6 +38,7 @@
 pub mod error;
 pub mod handle;
 pub mod paths;
+mod resilience;
 
 pub use error::TarsError;
 pub use handle::{Tars, WorkspaceHandles};

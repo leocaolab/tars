@@ -29,6 +29,7 @@ pub mod manager;
 pub mod model_kb;
 pub mod paths;
 pub mod providers;
+pub mod resilience;
 pub mod routing;
 pub mod sandbox;
 pub mod web_search;
@@ -40,6 +41,7 @@ pub use builtin::{
 pub use error::ConfigError;
 pub use global::resolve_home;
 pub use manager::{Config, ConfigManager};
+pub use resilience::{BreakerTuning, ResilienceConfig, RetryTuning};
 pub use model_kb::{
     KbModality, ModelEntry, ModelKb, ModelStatus, ModelTier, ProviderModels, Thinking,
     ThinkingParam, MODEL_KB,

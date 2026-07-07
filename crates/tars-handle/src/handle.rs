@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use tars_config::{Config, RoutingConfig};
+use tars_config::{Config, ResilienceConfig, RoutingConfig};
 use tars_pipeline::{EventStores, OutputValidator, Pipeline, PipelineOpts};
 use tars_provider::{LlmProvider, ProviderRegistry};
 use tars_runtime::{LocalRuntime, Runtime};
@@ -43,6 +43,12 @@ pub struct Tars {
     /// Tier-based routing (`ModelTier → provider ids`) from the global config;
     /// the fallback after the flat `roles` map misses.
     routing: RoutingConfig,
+    /// `[resilience]` tuning from the global config — retry + circuit-breaker
+    /// policy fed into every pipeline this handle builds. Snapshotted at
+    /// construction (like `roles`/`routing`) so `pipeline_with` never touches
+    /// the global singleton. Default (both `None`) ⇒ tars's current pipeline
+    /// (default retry, no breaker).
+    resilience: ResilienceConfig,
     /// Per-scope stores. Task 4 consolidates these three separate SQLite
     /// stores behind one MPSC single-writer sink; today they are reused
     /// directly so pipeline + runtime can emit.
@@ -119,6 +125,7 @@ impl Tars {
             registry,
             roles,
             routing: global.routing.clone(),
+            resilience: global.resilience.clone(),
             sink,
             cancel: CancellationToken::new(),
             root,
@@ -141,6 +148,7 @@ impl Tars {
             registry,
             roles: global.roles.clone(),
             routing: global.routing.clone(),
+            resilience: global.resilience.clone(),
             sink,
             cancel: CancellationToken::new(),
             root,
@@ -185,6 +193,13 @@ impl Tars {
         let capabilities = provider.capabilities().clone();
         let mut opts = PipelineOpts::new(id);
         opts.validators = validators;
+        // Feed the global `[resilience]` section into the pipeline's retry +
+        // circuit-breaker knobs. Both `None` (no `[resilience]` config) ⇒
+        // `default_chain` produces exactly today's chain (default retry, no
+        // breaker); a populated section overrides.
+        let (retry, circuit_breaker) = crate::resilience::resilience_configs(&self.resilience);
+        opts.retry = retry;
+        opts.circuit_breaker = circuit_breaker;
         if let Some(p) = &self.sink.pipeline {
             opts.events = Some(EventStores {
                 events: p.events.clone(),
@@ -430,11 +445,82 @@ mod tests {
             registry,
             roles: HashMap::new(),
             routing: RoutingConfig::default(),
+            resilience: ResilienceConfig::default(),
             sink: open_sink(&StoreScope::Off).expect("open off sink"),
             cancel: CancellationToken::new(),
             root: PathBuf::from("."),
             scope: StoreScope::Off,
         }
+    }
+
+    /// Like [`mock_handle`] but every provider call fails (via `err`), and
+    /// the handle carries `resilience`. Returns the handle + a shared hit
+    /// counter so a test can observe how many times the provider was reached
+    /// (i.e. whether the retry / breaker config actually took effect). Built
+    /// by mapping the config's `mock` provider to an always-erroring one so
+    /// the role still resolves to id `mock`.
+    fn erroring_handle(
+        resilience: ResilienceConfig,
+        err: fn() -> tars_types::ProviderError,
+    ) -> (Tars, Arc<std::sync::atomic::AtomicU32>) {
+        use tars_provider::LlmEventStream;
+        use tars_types::{Capabilities, ChatRequest, ProviderError, RequestContext};
+
+        struct AlwaysErr {
+            id: ProviderId,
+            caps: Capabilities,
+            hits: Arc<std::sync::atomic::AtomicU32>,
+            err: fn() -> ProviderError,
+        }
+        #[async_trait::async_trait]
+        impl LlmProvider for AlwaysErr {
+            fn id(&self) -> &ProviderId {
+                &self.id
+            }
+            fn capabilities(&self) -> &Capabilities {
+                &self.caps
+            }
+            async fn stream(
+                self: Arc<Self>,
+                _req: ChatRequest,
+                _ctx: RequestContext,
+            ) -> Result<LlmEventStream, ProviderError> {
+                self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err((self.err)())
+            }
+        }
+
+        let cfg = ConfigManager::load_from_str(
+            "[providers.mock]\ntype = \"mock\"\ncanned_response = \"hi\"\n",
+        )
+        .expect("parse mock config");
+        let http = HttpProviderBase::default_arc().expect("http base");
+        let base = ProviderRegistry::from_config(&cfg.providers, http, basic())
+            .expect("build registry");
+        let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let hits_for_map = hits.clone();
+        // Replace the config-built mock with an always-erroring provider under
+        // the same id, so `resolve("mock")` still finds it.
+        let registry = Arc::new(base.map_providers(|id, p| {
+            Arc::new(AlwaysErr {
+                id: id.clone(),
+                caps: p.capabilities().clone(),
+                hits: hits_for_map.clone(),
+                err,
+            }) as Arc<dyn LlmProvider>
+        }));
+
+        let tars = Tars {
+            registry,
+            roles: HashMap::new(),
+            routing: RoutingConfig::default(),
+            resilience,
+            sink: open_sink(&StoreScope::Off).expect("open off sink"),
+            cancel: CancellationToken::new(),
+            root: PathBuf::from("."),
+            scope: StoreScope::Off,
+        };
+        (tars, hits)
     }
 
     #[test]
@@ -468,6 +554,127 @@ mod tests {
             !pipeline.layer_names().contains(&"validation"),
             "unexpected validation layer with no validators: {:?}",
             pipeline.layer_names(),
+        );
+    }
+
+    // ── [resilience] config → pipeline ───────────────────────────────────
+
+    #[test]
+    fn no_resilience_config_yields_todays_chain() {
+        // Default (both None) ⇒ the pipeline is byte-for-byte today's chain:
+        // default retry, NO circuit-breaker wrapper. (Sink Off ⇒ no
+        // event_emitter; no validators ⇒ no validation.)
+        let tars = mock_handle();
+        assert_eq!(tars.resilience, ResilienceConfig::default());
+        let pipeline = tars.pipeline("mock").expect("build default pipeline");
+        assert_eq!(
+            pipeline.layer_names(),
+            &["telemetry", "cache_lookup", "retry"],
+            "absent [resilience] must reproduce today's canonical chain",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resilience_retry_count_flows_into_pipeline() {
+        use futures::StreamExt;
+        // A retry override of 4 MaybeRetriable attempts, no backoff, no
+        // breaker: a single pipeline call against an always-`Internal`
+        // (MaybeRetriable) provider must hit it exactly 4 times — proving the
+        // [resilience.retry] config reached the pipeline's RetryConfig.
+        let resilience = ResilienceConfig {
+            retry: Some(tars_config::RetryTuning {
+                max_attempts: Some(4),
+                initial_backoff_secs: Some(0.0),
+                max_backoff_secs: Some(0.0),
+                multiplier: Some(1.0),
+                respect_retry_after: Some(false),
+                max_attempts_maybe_retriable: Some(4),
+                max_wait_secs: Some(0.0),
+                jitter_secs: Some(0.0),
+            }),
+            circuit_breaker: None,
+        };
+        let (tars, hits) =
+            erroring_handle(resilience, || tars_types::ProviderError::Internal("boom".into()));
+        let pipeline = Arc::new(tars.pipeline("mock").expect("build pipeline"));
+        let res = pipeline
+            .call(
+                tars_types::ChatRequest::user(
+                    tars_types::ModelHint::Explicit("m".into()),
+                    "x",
+                ),
+                tars_types::RequestContext::test_default(),
+            )
+            .await;
+        // Open-time error surfaces immediately (no stream); if a stream came
+        // back, drain it.
+        if let Ok(s) = res {
+            let mut s = s;
+            while s.next().await.is_some() {}
+        }
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "retry max_attempts_maybe_retriable=4 from [resilience] must drive 4 provider hits",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resilience_circuit_breaker_flows_into_pipeline() {
+        // Breaker configured to open after 2 consecutive failures, retry
+        // disabled (1 attempt) so each `call` = one provider hit. After two
+        // failing calls the breaker opens and the 3rd call rejects with
+        // CircuitOpen WITHOUT reaching the provider — proving
+        // [resilience.circuit_breaker] reached PipelineOpts.circuit_breaker.
+        let resilience = ResilienceConfig {
+            retry: Some(tars_config::RetryTuning {
+                max_attempts: Some(1),
+                initial_backoff_secs: Some(0.0),
+                max_backoff_secs: Some(0.0),
+                multiplier: Some(1.0),
+                respect_retry_after: Some(false),
+                max_attempts_maybe_retriable: Some(1),
+                max_wait_secs: Some(0.0),
+                jitter_secs: Some(0.0),
+            }),
+            circuit_breaker: Some(tars_config::BreakerTuning {
+                failure_threshold: Some(2),
+                cooldown_secs: Some(30.0),
+            }),
+        };
+        let (tars, hits) =
+            erroring_handle(resilience, || tars_types::ProviderError::ModelOverloaded);
+        let pipeline = Arc::new(tars.pipeline("mock").expect("build pipeline"));
+        let req = || {
+            tars_types::ChatRequest::user(tars_types::ModelHint::Explicit("m".into()), "x")
+        };
+        for _ in 0..2 {
+            let e = pipeline
+                .clone()
+                .call(req(), tars_types::RequestContext::test_default())
+                .await;
+            assert!(matches!(
+                e,
+                Err(tars_types::ProviderError::ModelOverloaded)
+            ));
+        }
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "both failures reached the provider",
+        );
+        let e = pipeline
+            .clone()
+            .call(req(), tars_types::RequestContext::test_default())
+            .await;
+        assert!(
+            matches!(e, Err(tars_types::ProviderError::CircuitOpen { .. })),
+            "breaker from [resilience] must reject the 3rd call as CircuitOpen",
+        );
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "open breaker spared the provider on the 3rd call",
         );
     }
 }
