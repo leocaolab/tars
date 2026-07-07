@@ -19,6 +19,43 @@ is authoritative. This file aggregates.
 
 ---
 
+## 1.1 — web capability: `web.fetch` + `web.search` builtins over sisurf-core — `v1.1.0`
+
+Agents can now read the live web. Two built-in tools land in `tars-tools`,
+thin adapters over the typed [`sisurf-core`](https://github.com/leocaolab/sisurf)
+engine (all fetching / browser-escalation / distillation / result-parsing lives
+there; tars only validates args, calls the one primitive, and maps the typed
+result / typed `WebError` into the `ToolResult` contract).
+
+### `web.fetch` + `web.search` builtins (`tars-tools`) — `0a9192c`
+- **`web.fetch`** — URL → clean Markdown plus a provenance header (final URL +
+  which tier served it, `static` vs `browser`). sisurf hides the
+  reqwest→Chromium escalation; the tool never picks a tier. `WebError::NoBrowser`
+  stays a first-class, **actionable** result ("needs a headless browser — install
+  Chrome, or it fell back to static"), not an opaque blob.
+- **`web.search`** — query → a numbered title/url/snippet list. Backend
+  (`ddg` / `google_cse` / `brave`) comes from config; the runnable backend is
+  built at call time so a missing key surfaces as a legible tool error *before*
+  any network, never a silent fallback.
+- Both are `web.*` (network, long-running): the dispatch permission gate keys on
+  the tool **name**, so a policy that marks them `Ask`/`Deny` routes them through
+  human approval exactly like `bash.run` — no per-tool plumbing.
+- **Typed errors, not stringified blobs**: `web_error_result` branches on every
+  `WebError` variant; where a variant carries a `#[source]` (`Fetch` / `Browser`)
+  it renders that source's own `Display` — the real reason.
+
+### `[web_search]` config merge (`tars-config`) — `0a9192c`
+- The `[web_search]` TOML section deserializes **straight into sisurf's owned
+  `SearchConfig`** (tars never redeclares the schema). `inject_search_keys`
+  resolves the backend's API key from a conventional env var
+  (`GOOGLE_CSE_KEY` / `BRAVE_API_KEY`) and writes it into the sub-config — the
+  same posture as provider `api_key_env`. **The secret never lives on disk.**
+- A missing/blank env var is **not** patched over: the key stays empty and
+  `SearchConfig::build()` typed-fails `MissingApiKey` at search time. Truth over
+  cover-up.
+
+---
+
 ## 1.0 — provider layer: dialects, sandboxed CLI delegates, Bedrock, model KB — `v1.0.0`
 
 The 1.0 release. The provider layer becomes clean, data-driven, and sandboxed —

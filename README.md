@@ -105,6 +105,11 @@ wire it in as one tool.
   error (*parse, don't validate*).
 - **An Agent abstraction.** Hand a `Task` to an Agent; LLM-backed or not, both are
   first-class, and you can hedge one task across N agents.
+- **Live web access, built in.** `web.fetch` (URL → clean Markdown, with the
+  serving tier as provenance) and `web.search` (query → ranked results;
+  DuckDuckGo out of the box, Google CSE / Brave with a key) — thin adapters over
+  the typed [`sisurf-core`](https://github.com/leocaolab/sisurf) engine, gated
+  through the same approval sink as `bash.run`.
 - **First-class Python + Node bindings** (PyO3 / napi-rs).
 
 ---

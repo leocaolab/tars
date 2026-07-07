@@ -427,7 +427,40 @@ mod tests {
         assert!(r.content.contains("https://a.com"));
         assert!(r.content.contains("the first hit"));
         assert!(r.content.contains("2. Second"));
+        // The keyless second hit renders its number/title/url but no snippet line.
+        assert!(!r.content.contains("Second\n   https://b.com\n   \n"));
         assert!(r.title.contains("2 results"));
+    }
+
+    #[test]
+    fn untitled_page_falls_back_to_placeholder_heading() {
+        // `Page.title == None` (the site had no <title>) must render a stable
+        // placeholder heading, not an empty `# ` or a panic.
+        let page = Page {
+            url: "https://example.com/raw".to_string(),
+            title: None,
+            content: "plain body".to_string(),
+            content_length: 10,
+            tier: Tier::Browser,
+        };
+        let r = render_page(page);
+        assert!(!r.is_error);
+        assert!(r.content.contains("# (untitled)"), "content: {}", r.content);
+        // Browser tier is surfaced in both title + provenance header.
+        assert!(r.title.contains("browser"));
+        assert!(r.content.contains("Tier: browser"));
+    }
+
+    #[test]
+    fn empty_result_list_renders_a_zero_result_success_not_an_error() {
+        // A backend that legitimately returned zero hits (as opposed to the
+        // `EmptyResults` typed error) still maps to a non-error result: an empty
+        // numbered list with a "0 results" header. render_results must not panic
+        // on an empty Vec.
+        let r = render_results("no such thing", Vec::new());
+        assert!(!r.is_error);
+        assert!(r.title.contains("0 results"));
+        assert!(r.content.contains("Results for"));
     }
 
     // ── typed error mapping — NoBrowser stays legible + branchable ────
@@ -487,6 +520,51 @@ mod tests {
         assert!(r.is_error);
         assert!(r.content.contains("Static fetch failed"));
         assert!(r.content.contains("503"), "real status preserved: {}", r.content);
+    }
+
+    #[test]
+    fn browser_source_error_renders_the_real_reason_not_a_sentinel() {
+        // The `Browser` arm carries a typed `#[source]` too — render *its* own
+        // Display (the real CDP-level reason), not a Debug blob or a sentinel.
+        use sisurf_core::BrowserError;
+        let err = WebError::Browser(BrowserError::Crashed("cdp websocket dropped".into()));
+        let r = web_error_result("web.fetch", err);
+        assert!(r.is_error);
+        assert!(r.content.contains("Browser-tier fetch failed"));
+        assert!(
+            r.content.contains("cdp websocket dropped"),
+            "real source reason preserved: {}",
+            r.content
+        );
+        assert!(!r.content.contains("Browser("), "no Debug blob");
+    }
+
+    #[test]
+    fn search_parse_error_names_the_backend_and_carries_the_detail() {
+        // A fetched-but-unparseable search page: the message names WHICH backend
+        // and carries the parser's real detail — never a `parse_failed` token.
+        let r = web_error_result(
+            "web.search",
+            WebError::SearchParse {
+                backend: "ddg".into(),
+                detail: "expected <a class=result__a> nodes, found none".into(),
+            },
+        );
+        assert!(r.is_error);
+        assert!(r.title.contains("ddg"));
+        assert!(r.content.contains("expected <a class=result__a> nodes"));
+        assert!(!r.content.contains("SearchParse"), "no Debug blob");
+    }
+
+    #[test]
+    fn unsupported_backend_is_legible() {
+        let r = web_error_result(
+            "web.search",
+            WebError::UnsupportedBackend("compiled without the brave feature".into()),
+        );
+        assert!(r.is_error);
+        assert!(r.content.contains("compiled without the brave feature"));
+        assert!(!r.content.contains("UnsupportedBackend"), "no Debug blob");
     }
 
     #[test]
@@ -609,5 +687,46 @@ mod tests {
             .await
             .expect_err("pre-cancelled should fast-fail");
         assert!(matches!(err, ToolError::Cancelled));
+    }
+
+    // ── registration + spec projection + name-based approval gate ─────
+
+    #[tokio::test]
+    async fn both_web_tools_register_expose_specs_and_gate_by_name() {
+        use crate::{PermissionView, ToolDecision, ToolRegistry};
+        use tars_types::{Message, ToolCall};
+
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(WebFetchTool::new())).unwrap();
+        reg.register(Arc::new(WebSearchTool::new())).unwrap();
+
+        // to_tool_specs() surfaces BOTH web tools by name — an agent's model
+        // sees them in its tool set.
+        let names: Vec<String> = reg.to_tool_specs().into_iter().map(|s| s.name).collect();
+        assert!(names.contains(&"web.fetch".to_string()), "specs: {names:?}");
+        assert!(names.contains(&"web.search".to_string()), "specs: {names:?}");
+
+        // The dispatch gate keys on the tool NAME (no per-tool plumbing): a Deny
+        // policy stops `web.fetch` *before* execute — so it never touches the
+        // network — and yields an is_error tool message the model can adapt to.
+        let deny: Arc<dyn PermissionView> = Arc::new(|_name: &str| ToolDecision::Deny);
+        let ctx = ToolContext {
+            permission: Some(deny),
+            ..Default::default()
+        };
+        let msg = reg
+            .dispatch(
+                &ToolCall::new("c1", "web.fetch", json!({"url": "https://example.com"})),
+                ctx,
+            )
+            .await;
+        match msg {
+            Message::Tool { is_error, content, .. } => {
+                assert!(is_error, "denied web.fetch must be an error result");
+                let text = content[0].as_text().unwrap_or_default();
+                assert!(text.contains("web.fetch"), "names the gated tool: {text}");
+            }
+            other => panic!("expected Tool message, got {other:?}"),
+        }
     }
 }

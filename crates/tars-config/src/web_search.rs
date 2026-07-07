@@ -176,6 +176,26 @@ mod tests {
     }
 
     #[test]
+    fn missing_brave_env_leaves_key_empty_and_build_typed_fails() {
+        // Symmetry with the google_cse path: a selected brave backend with no
+        // env-resolved key stays empty and `build()` typed-fails MissingApiKey —
+        // no silent fallback to DDG.
+        let cfg = SearchConfig {
+            backend: BackendKind::Brave,
+            google_cse: None,
+            brave: Some(BraveConfig {
+                api_key: String::new(),
+            }),
+        };
+        let injected = inject_search_keys_with(cfg, fake_env(&[]));
+        assert!(injected.brave.as_ref().unwrap().api_key.is_empty());
+        assert!(matches!(
+            injected.build(),
+            Err(sisurf_core::WebError::MissingApiKey(_))
+        ));
+    }
+
+    #[test]
     fn blank_env_value_treated_as_absent() {
         // A present-but-whitespace env value must not inject an empty-ish key.
         assert!(super::non_blank("   ".to_string()).is_none());

@@ -615,6 +615,51 @@ committed file:
 The discipline: a bless is a **reviewable commit**, never a silent overwrite —
 so an unintended drift can't slip through as an "accepted" snapshot.
 
+## Built-in web tools
+
+Two built-in tools give an agent live web access. Both are thin adapters over
+[`sisurf-core`](https://github.com/leocaolab/sisurf) — the browsing engine
+(fetch, browser escalation, distillation, result parsing) lives there; tars only
+validates the args, calls the one sisurf primitive, and maps its typed result
+into a `ToolResult`.
+
+| Tool | In → out |
+|---|---|
+| **`web.fetch`** | `url` → the page's main content as clean **Markdown**, plus a provenance header (final URL + which **tier** served it: `static` reqwest fetch vs. `browser` Chromium render). Use to READ a page you already have a URL for. If a page needs JavaScript and no headless browser can be launched, you get a legible, actionable `NoBrowser` error ("install Chrome, or fetch a URL that serves without client-side JS"), not an opaque failure. |
+| **`web.search`** | `query` → a numbered `title / url / snippet` list. Use to DISCOVER URLs, then follow up with `web.fetch`. Backend is chosen by config (see below). |
+
+Both are network, long-running `web.*` ops, so they route through the same
+approval gate as `bash.run`: a policy that marks them `Ask` / `Deny` sends them
+through human approval by tool name — no extra wiring.
+
+### `[web_search]` config
+
+`web.search` defaults to **DuckDuckGo** (`ddg`) — no key, works out of the box.
+To use a keyed backend, add a `[web_search]` section to `~/.tars/config.toml`.
+The schema is **owned by sisurf** (`SearchConfig`); tars deserializes the section
+into it and injects the key — it does not redeclare the schema.
+
+```toml
+[web_search]
+backend = "google_cse"            # ddg | google_cse | brave
+google_cse = { cx = "your-cx-id" } # the programmable-search-engine id; NOT the secret
+```
+
+The **API key is never written to the config file.** tars resolves it from a
+conventional environment variable — the same posture as a provider's
+`api_key_env` — and injects it at load time:
+
+| Backend | Config section | Key env var |
+|---|---|---|
+| `ddg` | *(none)* | *(none — keyless)* |
+| `google_cse` | `[web_search] google_cse = { cx = "…" }` | `GOOGLE_CSE_KEY` |
+| `brave` | `[web_search] brave = { }` | `BRAVE_API_KEY` |
+
+If the env var is missing or blank, the key stays empty on purpose:
+`SearchConfig::build()` then typed-fails with `MissingApiKey`, which `web.search`
+surfaces as a legible tool error **before any network call** — it never silently
+falls back to a different backend.
+
 ## Agents — hand a task to a capability set
 
 The three shapes above are *calls*. An **Agent** is one level up: a set of
