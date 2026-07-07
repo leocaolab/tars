@@ -25,6 +25,9 @@ tars-pipeline = { path = "../tars-pipeline" }
 tars-cache = { path = "../tars-cache" }
 tars-storage = { path = "../tars-storage" }
 tars-runtime = { path = "../tars-runtime" }
+# The per-scope `Tars` handle (Doc 06 §6 C3) — the binding target for the
+# handle-based surface (`Workspaces` / `TarsHandle` / provider+pipeline).
+tars-handle = { path = "../tars-handle" }
 serde.workspace = true
 serde_json.workspace = true
 

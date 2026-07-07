@@ -43,6 +43,19 @@
 //! marshalling, per-call cancellation tokens, validator chains,
 //! event-store wiring. Each is additive on top of this surface.
 
+mod ctx;
+mod errors;
+mod handle;
+
+// Re-export the handle-based surface at the crate root so `rlib` consumers get
+// the full API and the free `#[napi]` functions read as reachable (they are —
+// napi exports them; a private-module free fn otherwise trips `dead_code` in
+// the rlib-test build, unlike the `#[napi]` structs which their impls keep
+// live). The `#[napi]` registration is unaffected — it fires at the definition
+// site, not this re-export.
+pub use ctx::JsContext;
+pub use handle::{Provider, TarsHandle, Workspaces, init, is_initialized, tars_home};
+
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -51,13 +64,16 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::runtime::Runtime;
 
+use crate::ctx::default_context;
+use crate::errors::provider_reason;
+
 use tars_config::ConfigManager;
 use tars_pipeline::{LlmService, Pipeline as RsPipeline, PipelineOpts};
 use tars_provider::{
     LlmProvider, auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry,
 };
 use tars_types::{
-    Message, RequestContext,
+    Message, RUN_CONTEXT, RequestContext,
     chat::{ChatRequest, ContentBlock},
     ids::ProviderId,
     model::{ModelHint, ThinkingMode},
@@ -210,6 +226,11 @@ pub struct Pipeline {
     /// `Arc<dyn LlmService>` so calls don't move it — `complete()`
     /// can `Arc::clone` and drive on the tokio runtime.
     inner: Arc<dyn LlmService>,
+    /// The explicit call context re-scoped onto `RUN_CONTEXT` at the binding
+    /// boundary for each `complete()` (Doc 06 §9). The `from_*` factories set a
+    /// fresh single-user default; the handle path
+    /// ([`handle::TarsHandle::pipeline`]) threads the handle's ctx.
+    ctx: RequestContext,
 }
 
 #[napi]
@@ -254,42 +275,7 @@ impl Pipeline {
     /// marshals this as a `Promise<CompleteResult>` to JS callers.
     #[napi]
     pub async fn complete(&self, opts: CompleteOptions) -> Result<CompleteResult> {
-        // Pull cohort tags before consuming opts into the request
-        // builder — both downstream uses (RequestContext.tags and
-        // build_request's ChatRequest construction) need ownership
-        // bits out of `opts` and Rust's move semantics force one
-        // copy-out here. Empty when caller didn't pass `tags`.
-        let tags = opts.tags.clone().unwrap_or_default();
-        let req = build_request(opts)?;
-        let svc = Arc::clone(&self.inner);
-        // napi-rs's `tokio_rt` feature already dispatched us onto our
-        // shared runtime. The explicit `tokio_rt()?` call is the
-        // membership check — surfaces a clean error if the runtime
-        // hasn't initialised (shouldn't happen, but defensive).
-        let _rt = tokio_rt()?;
-        let ctx = RequestContext::test_default().with_tags(tags);
-        let mut stream = svc
-            .call(req, ctx)
-            .await
-            .map_err(|e| Error::from_reason(format!("provider call: {e}")))?;
-        let mut builder = ChatResponseBuilder::new();
-        while let Some(ev) = stream.next().await {
-            let ev = ev.map_err(|e| Error::from_reason(format!("stream event: {e}")))?;
-            builder.apply(ev);
-        }
-        let resp = builder.finish();
-        Ok(CompleteResult {
-            text: resp.text,
-            usage: UsageJs {
-                input_tokens: resp.usage.input_tokens as u32,
-                output_tokens: resp.usage.output_tokens as u32,
-                cached_input_tokens: resp.usage.cached_input_tokens as u32,
-                cache_creation_tokens: resp.usage.cache_creation_tokens as u32,
-                thinking_tokens: resp.usage.thinking_tokens as u32,
-            },
-            model: Some(resp.actual_model),
-            stop_reason: resp.stop_reason.map(|r| stop_reason_str(&r).to_string()),
-        })
+        drive_complete(Arc::clone(&self.inner), self.ctx.clone(), opts).await
     }
 }
 
@@ -297,13 +283,68 @@ impl Pipeline {
     /// Internal constructor shared by every `from_*` factory: wrap
     /// the resolved `Arc<dyn LlmProvider>` in TARS's default
     /// middleware onion (`Pipeline::default_chain`) so cache, retry,
-    /// telemetry, and the rest are all active by construction.
+    /// telemetry, and the rest are all active by construction. Uses a fresh
+    /// single-user default context (the handle path threads its own).
     fn from_provider(id: String, provider: Arc<dyn LlmProvider>) -> Self {
         let opts = PipelineOpts::new(ProviderId::new(id.clone()));
         let pipeline = RsPipeline::default_chain(provider, opts);
         let inner: Arc<dyn LlmService> = Arc::new(pipeline);
-        Self { id, inner }
+        Self {
+            id,
+            inner,
+            ctx: default_context(),
+        }
     }
+
+    /// Wrap an already-assembled `LlmService` (the handle path: the scope's
+    /// pipeline for a role) with an explicit call context. Shared by
+    /// [`handle::TarsHandle::pipeline`].
+    pub(crate) fn from_service(id: String, inner: Arc<dyn LlmService>, ctx: RequestContext) -> Self {
+        Self { id, inner, ctx }
+    }
+}
+
+/// Drive one non-streaming completion through `svc`, re-establishing the
+/// explicit call context on `RUN_CONTEXT` at the binding boundary (Doc 06 §9:
+/// the `task_local` never crosses the FFI hop, so we re-scope it per call).
+/// Shared by [`Pipeline::complete`] and [`handle::Provider::complete`].
+pub(crate) async fn drive_complete(
+    svc: Arc<dyn LlmService>,
+    mut ctx: RequestContext,
+    opts: CompleteOptions,
+) -> Result<CompleteResult> {
+    // Pull cohort tags before consuming opts into the request builder, then
+    // merge them onto the context's tags (union with any set via `context()`).
+    if let Some(tags) = opts.tags.clone() {
+        ctx.tags.extend(tags);
+    }
+    let req = build_request(opts)?;
+    // napi-rs's `tokio_rt` feature already dispatched us onto our shared
+    // runtime; this is the defensive membership check.
+    let _rt = tokio_rt()?;
+    RUN_CONTEXT
+        .scope(ctx.clone(), async move {
+            let mut stream = svc.call(req, ctx).await.map_err(provider_reason)?;
+            let mut builder = ChatResponseBuilder::new();
+            while let Some(ev) = stream.next().await {
+                let ev = ev.map_err(|e| Error::from_reason(format!("stream event: {e}")))?;
+                builder.apply(ev);
+            }
+            let resp = builder.finish();
+            Ok(CompleteResult {
+                text: resp.text,
+                usage: UsageJs {
+                    input_tokens: resp.usage.input_tokens as u32,
+                    output_tokens: resp.usage.output_tokens as u32,
+                    cached_input_tokens: resp.usage.cached_input_tokens as u32,
+                    cache_creation_tokens: resp.usage.cache_creation_tokens as u32,
+                    thinking_tokens: resp.usage.thinking_tokens as u32,
+                },
+                model: Some(resp.actual_model),
+                stop_reason: resp.stop_reason.map(|r| stop_reason_str(&r).to_string()),
+            })
+        })
+        .await
 }
 
 // ── Builder helpers ──────────────────────────────────────────────────
