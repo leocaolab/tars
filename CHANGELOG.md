@@ -21,6 +21,8 @@ is authoritative. This file aggregates.
 
 ## 1.2 — config + runtime handle: process isolation, per-workspace `Tars` handle, Python/Node bindings — `v1.2.0`
 
+> **v1.2.1** — `sisurf-core` moves from a path dep to a git dep (`leocaolab/sisurf` @ `v0.3.0`) so tars is consumable as a **git dependency**. v1.1.0/v1.2.0 path-dep'd it and were silently not git-installable (surfaced when arc tried to bump).
+
 The scattered `load_from_file → from_config → builder → new` wiring collapses into
 one entry: a `Tars` handle per workspace. The load-bearing decision is **process
 isolation** — one Runtime = one tenant — which makes a global immutable

@@ -16,7 +16,7 @@ tars-sandbox = { path = "../tars-sandbox" }
 # Web capability (fetch + search) — the typed sisurf engine, linked in as a
 # sibling path dep (both repos live under ~/projects). `web.fetch` / `web.search`
 # builtins are thin adapters over its `sisurf_core::{fetch,search}` public API.
-sisurf-core = { path = "../../../sisurf/crates/core" }
+sisurf-core = { git = "https://github.com/leocaolab/sisurf", tag = "v0.3.0" }
 
 # Async
 tokio = { workspace = true, features = ["fs", "rt"] }

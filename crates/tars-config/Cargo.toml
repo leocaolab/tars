@@ -16,7 +16,7 @@ tars-sandbox = { path = "../tars-sandbox" }
 # Web-search config schema is OWNED by sisurf (`SearchConfig`) — tars
 # deserializes the `[web_search]` TOML section into it and injects the
 # env-resolved API key, but never redeclares the schema. Sibling path dep.
-sisurf-core = { path = "../../../sisurf/crates/core" }
+sisurf-core = { git = "https://github.com/leocaolab/sisurf", tag = "v0.3.0" }
 
 serde.workspace = true
 serde_json.workspace = true
