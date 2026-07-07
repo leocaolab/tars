@@ -81,7 +81,7 @@ def build_role(
 ) -> LlmRole:
     """Build the shared role from `$TARS_PROVIDER` / `$TARS_MODEL` (or args).
 
-    Run `tars init` once to write `~/.tars/config.toml`, then point this at any
+    Run `tars init` once to write `$TARS_HOME/config.toml` (default `~/.tars`), then point this at any
     provider in it. `event_store_dir` (or `$TARS_EVENT_STORE`) makes every call
     inspectable later via the `tars events` CLI.
     """

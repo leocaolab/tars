@@ -127,12 +127,19 @@ cd crates/tars-py && maturin develop --release
 ```
 
 ```bash
-cargo run -p tars-cli -- init      # writes ~/.tars/config.toml
+cargo run -p tars-cli -- init      # writes $TARS_HOME/config.toml (default ~/.tars)
 # Built-ins need only an env key: OPENAI_API_KEY / ANTHROPIC_API_KEY /
 # GEMINI_API_KEY / DEEPSEEK_API_KEY. Local + subscription-CLI providers need no key.
 
 cargo run -p tars-cli -- run -P deepseek --prompt "Say hi in five words."
 ```
+
+tars reads its global config from **`$TARS_HOME/config.toml`** —
+`$TARS_HOME` resolves as `--tars_home` flag > `$TARS_HOME` env var >
+`~/.tars` (the default). The providers declared there are global, shared by
+every tars consumer/tool; each provider's API key is read from the env var
+its `api_key_env` names (optionally loaded from `$TARS_HOME/.env`), never
+stored in the file.
 
 ### Run a completion (Python)
 

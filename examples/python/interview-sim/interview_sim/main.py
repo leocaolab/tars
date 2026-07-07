@@ -1,7 +1,7 @@
 """Entry point — wires the blackboard + three agents over a tars Pipeline.
 
 Run:
-    export TARS_PROVIDER=anthropic          # any provider in ~/.tars/config.toml
+    export TARS_PROVIDER=anthropic          # any provider in $TARS_HOME/config.toml (default ~/.tars)
     export TARS_MODEL=claude-sonnet-4-5
     python -m interview_sim.main             # human candidate (you type)
     python -m interview_sim.main --auto       # self-play: AI candidate vs AI interviewer
@@ -52,7 +52,7 @@ def main():
     except Exception as e:
         print(
             f"错误：无法创建 tars Pipeline：{e}\n"
-            "请先运行 `tars init` 并在 ~/.tars/config.toml 配置好 "
+            "请先运行 `tars init` 并在 $TARS_HOME/config.toml(默认 ~/.tars)配置好 "
             "$TARS_PROVIDER，并设置好对应的 API key 环境变量。",
             file=sys.stderr,
         )

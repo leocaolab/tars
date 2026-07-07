@@ -79,7 +79,7 @@ typed `tars.TarsProviderError` instead of a `ValidationError` you have to guess 
 cd ../../../crates/tars-py && maturin develop --release && cd -
 
 # 2. Bootstrap a tars config and add your provider's API key.
-tars init                       # writes ~/.tars/config.toml
+tars init                       # writes $TARS_HOME/config.toml (default ~/.tars)
 export TARS_PROVIDER=anthropic  # any provider id in that config
 export TARS_MODEL=claude-sonnet-4-5
 

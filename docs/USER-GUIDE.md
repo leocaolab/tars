@@ -42,7 +42,7 @@ commands are the shortest route to a successful LLM call. No Python,
 no Rust code — just shell.
 
 ```bash
-# 1. Build + write a starter config to ~/.tars/config.toml.
+# 1. Build + write a starter config to $TARS_HOME/config.toml (default ~/.tars).
 cargo run -p tars-cli -- init
 
 # 2. Set the credential the starter config references.
@@ -54,10 +54,11 @@ cargo run -p tars-cli -- run -p anthropic "Say hi in 5 words."
 
 Expected: the model's reply on stdout, a one-line `usage:` summary on
 stderr. If you see `error in tars run:` instead, double-check the env
-var name matches what `~/.tars/config.toml` declares for that provider.
+var name matches what `$TARS_HOME/config.toml` (default `~/.tars`) declares
+for that provider.
 
 Want a different provider? Replace `-p anthropic` with one of the ids
-in `~/.tars/config.toml` (`-p openai_main`, `-p claude_cli`, etc.).
+in `$TARS_HOME/config.toml` (default `~/.tars`) (`-p openai_main`, `-p claude_cli`, etc.).
 For the long-lived subscription path, see
 [`providers/claude-cli.md`](./providers/claude-cli.md).
 
@@ -114,8 +115,15 @@ tars-types    = { git = "https://github.com/leocaolab/tars.git", tag = "v0.4.0" 
 
 ```bash
 cargo run -p tars-cli -- init
-# writes ~/.tars/config.toml with starter providers
+# writes $TARS_HOME/config.toml (default ~/.tars) with starter providers
 ```
+
+tars reads its global config from **`$TARS_HOME/config.toml`** —
+`$TARS_HOME` resolves as `--tars_home` flag > `$TARS_HOME` env var >
+`~/.tars` (the default). The providers declared there are global: shared by
+every tars consumer/tool. Each provider's API key is read from the env var
+its `api_key_env` names — optionally loaded from `$TARS_HOME/.env` — and is
+never stored in the config file itself.
 
 Then `export ANTHROPIC_API_KEY=...` (and/or `OPENAI_API_KEY`,
 `GOOGLE_API_KEY`) — the config references env vars by name; secrets
@@ -156,7 +164,7 @@ p = tars.Provider.from_default("anthropic")  # no middleware
 
 **Rust**
 
-The shortest path loads the same `~/.tars/config.toml` and goes through
+The shortest path loads the same `$TARS_HOME/config.toml` (default `~/.tars`) and goes through
 `ProviderRegistry::from_config`. No `Pipeline.from_default` analogue
 exists in Rust today — you stack middleware explicitly.
 
@@ -169,7 +177,7 @@ use tars_types::{ChatRequest, ModelHint, ProviderId, RequestContext};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load ~/.tars/config.toml and build providers from it.
+    // Load $TARS_HOME/config.toml (default ~/.tars) and build providers from it.
     let cfg = Config::load_default()?;
     let registry = ProviderRegistry::from_config(&cfg.providers, /* … */)?;
 
@@ -635,7 +643,7 @@ through human approval by tool name — no extra wiring.
 ### `[web_search]` config
 
 `web.search` defaults to **DuckDuckGo** (`ddg`) — no key, works out of the box.
-To use a keyed backend, add a `[web_search]` section to `~/.tars/config.toml`.
+To use a keyed backend, add a `[web_search]` section to `$TARS_HOME/config.toml` (default `~/.tars`).
 The schema is **owned by sisurf** (`SearchConfig`); tars deserializes the section
 into it and injects the key — it does not redeclare the schema.
 
