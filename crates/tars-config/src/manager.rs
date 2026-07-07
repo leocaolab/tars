@@ -85,9 +85,10 @@ impl Config {
 
 /// Loads + validates a [`Config`] from a single TOML file.
 ///
-/// Future iterations grow this into the 5-layer merge described in
-/// Doc 06 §2 (Compiled → Built-in → System → User → Tenant → Per-Request).
-/// This v0.1 reads exactly one file so we can wire providers up first.
+/// Under Doc 06 (process isolation) this loads the global immutable Config
+/// once from ~/.tars; the per-workspace `[roles]` overlay is a separate small
+/// layer. The old shared-process 5-layer merge (System/Tenant/Per-Request +
+/// hot reload) is the DEPRECATED appendix of Doc 06, not the target.
 pub struct ConfigManager;
 
 impl ConfigManager {

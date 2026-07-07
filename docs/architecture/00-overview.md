@@ -127,7 +127,7 @@ The Rust trait is the source of truth; HTTP API / gRPC / Python / TypeScript and
 | [03](./03-cache-registry.md) | Cache Registry | Three-tier cache (L1/L2/L3); content addressing; reference counting; three lines of defense for tenant isolation | Performance / cost engineers |
 | [04](./04-agent-runtime.md) | Agent Runtime | Trajectory tree; event sourcing; Saga compensation; recovery mechanism; Frontend contract | Core architects |
 | [05](./05-tools-mcp-skills.md) | Tools / MCP / Skills | Clear separation of three-layer concepts; MCP integration; three Skill implementations | Tool developers |
-| [06](./06-config-multitenancy.md) | Config and Multi-tenancy | 5-layer override; lock layer; Secret management; tenant lifecycle | DevOps / platform engineering |
+| [06](./06-config-multitenancy.md) | Config & Runtime Handle | Process isolation (1 Runtime = 1 tenant); global Config/Registry singleton; per-workspace `Tars` handle; StoreScope; `task_local` ctx. *(Old shared-process 5-layer / secrets / tenant-lifecycle design = DEPRECATED appendix.)* | Runtime / platform engineering |
 | [07](./07-deployment-frontend.md) | Deployment and Frontend | 4 deployment shapes; CI / TUI / Web Dashboard; Hybrid control plane | Product + DevOps |
 | [08](./08-melt-observability.md) | MELT Observability | Disambiguation of three data flows; cardinality control; mandatory redaction of sensitive data | SRE |
 | [09](./09-storage-schema.md) | Storage Schema | Postgres + SQLite + Redis + S3; partitioning; migration; tenant-level cleanup | Database engineers |

@@ -1,11 +1,12 @@
 //! tars-config — declarative configuration for TARS Runtime.
 //!
-//! Per Doc 06 the eventual shape is a 5-layer override stack
-//! (Compiled → Built-in → System → User → Tenant → Per-Request) with
-//! lock constraints, hot reload, and tenant-level overrides. This v0.1
-//! ships only the pieces needed to **declaratively configure
-//! providers** so the existing `tars-provider` builders no longer need
-//! to be hand-wired:
+//! Per Doc 06 (process isolation) the shape is a global immutable Config
+//! loaded once from `~/.tars` (one tenant per process) plus a small
+//! per-workspace `[roles]` overlay — NOT the old shared-process 5-layer
+//! stack with hot reload / in-process tenant overrides (that is the
+//! DEPRECATED appendix of Doc 06). This v0.1 ships only the pieces needed
+//! to **declaratively configure providers** so the existing
+//! `tars-provider` builders no longer need to be hand-wired:
 //!
 //! - [`Config`] — top-level container (only `providers` populated for now)
 //! - [`ProvidersConfig`] / [`ProviderConfig`] — provider declarations
