@@ -19,6 +19,48 @@ is authoritative. This file aggregates.
 
 ---
 
+## 1.2 — config + runtime handle: process isolation, per-workspace `Tars` handle, Python/Node bindings — `v1.2.0`
+
+The scattered `load_from_file → from_config → builder → new` wiring collapses into
+one entry: a `Tars` handle per workspace. The load-bearing decision is **process
+isolation** — one Runtime = one tenant — which makes a global immutable
+config/registry singleton correct and defers shared-process multi-tenancy to "spin
+another process" (Doc 06; the old shared-process design kept as a DEPRECATED appendix).
+
+### Global config + provider registry singletons (`tars-config`, `tars-provider`) — `e88ead1` / `46f4bea`
+- `Config::load/get/resolve_home` over a `OnceLock`: global config loads once from
+  **`$TARS_HOME/config.toml`** (`--tars_home` > `$TARS_HOME` > `~/.tars`, not XDG).
+  `ProviderRegistry::global()` builds every declared provider once, shared.
+
+### `Tars` per-workspace handle + path/store law (`tars-handle`, new crate) — `47adffb`
+- `Tars::for_workspace(tool, root)` / `standalone` → `provider(role)` / `pipeline(role)`
+  / `runtime()`. `resolve_workspace_root` canonicalizes + walks up, where a `.<tool>/`
+  marker **beats `.git`** (the monorepo split). `StoreScope` (workspace / tars_home /
+  off). Deterministic `Drop` (cancel + release).
+
+### First-class flat `[roles]` name→provider map (`tars-config`, `tars-handle`) — `7bfb4b2`
+- `[roles] critic = "deepseek"` resolves natively: `provider("critic")` → the deepseek
+  provider (flat map > tier > literal id > default tier > sole > error). Aligns with how
+  arc/concer already configure roles.
+
+### `RUN_CONTEXT` task-local + `spawn_with_context` (`tars-types`) — `9c3558e`
+- Context threads implicitly inside Rust (no ctx-param plumbing); `spawn_with_context`
+  re-establishes it across `tokio::spawn`. `tenant_id` is the partition-key seam (M5) —
+  no `for_tenant` built until a server needs it.
+
+### Handle-based Python (PyO3) + Node (napi) bindings (`tars-py`, `tars-node`) — `db41acc` / `5d2df1f`
+- The spine in both languages: `init` → `Workspaces` manager → handle → `context` scope →
+  `provider`/`pipeline`. Python is **sync-blocking** (existing `TOKIO` + `allow_threads`
+  bridge); Node is **async/Promise** with discriminable error codes. ctx is explicit at
+  the FFI boundary (task-local never crosses). DAG (`runtime().run(plan)`) left as a
+  marked follow-up.
+
+### Docs — `$TARS_HOME` framing + Doc 12 rewrite — `033c149` / `7e073e5`
+- README / USER-GUIDE / examples frame the config path as `$TARS_HOME` (default
+  `~/.tars`), not hardcoded. Doc 12 §6/§7 rewritten to the handle spine.
+
+---
+
 ## 1.1 — web capability: `web.fetch` + `web.search` builtins over sisurf-core — `v1.1.0`
 
 Agents can now read the live web. Two built-in tools land in `tars-tools`,
