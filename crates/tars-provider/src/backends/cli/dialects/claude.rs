@@ -113,6 +113,22 @@ impl CliDialect for ClaudeCliDialect {
         OutputMode::JsonEvents
     }
 
+    fn state_dirs(&self) -> Vec<std::path::PathBuf> {
+        // claude_cli's own home (`$CLAUDE_CONFIG_DIR`, default `~/.claude`)
+        // holds its config, sessions, and the per-session shell-snapshot /
+        // session-env dir its Bash tool creates on first use. Under the
+        // delegate write-jail that `mkdir` was the live `EPERM on session-env
+        // directory creation` — the fixer could edit the worktree but not run
+        // `cargo build`/`cargo test` to self-verify its own fix. Grant
+        // `~/.claude` too (skipped centrally if absent), mirroring codex's
+        // `~/.codex`. The env/home reads live here; the resolution rule is
+        // factored into the pure `resolve_claude_state_dirs` below.
+        resolve_claude_state_dirs(
+            std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
+            tars_types::env::home_dir(),
+        )
+    }
+
     fn parse_line(&self, raw: &Value) -> Result<Vec<ChatEvent>, ProviderError> {
         // The runner reconstructs claude's `--output-format json` payload
         // (or the stream-json `result` event, `type` stripped) into a single
@@ -131,10 +147,28 @@ impl CliDialect for ClaudeCliDialect {
     }
 }
 
+/// Resolve claude's writable state dir from `(config-dir override, home dir)`.
+/// `$CLAUDE_CONFIG_DIR` wins when set; otherwise `~/.claude`; otherwise nothing
+/// (no `$HOME` → no dir to grant). Non-existent paths are filtered centrally in
+/// `subprocess::build_sandboxed_command`, so this stays a pure mapping. Pulled
+/// out of [`ClaudeCliDialect::state_dirs`] so it's unit-testable without
+/// process-global env mutation (the workspace forbids `unsafe`; Rust 2024 makes
+/// `env::set_var` `unsafe`) — same idiom as `build_argv_with`.
+fn resolve_claude_state_dirs(
+    config_dir_override: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    config_dir_override
+        .or_else(|| home.map(|h| h.join(".claude")))
+        .into_iter()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
     use tars_types::{ModelHint, ModelTier};
 
     fn dialect() -> ClaudeCliDialect {
@@ -241,6 +275,32 @@ mod tests {
         let d = dialect();
         let events = d.parse_line(&json!({"result": null, "is_error": false})).unwrap();
         assert!(matches!(&events[0], ChatEvent::Delta { text } if text.is_empty()));
+    }
+
+    #[test]
+    fn state_dirs_prefers_config_dir_override_verbatim() {
+        // `$CLAUDE_CONFIG_DIR` set → grant exactly that path, NOT joined with
+        // `.claude` (the override already names the config home). The home dir
+        // is ignored when the override is present.
+        let dirs = resolve_claude_state_dirs(
+            Some(PathBuf::from("/custom/claude/home")),
+            Some(PathBuf::from("/home/alice")),
+        );
+        assert_eq!(dirs, vec![PathBuf::from("/custom/claude/home")]);
+    }
+
+    #[test]
+    fn state_dirs_resolves_dot_claude_under_home_when_no_override() {
+        // No `$CLAUDE_CONFIG_DIR` → fall back to `$HOME/.claude`.
+        let dirs = resolve_claude_state_dirs(None, Some(PathBuf::from("/home/alice")));
+        assert_eq!(dirs, vec![PathBuf::from("/home/alice/.claude")]);
+    }
+
+    #[test]
+    fn state_dirs_empty_when_no_override_and_no_home() {
+        // Neither knob available (e.g. `$HOME` unset in a container) → grant
+        // nothing rather than a bogus relative path; the jail simply omits it.
+        assert!(resolve_claude_state_dirs(None, None).is_empty());
     }
 
     #[test]
