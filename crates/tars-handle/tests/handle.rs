@@ -14,9 +14,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::sync::Mutex;
 
+use futures::StreamExt;
 use tars_config::{Config, ProviderConfig, ProvidersConfig, RoutingConfig};
 use tars_handle::{StoreScope, Tars, WorkspaceHandles};
-use tars_types::{ModelTier, ProviderId};
+use tars_types::{ChatEvent, ChatRequest, ModelHint, ModelTier, ProviderId, RequestContext};
 
 /// Install the shared test config once (idempotent — first writer wins).
 fn ensure_config() {
@@ -162,6 +163,103 @@ fn lifecycle_open_switch_close_keeps_registry_shared() {
         assert!(!map.contains_key(&root_a));
         assert!(map.contains_key(&root_b));
     }
+}
+
+#[test]
+fn lifecycle_switch_back_close_and_reconstruct() {
+    // The full consumer lifecycle (Doc 06 §10 / CUJ-5): open A, switch to B,
+    // switch back to A (cache hit — NOT rebuilt), close A (B survives), then
+    // reconstruct A from its on-disk state.
+    ensure_config();
+    let a = workspace_with_config("[roles]\ncritic = \"mock1\"\n");
+    let b = workspace_with_config("");
+    let handles: WorkspaceHandles = Mutex::new(HashMap::new());
+    let root_a = a.path().canonicalize().unwrap();
+    let root_b = b.path().canonicalize().unwrap();
+
+    // `built` counts real handle constructions: a cache hit must not bump it.
+    let mut built = 0usize;
+    let store_a;
+    {
+        let mut map = handles.lock().unwrap();
+        store_a = map
+            .entry(root_a.clone())
+            .or_insert_with(|| {
+                built += 1;
+                Tars::for_workspace("arc", &root_a).unwrap()
+            })
+            .store_scope()
+            .clone();
+        // switch to B.
+        map.entry(root_b.clone()).or_insert_with(|| {
+            built += 1;
+            Tars::for_workspace("arc", &root_b).unwrap()
+        });
+        // switch BACK to A — same root, must be a cache hit (no rebuild).
+        map.entry(root_a.clone()).or_insert_with(|| {
+            built += 1;
+            Tars::for_workspace("arc", &root_a).unwrap()
+        });
+        assert_eq!(built, 2, "A + B built once each; switch-back-to-A is cached");
+        // The cached A still resolves its flat `[roles]` entry.
+        assert_eq!(
+            map.get(&root_a).unwrap().provider("critic").unwrap().id(),
+            &ProviderId::new("mock1"),
+        );
+    }
+
+    // close A: cancel + evict. B is untouched and still resolves.
+    {
+        let mut map = handles.lock().unwrap();
+        map.remove(&root_a).expect("A was open").cancel();
+        assert!(!map.contains_key(&root_a));
+        assert!(
+            map.get(&root_b).unwrap().provider("default").is_ok(),
+            "B still resolves after A is closed",
+        );
+    }
+
+    // reconstruct: reopen A's root — lands on the SAME on-disk store and
+    // resolves against the `[roles]` it persisted.
+    let reopened = Tars::for_workspace("arc", &root_a).expect("reopen A");
+    assert_eq!(
+        reopened.store_scope(),
+        &store_a,
+        "reopened A maps to the same on-disk store dir",
+    );
+    assert_eq!(
+        reopened.provider("critic").unwrap().id(),
+        &ProviderId::new("mock1"),
+        "reopened A resolves against its persisted [roles]",
+    );
+}
+
+#[tokio::test]
+async fn pipeline_completes_end_to_end_over_the_mock() {
+    // Load a config with a `[roles]` + a mock provider → for_workspace →
+    // pipeline(role) → the call completes and the mock's canned response flows
+    // back through the whole middleware chain (no network).
+    ensure_config();
+    let ws = workspace_with_config("[roles]\ncritic = \"mock1\"\n");
+    let tars = Tars::for_workspace("arc", ws.path()).expect("open");
+
+    let pipe = tars.pipeline("critic").expect("pipeline builds for the mapped role");
+    let req = ChatRequest::user(ModelHint::Explicit("mock-model".into()), "review this");
+    let mut stream = std::sync::Arc::new(pipe)
+        .call(req, RequestContext::test_default())
+        .await
+        .expect("pipeline call opens a stream over the mock");
+
+    let mut text = String::new();
+    while let Some(ev) = stream.next().await {
+        if let ChatEvent::Delta { text: t } = ev.expect("event") {
+            text.push_str(&t);
+        }
+    }
+    assert_eq!(
+        text, "hi",
+        "the mock's canned response completes back through the pipeline",
+    );
 }
 
 #[tokio::test]
