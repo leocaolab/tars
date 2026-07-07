@@ -29,6 +29,7 @@ pub mod paths;
 pub mod providers;
 pub mod routing;
 pub mod sandbox;
+pub mod web_search;
 
 pub use builtin::{
     built_in_provider_defaults, default_anthropic, default_claude_cli, default_gemini,
@@ -47,3 +48,7 @@ pub use providers::{
 };
 pub use routing::RoutingConfig;
 pub use sandbox::{resolve_policy, SandboxConfig, SandboxModeConfig};
+// `[web_search]` schema is owned by sisurf; we re-export it so consumers wire
+// the resolved backend without a direct sisurf-core dependency of their own.
+pub use sisurf_core::SearchConfig;
+pub use web_search::{inject_search_keys, BRAVE_API_KEY_ENV, GOOGLE_CSE_API_KEY_ENV};

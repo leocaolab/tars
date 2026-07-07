@@ -39,6 +39,11 @@
 //!   file, optional path-jail, hard size cap. The smallest useful
 //!   tool that proves the trait + registry plumbing end-to-end and
 //!   gives WorkerAgent something real to do.
+//! - [`builtins::WebFetchTool`] — `web.fetch`. URL → clean Markdown +
+//!   provenance (final URL, serving tier), backed by `sisurf-core`. A
+//!   network op: routed through the dispatch gate like `bash.run`.
+//! - [`builtins::WebSearchTool`] — `web.search`. Query → structured
+//!   title/url/snippet list, backed by `sisurf-core`.
 //!
 //! Future builtins (each its own commit when WorkerAgent's loop has
 //! a consumer for it):
@@ -47,7 +52,6 @@
 //!     mutate the filesystem).
 //!   - `fs.list_dir`
 //!   - `git.fetch_pr_diff`
-//!   - `web.fetch`
 //!   - `shell.exec` — biggest blast radius; ships last with explicit
 //!     allowlist + jail.
 

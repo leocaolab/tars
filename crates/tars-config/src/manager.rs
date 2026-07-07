@@ -36,6 +36,14 @@ pub struct Config {
     #[serde(default)]
     pub sandbox: Option<SandboxConfig>,
 
+    /// `[web_search]` — which web-search backend the `web.search` tool uses.
+    /// Schema owned by sisurf ([`sisurf_core::SearchConfig`]); the committed
+    /// TOML omits the API key, which tars resolves from the environment and
+    /// injects via [`crate::inject_search_keys`]. **Optional** — absent =
+    /// keyless DuckDuckGo default.
+    #[serde(default)]
+    pub web_search: Option<sisurf_core::SearchConfig>,
+
     /// IDs that came from the user's TOML, captured *before* the
     /// builtin-merge step so callers can distinguish "explicitly
     /// declared by the user" from "ambient builtin default".
@@ -171,6 +179,37 @@ mod tests {
                 .get(&tars_types::ProviderId::new("vllm"))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn web_search_section_loads_into_config_and_is_key_injectable() {
+        // A `[web_search]` table must parse (Config has deny_unknown_fields, so
+        // the field has to exist) straight into sisurf's owned schema, with the
+        // secret ABSENT from the file — tars injects it from the env later.
+        let toml_str = r#"
+            [web_search]
+            backend = "google_cse"
+            google_cse = { cx = "my-cx-id" }
+        "#;
+        let cfg = ConfigManager::load_from_str(toml_str).expect("web_search section must load");
+        let ws = cfg.web_search.expect("web_search present");
+        assert_eq!(ws.backend, sisurf_core::BackendKind::GoogleCse);
+        assert_eq!(ws.google_cse.as_ref().unwrap().cx, "my-cx-id");
+        assert!(
+            ws.google_cse.as_ref().unwrap().api_key.is_empty(),
+            "the API key must NOT be committed in config.toml"
+        );
+        // Without an injected key, build() typed-fails (not a silent fallback).
+        assert!(matches!(
+            ws.build(),
+            Err(sisurf_core::WebError::MissingApiKey(_))
+        ));
+    }
+
+    #[test]
+    fn absent_web_search_section_is_none() {
+        let cfg = ConfigManager::load_from_str("[providers]\n").expect("loads");
+        assert!(cfg.web_search.is_none(), "absent [web_search] = None (keyless DDG default)");
     }
 
     #[test]
