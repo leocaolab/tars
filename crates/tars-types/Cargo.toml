@@ -17,6 +17,10 @@ tracing.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 url.workspace = true
+# `task_local!` + `spawn` for the RUN_CONTEXT call-context law (Doc 06 §9).
+# tars-types is the lowest shared crate both the pipeline and the `Tars`
+# handle import, so RUN_CONTEXT lives here.
+tokio.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true  # for ProviderError::from(reqwest::Error)
 uuid.workspace = true     # PipelineEvent.event_id (B-20 W3 enabler)

@@ -43,6 +43,7 @@ pub mod model;
 pub mod pipeline_events;
 pub mod principal;
 pub mod response;
+pub mod run_context;
 pub mod run_report;
 pub mod schema;
 pub mod secret;
@@ -79,6 +80,7 @@ pub use pipeline_events::{
 };
 pub use principal::{Principal, PrincipalKind, Scope};
 pub use response::{ChatResponse, ChatResponseBuilder};
+pub use run_context::{RUN_CONTEXT, spawn_with_context};
 pub use run_report::{AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus};
 pub use schema::JsonSchema;
 pub use secret::{SecretRef, SecretString};
