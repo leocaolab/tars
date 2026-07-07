@@ -31,8 +31,10 @@
 //! python -c "import tars; print(tars.version())"
 //! ```
 
+mod context;
 mod errors;
 mod eval;
+mod handle;
 mod session;
 mod validation;
 
@@ -54,8 +56,8 @@ use tars_provider::{
     LlmProvider, auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry,
 };
 use tars_types::{
-    ChatRequest, ChatResponseBuilder, ContentBlock, Message, ModelHint, ProviderId, RequestContext,
-    StopReason,
+    ChatRequest, ChatResponseBuilder, ContentBlock, Message, ModelHint, ProviderId, RUN_CONTEXT,
+    RequestContext, StopReason,
 };
 
 /// Process-wide tokio runtime. Single instance amortizes the
@@ -522,6 +524,32 @@ impl Pipeline {
     }
     pub(crate) fn capabilities_owned(&self) -> tars_types::Capabilities {
         self.capabilities_full.clone()
+    }
+
+    /// Wrap an **already-built** `tars_pipeline::Pipeline` as the layer-2
+    /// `Pipeline` pyclass. Used by the handle path (`Tars::pipeline`), where
+    /// the Rust handle composes the canonical onion with the workspace's
+    /// observability sink already wired in — so we adopt that chain wholesale
+    /// rather than re-running `default_chain` here (which would drop the
+    /// sink). `id` / `capabilities_full` come from the resolved provider.
+    pub(crate) fn from_built(
+        id: String,
+        pipeline: RsPipeline,
+        capabilities_full: tars_types::Capabilities,
+    ) -> Self {
+        let capabilities_summary = CapabilitiesSummary::from(&capabilities_full);
+        let layer_names: Vec<String> =
+            pipeline.layer_names().iter().map(|s| s.to_string()).collect();
+        let inner: Arc<dyn LlmService> = Arc::new(pipeline);
+        Self {
+            id: id.clone(),
+            inner,
+            capabilities_summary,
+            capabilities_full,
+            layer_names,
+            latency_stats: None,
+            candidate_ids: vec![id],
+        }
     }
 
     /// Internal: wrap a built provider in TARS's default middleware
@@ -1837,6 +1865,13 @@ fn run_complete_tagged(
     tags: Vec<String>,
 ) -> PyResult<Response> {
     let rt = tokio_runtime()?;
+    // Read the active `with handle.context(...)` off the thread-local BEFORE
+    // releasing the GIL / entering the runtime — the task-local does not
+    // survive the FFI hop, so the binding re-establishes the scope per call
+    // (Doc 12 §6.2). `None` (no active context, or a direct
+    // `Pipeline.complete` outside a handle) keeps the prior test-default
+    // behaviour, so existing call sites are unchanged.
+    let active_ctx = context::current();
     py.allow_threads(|| {
         rt.block_on(async move {
             // Build the context here (rather than inline in `call`) so
@@ -1844,11 +1879,25 @@ fn run_complete_tagged(
             // survives the move into the middleware chain. Middleware
             // writes through the same Arc; we read it back after
             // stream drain.
-            let ctx = RequestContext::test_default().with_tags(tags);
+            let ctx = match active_ctx {
+                // Cohort tags passed to `complete(tags=…)` override the
+                // context's tags for this one call; an empty list leaves the
+                // context tags in place.
+                Some(c) if tags.is_empty() => c,
+                Some(c) => c.with_tags(tags),
+                None => RequestContext::test_default().with_tags(tags),
+            };
             let telemetry_handle = ctx.telemetry.clone();
             let validation_handle = ctx.validation_outcome.clone();
 
-            let mut stream = svc.call(req, ctx).await.map_err(provider_to_py)?;
+            // The pipeline reads its ctx from the call argument; we also
+            // re-scope `RUN_CONTEXT` around the drain so any deep code /
+            // detached job (`spawn_with_context`) sees the same context. Both
+            // share the ctx's Arcs, so the telemetry/validation handles read
+            // back the middleware's writes.
+            let call_ctx = ctx.clone();
+            let drain = async move {
+            let mut stream = svc.call(req, call_ctx).await.map_err(provider_to_py)?;
             let mut builder = ChatResponseBuilder::new();
             while let Some(ev) = stream.next().await {
                 let ev = ev.map_err(provider_to_py)?;
@@ -1899,6 +1948,8 @@ fn run_complete_tagged(
                 telemetry,
                 validation_summary,
             })
+            };
+            RUN_CONTEXT.scope(ctx, drain).await
         })
     })
 }
@@ -2007,6 +2058,13 @@ fn _tars_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(default_config_path_py, m)?)?;
     m.add_function(wrap_pyfunction!(eval::write_score, m)?)?;
     m.add_function(wrap_pyfunction!(eval::read_calls, m)?)?;
+    // Config + runtime-handle spine (Doc 12 §6).
+    m.add_function(wrap_pyfunction!(handle::init, m)?)?;
+    m.add_function(wrap_pyfunction!(handle::is_initialized, m)?)?;
+    m.add_function(wrap_pyfunction!(handle::tars_home, m)?)?;
+    m.add_class::<handle::Workspaces>()?;
+    m.add_class::<handle::Handle>()?;
+    m.add_class::<context::ContextGuard>()?;
     m.add_class::<Provider>()?;
     m.add_class::<Pipeline>()?;
     m.add_class::<PipelineBuilder>()?;

@@ -11,7 +11,8 @@
 //! TarsError                     base — catch-all
 //! ├── TarsConfigError           load / parse / validate / unknown provider id
 //! ├── TarsProviderError         backend call failed (auth, rate-limit, parse, …)
-//! └── TarsRuntimeError          HTTP base / registry build / internal wiring
+//! ├── TarsRuntimeError          HTTP base / registry build / internal wiring
+//! └── TarsHandleError           workspace-open / role-resolution (Doc 06 handle)
 //! ```
 //!
 //! `TarsProviderError` carries three structured attributes the caller
@@ -39,6 +40,11 @@ create_exception!(tars._tars_py, TarsError, PyException);
 create_exception!(tars._tars_py, TarsConfigError, TarsError);
 create_exception!(tars._tars_py, TarsProviderError, TarsError);
 create_exception!(tars._tars_py, TarsRuntimeError, TarsError);
+// Doc 06 handle failures: opening a workspace (registry / store / io) or
+// resolving a `role` to a provider. Rooted at `TarsError` so a catch-all
+// still matches; carries a typed `kind` tag (+ `role`/`tried` for the
+// unknown-role case) so callers branch on structure, not the message.
+create_exception!(tars._tars_py, TarsHandleError, TarsError);
 // Subclass of TarsProviderError — `isinstance(e, TarsProviderError)` still
 // matches, so existing catch-all blocks keep working. Caller can branch
 // on `except TarsRoutingExhaustedError` for typed access to
@@ -48,6 +54,59 @@ create_exception!(tars._tars_py, TarsRoutingExhaustedError, TarsProviderError);
 /// Map a `ConfigError` to its Python exception.
 pub fn config_to_py(err: ConfigError) -> PyErr {
     TarsConfigError::new_err(err.to_string())
+}
+
+/// Map a [`tars_handle::TarsError`] to its Python exception, preserving the
+/// typed variant as a `kind` attribute (and `role`/`tried` for the
+/// role-resolution case) rather than collapsing to one opaque string.
+///
+/// A workspace `config.toml` parse failure routes to `TarsConfigError` (it is
+/// a config-shaped error the caller fixes in the file); everything else — the
+/// registry, store, filesystem-bootstrap, and unknown-role failures — is a
+/// handle-layer failure and routes to `TarsHandleError`.
+pub fn handle_to_py(err: tars_handle::TarsError) -> PyErr {
+    use tars_handle::TarsError as E;
+    // A parse of the workspace config file is config-shaped: same class the
+    // provider-config path uses, so callers catch config errors uniformly.
+    if let E::WorkspaceConfig(_) = &err {
+        return TarsConfigError::new_err(err.to_string());
+    }
+    let kind = match &err {
+        E::Registry(_) => "registry",
+        E::Storage(_) => "storage",
+        E::Io(_) => "io",
+        E::UnknownRole { .. } => "unknown_role",
+        // `WorkspaceConfig` handled above; kept exhaustive so a new variant
+        // is a compile error here rather than a silent mis-tag.
+        E::WorkspaceConfig(_) => "workspace_config",
+    };
+    let message = err.to_string();
+    Python::with_gil(|py| {
+        match build_handle_exc(py, &err, kind, message) {
+            Ok(exc) => exc,
+            Err(decorate_err) => decorate_err,
+        }
+    })
+}
+
+/// Build a decorated [`TarsHandleError`]: sets `kind` on every instance and,
+/// for the role-resolution failure, the structured `role` + `tried` fields so
+/// a caller branches on them instead of parsing the message.
+fn build_handle_exc(
+    py: Python<'_>,
+    err: &tars_handle::TarsError,
+    kind: &'static str,
+    message: String,
+) -> PyResult<PyErr> {
+    use tars_handle::TarsError as E;
+    let exc = TarsHandleError::new_err(message);
+    let value = exc.value(py);
+    value.setattr("kind", kind)?;
+    if let E::UnknownRole { role, tried } = err {
+        value.setattr("role", role)?;
+        value.setattr("tried", tried.as_ref().map(|p| p.to_string()))?;
+    }
+    Ok(exc)
 }
 
 /// Map a generic runtime/wiring error (HTTP base build, registry build,
@@ -241,6 +300,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("TarsConfigError", py.get_type::<TarsConfigError>())?;
     m.add("TarsProviderError", py.get_type::<TarsProviderError>())?;
     m.add("TarsRuntimeError", py.get_type::<TarsRuntimeError>())?;
+    m.add("TarsHandleError", py.get_type::<TarsHandleError>())?;
     m.add(
         "TarsRoutingExhaustedError",
         py.get_type::<TarsRoutingExhaustedError>(),
