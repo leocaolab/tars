@@ -17,7 +17,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use tars_config::{Config, RoutingConfig};
-use tars_pipeline::{EventStores, Pipeline, PipelineOpts};
+use tars_pipeline::{EventStores, OutputValidator, Pipeline, PipelineOpts};
 use tars_provider::{LlmProvider, ProviderRegistry};
 use tars_runtime::{LocalRuntime, Runtime};
 use tars_storage::{
@@ -25,7 +25,7 @@ use tars_storage::{
     SqliteEventStore, SqlitePipelineEventStore, SqlitePipelineEventStoreConfig,
     open_event_store_at_path,
 };
-use tars_types::{CancellationToken, ModelTier, ProviderId, SessionId};
+use tars_types::{Capabilities, CancellationToken, ModelTier, ProviderId, SessionId};
 
 use crate::error::TarsError;
 use crate::paths::{
@@ -159,16 +159,39 @@ impl Tars {
 
     /// Build the canonical pipeline for `role`, with this scope's sink wired
     /// into the `EventEmitter` layer (`None` sink ⇒ no emission).
+    ///
+    /// Thin wrapper over [`Tars::pipeline_with`] with no output validators;
+    /// the resolved provider's [`Capabilities`] are dropped. Reach for
+    /// `pipeline_with` when the consumer needs to inject validators or wants
+    /// the capabilities (e.g. a structured-output preflight).
     pub fn pipeline(&self, role: &str) -> Result<Pipeline, TarsError> {
+        Ok(self.pipeline_with(role, Vec::new())?.0)
+    }
+
+    /// Build the canonical pipeline for `role` with `validators` layered in,
+    /// and return it alongside the resolved provider's [`Capabilities`].
+    ///
+    /// Same role→provider resolution and sink wiring as [`Tars::pipeline`];
+    /// the extra `validators` become the pipeline's `ValidationMiddleware`
+    /// (empty ⇒ no validation layer, identical to `pipeline`), and the
+    /// provider's declared [`Capabilities`] are surfaced so a consumer can
+    /// run a structured-output / tool-use preflight before dispatching.
+    pub fn pipeline_with(
+        &self,
+        role: &str,
+        validators: Vec<Arc<dyn OutputValidator>>,
+    ) -> Result<(Pipeline, Capabilities), TarsError> {
         let (id, provider) = self.resolve(role)?;
+        let capabilities = provider.capabilities().clone();
         let mut opts = PipelineOpts::new(id);
+        opts.validators = validators;
         if let Some(p) = &self.sink.pipeline {
             opts.events = Some(EventStores {
                 events: p.events.clone(),
                 bodies: p.bodies.clone(),
             });
         }
-        Ok(Pipeline::default_chain(provider, opts))
+        Ok((Pipeline::default_chain(provider, opts), capabilities))
     }
 
     /// The DAG runtime for this scope, ready to pass to
@@ -377,3 +400,74 @@ fn open_sink(scope: &StoreScope) -> Result<Sink, TarsError> {
 /// # }
 /// ```
 pub type WorkspaceHandles = std::sync::Mutex<std::collections::HashMap<PathBuf, Tars>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tars_config::ConfigManager;
+    use tars_pipeline::NotEmptyValidator;
+    use tars_provider::{HttpProviderBase, basic};
+
+    /// Build a handle around a hand-rolled registry holding a single `mock`
+    /// provider, with the store scope Off (no network, no on-disk sink). Same
+    /// module ⇒ we can construct `Tars` directly and skip the global
+    /// `Config::load` composition root the real constructors require.
+    fn mock_handle() -> Tars {
+        let cfg = ConfigManager::load_from_str(
+            r#"
+            [providers.mock]
+            type = "mock"
+            canned_response = "hi"
+            "#,
+        )
+        .expect("parse mock config");
+        let http = HttpProviderBase::default_arc().expect("http base");
+        let registry = Arc::new(
+            ProviderRegistry::from_config(&cfg.providers, http, basic())
+                .expect("build registry"),
+        );
+        Tars {
+            registry,
+            roles: HashMap::new(),
+            routing: RoutingConfig::default(),
+            sink: open_sink(&StoreScope::Off).expect("open off sink"),
+            cancel: CancellationToken::new(),
+            root: PathBuf::from("."),
+            scope: StoreScope::Off,
+        }
+    }
+
+    #[test]
+    fn pipeline_with_layers_validators_and_surfaces_capabilities() {
+        let tars = mock_handle();
+        let validators: Vec<Arc<dyn OutputValidator>> =
+            vec![Arc::new(NotEmptyValidator::new())];
+
+        let (pipeline, caps) = tars
+            .pipeline_with("mock", validators)
+            .expect("build validated pipeline");
+
+        // The injected validator must materialize as a `validation` layer in
+        // the onion (sink is Off ⇒ no `event_emitter`).
+        assert!(
+            pipeline.layer_names().contains(&"validation"),
+            "validation layer missing from chain: {:?}",
+            pipeline.layer_names(),
+        );
+
+        // Capabilities came from the resolved provider — a plausible, real
+        // struct (the mock's text-only baseline), not a fabricated default.
+        assert!(caps.max_context_tokens > 0, "capabilities look empty: {caps:?}");
+    }
+
+    #[test]
+    fn pipeline_wrapper_omits_validation_when_no_validators() {
+        let tars = mock_handle();
+        let pipeline = tars.pipeline("mock").expect("build default pipeline");
+        assert!(
+            !pipeline.layer_names().contains(&"validation"),
+            "unexpected validation layer with no validators: {:?}",
+            pipeline.layer_names(),
+        );
+    }
+}
