@@ -21,6 +21,7 @@ pub mod auth;
 pub mod backends;
 pub mod batch;
 pub mod child_reaper;
+pub mod global;
 pub mod http_base;
 pub mod provider;
 pub mod registry;
