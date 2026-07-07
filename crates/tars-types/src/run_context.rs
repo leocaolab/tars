@@ -83,12 +83,13 @@ mod tests {
     async fn spawned_job_rescopes_context() {
         let mut ctx = RequestContext::test_default();
         ctx.tenant_id = TenantId::new("acme");
-        let handle = RUN_CONTEXT
+        let tenant = RUN_CONTEXT
             .scope(ctx, async {
                 spawn_with_context(async { RUN_CONTEXT.with(|c| c.tenant_id.clone()) })
+                    .await
+                    .expect("spawned task joins")
             })
             .await;
-        let tenant = handle.await.expect("spawned task joins");
         assert_eq!(tenant, TenantId::new("acme"));
     }
 
@@ -109,8 +110,10 @@ mod tests {
                 );
                 // … and a detached job re-scopes the SAME tenant.
                 spawn_with_context(async { RUN_CONTEXT.with(|c| c.tenant_id.clone()) })
+                    .await
+                    .unwrap()
             })
             .await;
-        assert_eq!(joined.await.unwrap(), TenantId::new("acme-corp"));
+        assert_eq!(joined, TenantId::new("acme-corp"));
     }
 }

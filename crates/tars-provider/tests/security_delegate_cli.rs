@@ -214,8 +214,8 @@ fn fresh_dir(name: &str) -> PathBuf {
 }
 
 /// A fresh dir GUARANTEED outside the delegate's writable set, for the escape
-/// target. The codex-model jail's writable set is: the worktree + real `$TMPDIR`
-/// + `/tmp` + the CLI's own state dir (none for claude). `$HOME` at large is
+/// target. The codex-model jail's writable set is: the worktree, real `$TMPDIR`,
+/// `/tmp`, and the CLI's own state dir (none for claude). `$HOME` at large is
 /// denied, so a dir under `$HOME` is a genuine "outside" — UNLIKE `$TMPDIR`,
 /// which this test used to use back when the jail denied tmp (a policy we have
 /// deliberately reversed to match codex, so the target had to move here).
