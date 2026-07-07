@@ -33,7 +33,7 @@ use tars_pipeline::{CircuitBreakerConfig, RetryConfig};
 /// So an empty (or absent) `[resilience]` leaves the pipeline exactly as it is
 /// today; a populated one flows straight into
 /// [`tars_pipeline::Pipeline::default_chain`].
-pub(crate) fn resilience_configs(
+pub fn resilience_configs(
     cfg: &ResilienceConfig,
 ) -> (Option<RetryConfig>, Option<CircuitBreakerConfig>) {
     (

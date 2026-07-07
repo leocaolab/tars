@@ -121,6 +121,59 @@ pub struct BreakerTuning {
 }
 
 impl ResilienceConfig {
+    /// The historical LLM-transport resilience policy every real consumer
+    /// (arc, concer) used to hand-copy as Rust literals: **6 attempts**
+    /// (1 initial + 5 retries), 1s→30s exponential backoff (×2, capped 30s)
+    /// with up to 400ms jitter, honouring a provider `Retry-After` capped at
+    /// `max_wait` (30s), `MaybeRetriable` errors get a single attempt; a
+    /// **circuit breaker** that opens after 4 consecutive failures with a 30s
+    /// cooldown.
+    ///
+    /// These NUMBERS live here, ONCE. A consumer that wants this policy (rather
+    /// than tars-pipeline's leaner 3-attempt / no-breaker default) reads
+    /// `config.resilience` and falls back to this when the section is absent —
+    /// see [`ResilienceConfig::or_llm_default`]. Every field is populated
+    /// (`Some`), so the conversion in `tars_handle::resilience::resilience_configs`
+    /// yields exactly this policy with no reliance on tars-pipeline defaults.
+    pub fn llm_default() -> Self {
+        ResilienceConfig {
+            retry: Some(RetryTuning {
+                max_attempts: Some(6),
+                initial_backoff_secs: Some(1.0),
+                max_backoff_secs: Some(30.0),
+                multiplier: Some(2.0),
+                respect_retry_after: Some(true),
+                max_attempts_maybe_retriable: Some(1),
+                max_wait_secs: Some(30.0),
+                jitter_secs: Some(0.4),
+            }),
+            circuit_breaker: Some(BreakerTuning {
+                failure_threshold: Some(4),
+                cooldown_secs: Some(30.0),
+            }),
+        }
+    }
+
+    /// True when no `[resilience]` section was present at all — both sub-tables
+    /// absent. This is exactly `ResilienceConfig::default()` and reproduces
+    /// tars-pipeline's built-in behaviour (default retry, no breaker).
+    pub fn is_empty(&self) -> bool {
+        self.retry.is_none() && self.circuit_breaker.is_none()
+    }
+
+    /// The effective policy for a consumer that wants the LLM default when the
+    /// operator wrote no `[resilience]` section: returns [`llm_default`] when
+    /// [`is_empty`], otherwise the config as written (so a present section —
+    /// even a partial one — always wins, preserving the sparse-overlay
+    /// override semantics; only the *total absence* of the section triggers the
+    /// LLM default).
+    ///
+    /// [`llm_default`]: ResilienceConfig::llm_default
+    /// [`is_empty`]: ResilienceConfig::is_empty
+    pub fn or_llm_default(self) -> Self {
+        if self.is_empty() { Self::llm_default() } else { self }
+    }
+
     /// Validate the numeric ranges. Counts must be `>= 1`; every `*_secs`
     /// must be finite and non-negative; `multiplier` finite and non-negative.
     /// The conversion in tars-pipeline is panic-safe regardless, but a bad
@@ -280,6 +333,52 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn llm_default_carries_the_six_breaker_policy() {
+        // The single source of the historical arc/concer numbers. A drift here
+        // is the deliberate way to change the shared policy — and it changes
+        // both consumers at once, which is the point.
+        let r = ResilienceConfig::llm_default();
+        let retry = r.retry.clone().expect("llm_default has retry");
+        assert_eq!(retry.max_attempts, Some(6));
+        assert_eq!(retry.initial_backoff_secs, Some(1.0));
+        assert_eq!(retry.max_backoff_secs, Some(30.0));
+        assert_eq!(retry.multiplier, Some(2.0));
+        assert_eq!(retry.respect_retry_after, Some(true));
+        assert_eq!(retry.max_attempts_maybe_retriable, Some(1));
+        assert_eq!(retry.max_wait_secs, Some(30.0));
+        assert_eq!(retry.jitter_secs, Some(0.4));
+        let breaker = r.circuit_breaker.clone().expect("llm_default has breaker");
+        assert_eq!(breaker.failure_threshold, Some(4));
+        assert_eq!(breaker.cooldown_secs, Some(30.0));
+        // Every field populated ⇒ conversion never touches tars-pipeline defaults.
+        assert!(!r.is_empty());
+        // And it passes its own validation (counts >= 1, secs finite >= 0).
+        let mut errs = Vec::new();
+        r.validate(&mut errs);
+        assert!(errs.is_empty(), "llm_default must be self-valid: {errs:?}");
+    }
+
+    #[test]
+    fn or_llm_default_fills_only_when_section_absent() {
+        // Absent section ⇒ default() ⇒ is_empty ⇒ fall back to the LLM policy.
+        assert_eq!(
+            ResilienceConfig::default().or_llm_default(),
+            ResilienceConfig::llm_default(),
+            "no [resilience] section ⇒ the LLM default policy"
+        );
+        // A present (even partial) section wins verbatim — the operator opted in.
+        let partial = ResilienceConfig {
+            retry: Some(RetryTuning { max_attempts: Some(2), ..Default::default() }),
+            circuit_breaker: None,
+        };
+        assert_eq!(
+            partial.clone().or_llm_default(),
+            partial,
+            "a present section overrides; only total absence triggers llm_default"
+        );
     }
 
     #[test]

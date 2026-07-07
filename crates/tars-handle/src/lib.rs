@@ -38,10 +38,11 @@
 pub mod error;
 pub mod handle;
 pub mod paths;
-mod resilience;
+pub mod resilience;
 
 pub use error::TarsError;
 pub use handle::{Tars, WorkspaceHandles};
+pub use resilience::resilience_configs;
 pub use paths::{
     StoreScope, WorkspaceResolution, resolve_workspace_root, standalone_store_dir,
     tars_home_store_dir, workspace_store_dir,
