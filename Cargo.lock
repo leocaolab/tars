@@ -6114,6 +6114,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tars-handle"
+version = "1.1.0"
+dependencies = [
+ "serde",
+ "sha2 0.10.9",
+ "tars-config",
+ "tars-pipeline",
+ "tars-provider",
+ "tars-runtime",
+ "tars-storage",
+ "tars-types",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "tars-melt"
 version = "1.1.0"
 dependencies = [
@@ -6338,6 +6358,7 @@ dependencies = [
  "sha2 0.10.9",
  "tars-sandbox",
  "thiserror 1.0.69",
+ "tokio",
  "tokio-util",
  "toml 0.8.23",
  "tracing",
