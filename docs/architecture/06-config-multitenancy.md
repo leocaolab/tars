@@ -1,3 +1,499 @@
+# Doc 06 — Configuration & Runtime Handle (multi-tenant & multi-workspace)
+
+> Status: **current architecture.** Supersedes the earlier shared-process SaaS config design,
+> which is kept **verbatim and DEPRECATED** in the Appendix at the end of this file (historical
+> record — do not resurrect without re-opening the process-isolation decision).
+> Angle: **tars is a general agentic-runtime library.** arc / concer / tars-py are
+> *consumers* (examples), never the subject. Every abstraction here is tars's.
+> Event-store internals are **out of scope** — deferred to Task 4 (only the
+> *placement* decision is fixed here).
+
+---
+
+## 1. Overview & goal
+
+tars today has all the pieces of an agentic runtime — `Config`, `ProviderRegistry`,
+`Pipeline`, `LocalRuntime`, `EventStore` — but **no single entry that binds them for a
+scope**, so every consumer hand-wires `load_from_file → from_config → builder → new`
+independently (the "scatter"). This refactor introduces:
+
+1. A **global layer** (process-wide, immutable): `Config` + `ProviderRegistry`,
+   loaded once, shared.
+2. A **scope layer**: one **`Tars` handle** per *workspace* (local) or *tenant×workspace*
+   (server), carrying the scope's roles + observability sink + cancellation.
+3. A **path-resolution law**: where config lives, where the store lives, how a
+   workspace is discovered — one rule for CLI, GUI/DMG, standalone, and server.
+4. A **context law**: `tokio::task_local!` inside Rust; explicit ctx at every language
+   boundary.
+5. A **deterministic lifecycle**: open → switch → close (Drop + cancel) → reconstruct.
+
+### The load-bearing decision — process isolation
+
+**One Runtime = one user (local) / one tenant (server). We NEVER mix tenants in one
+process.** This is cloud-native **process/container isolation**, not shared-process
+multi-tenancy. Consequence: within a process there is exactly one tenant, so the global
+`Config`/`ProviderRegistry` singleton is *correct*; "multi-tenant server" = orchestrate
+**N single-tenant processes**, each with its own singleton. This collapses an entire
+class of complexity (per-request registry keying, cross-tenant locks, shared-process
+authz) into "spin another process."
+
+### Non-goals
+
+- Not redesigning the event store (Task 4; only placement fixed here).
+- Not building shared-process SaaS multi-tenancy (process isolation replaces it).
+- Not a generic config framework — this serves the agentic runtime's three layers
+  (provider / pipeline / runtime).
+- No config hot-reload (desktop-tool convention: close+reopen workspace for
+  workspace config; restart process for global config).
+
+---
+
+## 2. Prior art — rig / OpenClaw / Hermes
+
+| Axis | **rig** (lib) | **OpenClaw** (daemon) | **Hermes** (daemon) | **tars → this design** |
+|---|---|---|---|---|
+| Shape | library, everything a trait | opinionated daemon | opinionated daemon | **library** (like rig) |
+| Entry | `openai::Client::from_env()` (stateless, cheap) | `$OPENCLAW_STATE_DIR` (`~/.openclaw`) | `$HERMES_HOME` (`~/.hermes`) | **`Tars::for_workspace()` handle** + global `Config::get()` |
+| Config home | app-provided | `~/.openclaw/openclaw.json` | `~/.hermes/*.json` | `~/.tars/config.toml`, **flag > env > default** |
+| Data location | app decides (pluggable stores) | `~/.openclaw/memory/<agentId>.sqlite` | `~/.hermes/state.db` | **per-workspace** `<root>/.<tool>/tars/` (default); `~/.tars` fallback |
+| Partition key | `PromptRequest::conversation` | **agentId** | **session** | **`tenant_id` × workspace** |
+| Global init/singleton | **none** — all DI | daemon owns it | daemon owns it | **global singleton for immutable config/registry** (process isolation makes it safe); **DI handle** for scope |
+| Backend | pluggable (LanceDB/Qdrant/…) | SQLite | SQLite / Postgres | **`EventStore` trait**: SQLite (Personal) / Postgres (Team) |
+| Env override | — | `$OPENCLAW_STATE_DIR` | `$HERMES_HOME` | **`$TARS_HOME`** |
+
+**What we take from each:** rig's *library + trait + DI-handle* shape and stateless
+provider client; OpenClaw/Hermes's *home-dir + partition-by-id + env-override + pluggable
+SQLite/Postgres backend*. **Where tars diverges:** it is directory-based (a workspace/repo),
+which neither daemon models — so the store follows the **workspace**, not a global home,
+and the global home is the *fallback* for the non-directory (standalone) case.
+
+---
+
+## 3. Consumer journeys (CUJ)
+
+- **CUJ-1 — CLI tool on a repo.** `arc` runs in a git repo → resolves workspace root =
+  git-root → per-workspace store under `<root>/.arc/tars/`. Global providers from `~/.tars`.
+- **CUJ-2 — GUI app (DMG) opens a folder.** concer.app launched from `/Applications`
+  (irrelevant) → user Opens Folder X → workspace = X → store `X/.concer/tars/`. First open
+  bootstraps `X/.concer/`.
+- **CUJ-3 — switch / multiple workspaces.** GUI opens A then B; closes A. Global registry
+  is *not* rebuilt; B gets its own handle; A's in-flight jobs keep running (bound to A) and
+  A's Drop is deferred until they finish.
+- **CUJ-4 — standalone (no directory).** GUI launched with no folder open, or a bare CLI
+  task → no workspace → global fallback `~/.tars`, partition by session id.
+- **CUJ-5 — restart / reconstruct.** Process restarts → reopen remembered workspace root(s)
+  → rebuild handle (registry shared, roles from `<root>/.<tool>/config.toml`, store
+  reconnected to the on-disk file) → domain-derived resume of unfinished work.
+- **CUJ-6 — multi-tenant server (future).** N tenants → **N single-tenant processes** (one
+  per tenant / container), each identical to CUJ-1..5 with `tenant_id` = the tenant and
+  `EventStore` = Postgres (Team mode). Same handle shape; different bindings.
+
+---
+
+## 4. The layered model
+
+```
+┌─ GLOBAL (process-wide, immutable, built once) ──────────────────────────┐
+│  Config::get()          ~/.tars/config.toml  (providers, keys, routing)  │
+│  ProviderRegistry::global()   Arc, all providers built once, shared      │
+└──────────────────────────────────────────────────────────────────────────┘
+             │ shared Arc ref
+┌─ SCOPE  (per workspace [local] / per tenant×workspace [server]) ─────────┐
+│  Tars {                                                                   │
+│     registry: Arc<ProviderRegistry>,   // shared ref to the global        │
+│     roles:    RoutingConfig,           // <root>/.<tool>/config.toml       │
+│     sink:     EventSink,               // per-scope obs sink (Task 4)      │
+│     cancel:   CancellationToken,       // cancel-on-close                  │
+│     root:     WorkspaceRoot,                                              │
+│  }                                                                        │
+└──────────────────────────────────────────────────────────────────────────┘
+             │ DI (Tauri State keyed by root / CLI main / per-request)
+┌─ CALL   (per operation) ────────────────────────────────────────────────┐
+│  RUN_CONTEXT (task_local): { tenant, session, trace, tags }  — ids only  │
+│  tars.provider(role) / tars.pipeline(role) / tars.runtime()              │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why the split:** the registry is a function of the *global* config → build once, share
+(a global immutable singleton is correct under process isolation). The roles + store are a
+function of the *workspace* → must be per-handle (a singleton would break multi-workspace).
+The call context is per-operation → task_local, ids only (kept light; see §9).
+
+### Three entry paths (a consumer picks its depth)
+
+A consumer enters at exactly the layer it needs — the handle exposes all three; the layers
+nest internally:
+
+| Entry | Accessor | Use |
+|---|---|---|
+| provider-only | `tars.provider(role)` | one raw LLM call, stateless |
+| pipeline (bypass runtime) | `tars.pipeline(role)` | single agent call w/ retry/cache/obs — no DAG |
+| runtime (DAG) | `tars.runtime()` → `run_plan(...)` | dependency-scheduled multi-step workflow |
+
+A single agent call does **not** go through `run_plan` — it's one call at the pipeline layer,
+not a one-node DAG.
+
+---
+
+## 5. Config layering
+
+`manager.rs:16-18` reserves a `tenants` field; `manager.rs:88-89` names an aspirational
+**5-layer merge** (*Compiled → Built-in → System → User → Tenant → Per-Request*) — the full
+shared-process version of which is the **DEPRECATED design in the Appendix**. This (current)
+design realizes only the two layers that matter now and leaves the rest as declared seams:
+
+| Layer | Source | Scope | Status |
+|---|---|---|---|
+| Compiled / Built-in | `merge_builtin_with_user` (`manager.rs:10,108`) | global | exists |
+| System | `/etc/tars/config.toml` (optional) | global | seam (future) |
+| **User** | `~/.tars/config.toml` (`paths.rs:25`) | global | **this design** |
+| **Tenant** | per-tenant overlay (server: config store; local: n/a) | tenant | **seam wired** (§8) |
+| Per-Request | `RUN_CONTEXT` overrides (`tags`, model hint) | call | **this design** (§9) |
+| Workspace (tars-specific) | `<root>/.<tool>/config.toml` `[roles]` (`routing.rs:26`) | workspace | **this design** |
+
+> tars adds a **Workspace** layer the 5-layer model didn't name — it sits below User and
+> above Per-Request, and holds only role→provider mapping (`RoutingConfig`), no secrets.
+
+---
+
+## 6. Components
+
+### C1 — `Config` (global, immutable singleton)
+- **Reuse:** `Config` struct `manager.rs:21`; `ConfigManager::load_from_file` `:94`,
+  `load_from_str` `:115`; `default_config_path` `paths.rs:25`; `merge_builtins_into`
+  `:108`; `Config::validate` `:66`.
+- **New:**
+  ```rust
+  static CONFIG: OnceLock<Config> = OnceLock::new();
+  impl Config {
+      /// Composition root, once. `home`: explicit override (from --tars_home).
+      /// Named `load`, NOT `init` — it's a one-time global *load*, not a
+      /// side-effecting "initialize the framework" call.
+      pub fn load(home: Option<PathBuf>) -> Result<(), ConfigError>;
+      pub fn get() -> &'static Config;
+      /// --tars_home flag > $TARS_HOME > ~/.tars
+      pub fn resolve_home(flag: Option<PathBuf>) -> PathBuf;
+  }
+  ```
+  `load` loads+validates (fallible handled here) then `CONFIG.set`. `get` is infallible
+  (`expect("Config::load not called")`). No hot-reload.
+
+### C2 — `ProviderRegistry` (global, built-once, Arc-shared)
+- **Reuse:** `ProviderRegistry` `registry.rs:64` ("Cheap to clone (everything is Arc)"
+  `:62`); `from_config` `:86` (eager — builds *all* declared providers).
+- **New:**
+  ```rust
+  static REGISTRY: OnceLock<Arc<ProviderRegistry>> = OnceLock::new();
+  impl ProviderRegistry {
+      pub fn global() -> Result<Arc<ProviderRegistry>, RegistryError>; // lazy from Config::get()
+  }
+  ```
+  - **Correctness note:** a global static singleton is safe *only* under process isolation
+    (one tenant/process). It is the one thing that would break shared-process multi-tenancy;
+    we choose process isolation precisely so this stays simple.
+  - **Open (measure later):** `from_config` is eager (builds every declared provider even if
+    unused). Acceptable for now; a lazy per-id build is a future optimization, not a blocker.
+
+### C3 — `Tars` handle (per scope)
+- **Reuse:** `Pipeline::builder(provider)` `middleware.rs:45`; `EventStores` `:160`;
+  `LocalRuntime::new(event_store)` `runtime.rs:128`; `run_plan` `executor.rs:695`;
+  `CancellationToken` (`executor.rs:748`); `RoutingConfig` `routing.rs:26`.
+- **New:**
+  ```rust
+  pub struct Tars { registry: Arc<ProviderRegistry>, roles: RoutingConfig,
+                    sink: EventSink, cancel: CancellationToken, root: WorkspaceRoot }
+  impl Tars {
+      pub fn for_workspace(tool: &str, root: &Path) -> Result<Tars, TarsError>;
+      pub fn standalone(tool: &str, session: SessionId) -> Result<Tars, TarsError>;
+      pub fn provider(&self, role: &str) -> Result<Arc<dyn LlmProvider>, TarsError>;
+      pub fn pipeline(&self, role: &str) -> Result<Pipeline, TarsError>; // wires self.sink into EventEmitter
+      pub fn runtime(&self)              -> Arc<dyn Runtime>;             // LocalRuntime::new(store); pass to run_plan(...)
+      pub fn cancel(&self);              // fire before Drop on close
+  }
+  impl Drop for Tars { /* cancel(); drop sink Sender → writer drains → store closes */ }
+  ```
+  Role resolution = `self.roles` (workspace) → provider id → `self.registry` (global). Two
+  config layers meet here (§5).
+
+### C4 — `StoreScope` (placement; sink internals = Task 4)
+- **Reuse:** `default_personal_event_store_path` `sqlite.rs:292`; Personal/Team split
+  `event_store.rs:5-6`.
+- **New:**
+  ```rust
+  enum StoreScope {
+      Workspace(PathBuf), // <root>/.<tool>/tars/    default (data follows project)
+      TarsHome(PathBuf),  // ~/.tars/ws/<path-hash>/ fallback (read-only dir / policy)
+      Off,                // opt-out
+  }
+  ```
+  Resolved by `for_workspace` (§7). **Only placement is fixed here; the sink (MPSC single
+  writer, best-effort, EventStore-trait backend) is Task 4.**
+  - **What the store is NOT (fixed now, so Task 4 stays honest):** observability only — a
+    write-only side-log. It is **never** the scheduler and **never** the durability source
+    (durability = consumer domain state). The executor (`run_plan`) is already an async
+    dependency-DAG and does **not** read the store to schedule. *(Reviews that claim "a
+    dropped event stalls the DAG" or "a lost event breaks idempotency" assume the store
+    drives scheduling/reconcile — it does not; both are rejected on that premise.)*
+  - **Task 4 backlog (carried from review, not decided here):** (1) multi-process
+    `SQLITE_BUSY` when two instances of the *same* tool write one `.<tool>/tars/` — needs a
+    `busy_timeout` + backoff (per-tool isolation stops arc-vs-concer, not arc-vs-arc);
+    (2) fat-payload blob offloading — large bodies to `.<tool>/tars/blobs/` with a pointer in
+    SQLite (tars already splits `bodies.db` from `pipeline_events.db` — partial); (3) a CLI
+    `flush().await` / `shutdown(self)` so a bare `tokio::main` exit drains the writer instead
+    of truncating the log tail (best-effort only — not a durability guarantee); (4) fold
+    `RUN_CONTEXT` ids into `tracing::Span` for OTel/Datadog correlation;
+    (5) **schema migration + version skew** — embed `sqlx::migrate!()` in `EventSink::open`,
+    read forward-compatibly (ignore unknown columns); if the on-disk schema is *newer* than the
+    binary, degrade gracefully ("upgrade the client") instead of a raw SQL panic (DBs scatter
+    across user project dirs; an old binary / a second machine must not crash);
+    (6) **order by monotonic sequence, never wall-clock** — replay/inspection orders by
+    `events.sequence_no` (already the PK, `sqlite.rs`), NOT `SystemTime::now()` (NTP / sleep-wake
+    can invert two events); timestamps are UI-only (reconcile reads domain state, not this log,
+    so drift can't stall the DAG — but keep the invariant);
+    (7) **corruption graceful-degrade** — `for_workspace` catches `SQLITE_CORRUPT` (power loss
+    mid-WAL, NFS/Dropbox mounts), renames the bad file to `events.db.corrupted.bak`, opens a
+    fresh empty store, and **starts anyway** — never lock the user out of a workspace over a
+    corrupt *observability* log (precisely why the store is observability, not durability).
+
+### C5 — `RUN_CONTEXT` (call context)
+- **Reuse:** existing `RequestContext` (ids-only: tenant/session/trace/tags — the shape
+  `concer_context` already sets); `service.call(req, ctx)`.
+- **New:**
+  ```rust
+  tokio::task_local! { pub static RUN_CONTEXT: RequestContext; }
+  ```
+  Established once at the operation entry (Tauri command / run_plan entry / FFI boundary).
+  Deep calls read implicitly; the sink reads ids from it. **Ids only — never providers**
+  (kept light, §9).
+
+---
+
+## 7. Path resolution law
+
+### Config home (global)
+```
+--tars_home <path>   >   $TARS_HOME   >   ~/.tars       (Config::resolve_home)
+```
+
+### Workspace root (deterministic, entry-independent)
+```
+resolve_workspace_root(entry):
+  1. canonicalize(entry)                       // symlink / relative / trailing-slash → one path
+  2. explicit open / --workspace / `tool .`    → that dir            (highest — user said so)
+  3. walk up; STOP at the FIRST level with an existing .<tool>/   → that level is the root
+       (the marker is the persisted declaration; the CLOSEST marker wins)
+  4. else walk up to .git                       → git-root
+  5. none of the above (bare dir, no git, no marker) → NO workspace → standalone
+```
+Same folder via DMG-GUI, CLI, or a CLI subdir all canonicalize + resolve to the **same**
+root → the **same** store. Launch mode is irrelevant; only `(tool, canonical root)` matters.
+
+> **Marker beats `.git` — the monorepo trap.** In a monorepo (`/mono/.git`, subprojects
+> `/mono/backend`, `/mono/frontend`), a GUI that opened `/mono/backend` bootstraps
+> `/mono/backend/.<tool>/`. A CLI later run in `/mono/backend/src` **must** stop at that
+> marker, **not** walk past it to `/mono/.git` — otherwise GUI and CLI split into two stores
+> for the same project. Hence `.<tool>/` (step 3) is checked **before** `.git` (step 4).
+
+### Store scope
+```
+declared workspace + writable      → Workspace(<root>/.<tool>/tars/)   (bootstrap .<tool>/ on first use)
+declared workspace + read-only,
+  or [store] location="tars_home"  → TarsHome(~/.tars/ws/<hash>)
+no workspace (standalone)          → ~/.tars (global), tenant = session
+[store] enabled=false              → Off
+```
+**Never** a single shared cross-workspace store: it mixes projects' private I/O (privacy /
+blast-radius) **and** breaks the per-workspace deterministic Drop (one shared writer can't
+close on a single-workspace close).
+
+### Multi-tool in one directory, and who resolves the location
+
+When several tars consumers touch the **same** directory (e.g. `arc` reviewing a repo that
+also holds `concer` docs):
+
+- **Providers are shared, written once.** All tools read the same global `~/.tars/config.toml`
+  — a tool does **not** copy provider defs. Only the tiny per-tool `[roles]`
+  (`<root>/.<tool>/config.toml`) differs.
+- **Stores are per-tool, isolated — not merged.** Each tool keeps its own
+  `<root>/.arc/tars/`, `<root>/.concer/tars/`, … We do **not** fold them into one shared
+  `<root>/.tars/`. Rationale: privacy (arc's code-review I/O ≠ concer's doc I/O), per-tool
+  cleanup (delete one tool's dir without touching another), and zero cross-tool coordination.
+  Three dirs is *isolation*, not duplication.
+
+**tars never discovers the location itself.** The library must not call `current_dir()` — a
+GUI has no meaningful CWD, and self-sourcing breaks DI. The **consumer** resolves the root
+from its entry (GUI: OS Open-Folder dialog → held in app state; CLI: CWD + walk-up to
+git-root, or `--workspace`) and injects it via `Tars::for_workspace(tool, root)`.
+
+---
+
+## 8. Multi-tenant — minimal seam (deliberately NOT designed out)
+
+Multi-tenant is a **small future addition**, not a thing to design now (minimal principle).
+The current abstractions already don't preclude it:
+
+- **Process isolation** — multi-tenant = **N single-tenant processes** (one per
+  tenant/container), each identical to the local design. No shared-process work, no
+  cross-tenant locks/authz in the runtime.
+- **`tenant_id`** is already the partition key (local: the single user; server: from the
+  request boundary). **`EventStore` is a trait** (SQLite Personal → Postgres Team later).
+
+That's the whole seam. Carrying a `tenant_id` into the handle when a server needs it is an
+**L4 contract on top** — **out of scope here**. Do **not** pre-build `for_tenant`,
+per-tenant registry keying, or server authz until a real server needs them.
+
+---
+
+## 9. Context law (task_local inside; explicit at boundaries)
+
+- **Inside Rust:** `RUN_CONTEXT.scope(ctx, async { … }).await` at the operation entry; deep
+  `pipeline.call` / `runtime` never thread `ctx`; `EventSink::emit` reads ids via
+  `RUN_CONTEXT.with(...)`.
+- **Across `tokio::spawn`:** task_local does **not** propagate. Detached jobs (the async
+  agent job that must survive the command returning) MUST re-establish
+  `RUN_CONTEXT.scope(ctx.clone(), job)` inside the spawn. (`FuturesUnordered` in
+  `run_plan` is the same task → inherits; `spawn` does not.) To kill this footgun at the
+  source, tars ships a helper and **all internal detached tasks go through it**:
+  ```rust
+  pub fn spawn_with_context<F>(fut: F) -> JoinHandle<F::Output>
+  where F: Future + Send + 'static, F::Output: Send + 'static {
+      let ctx = RUN_CONTEXT.with(|c| c.clone());
+      tokio::spawn(async move { RUN_CONTEXT.scope(ctx, fut).await })
+  }
+  ```
+- **Across language boundaries (PyO3 / napi / Tauri command):** the boundary passes `ctx`
+  **explicitly**; the binding re-establishes the scope. task_local is a Rust-internal
+  elegance, never crossing FFI. (Detailed in Tasks 2/3.)
+- **Weight:** context carries **ids only**; providers live in the handle as `Arc` (built
+  once, shared). Passing a handle = a few `Arc` refcount bumps, not a provider copy.
+
+---
+
+## 10. Lifecycle (deterministic Drop + cancel)
+
+```
+tauri::State<Mutex<HashMap<PathBuf, Tars>>>   // no LRU/TTL — explicit lifecycle
+
+open_workspace(X):   root=resolve(X); map.entry(root).or_insert_with(|| Tars::for_workspace(tool, root))
+switch A→B:          registry NOT rebuilt (shared); B gets/creates its handle; A stays cached
+close_workspace(A):  if let Some(t)=map.remove(A) { t.cancel(); }   // Drop after in-flight jobs release Arc
+restart:             reopen remembered root(s) → rebuild handle → reconnect on-disk store → domain resume
+```
+
+- **Drop is deterministic:** `remove` → (in-flight jobs still hold `Arc` → they finish/cancel
+  → release) → last `Arc` drops → `EventSink` Sender drops → writer drains → SQLite pool
+  closes. **`cancel()` before Drop** prevents a hung job pinning the handle.
+- **In-flight jobs are bound to their workspace, not the active view** — they hold their own
+  `Arc<sink>`/factory, so switching/closing doesn't corrupt them; they finish and write to
+  their own store.
+- **Reconstruct ≠ rebuild data:** the store file is on disk (reconnect); durable truth is the
+  **domain state** (consumer-owned artifacts), which drives resume.
+
+---
+
+## 11. Interfaces with other modules
+
+| Direction | Symbol | Signature / note |
+|---|---|---|
+| tars-config → runtime | `Config::get() -> &'static Config` | global immutable |
+| tars-provider → handle | `ProviderRegistry::global() -> Arc<…>` | built once |
+| handle → tars-pipeline | `Pipeline::builder(provider)` `middleware.rs:45` | sink wired into `EventStores` `:160` |
+| handle → tars-runtime | `LocalRuntime::new(store)` `runtime.rs:128`; `run_plan(...)` `executor.rs:695` | cancel token threaded |
+| runtime/pipeline → sink | `EventSink::emit(ev)` (Task 4) | ids from `RUN_CONTEXT` |
+| bindings → handle | `Tars::for_workspace` / `Config::load` | Tasks 2 (PyO3) / 3 (napi) — ctx explicit at boundary |
+
+---
+
+## 12. Reliability / Security / Performance
+
+- **Reliability:** deterministic Drop (no leak — `Arc`→0 closes the pool); `cancel()` on
+  close; reconstruct from on-disk store + domain-derived resume; no hot-reload race (config
+  is snapshot-at-init).
+- **Security:** `~/.tars/config.toml` holds provider *names* + `api_key_env` (never inline
+  keys); keys from env. **GUI env-void:** a DMG/Launchpad-launched app does **not** inherit
+  the shell's `export`ed keys, so `Config::load` must also read `~/.tars/.env` (dotenv)
+  before resolving `api_key_env` — else GUI LLM calls fail "key not found" while the CLI
+  works. Per-workspace store holds raw LLM I/O (prompts + user content) →
+  gitignored, lives with the project (privacy). Server (future seam, §8): per-tenant
+  secrets + DB isolation — not designed here; process isolation already means a tenant
+  can't read another tenant's process memory.
+- **Performance:** global singletons built once; handle = `Arc` clones; context = ids;
+  registry eager-build is the one measured-later cost (§C2). Store writes are async
+  (Task 4: MPSC single writer, non-blocking `try_send`).
+
+---
+
+## 13. Reuse map (Phase 0)
+
+| Symbol | file:line | How we use it |
+|---|---|---|
+| `Config` | `tars-config/src/manager.rs:21` | global singleton payload |
+| `ConfigManager::load_from_file` / `load_from_str` | `manager.rs:94` / `:115` | `Config::load` |
+| 5-layer merge / `tenants` seam | `manager.rs:16-18`, `:88-89` | §5 layering |
+| `default_config_path` | `paths.rs:25` | `resolve_home` default |
+| `RoutingConfig` | `routing.rs:26` | workspace `[roles]` layer |
+| `ProviderRegistry` / `from_config` | `registry.rs:64` / `:86` | global registry (built once) |
+| `Pipeline::builder` / `EventStores` | `middleware.rs:45` / `:160` | `tars.pipeline(role)` |
+| `LocalRuntime::new` / `run_plan` | `runtime.rs:128` / `executor.rs:695` | `tars.runtime()` |
+| `CancellationToken` | `executor.rs:748` | cancel-on-close |
+| `default_personal_event_store_path` / Personal-Team | `sqlite.rs:292` / `event_store.rs:5-6` | StoreScope fallback / backend axis |
+| tars-py `Provider` / `Pipeline` / `EventStorePair` | `tars-py/src/lib.rs:350` / `:504` / `:605` | Task 2 binding baseline |
+
+New abstractions (justified): `Config::get`/`Registry::global` (collapse the scatter under
+process isolation), `Tars` handle (the missing single entry, rig-style), `StoreScope`
+(placement law), `RUN_CONTEXT` task_local (context law), deterministic-Drop lifecycle.
+
+---
+
+## 14. Roadmap (Task 1 scope)
+
+- **M1 — global layer.** `Config::load/get/resolve_home` (`$TARS_HOME`/flag) +
+  `ProviderRegistry::global()`. Verify: two consumers resolve the same registry; flag>env>default
+  path test. *(no behavior change to existing load)*
+- **M2 — `Tars` handle + StoreScope placement.** `for_workspace` / `standalone`,
+  `provider/pipeline/runtime` accessors wired to the global registry + workspace roles;
+  StoreScope resolution (workspace / tars_home / off) — **sink still the current store
+  impl** (real consolidation is Task 4). Verify: CUJ-1/2/4 resolve correct paths; role→provider
+  through both layers.
+- **M3 — lifecycle.** `Mutex<HashMap<root, Tars>>` pattern, `cancel()` + deterministic Drop,
+  workspace-root resolution (canonical + walk-up), reconstruct-on-restart. Verify: CUJ-3/5
+  (switch/close/restart) — registry not rebuilt, Drop closes cleanly, in-flight survives switch.
+- **M4 — context law.** `RUN_CONTEXT` task_local; entry scoping; spawn re-scope rule
+  documented + a spawn test. Verify: deep call reads ctx without threading; spawned job
+  re-scopes.
+- **M5 — multi-tenant seam (minimal, §8).** Only ensure `tenant_id` flows as the partition
+  key and `EventStore` stays backend-swappable — **no** `for_tenant`, per-tenant keying, or
+  authz until a server needs them. Verify: local `tenant_id`=user path unchanged; nothing
+  precludes a later tenant param.
+
+Sequenced risk-up-front: the singleton/handle split (M1/M2) and the deterministic lifecycle
+(M3) are the load-bearing, least-reversible pieces — done first. Bindings (Tasks 2/3) and the
+event-store consolidation (Task 4) build on the frozen handle shape.
+
+---
+
+---
+
+# Appendix — DEPRECATED: shared-process SaaS config / multi-tenancy design
+
+> ⚠️ **This appendix is the ORIGINAL Doc 06, preserved verbatim as a historical record. It is
+> DEPRECATED and is NOT the current architecture.**
+>
+> Its core premise — **shared-process multi-tenancy** (one process serving many tenants via
+> in-process config layering, hot-reload, `ArcSwap`, per-tenant cache/event partitioning) — was
+> **deliberately replaced by process isolation** (see the current design above: *one Runtime =
+> one tenant; multi-tenant = N single-tenant processes*).
+>
+> It is kept here **only** so the decision is on the record: this approach was considered in
+> full and set aside for performance / complexity / deadlock reasons. **Do not resurrect any
+> part of it as a requirement** without first re-opening the process-isolation decision.
+>
+> The genuinely-still-relevant *concerns* below (secret resolution, tenant lifecycle / GDPR,
+> quotas & billing, audit) remain valid as **future server work** — but they will be
+> implemented **per-process**, not via the in-process machinery described here.
+
+---
+
 # Doc 06 — Configuration & Multi-Tenancy Management
 
 > Scope: define the layers, sources, priority, and hot-reload mechanism for configuration; the multi-tenant data model and isolation guarantees; secret management; tenant lifecycle; quotas and billing.
