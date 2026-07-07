@@ -34,6 +34,11 @@ pub enum ConfigError {
     #[error("provider {id} references unknown auth source: {detail}")]
     BadAuthRef { id: String, detail: String },
 
+    /// Could not resolve the tars home directory: `$TARS_HOME` unset and no
+    /// discoverable home dir, with no `--tars_home` override.
+    #[error("cannot resolve tars home: set $TARS_HOME or --tars_home (or ensure HOME is set)")]
+    NoHome,
+
     #[error("internal: {0}")]
     Internal(String),
 }

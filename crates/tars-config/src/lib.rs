@@ -24,6 +24,7 @@
 
 pub mod builtin;
 pub mod error;
+pub mod global;
 pub mod manager;
 pub mod model_kb;
 pub mod paths;
@@ -37,6 +38,7 @@ pub use builtin::{
     default_gemini_cli, default_openai, default_vllm, merge_builtin_with_user,
 };
 pub use error::ConfigError;
+pub use global::resolve_home;
 pub use manager::{Config, ConfigManager};
 pub use model_kb::{
     KbModality, ModelEntry, ModelKb, ModelStatus, ModelTier, ProviderModels, Thinking,
