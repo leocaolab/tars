@@ -21,7 +21,7 @@
     "_comment": "napi build = compile crate + emit binding artifacts. --platform writes index.js + index.d.ts that pick the right native binary per OS/arch.",
     "build": "napi build --platform --release --strip",
     "build:debug": "napi build --platform",
-    "test": "node --test __test__/"
+    "test": "node --test __test__/*.mjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.0"

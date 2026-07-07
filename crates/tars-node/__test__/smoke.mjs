@@ -25,7 +25,6 @@ import { hello, Pipeline } from '../index.js';
 const MOCK_CONFIG = `
 [providers.demo]
 type = "mock"
-model = "mock-model"
 canned_response = "tars-node smoke test ok"
 `;
 

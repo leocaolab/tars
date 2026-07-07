@@ -156,3 +156,70 @@ def test_standalone_handle_without_workspace(tars_home):
     # is no workspace overlay, so the single configured provider answers.
     assert handle.role_provider("echo") == "echo"
     handle.close()
+
+
+@pytest.fixture(scope="module")
+def workspace_b(tmp_path_factory) -> Path:
+    """A SECOND workspace root (distinct `.arc` marker) — for the
+    multi-workspace manager test. Both resolve `critic` → `echo`."""
+    ws = tmp_path_factory.mktemp("workspace_b")
+    marker = ws / ".arc"
+    marker.mkdir()
+    (marker / "config.toml").write_text(_WORKSPACE_CONFIG)
+    return ws
+
+
+def test_multiple_workspaces_open_two_close_one(tars_home, workspace, workspace_b):
+    # One manager, two distinct workspace roots: opening the second does NOT
+    # rebuild the global registry (providers are global), and closing one
+    # leaves the other fully live.
+    ws = tars.Workspaces("arc")
+    ha = ws.open(str(workspace))
+    hb = ws.open(str(workspace_b))
+    assert len(ws.roots()) == 2
+    assert os.path.realpath(ha.root) != os.path.realpath(hb.root)
+
+    # Close A only. B stays open and still resolves its role.
+    ws.close(str(workspace))
+    assert ws.get(str(workspace)) is None
+    assert len(ws.roots()) == 1
+    assert hb.role_provider("critic") == "echo"
+
+    ws.close_all()
+    assert ws.roots() == []
+
+
+def test_nested_context_composes_and_refuses_double_enter(tars_home, workspace):
+    # Nested `with handle.context(...)` blocks compose (a stack, not a single
+    # slot): the inner scope is active inside, and the outer scope survives the
+    # inner block's exit — pipelines build at every level.
+    ws = tars.Workspaces("arc")
+    handle = ws.open(str(workspace))
+
+    with handle.context(session="outer", tags=["o"]) as outer:
+        assert handle.pipeline("critic").id == "echo"
+        with handle.context(session="inner", tags=["i"]) as inner:
+            assert outer is not inner
+            # innermost scope active; a call inside binds to it.
+            assert handle.pipeline("critic").id == "echo"
+        # inner exited (LIFO pop); outer scope still active and usable.
+        assert handle.pipeline("critic").id == "echo"
+
+        # A guard is single-use: re-entering the SAME guard raises rather than
+        # silently double-pushing and leaking a stack entry.
+        with pytest.raises(RuntimeError):
+            with outer:
+                pass
+
+    ws.close_all()
+
+
+def test_open_missing_path_raises_typed_io_error(tars_home):
+    # A typed handle-error path beyond unknown-role: opening a non-existent
+    # path fails to canonicalize → TarsHandleError tagged `kind == "io"`
+    # (not one opaque message string).
+    ws = tars.Workspaces("arc")
+    with pytest.raises(tars.TarsHandleError) as ei:
+        ws.open("/no/such/path/exists/here")
+    assert isinstance(ei.value, tars.TarsError)
+    assert ei.value.kind == "io"

@@ -96,6 +96,27 @@ test('context(ctx) yields a bound handle that still completes', async () => {
   ws.closeAll();
 });
 
+test('Workspaces manages two distinct roots; closing one leaves the other live', async () => {
+  const ws = new Workspaces('arc');
+  // Two distinct bare dirs → two distinct canonical roots (neither has a
+  // marker/.git, so each is opened as its own root).
+  const wsA = mkdtempSync(join(tmpdir(), 'tars-node-wsA-'));
+  const wsB = mkdtempSync(join(tmpdir(), 'tars-node-wsB-'));
+  ws.open(wsA);
+  const hb = ws.open(wsB);
+  assert.equal(ws.roots().length, 2);
+
+  // Close A only; B stays open and still drives a completion through the mock.
+  assert.equal(ws.close(wsA), true);
+  assert.equal(ws.get(wsA), null);
+  assert.equal(ws.roots().length, 1);
+  const r = await hb.pipeline('critic').complete({ model: 'm', user: 'hi' });
+  assert.match(r.text, /handle spine ok/);
+
+  ws.closeAll();
+  assert.equal(ws.roots().length, 0);
+});
+
 test('TarsHandle.standalone opens without a workspace', async () => {
   const handle = TarsHandle.standalone('arc', 'sess-standalone');
   const r = await handle
