@@ -133,7 +133,7 @@ The Rust trait is the source of truth; HTTP API / gRPC / Python / TypeScript and
 | [09](./09-storage-schema.md) | Storage Schema | Postgres + SQLite + Redis + S3; partitioning; migration; tenant-level cleanup | Database engineers |
 | [10](./10-security-model.md) | Security Model | STRIDE threat model; trust boundaries; isolation summary; Prompt Injection defenses | Security engineers |
 | [11](./11-performance-capacity.md) | Performance and Capacity | SLO definitions; bottleneck analysis; cache ROI; load-testing methodology | Performance engineers + SRE |
-| [12](./12-api-specification.md) | API Specification | Rust / HTTP / gRPC / Python(PyO3) / TS(napi-rs) / WASM | SDK developers |
+| [12](./12-api-specification.md) | API Specification | Rust / HTTP / gRPC / Python(PyO3, sync) / TS(napi-rs, async) / WASM; FFI bindings project the Doc 06 handle spine (`init` → `Workspaces` → per-workspace handle → per-call context → provider/pipeline/runtime), not a task-submit model | SDK developers |
 | [13](./13-operational-runbook.md) | Operational Runbook | On-call playbook; 12 failure scenarios; backup and restore; incident communication | SRE / On-call |
 | [14](./14-implementation-path.md) | Implementation Path | M0–M9 milestones; crate workspace; dependency choices | Maintainers / planners |
 | [15](./15-output-validation.md) | Output Validation | Validator chain; Pass/Reject/Filter/Annotate outcomes | Pipeline developers |
