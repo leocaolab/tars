@@ -131,6 +131,83 @@ don't go into the file.
 
 See [`.env.example`](../.env.example) for the full env-var list.
 
+## Checking your setup — `tars providers` / `tars models`
+
+Two read-only commands answer "is my config wired up, and which models
+can I actually ask for?" Both resolve config from
+**`$TARS_HOME/config.toml`** (override with `--config <path>`) and
+best-effort load `$TARS_HOME/.env` first, so env-var-backed keys resolve
+without pre-exporting them. Neither ever prints a secret.
+
+### `tars providers` — configured providers + key health
+
+```bash
+tars providers            # name, type, default_model, key-env health
+tars providers --check    # + a fast reachability probe per HTTP provider
+tars providers --json     # machine-readable envelope
+```
+
+For every provider in your config it prints the `type`, the configured
+`default_model`, and how its auth resolves — for an env-backed key,
+**which** env var and whether it is currently **set** (`(set)` /
+`(UNSET)`), never the value. Keyless local servers show `auth: none`;
+subscription CLIs show `auth: delegated to tool login`. With `--check`
+it also fires the same list-models GET as `tars models --live` and
+reports `reachable` / `auth failed (HTTP 401)` / `unreachable` /
+`no list API (CLI/bedrock/mock)` — bounded by a short timeout so a dead
+local server can't hang the command.
+
+### The model library — `tars models`
+
+The **model library** is a JSON catalog at **`$TARS_HOME/models.json`**
+recording, per provider, the model ids that provider's API last
+reported. It's tars-owned state alongside `config.toml`.
+
+```bash
+tars models                 # QUERY the library (fast, offline) for every provider
+tars models gemini_flash    # just one provider
+tars models --live          # bypass the library, hit the provider APIs now
+tars models --json          # machine-readable envelope
+
+tars models update          # UPDATE the library from the live APIs, for all providers
+tars models update openai   # refresh one provider
+```
+
+- **`tars models`** reads the library — fast and offline. Each provider
+  row marks the configured `default_model` (`← default`), and flags it
+  with `⚠ default not in list (stale config?)` if that default is not in
+  the last-seen live list. If the library is empty/missing it tells you
+  to run `tars models update`. `--live` skips the cache and queries the
+  APIs directly.
+- **`tars models update`** queries every selected provider live,
+  persists the result, and reports what **changed** since last time
+  (`+ added` / `- removed (deprecated/retired)`). If a configured
+  `default_model` is no longer in the provider's live list it prints a
+  **stale-config warning** — it never edits your config, only reports.
+  A single-provider update merges into the existing library without
+  dropping the other providers' rows.
+
+### Which provider types are queryable
+
+Model discovery is an HTTP list-models call, so it only works for
+providers that expose one:
+
+| Provider type | Queryable? | Endpoint / note |
+|---|---|---|
+| `gemini` | ✅ | `…/v1beta/models` (`?key=`) |
+| `openai` | ✅ | `…/models` (Bearer) |
+| `openai_compat` | ✅ | `{base_url}/models` (Bearer, key optional) |
+| `vllm` / `mlx` / `llamacpp` | ✅ | local `…/models` (keyless OK) |
+| `anthropic` | ✅ | `…/v1/models` (`x-api-key` + `anthropic-version`) |
+| `bedrock` | — | model list is an AWS SDK (SigV4) call, not queried here |
+| `claude_cli` / `gemini_cli` / `codex_cli` / `opencode` / `antigravity` | — | models via the tool's own login |
+| `mock` / `cassette` | — | internal test providers |
+
+A non-queryable provider is listed with the reason, not silently
+dropped. When a provider needs a key whose env var is unset, the row
+carries the **var name to export** (e.g. `no key: set $GEMINI_API_KEY`),
+never a sentinel.
+
 ## Three call shapes
 
 ### 1. Single completion
@@ -857,6 +934,42 @@ rate-limit handling, see
 
 For offline batch processing (~50% pricing, 24h SLA) on Anthropic /
 OpenAI, see [`recipes/batch.md`](./recipes/batch.md).
+
+## Durable agent jobs (`tars-durable`)
+
+The default DAG runner (`tars_runtime::run_plan`) executes a plan of
+agent steps to completion **in one `await`, entirely in memory** — great
+for a short, side-effect-free run, but the whole frontier is lost if the
+process dies mid-run. The new **`tars-durable`** crate adds a durable
+execution layer for work that must survive a restart without re-paying
+for what already finished.
+
+The core idea: **the persisted step-result store IS the checkpoint.**
+
+- **Durable async jobs.** An agent task's DAG runs as a job whose state
+  and per-step answers are persisted as it goes, in the runtime's own
+  always-on sqlite store (`answers` + an append-only `result_events`
+  log + a `jobs` status table), each step checkpointed through **one**
+  atomic transaction.
+- **Resume = memoized re-run.** On restart the DAG is simply re-driven:
+  a step whose answer is already in the store is skipped — **the LLM is
+  never re-called** — and only un-done steps execute. Resume falls out
+  of the model; there's no in-memory frontier to reconstruct.
+- **Critical invariant — correctness never depends on observability.**
+  The durability store is separate from, and independent of, the
+  **off-able** event/telemetry store (`StoreScope::Off`,
+  `ARC_TARS_EVENTS_OFF`, …). With observability events fully off, a
+  job's answers and state still persist and it still resumes. Event
+  logs stay a diagnosis convenience, never the status-of-record.
+
+**Status: M0 + M1 shipped** — the durable checkpoint store (AnswerStore
++ atomic commit) and the DB-driven memoized-re-run scheduler
+(`DurableScheduler`). **M2–M5 are pending**: the JobManager +
+reconcile-on-open + persisted cancel, the at-least-once delivery outbox,
+the ephemeral streaming event bus, and the end-to-end app wiring.
+
+Full design (CUJs, the outbox two-bit rule, effect classification, the
+reuse map, the roadmap): [`design/durable-agent-runtime.md`](./design/durable-agent-runtime.md).
 
 ## When NOT to use tars
 

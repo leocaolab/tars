@@ -141,6 +141,20 @@ every tars consumer/tool; each provider's API key is read from the env var
 its `api_key_env` names (optionally loaded from `$TARS_HOME/.env`), never
 stored in the file.
 
+Check the setup without sending a paid call:
+
+```bash
+cargo run -p tars-cli -- providers          # configured providers + key-env health
+cargo run -p tars-cli -- providers --check  # + a live reachability probe
+cargo run -p tars-cli -- models             # models each provider offers (from the model library)
+```
+
+`tars providers` shows, per provider, its `type`, `default_model`, and
+whether its key env var is set — never the secret itself. `tars models`
+reads the **model library** (`$TARS_HOME/models.json`, refreshed by
+`tars models update`); `--live` queries the provider APIs directly. See
+[USER-GUIDE → Checking your setup](docs/USER-GUIDE.md#checking-your-setup--tars-providers--tars-models).
+
 ### Run a completion (Python)
 
 ```python
@@ -218,6 +232,114 @@ directly; `None` / `ToolUseEmulation` scrape the first balanced JSON out of chat
 prose. Shortcuts: `decode_json::<T>(text, mode)`, `resp.json::<T>(mode)`. Python /
 Node callers use `response_schema` + `json.loads` / `JSON.parse`. Full recipe:
 [USER-GUIDE → Decoding a structured response](docs/USER-GUIDE.md#decoding-a-structured-response).
+
+---
+
+## The three layers: provider → pipeline → runtime
+
+tars is a stack of three seams you can enter at whichever level you need:
+a **stateless provider call**, a **resilient validated pipeline** around
+it, or an **orchestrated durable DAG** over many calls. All three hang
+off one per-workspace **`Tars` handle** (`tars-handle`), which owns config
++ provider registry + the event-store scope, and resolves a **role name**
+to a concrete provider through the `[roles]` map:
+
+```toml
+# $TARS_HOME/config.toml
+[roles]
+critic = "deepseek"          # role → provider id
+fixer  = "claude_cli"
+```
+
+```rust
+use tars_handle::Tars;
+
+// One handle per workspace (a `.<tool>/` marker or `.git` roots it);
+// or `Tars::standalone(tool, session)` when there's no workspace.
+let tars = Tars::for_workspace("myapp", &root)?;
+```
+
+Role resolution order: the flat `[roles]` map → a routing tier → a literal
+provider id → the `default` tier → the sole provider → else `UnknownRole`.
+
+### 1 — Provider: one stateless inference call
+
+`handle.provider(role)` hands back an `Arc<dyn LlmProvider>` — the raw,
+stateless LLM seam. `complete` accumulates a whole `ChatResponse`;
+`stream` gives you the event stream.
+
+```rust
+use tars_types::{ChatRequest, Message, ModelHint, RequestContext};
+
+let provider = tars.provider("critic")?;              // resolves [roles].critic → deepseek
+let req = ChatRequest {
+    model: ModelHint::Default,                        // provider's current default from the model KB
+    messages: vec![Message::user_text("Say hi in 5 words.")],
+    ..Default::default()
+};
+let resp = provider.complete(req, RequestContext::default()).await?;
+println!("{}", resp.text);
+```
+
+No retry, no cache, no validation — just the call. Reach here when you
+want the provider and nothing around it.
+
+### 2 — Pipeline: the resilient, validated onion
+
+`handle.pipeline(role)` wraps that provider in the canonical middleware
+chain — telemetry, cache, retry, circuit-breaker, output validation, and
+event emission — and returns a `Pipeline`. Every response carries a
+`telemetry` block (`cache_hit`, `retry_count`, layer trace, latency,
+cost).
+
+```rust
+let pipeline = tars.pipeline("critic")?;
+let mut stream = pipeline.call(req, ctx).await?;
+while let Some(event) = stream.next().await { /* deltas + telemetry */ }
+```
+
+Need output validators and the provider's `Capabilities` (e.g. a
+structured-output / tool-use pre-flight)?
+`handle.pipeline_with(role, validators) -> (Pipeline, Capabilities)`.
+
+Retry and circuit-breaker are **config, not code**: the `[resilience]`
+section (v1.2.3+) feeds the pipeline's `RetryConfig` / `CircuitBreakerConfig`
+so consumers don't re-type the same literals — absent ⇒ tars's default
+chain (default retry, no breaker).
+
+```toml
+[resilience.retry]
+max_attempts = 6
+respect_retry_after = true
+
+[resilience.circuit_breaker]      # presence turns the breaker ON
+failure_threshold = 4
+cooldown_secs = 30.0
+```
+
+### 3 — Runtime: orchestrated DAG, ephemeral or durable
+
+`handle.runtime()` returns the `Runtime` for this scope. Pass it to
+**`tars_runtime::run_plan`** to execute a `Plan` (a DAG of `PlanStep`s
+with `depends_on`) of agent steps to completion. `run_plan` runs the
+whole DAG **in one `await`, in memory** — ideal for short, ephemeral,
+side-effect-free runs, but the frontier is lost if the process dies.
+
+For work that must **survive a restart without re-paying for finished
+steps**, the new **`tars-durable`** crate adds a durable execution layer
+where *the persisted step-result store IS the checkpoint*:
+
+- durable async agent **jobs** (state + per-step answers persisted as
+  the DAG runs, in the runtime's own always-on store);
+- **resume = memoized re-run** — a step whose answer is already stored is
+  skipped, so the LLM is never re-called; only un-done steps execute;
+- **correctness never depends on the off-able observability event store**
+  (the durability store is separate and always-on).
+
+Status: **M0 + M1 shipped** (`DurableStore` checkpoint + `DurableScheduler`
+memoized-re-run); M2–M5 (JobManager/reconcile, delivery outbox, streaming
+bus, app wiring) pending. Design:
+[docs/design/durable-agent-runtime.md](docs/design/durable-agent-runtime.md).
 
 ---
 

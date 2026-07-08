@@ -19,7 +19,63 @@ is authoritative. This file aggregates.
 
 ---
 
+## 1.3 — model-library CLI + durable agent runtime — `v1.3.0`
+
+Two additions: a data-driven way to **see and refresh** which models each
+provider actually offers, and the first durable/resumable layer under the
+DAG runtime.
+
+### `tars models` + `tars providers` — the model library (`tars-cli`) — `732bba1`
+- A persisted **model library** at **`$TARS_HOME/models.json`**: per
+  provider, the model ids its API last reported, tars-owned state
+  alongside `config.toml`.
+- **`tars models [PROVIDER]`** — QUERY the library (fast, offline), marking
+  each provider's configured `default_model` and flagging it when the
+  default is no longer in the last-seen live list (stale-config warning).
+  **`--live`** bypasses the cache and hits the provider APIs directly.
+- **`tars models update [PROVIDER]`** — refresh the library from the live
+  APIs, report **added / removed (deprecated/retired)** per provider, and
+  flag any configured `default_model` that's no longer available. Reports
+  only — **never edits config**. A single-provider update merges into the
+  library without dropping other providers' rows.
+- **`tars providers [--check]`** — list configured providers with `type`,
+  `default_model`, and **key-env health** (which env var backs auth +
+  whether it's set), plus an optional best-effort **reachability probe**.
+- Queryable provider types: `gemini` / `openai` / `openai_compat` /
+  `vllm` / `mlx` / `llamacpp` / `anthropic` (an HTTP list-models call).
+  `bedrock` (AWS SDK) and the CLI delegates (models via their own login)
+  are listed with the reason, not queried. Keys resolve from
+  `$TARS_HOME/.env` + env-var auth; **secrets are never printed** — a
+  missing key surfaces the **var name to export**, never a sentinel.
+  `--json` on every command for a machine-readable envelope.
+
+### `tars-durable` — durable agent-task runtime (new crate, M0 + M1) — `238bd70` / `43840b0`
+- A durable execution layer where **the persisted step-result store IS
+  the checkpoint**. An agent task's DAG runs as a job whose per-step
+  answers + state persist as it goes; **resume is a memoized re-run** —
+  a step whose answer is already stored is skipped and **the LLM is never
+  re-called**, only un-done steps execute.
+- **Critical invariant:** correctness never depends on the **off-able**
+  observability event store. The durability store (`answers` +
+  append-only `result_events` + `jobs` status, one atomic
+  `SqliteBlackboard::commit` per step) is separate and **always-on**;
+  with events fully off, jobs still persist and resume (regression:
+  `events_off_still_persists_and_resumes`).
+- **Shipped: M0** (always-on checkpoint store: AnswerStore + atomic commit)
+  + **M1** (`DurableScheduler` — DB-driven memoized-re-run, readiness/skip
+  derived from the answer store every pass). **Pending: M2–M5** —
+  JobManager + reconcile-on-open + persisted cancel; the at-least-once
+  delivery outbox; the ephemeral streaming event bus; app (concer) wiring.
+- Layering is clean and acyclic: `tars-durable → tars-runtime → tars-storage`.
+  Full design: [`docs/design/durable-agent-runtime.md`](./docs/design/durable-agent-runtime.md).
+
 ## 1.2 — config + runtime handle: process isolation, per-workspace `Tars` handle, Python/Node bindings — `v1.2.0`
+
+> **v1.2.4** — `ResilienceConfig::llm_default()` single-sources the retry defaults so `[resilience]` and the pipeline agree on one baseline (`847d655` / `6507d61`).
+>
+> **v1.2.3** — new **`[resilience]`** config section: LLM transport **retry + circuit-breaker** tuning, fed into the pipeline's `RetryConfig` / `CircuitBreakerConfig` (`b240304` / `2ccb9aa`). Every consumer used to re-type the same literals at pipeline-build time; now it's config. Absent `[resilience]` ⇒ exactly today's behaviour (default retry, no breaker); presence of `[resilience.circuit_breaker]` turns the breaker on. `tars-handle`'s `pipeline`/`pipeline_with` feed it automatically.
+>
+> **v1.2.2** — `tars-handle` gains `pipeline_with(role, validators) -> (Pipeline, Capabilities)`: inject output validators and surface the resolved provider's `Capabilities` for a structured-output / tool-use pre-flight (`9dced63` / `785ef3d`). `pipeline(role)` stays the no-validator wrapper.
 
 > **v1.2.1** — `sisurf-core` moves from a path dep to a git dep (`leocaolab/sisurf` @ `v0.3.0`) so tars is consumable as a **git dependency**. v1.1.0/v1.2.0 path-dep'd it and were silently not git-installable (surfaced when arc tried to bump).
 
