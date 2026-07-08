@@ -6115,6 +6115,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tars-durable"
+version = "1.2.4"
+dependencies = [
+ "async-trait",
+ "futures",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tars-runtime",
+ "tars-storage",
+ "tars-types",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "tars-handle"
 version = "1.2.4"
 dependencies = [
