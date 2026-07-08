@@ -1,0 +1,36 @@
+[package]
+name = "tars-durable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Durable agent-task runtime — always-on answer/job/result-event store (Blackboard-backed) + memoized-re-run DAG scheduler. Independent of the off-able observability EventStore."
+
+[lints]
+workspace = true
+
+[dependencies]
+tars-types = { path = "../tars-types" }
+tars-storage = { path = "../tars-storage" }
+tars-runtime = { path = "../tars-runtime" }
+
+# Async
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Persistence — the durable store's OWN sqlite tables (not the event store's).
+rusqlite.workspace = true
+
+# Errors / tracing
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
