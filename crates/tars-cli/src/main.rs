@@ -23,8 +23,12 @@ mod eval;
 mod event_store;
 mod events;
 mod init;
+mod model_library;
+mod model_query;
+mod models;
 mod plan;
 mod probe;
+mod providers_cmd;
 mod run;
 mod run_report;
 mod run_task;
@@ -134,6 +138,13 @@ enum Command {
     /// See `docs/eval-and-arc-llm-roadmap.md §1.3`.
     #[command(subcommand_value_name = "COMMAND")]
     Eval(eval::EvalArgs),
+    /// Discover provider models over a persisted model library.
+    /// `tars models` reads the library (fast/offline); `tars models update`
+    /// refreshes it from the live provider APIs and flags stale defaults.
+    Models(models::ModelsArgs),
+    /// List configured providers with key-env health and optional
+    /// (`--check`) reachability probing.
+    Providers(providers_cmd::ProvidersArgs),
     /// Bootstrap a starter user-level config at `~/.tars/config.toml`.
     /// Idempotent (`--force` to overwrite). New users run this first.
     Init(init::InitArgs),
@@ -183,6 +194,8 @@ async fn main() -> ExitCode {
         Command::Trajectory(_) => "trajectory",
         Command::RunReport(_) => "run-report",
         Command::Eval(_) => "eval",
+        Command::Models(_) => "models",
+        Command::Providers(_) => "providers",
         Command::Init(_) => "init",
         Command::Events(_) => "events",
     };
@@ -218,6 +231,8 @@ async fn main() -> ExitCode {
             run_report::execute(args).await
         }
         Command::Eval(args) => eval::execute(args, cli.config).await,
+        Command::Models(args) => models::execute(args, cli.config).await,
+        Command::Providers(args) => providers_cmd::execute(args, cli.config).await,
         Command::Init(args) => {
             // `--config` is a global flag for ergonomics on other
             // subcommands; `init` writes its own target so it never

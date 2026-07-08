@@ -45,7 +45,15 @@ clap.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 
-# `tars events list` timestamp formatting
+# `tars models` / `tars providers` — live model-list HTTP queries against
+# each provider's REST API. Reuses the workspace reqwest (same TLS stack as
+# tars-provider) rather than adding a second HTTP client.
+reqwest.workspace = true
+# `tars models` reads `$TARS_HOME/.env` so env-var auth resolves for the
+# live queries without the user pre-exporting keys into the shell.
+dotenvy.workspace = true
+
+# `tars events list` timestamp formatting; `tars models` library `updated_at`.
 chrono.workspace = true
 
 # Logging

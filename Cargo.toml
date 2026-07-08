@@ -92,6 +92,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # CLI
 clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 anyhow = "1"
+# `.env` loader — `tars models` reads `$TARS_HOME/.env` so env-var provider
+# auth (GEMINI_API_KEY, …) resolves without the user pre-exporting it.
+dotenvy = "0.15"
 # HTTP server (tars-server). Pinned to the 0.7 line already resolved in
 # the lockfile (transitive) to avoid a second axum major in the tree.
 axum = "0.7"
