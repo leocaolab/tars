@@ -5,7 +5,7 @@
 //! answer store, so resume is a *memoized re-run* — a step whose answer
 //! is already stored is skipped and the LLM is never re-called.
 //!
-//! ## Scope (M0)
+//! ## Scope (M0 + M1)
 //!
 //! - **M0 — the always-on durability store** ([`store`]): [`DurableStore`]
 //!   holds three tables (`answers` = the [`AnswerStore`]; `result_events`
@@ -13,6 +13,9 @@
 //!   in its OWN sqlite file. Every step is checkpointed through ONE
 //!   [`tars_storage::SqliteBlackboard`] `commit` transaction — atomic
 //!   `{answer + event + job-state}`.
+//! - **M1 — the memoized-re-run driver** ([`scheduler`]):
+//!   [`DurableScheduler`] derives readiness/skip entirely from the answer
+//!   store and executes un-done steps via the existing `Worker::run` seam.
 //!
 //! ## Critical invariant — durability is independent of observability
 //!
@@ -22,12 +25,20 @@
 //! (`StoreScope::Off`, `ARC_TARS_EVENTS_OFF`, `CONCER_TARS_EVENTS_OFF`).
 //! With observability events fully off/absent, a step's answer, the
 //! job's state, and `result_events` still persist and a job still
-//! resumes.
+//! resumes. (Regression: `events_off_still_persists_and_resumes`.)
+//!
+//! ## Not in this round (M2–M5)
+//!
+//! JobManager + `reconcile_on_open` + persisted cancel (M2); the
+//! `delivery` cursor/ack outbox worker (M3); the ephemeral `EventBus` +
+//! streaming + Zustand projection (M4); the concer CUJ-1 wiring (M5).
 
 pub mod error;
+pub mod scheduler;
 pub mod store;
 
 pub use error::DurableError;
+pub use scheduler::DurableScheduler;
 pub use store::{
     DurableBoard, DurableStore, ResultEventKind, ResultEventRecord, StepAnswer,
     JOB_STATUS_DONE, JOB_STATUS_RUNNING,
