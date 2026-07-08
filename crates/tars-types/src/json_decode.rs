@@ -215,25 +215,34 @@ pub fn decode_json<T: DeserializeOwned>(
 
 /// Decode `text` into a [`JsonAgentResponse`], composing the full seam:
 ///
-/// 1. strip an outer code fence,
-/// 2. if `T::wrapper_tags()` is non-empty, extract the substring between
-///    the first matching `<tag>…</tag>` (→ [`TarsJsonError::MissingBlock`]
-///    if none match); otherwise use the text as-is,
-/// 3. dispatch on `mode` (native → direct parse; chatty → fence-scrape),
-/// 4. if `opts.clamp_ints`, clamp out-of-`i64`-range integers before the
+/// 1. if `T::wrapper_tags()` is non-empty, extract the substring between
+///    the first matching `<tag>…</tag>` **from the raw text** (→
+///    [`TarsJsonError::MissingBlock`] if none match); otherwise strip an
+///    outer code fence and use the body,
+/// 2. dispatch on `mode` (native → direct parse; chatty → fence-scrape;
+///    a fence *inside* the envelope is handled by the scrape),
+/// 3. if `opts.clamp_ints`, clamp out-of-`i64`-range integers before the
 ///    final deserialize.
+///
+/// The envelope tag is extracted BEFORE any outer-fence strip: the tag is
+/// the explicit, unambiguous delimiter, and a leading code fence that is
+/// NOT the envelope (e.g. a fixer narrating a ```` ```diff ```` block
+/// before its `<fix_report>`) must not swallow the envelope that follows
+/// it. Stripping the outer fence first would consume everything up to the
+/// fence's close — including a trailing envelope tag — and report a
+/// spurious [`TarsJsonError::MissingBlock`]. Fences that legitimately wrap
+/// the JSON *inside* the envelope are still handled downstream by the
+/// chatty-mode scrape ([`parse_value`]).
 pub fn decode<T: JsonAgentResponse>(
     text: &str,
     mode: StructuredOutputMode,
     opts: DecodeOpts,
 ) -> Result<T, TarsJsonError> {
-    let body = strip_code_fences(text);
-
     let tags = T::wrapper_tags();
     let inner = if tags.is_empty() {
-        body
+        strip_code_fences(text)
     } else {
-        extract_tag_block(body, tags).ok_or_else(|| TarsJsonError::MissingBlock {
+        extract_tag_block(text, tags).ok_or_else(|| TarsJsonError::MissingBlock {
             tried: tags.iter().map(|t| (*t).to_string()).collect(),
         })?
     };
@@ -705,6 +714,19 @@ mod tests {
         let text = "<report>```json\n{\"x\":7,\"y\":8}\n```</report>";
         let w: Wrapped = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
         assert_eq!(w, Wrapped { x: 7, y: 8 });
+    }
+
+    #[test]
+    fn decode_envelope_survives_a_leading_unrelated_code_fence() {
+        // A response that narrates a ```diff block and THEN emits its
+        // envelope. The leading fence is NOT the envelope; the outer-fence
+        // strip must not consume the `<report>` block that follows it.
+        // Regression: `strip_code_fences` used to run before tag extraction,
+        // eating everything up to the diff fence's close → a spurious
+        // MissingBlock. The tag must be extracted from the raw text first.
+        let text = "```diff\n--- a.rs\n+++ a.rs\n-old\n+new\n```\n<report>{\"x\":1,\"y\":2}</report>";
+        let w: Wrapped = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
+        assert_eq!(w, Wrapped { x: 1, y: 2 });
     }
 
     // ── decode: opt-in integer clamp ────────────────────────────────
