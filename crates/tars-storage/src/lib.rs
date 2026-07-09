@@ -41,6 +41,7 @@
 
 pub mod blackboard;
 mod body_store;
+mod durable_store;
 mod error;
 mod event_store;
 mod pipeline_event_store;
@@ -51,6 +52,11 @@ pub use blackboard::{
     SqliteBlackboard, Transition,
 };
 pub use body_store::{BodyStore, SqliteBodyStore, SqliteBodyStoreConfig};
+pub use durable_store::{
+    DurableBoard, DurableStore, DurableStoreError, JOB_STATUS_DONE, JOB_STATUS_RUNNING, RawAnswer,
+    ResultEventKind, ResultEventRecord, STATUS_COMPLETED, STATUS_PENDING, STATUS_SKIPPED,
+    SqliteDurableStore,
+};
 pub use error::StorageError;
 pub use event_store::{EventRecord, EventStore};
 pub use pipeline_event_store::{
