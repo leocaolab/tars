@@ -5,6 +5,13 @@
 > See [What's next](#whats-next-beyond-this-roadmap) for the next
 > set of larger gaps.
 >
+> **Update (v1.5.0):** Feature #2 (Fallback / degrade middleware) was
+> subsequently **removed**. Provider *selection* — routing, ensemble,
+> fallback — is no longer a pipeline concern: a caller who wants
+> fallback composes several `LlmService`s and, on `Err`, tries the next.
+> The §2 design below is retained as historical record; the pipeline
+> ships no `FallbackMiddleware`.
+>
 > Last updated 2026-06-10.
 
 The features in this doc share one motivation: **make tars usable
@@ -20,14 +27,16 @@ that uses it, then the bigger access-pattern shift (batch).
 | # | Feature | Effort | Status | Commit(s) |
 |---|---|---|---|---|
 | 1 | [Rate-limit max_wait + cancel propagation](#1-rate-limit-max-wait--cancel-propagation) | 1-2 days | ✅ shipped | `2b10167` |
-| 2 | [Fallback / degrade middleware](#2-fallback--degrade-middleware) | 1-2 weeks | ✅ shipped | `2b10167` |
+| 2 | [Fallback / degrade middleware](#2-fallback--degrade-middleware) | 1-2 weeks | ✅ shipped · ⚠️ **removed in v1.5.0** (re-scoped as a caller composition) | `2b10167` |
 | 3 | [Per-call budget middleware](#3-per-call-budget-middleware) | 1 week | ✅ shipped | `8088499` |
 | 4 | [Tenant budget middleware (stateful)](#4-tenant-budget-middleware-stateful) | 2-3 weeks | ✅ shipped | `c92ec8e` |
 | 5 | [Batch mode (BatchSubmitter trait)](#5-batch-mode-batchsubmitter-trait) | 3-4 weeks | ✅ Anthropic + OpenAI / ⛔ Gemini deferred | `48fb341` `f038fd8` `e81aa2a` `342cfc3` |
 
 Features 1+2 paired — `max_wait` without fallback creates dead
 paths, fallback without `max_wait` makes "wait 30 minutes" a
-plausible default. Shipped in the same release.
+plausible default. Shipped in the same release. (Fallback was later
+removed in v1.5.0 — see the update note above; `max_wait` stays, and it
+now bubbles a too-long wait to the *caller*, who can try another service.)
 
 ## v1 outcomes — what production agents can do now
 
@@ -35,26 +44,25 @@ What Cando-Peter (or a similar production agent) can compose today
 without any app-level workarounds:
 
 ```rust
-let pipeline = Pipeline::builder(opus.clone())
-    .layer(TelemetryMiddleware::new())                                // observability for everything
-    .layer(CacheLookupMiddleware::new(cache))                         // free on hit
-    .layer(PerCallBudgetMiddleware::new(0.05, opus.capabilities()))   // <$0.05/call hard cap
-    .layer(TenantBudgetMiddleware::new(store, opus.capabilities()))   // aggregate per-tenant
-    .layer(FallbackMiddleware::builder()                              // typed degrade
-        .fallback_to_provider(sonnet, FallbackTrigger::cost_related())
-        .fallback_to_provider(local,  FallbackTrigger::availability())
-        .build())
-    .layer(RetryMiddleware::default())                                // short flakes; bubbles long waits to Fallback
+let svc = LlmService::builder(opus.clone(), "claude-opus-4-1")
+    .layer(TelemetryMiddleware::new())                                     // observability for everything
+    .layer(PerCallBudgetMiddleware::new(0.05, opus.capabilities()))        // <$0.05/call hard cap
+    .layer(TenantBudgetMiddleware::new(store, opus.capabilities()))        // aggregate per-tenant
+    .layer(CacheLookupMiddleware::new(cache_registry, cache_factory, origin)) // free on hit
+    .layer(RetryMiddleware::default())                                     // short flakes; bubbles long waits to the caller
     .build();
+
+// Provider fallback / ensemble is a CALLER composition, not a layer: build a
+// second `LlmService` over `sonnet` / `local` too and, on `Err`, try the next.
 
 // Offline / bulk path (50% pricing, 24h SLA):
 let submitter = opus.as_batch_submitter().unwrap();
-let job = submitter.submit(items).await?;
+let job = submitter.submit(items, "claude-opus-4-1", &ctx).await?;  // model is explicit
 // ... poll status, fetch results ...
 ```
 
 **Quantitative tally** of what landed:
-- **5 new middlewares** (`PerCallBudgetMiddleware`, `TenantBudgetMiddleware`, `FallbackMiddleware`, plus the `RetryMiddleware.max_wait` extension)
+- **5 new middlewares** (`PerCallBudgetMiddleware`, `TenantBudgetMiddleware`, `FallbackMiddleware` — since removed in v1.5.0, plus the `RetryMiddleware.max_wait` extension)
 - **2 new traits** (`BudgetStore`, `BatchSubmitter`) + their reference impls
 - **2 vendor batch implementations** (Anthropic + OpenAI), 1 stub (Gemini)
 - **~60 new unit / wiremock tests** across the four cost middlewares + the three batch backends
@@ -132,8 +140,9 @@ Logic:
 ```rust
 if let Some(retry_after) = err.retry_after() {
     if retry_after > cfg.max_wait {
-        // Bubble the error unchanged — outer FallbackMiddleware (§2)
-        // may switch provider; if no fallback, caller decides.
+        // Bubble the error unchanged — the caller decides whether to try
+        // another service. (Originally an outer FallbackMiddleware could
+        // switch provider here; that layer was removed in v1.5.0 — §2.)
         return Err(err);
     }
     cancellable_sleep(retry_after, &ctx.cancel).await;
@@ -159,9 +168,18 @@ if let Some(retry_after) = err.retry_after() {
 
 ## 2. Fallback / degrade middleware
 
+> ⚠️ **Removed in v1.5.0.** This feature shipped, then was removed by
+> decision: provider *selection* (routing / ensemble / fallback) is not a
+> pipeline concern. A caller who wants fallback builds several
+> `LlmService`s and, on a typed `Err`, tries the next; ensemble builds N
+> services, calls all, and merges. The design below is retained as
+> historical record — the pipeline no longer ships `FallbackMiddleware`,
+> `FallbackTrigger`, or `RoutingPolicy`, and the code samples in this
+> section describe the *removed* API.
+
 ### Motivation
 
-Today, `RoutingPolicy` picks a provider **once** at request open. If
+At the time, `RoutingPolicy` picked a provider **once** at request open. If
 that provider returns `BudgetExceeded`, `RateLimited` (with long
 retry-after), `ContextTooLong`, or `ModelOverloaded`, the call dies
 even if another configured provider would have succeeded. Peter
@@ -303,10 +321,10 @@ if capabilities.pricing.is_zero() {
 Cache should sit **outside** Budget — a cache hit should not pre-check budget at all (it's free). The current arch doc has Budget outside Cache; **this PR will propose flipping that** in arch §02.
 
 ```rust
-Pipeline::builder(provider)
+LlmService::builder(provider, "claude-opus-4-1")
     .layer(TelemetryMiddleware::new())
-    .layer(CacheLookupMiddleware::new(cache))
-    .layer(PerCallBudgetMiddleware::new(0.05))   // ← inside Cache
+    .layer(CacheLookupMiddleware::new(cache_registry, cache_factory, origin))
+    .layer(PerCallBudgetMiddleware::new(0.05, provider.capabilities()))   // ← inside Cache
     .layer(RetryMiddleware::default())
     .build();
 ```
@@ -400,13 +418,16 @@ pub trait BatchSubmitter: Send + Sync + 'static {
     async fn submit(
         &self,
         items: Vec<(BatchItemId, ChatRequest)>,
+        model: &str,                 // requests are model-agnostic; one model per batch
+        ctx: &RequestContext,        // principal / tenant / trace for the auth resolver
     ) -> Result<BatchJobId, ProviderError>;
 
-    async fn status(&self, id: &BatchJobId) -> Result<BatchStatus, ProviderError>;
+    async fn status(&self, id: &BatchJobId, ctx: &RequestContext) -> Result<BatchStatus, ProviderError>;
 
     async fn results(
         &self,
         id: &BatchJobId,
+        ctx: &RequestContext,
     ) -> Result<Vec<BatchResultItem>, ProviderError>;
 }
 

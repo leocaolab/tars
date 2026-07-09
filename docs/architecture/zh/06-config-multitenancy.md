@@ -1,3 +1,354 @@
+# 文档 06 — 配置与运行时句柄(多租户 & 多 workspace)
+
+> 状态:**当前架构。** 取代早先的共享进程 SaaS 配置设计——后者**原样保留、已废弃**,见本文件末尾的附录(历史记录——未重开进程隔离决策前不要复活)。
+> 视角:**tars 是一个通用的 agentic-runtime 库。** arc / concer / tars-py 是*消费者*(示例),从不是主角。这里的每个抽象都属于 tars。
+> 事件存储内部**不在范围内**——推迟到 Task 4(这里只固定*放置位置*决策)。
+
+> **⚠️ 更新(scope-facade 简化之后)。** 本文档设计的那个打包好的 **`Tars` 句柄**(§C3 / §4 SCOPE 框 / §10)**后来被移除了**。`tars-handle` 现在是*一小撮独立组件的集合*,不再是 per-scope 的句柄:
+> - **全局 config + registry:** `tars_handle::init(Config)`(DI)/ `init_from_home(home)`(CLI)安装进程级全局 `Config`(`Config::get()`),并预先构建唯一的 `ProviderRegistry`(`ProviderRegistry::global()` / `try_global()`);`is_initialized()`。
+> - **role → provider/service:** 自由函数 `resolve_role` / `resolve_role_bound` / `resolve_service` / `resolve_provider_id`(针对显式传入的 `&cfg.roles`、`&cfg.routing`、`&registry`)——没有 scope 对象。
+> - **paths:** `resolve_workspace_root`、`workspace_store_dir`、`tars_home_store_dir`、`standalone_store_dir`、`StoreScope`(§7 的路径法则,仍然有效)。
+> - **resilience:** `resilience_configs(&cfg.resilience)` → `(RetryConfig, CircuitBreakerConfig)`。
+> 下面那些承重的*决策*(进程隔离、配置分层、路径法则、只做可观测性的 store)全部成立;只有把它们**打包**进一个 `Tars` struct——以及它的 per-scope sink + cancel + 确定性 Drop 生命周期——没有了。Scope / 生命周期现在是**消费者**自己拥有的(tars 只提供 DI 缝,不提供句柄)。带着这个替换去读下面的章节。
+
+---
+
+## 1. 概述与目标
+
+tars 今天已经具备一个 agentic runtime 的全部零件——`Config`、`ProviderRegistry`、`LlmService`、`LocalRuntime`、`EventStore`——但**没有一个统一入口把它们绑成一个 scope**,所以每个消费者都各自手工串 `load_from_file → from_config → builder → new`(这就是"散装")。本次重构引入:
+
+1. 一个**全局层**(进程级、不可变):`Config` + `ProviderRegistry`,加载一次,共享。
+2. 一个**scope 层**:per-*workspace*(本地)或 *tenant×workspace*(服务端)的 roles + 可观测性 + 取消。**(实际落地时,这不是一个打包好的 `Tars` 句柄——见更新横幅:tars 提供独立零件,scope 由消费者拥有。)**
+3. 一条**路径解析法则**:config 在哪、store 在哪、workspace 怎么发现——CLI、GUI/DMG、standalone、服务端一套规则。
+4. 一条**上下文法则**:Rust 内部用 `tokio::task_local!`;每个语言边界显式传 ctx。
+5. 一套**确定性生命周期**:open → switch → close(Drop + cancel)→ reconstruct。
+
+### 承重决策——进程隔离
+
+**一个 Runtime = 一个用户(本地)/ 一个租户(服务端)。我们从不在一个进程里混多个租户。** 这是云原生的**进程/容器隔离**,不是共享进程的多租户。推论:一个进程内恰好只有一个租户,所以全局 `Config`/`ProviderRegistry` 单例是*正确的*;"多租户服务端" = 编排 **N 个单租户进程**,每个都有自己的单例。这把一整类复杂度(per-request registry keying、跨租户锁、共享进程 authz)坍缩成"再起一个进程"。
+
+### 非目标
+
+- 不重新设计事件存储(Task 4;这里只固定放置位置)。
+- 不做共享进程 SaaS 多租户(用进程隔离取代)。
+- 不做通用配置框架——这只服务于 agentic runtime 的三层(provider / pipeline / runtime)。
+- 不做配置热加载(桌面工具约定:workspace 配置靠关闭+重开 workspace;全局配置靠重启进程)。
+
+---
+
+## 2. 先行者——rig / OpenClaw / Hermes
+
+| 轴 | **rig**(库) | **OpenClaw**(daemon) | **Hermes**(daemon) | **tars → 本设计** |
+|---|---|---|---|---|
+| 形态 | 库,一切皆 trait | 有主张的 daemon | 有主张的 daemon | **库**(像 rig) |
+| 入口 | `openai::Client::from_env()`(无状态、廉价) | `$OPENCLAW_STATE_DIR`(`~/.openclaw`) | `$HERMES_HOME`(`~/.hermes`) | **`tars_handle::init` + 全局 `Config::get()` / `ProviderRegistry::global()`;role 经 `resolve_service`** |
+| 配置 home | app 提供 | `~/.openclaw/openclaw.json` | `~/.hermes/*.json` | `~/.tars/config.toml`,**flag > env > 默认** |
+| 数据位置 | app 决定(可插拔 store) | `~/.openclaw/memory/<agentId>.sqlite` | `~/.hermes/state.db` | **per-workspace** `<root>/.<tool>/tars/`(默认);`~/.tars` 兜底 |
+| 分区键 | `PromptRequest::conversation` | **agentId** | **session** | **`tenant_id` × workspace** |
+| 全局 init/单例 | **无**——全 DI | daemon 拥有 | daemon 拥有 | **不可变 config/registry 用全局单例**(进程隔离让它安全);scope 用 **DI 句柄** |
+| 后端 | 可插拔(LanceDB/Qdrant/…) | SQLite | SQLite / Postgres | **`EventStore` trait**:SQLite(Personal)/ Postgres(Team) |
+| Env 覆盖 | — | `$OPENCLAW_STATE_DIR` | `$HERMES_HOME` | **`$TARS_HOME`** |
+
+**从各家取什么:** rig 的*库 + trait + DI 句柄*形态和无状态 provider client;OpenClaw/Hermes 的 *home 目录 + 按 id 分区 + env 覆盖 + 可插拔 SQLite/Postgres 后端*。**tars 的分歧点:** 它是基于目录的(一个 workspace/repo),两个 daemon 都不建模这个——所以 store 跟着 **workspace** 走,而不是全局 home,而全局 home 只是非目录(standalone)场景的*兜底*。
+
+---
+
+## 3. 消费者旅程(CUJ)
+
+- **CUJ-1 — repo 上的 CLI 工具。** `arc` 在一个 git repo 里跑 → 解析 workspace root = git-root → per-workspace store 落在 `<root>/.arc/tars/`。全局 providers 来自 `~/.tars`。
+- **CUJ-2 — GUI app(DMG)打开一个文件夹。** concer.app 从 `/Applications` 启动(无关)→ 用户 Open Folder X → workspace = X → store `X/.concer/tars/`。首次打开 bootstrap 出 `X/.concer/`。
+- **CUJ-3 — 切换 / 多 workspace。** GUI 先开 A 再开 B;关掉 A。全局 registry *不*重建;B 拿到自己的句柄;A 的 in-flight 作业继续跑(绑定在 A)且 A 的 Drop 推迟到它们完成。
+- **CUJ-4 — standalone(无目录)。** GUI 启动时没开文件夹,或裸 CLI 任务 → 无 workspace → 全局兜底 `~/.tars`,按 session id 分区。
+- **CUJ-5 — 重启 / 重建。** 进程重启 → 重开记住的 workspace root(s)→ 重建句柄(registry 共享,roles 来自 `<root>/.<tool>/config.toml`,store 重连到磁盘上的文件)→ 由领域态派生地 resume 未完成的工作。
+- **CUJ-6 — 多租户服务端(未来)。** N 个租户 → **N 个单租户进程**(每租户/容器一个),每个都与 CUJ-1..5 一样,`tenant_id` = 该租户,`EventStore` = Postgres(Team 模式)。句柄形态相同;绑定不同。
+
+---
+
+## 4. 分层模型
+
+```
+┌─ GLOBAL(进程级、不可变、构建一次) ──────────────────────────────────────┐
+│  Config::get()          ~/.tars/config.toml  (providers, keys, routing)  │
+│  ProviderRegistry::global()   Arc,所有 provider 构建一次,共享           │
+└──────────────────────────────────────────────────────────────────────────┘
+             │ 共享 Arc ref
+┌─ SCOPE (per workspace [本地] / per tenant×workspace [服务端]) ───────────┐
+│  独立零件——没有打包句柄。scope 由消费者拥有:                            │
+│     cfg.roles / cfg.routing            // role → provider id(来自 Config)│
+│     ProviderRegistry::global()         // 全局的共享 ref                  │
+│     resolve_service(roles, routing, registry, role) -> LlmService         │
+│     (store 目录经 workspace_store_dir(...);StoreScope §C4——由消费者     │
+│      打开;cancel/生命周期由消费者拥有)                                   │
+└──────────────────────────────────────────────────────────────────────────┘
+             │ DI(Tauri State 按 root 键控 / CLI main / per-request)
+┌─ CALL  (per operation) ─────────────────────────────────────────────────┐
+│  RUN_CONTEXT (task_local): { tenant, session, trace, tags }  — 只带 ids  │
+│  resolve_role(...) / resolve_service(...)   (Rust)                        │
+│  tars.provider(role) / tars.pipeline(role)  (py/node 绑定)               │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**为什么这么拆:** registry 是*全局* config 的函数 → 构建一次、共享(进程隔离下全局不可变单例是正确的)。roles 是*workspace* config 的函数 → 每次调用针对 `cfg` 解析(一个消费者会 per-workspace 替换的全局)。调用上下文是 per-operation → task_local,只带 ids(保持轻量;见 §9)。
+
+### 三条入口路径(消费者按需选深度)
+
+消费者恰好进入它需要的那一层——三层内部互相嵌套:
+
+| 入口 | Rust | py/node 绑定 | 用途 |
+|---|---|---|---|
+| 只要 provider | `resolve_role(...)` → `Arc<dyn LlmProvider>` | `tars.provider(role)` | 一次裸 LLM 调用,无状态 |
+| service(绕过 runtime) | `resolve_service(...)` / `LlmService::default_chain(...)` | `tars.pipeline(role)` | 单次 agent 调用,带 retry/cache/obs——无 DAG |
+| runtime(DAG) | `LocalRuntime::new(store)` → `run_plan(...)` | *(绑定里暂缓)* | 依赖调度的多步工作流 |
+
+一次单 agent 调用**不**走 `run_plan`——它就是 service 层的一次调用,不是一个单节点 DAG。
+
+---
+
+## 5. 配置分层
+
+`manager.rs:16-18` 预留了 `tenants` 字段;`manager.rs:88-89` 命名了一个愿景性的 **5 层合并**(*Compiled → Built-in → System → User → Tenant → Per-Request*)——其完整的共享进程版本就是**附录里已废弃的设计**。本(当前)设计只实现现在真正需要的两层,其余作为已声明的缝留着:
+
+| 层 | 来源 | 范围 | 状态 |
+|---|---|---|---|
+| Compiled / Built-in | `merge_builtin_with_user`(`manager.rs:10,108`) | 全局 | 已有 |
+| System | `/etc/tars/config.toml`(可选) | 全局 | 缝(未来) |
+| **User** | `~/.tars/config.toml`(`paths.rs:25`) | 全局 | **本设计** |
+| **Tenant** | per-tenant overlay(服务端:config store;本地:无) | tenant | **缝已接**(§8) |
+| Per-Request | `RUN_CONTEXT` overrides(`tags`、model hint) | call | **本设计**(§9) |
+| Workspace(tars 专属) | `<root>/.<tool>/config.toml` `[roles]`(`routing.rs:26`) | workspace | **本设计** |
+
+> tars 加了一个 5 层模型没命名的 **Workspace** 层——它位于 User 之下、Per-Request 之上,只装 role→provider 映射(`RoutingConfig`),不装 secret。
+
+---
+
+## 6. 组件
+
+### C1 — `Config`(全局、不可变单例)
+- **复用:** `Config` struct `manager.rs:21`;`ConfigManager::load_from_file` `:94`、`load_from_str` `:115`;`default_config_path` `paths.rs:25`;`merge_builtins_into` `:108`;`Config::validate` `:66`。
+- **新增:**
+  ```rust
+  static CONFIG: OnceLock<Config> = OnceLock::new();
+  impl Config {
+      /// 组合根,一次。`home`:显式覆盖(来自 --tars_home)。
+      /// 叫 `load` 而不是 `init`——它是一次性的全局*加载*,不是有副作用的
+      /// "初始化框架" 调用。
+      pub fn load(home: Option<PathBuf>) -> Result<(), ConfigError>;
+      pub fn get() -> &'static Config;
+      /// --tars_home flag > $TARS_HOME > ~/.tars
+      pub fn resolve_home(flag: Option<PathBuf>) -> PathBuf;
+  }
+  ```
+  `load` 负责加载+校验(可失败在这里处理)然后 `CONFIG.set`。`get` 不可失败(`expect("Config::load not called")`)。无热加载。
+
+### C2 — `ProviderRegistry`(全局、构建一次、Arc 共享)
+- **复用:** `ProviderRegistry` `registry.rs:64`("Cheap to clone(everything is Arc)" `:62`);`from_config` `:86`(eager——构建*所有*声明的 provider)。
+- **新增:**
+  ```rust
+  static REGISTRY: OnceLock<Arc<ProviderRegistry>> = OnceLock::new();
+  impl ProviderRegistry {
+      pub fn global() -> Result<Arc<ProviderRegistry>, RegistryError>; // 从 Config::get() 惰性构建
+  }
+  ```
+  - **正确性说明:** 全局 static 单例*只*在进程隔离下(一进程一租户)才安全。它是唯一会破坏共享进程多租户的东西;我们选进程隔离恰恰是为了让它保持简单。
+  - **开放(以后再测):** `from_config` 是 eager 的(即使不用也构建每个声明的 provider)。目前可接受;按 id 惰性构建是未来的优化,不是拦路石。
+
+### C3 — role 解析(独立函数;**取代**早先的 `Tars` 句柄)
+- **复用:** `LlmService::default_chain(provider, model, opts)`(canonical onion);`LlmService::of(provider, model)`(leaf);`LocalRuntime::new(event_store)` `runtime.rs`;`run_plan` `executor.rs:695`;`RoutingConfig` `routing.rs`。
+- **已落地的表面**(`tars-handle`,没有 scope struct——每个输入都是普通参数):
+  ```rust
+  // 组合根:安装进程级全局 Config + 构建唯一 registry。
+  pub fn init(config: Config) -> Result<(), InitError>;          // DI(embedder)
+  pub fn init_from_home(home: Option<PathBuf>) -> Result<(), InitError>; // CLI
+  pub fn is_initialized() -> bool;
+
+  // role → provider / model 绑定的 service,针对显式的 registry + routing + roles。
+  pub fn resolve_role(roles, routing, registry, role) -> Result<(ProviderId, Arc<dyn LlmProvider>), TarsError>;
+  pub fn resolve_role_bound(roles, routing, registry, role) -> Result<(ProviderId, Arc<dyn LlmProvider>, String), TarsError>;
+  pub fn resolve_service(roles, routing, registry, role) -> Result<LlmService, TarsError>; // 面向业务的 leaf
+  pub fn resolve_provider_id(roles, routing, registry, role) -> Result<ProviderId, TarsError>;
+  ```
+  role 解析 = `cfg.roles`(扁平 `[roles]` map)→ tier → 字面 id → `default` tier → 唯一 provider → `UnknownRole`。两个配置层在这里汇合(§5)。provider+model 来自 `cfg`/`registry`;`resolve_service` 返回一个 leaf `LlmService`(用 `LlmService::default_chain` / `builder_with_inner` 把它裹进 onion)。**旧句柄的 per-scope 可观测性 sink + cancel + 确定性 Drop 生命周期不再是 tars 类型——scope 及其 store 句柄由消费者拥有**(store 是只写侧日志,Task 4;§C4 的放置位置仍适用)。
+
+### C4 — `StoreScope`(放置位置;sink 内部 = Task 4)
+- **复用:** `default_personal_event_store_path` `sqlite.rs:292`;Personal/Team 切分 `event_store.rs:5-6`。
+- **新增:**
+  ```rust
+  enum StoreScope {
+      Workspace(PathBuf), // <root>/.<tool>/tars/    默认(数据跟项目走)
+      TarsHome(PathBuf),  // ~/.tars/ws/<path-hash>/ 兜底(只读目录 / 策略)
+      Off,                // 退出
+  }
+  ```
+  由消费者在解析 workspace-root 时确定(§7)。**这里只固定放置位置;sink(MPSC 单写者、best-effort、EventStore-trait 后端)是 Task 4。**
+  - **store 不是什么(现在就固定,好让 Task 4 诚实):** 只做可观测性——一条只写的侧日志。它**从不**是调度器,**从不**是持久化来源(持久化 = 消费者领域态)。executor(`run_plan`)本身已是异步依赖 DAG,**不**读 store 来调度。*(那些声称"丢一个 event 会卡住 DAG"或"丢一个 event 破坏幂等"的评审,都假设 store 驱动调度/reconcile——它不;两者都基于这个前提被否掉。)*
+  - **Task 4 待办(从评审带过来,不在这里定):**(1)多进程 `SQLITE_BUSY`,当*同一个*工具的两个实例写一个 `.<tool>/tars/` 时——需要 `busy_timeout` + backoff(per-tool 隔离挡的是 arc-vs-concer,不是 arc-vs-arc);(2)大 payload blob 卸载——大 body 放 `.<tool>/tars/blobs/`,SQLite 里放指针(tars 已经把 `bodies.db` 从 `pipeline_events.db` 拆开——部分);(3)一个 CLI `flush().await` / `shutdown(self)`,好让裸 `tokio::main` 退出时把 writer 排干而不是截断日志尾(仅 best-effort——不是持久化保证);(4)把 `RUN_CONTEXT` ids 折进 `tracing::Span` 做 OTel/Datadog 关联;(5)**schema 迁移 + 版本偏移**——在 `EventSink::open` 里嵌 `sqlx::migrate!()`,前向兼容地读(忽略未知列);若磁盘上的 schema 比 binary *更新*,优雅降级("升级客户端")而不是原始 SQL panic(DB 散落在用户项目目录里;老 binary / 另一台机器绝不能崩);(6)**按单调序号排序,绝不用墙钟**——replay/inspection 按 `events.sequence_no` 排(已是 PK,`sqlite.rs`),不用 `SystemTime::now()`(NTP / 睡眠唤醒会把两个 event 倒序);时间戳仅供 UI(reconcile 读领域态而非本日志,所以漂移不会卡 DAG——但保持这个不变量);(7)**corruption 优雅降级**——store-open 捕获 `SQLITE_CORRUPT`(WAL 写一半断电、NFS/Dropbox 挂载),把坏文件重命名为 `events.db.corrupted.bak`,打开一个全新空 store,并**照样启动**——绝不因为一条损坏的*可观测性*日志把用户锁在 workspace 外(这正是为什么 store 是可观测性而非持久化)。
+
+### C5 — `RUN_CONTEXT`(调用上下文)
+- **复用:** 现有 `RequestContext`(只带 ids:tenant/session/trace/tags——`concer_context` 已经设的那个形态);`service.call(req, ctx)`。
+- **新增:**
+  ```rust
+  tokio::task_local! { pub static RUN_CONTEXT: RequestContext; }
+  ```
+  在操作入口(Tauri command / run_plan 入口 / FFI 边界)建立一次。深层调用隐式读取;sink 从中读 ids。**只带 ids——从不带 provider**(保持轻量,§9)。
+
+---
+
+## 7. 路径解析法则
+
+### 配置 home(全局)
+```
+--tars_home <path>   >   $TARS_HOME   >   ~/.tars       (Config::resolve_home)
+```
+
+### Workspace root(确定性、与入口无关)
+```
+resolve_workspace_root(entry):
+  1. canonicalize(entry)                       // 软链 / 相对 / 尾斜杠 → 一条路径
+  2. 显式 open / --workspace / `tool .`         → 那个目录          (最高——用户明说了)
+  3. 向上走;在**第一个**存在 .<tool>/ 的层 STOP → 那一层就是 root
+       (marker 是持久化的声明;**最近**的 marker 胜)
+  4. 否则向上走到 .git                           → git-root
+  5. 以上都不是(裸目录,无 git,无 marker)      → 无 workspace → standalone
+```
+同一个文件夹经 DMG-GUI、CLI、或 CLI 子目录都会 canonicalize + 解析到**同一个** root → **同一个** store。启动模式无关;只有 `(tool, canonical root)` 要紧。
+
+> **Marker 胜过 `.git`——monorepo 陷阱。** 在 monorepo(`/mono/.git`,子项目 `/mono/backend`、`/mono/frontend`)里,GUI 打开 `/mono/backend` 会 bootstrap 出 `/mono/backend/.<tool>/`。之后在 `/mono/backend/src` 跑的 CLI **必须**停在那个 marker,**不**能越过它走到 `/mono/.git`——否则 GUI 和 CLI 会为同一个项目分裂成两个 store。所以 `.<tool>/`(步骤 3)在 `.git`(步骤 4)**之前**检查。
+
+### Store scope
+```
+声明的 workspace + 可写                → Workspace(<root>/.<tool>/tars/)   (首次用时 bootstrap .<tool>/)
+声明的 workspace + 只读,
+  或 [store] location="tars_home"      → TarsHome(~/.tars/ws/<hash>)
+无 workspace(standalone)              → ~/.tars(全局),tenant = session
+[store] enabled=false                  → Off
+```
+**绝不**用单个跨 workspace 的共享 store:它会混淆各项目的私有 I/O(隐私 / 爆炸半径),**且**破坏 per-workspace 的确定性 Drop(一个共享 writer 无法在单个 workspace 关闭时关掉)。
+
+### 一个目录多工具,以及谁来解析位置
+
+当几个 tars 消费者碰**同一个**目录(例如 `arc` 评审一个也放着 `concer` 文档的 repo):
+
+- **Providers 共享,只写一份。** 所有工具读同一个全局 `~/.tars/config.toml`——工具**不**复制 provider 定义。只有那点 per-tool 的 `[roles]`(`<root>/.<tool>/config.toml`)不同。
+- **Stores per-tool 隔离——不合并。** 每个工具保留自己的 `<root>/.arc/tars/`、`<root>/.concer/tars/`……我们**不**把它们折进一个共享的 `<root>/.tars/`。理由:隐私(arc 的代码评审 I/O ≠ concer 的文档 I/O)、per-tool 清理(删一个工具的目录不动另一个)、零跨工具协调。三个目录是*隔离*,不是重复。
+
+**tars 从不自己发现位置。** 库绝不能调 `current_dir()`——GUI 没有有意义的 CWD,而且自取来源会破坏 DI。**消费者**从自己的入口解析 root(GUI:OS Open-Folder 对话框 → 存在 app state;CLI:CWD + 向上走到 git-root,或 `--workspace`),经 `resolve_workspace_root(tool, entry)`,再从全局 registry + `cfg.roles` 构建它的 scope(例如 `resolve_service`)。
+
+---
+
+## 8. 多租户——最小的缝(刻意不提前设计掉)
+
+多租户是个**未来的小增量**,不是现在要设计的东西(最小原则)。当前抽象已经不排斥它:
+
+- **进程隔离** — 多租户 = **N 个单租户进程**(每租户/容器一个),每个都与本地设计一样。没有共享进程的活,runtime 里没有跨租户锁/authz。
+- **`tenant_id`** 已经是分区键(本地:那个单一用户;服务端:来自请求边界)。**`EventStore` 是一个 trait**(SQLite Personal → 以后 Postgres Team)。
+
+整条缝就这些。当服务端需要时把 `tenant_id` 带进句柄,是**上面的一层 L4 契约**——**不在这里的范围**。在真有服务端需要之前,**不**要预建 `for_tenant`、per-tenant registry keying、或服务端 authz。
+
+---
+
+## 9. 上下文法则(内部 task_local;边界显式)
+
+- **Rust 内部:** 在操作入口 `RUN_CONTEXT.scope(ctx, async { … }).await`;深层 `pipeline.call` / `runtime` 从不穿 `ctx`;`EventSink::emit` 经 `RUN_CONTEXT.with(...)` 读 ids。
+- **跨 `tokio::spawn`:** task_local **不**传播。分离的作业(命令返回后还得存活的异步 agent 作业)**必须**在 spawn 内部重新建立 `RUN_CONTEXT.scope(ctx.clone(), job)`。(`run_plan` 里的 `FuturesUnordered` 是同一个 task → 会继承;`spawn` 不会。)为了从源头干掉这个坑,tars 提供一个 helper 且**所有内部分离 task 都走它**:
+  ```rust
+  pub fn spawn_with_context<F>(fut: F) -> JoinHandle<F::Output>
+  where F: Future + Send + 'static, F::Output: Send + 'static {
+      let ctx = RUN_CONTEXT.with(|c| c.clone());
+      tokio::spawn(async move { RUN_CONTEXT.scope(ctx, fut).await })
+  }
+  ```
+- **跨语言边界(PyO3 / napi / Tauri command):** 边界**显式**传 `ctx`;绑定重新建立 scope。task_local 是 Rust 内部的优雅,绝不跨 FFI。(Task 2/3 详述。)
+- **重量:** 上下文只带 **ids**;provider 以 `Arc` 存在句柄里(构建一次、共享)。传句柄 = 几次 `Arc` 引用计数增减,不是复制 provider。
+
+---
+
+## 10. 生命周期(确定性 Drop + cancel)
+
+生命周期现在是**消费者**的(tars 不再打包一个 scope 句柄)。典型的 Tauri 消费者保留自己的 per-root scope struct——registry 保持全局/共享:
+
+```
+tauri::State<Mutex<HashMap<PathBuf, ConsumerScope>>>   // 消费者拥有;无 LRU/TTL
+
+open_workspace(X):   root=resolve_workspace_root(tool, X); map.entry(root)
+                       .or_insert_with(|| ConsumerScope::new(ProviderRegistry::global()?, &cfg.roles, root))
+switch A→B:          registry 不重建(全局、共享);B 拿到/新建它的 scope;A 保留在缓存
+close_workspace(A):  map.remove(A) → 消费者取消自己的作业 + 排干自己的 store
+restart:             重开记住的 root(s) → 重建 scope → 重连磁盘 store → 领域态 resume
+```
+
+- **Drop 是确定性的:** `remove` →(in-flight 作业仍持 `Arc` → 它们完成/取消 → 释放)→ 最后一个 `Arc` drop → `EventSink` Sender drop → writer 排干 → SQLite 池关闭。**Drop 前 `cancel()`** 防止一个挂住的作业钉住句柄。
+- **In-flight 作业绑定在它们的 workspace,而非当前视图** — 它们持自己的 `Arc<sink>`/factory,所以切换/关闭不会污染它们;它们完成并写入自己的 store。
+- **Reconstruct ≠ 重建数据:** store 文件在磁盘上(重连);持久化的真相是**领域态**(消费者拥有的产物),由它驱动 resume。
+
+---
+
+## 11. 与其他模块的接口
+
+| 方向 | 符号 | 签名 / 备注 |
+|---|---|---|
+| tars-config → runtime | `Config::get() -> &'static Config` | 全局不可变 |
+| tars-provider → handle | `ProviderRegistry::global() -> Arc<…>` | 构建一次 |
+| scope → tars-pipeline | `LlmService::default_chain(provider, model, opts)` | events 经 `ChainOpts.events`(`EventStores`)接入 |
+| handle → tars-runtime | `LocalRuntime::new(store)` `runtime.rs:128`;`run_plan(...)` `executor.rs:695` | cancel token 穿进去 |
+| runtime/pipeline → sink | `EventSink::emit(ev)`(Task 4) | ids 来自 `RUN_CONTEXT` |
+| bindings → tars-handle | `tars_handle::init_from_home` / `resolve_role` | Task 2(PyO3)/ 3(napi)——边界显式传 ctx |
+
+---
+
+## 12. 可靠性 / 安全 / 性能
+
+- **可靠性:** 确定性 Drop(不泄漏——`Arc`→0 关池);关闭时 `cancel()`;从磁盘 store + 领域态派生地 resume;无热加载竞态(config 在 init 时快照)。
+- **安全:** `~/.tars/config.toml` 只放 provider *名字* + `api_key_env`(绝不 inline key);key 从 env 取。**GUI env 真空:** DMG/Launchpad 启动的 app **不**继承 shell 的 `export` key,所以 `Config::load` 在解析 `api_key_env` 前还必须读 `~/.tars/.env`(dotenv)——否则 GUI 的 LLM 调用会"key not found" 而 CLI 正常。Per-workspace store 存原始 LLM I/O(prompt + 用户内容)→ gitignore,与项目同在(隐私)。服务端(未来缝,§8):per-tenant secret + DB 隔离——这里不设计;进程隔离已经意味着一个租户读不到另一个租户的进程内存。
+- **性能:** 全局单例构建一次;句柄 = `Arc` 克隆;上下文 = ids;registry eager 构建是唯一"以后再测"的成本(§C2)。Store 写是异步的(Task 4:MPSC 单写者,非阻塞 `try_send`)。
+
+---
+
+## 13. 复用图(Phase 0)
+
+| 符号 | file:line | 怎么用 |
+|---|---|---|
+| `Config` | `tars-config/src/manager.rs:21` | 全局单例载荷 |
+| `ConfigManager::load_from_file` / `load_from_str` | `manager.rs:94` / `:115` | `Config::load` |
+| 5 层合并 / `tenants` 缝 | `manager.rs:16-18`、`:88-89` | §5 分层 |
+| `default_config_path` | `paths.rs:25` | `resolve_home` 默认 |
+| `RoutingConfig` | `routing.rs:26` | workspace `[roles]` 层 |
+| `ProviderRegistry` / `from_config` | `registry.rs:64` / `:86` | 全局 registry(构建一次) |
+| `LlmService::default_chain` / `EventStores` | `tars-pipeline` `service.rs` / `middleware.rs` | `resolve_service(role)` / `tars.pipeline(role)` |
+| `LocalRuntime::new` / `run_plan` | `runtime.rs` / `executor.rs:695` | `LocalRuntime::new(store)` → `run_plan(...)` |
+| `CancellationToken` | `executor.rs:748` | cancel-on-close |
+| `default_personal_event_store_path` / Personal-Team | `sqlite.rs:292` / `event_store.rs:5-6` | StoreScope 兜底 / 后端轴 |
+| tars-py `Provider` / `Pipeline` / `EventStorePair` | `tars-py/src/lib.rs:350` / `:504` / `:605` | Task 2 绑定基线 |
+
+新抽象(有理由):`Config::get`/`Registry::global`(在进程隔离下坍缩散装)、`tars-handle` 独立解析函数(`resolve_role` / `resolve_service`——那个"统一入口",简化之后取代了最初提议的打包 `Tars` 句柄,rig 风格)、`StoreScope`(放置位置法则)、`RUN_CONTEXT` task_local(上下文法则)。*(per-scope 确定性 Drop 生命周期现在由消费者拥有——见更新横幅。)*
+
+---
+
+## 14. 路线图(Task 1 范围)
+
+- **M1 — 全局层。** `Config::load/get/resolve_home`(`$TARS_HOME`/flag)+ `ProviderRegistry::global()`。验证:两个消费者解析到同一个 registry;flag>env>默认 路径测试。*(对现有 load 无行为改变)*
+- **M2 — role 解析器 + StoreScope 放置位置。** `resolve_role` / `resolve_role_bound` / `resolve_service` 针对全局 registry + workspace roles;StoreScope 解析(workspace / tars_home / off)——**store 仍是当前实现**(真正的合并是 Task 4)。验证:CUJ-1/2/4 解析出正确路径;role→provider 走通两层。*(实际落地:独立函数,不是打包的 `Tars` 句柄——见横幅。)*
+- **M3 — 生命周期(消费者拥有)。** 消费者的 `Mutex<HashMap<root, ConsumerScope>>` 模式,cancel + 排干,workspace-root 解析(canonical + 向上走),重启时 reconstruct。验证:CUJ-3/5(切换/关闭/重启)——registry 不重建,in-flight 挺过切换。
+- **M4 — 上下文法则。** `RUN_CONTEXT` task_local;入口 scoping;spawn 重新 scope 规则写文档 + 一个 spawn 测试。验证:深层调用不穿 ctx 就能读;spawned 作业重新 scope。
+- **M5 — 多租户缝(最小,§8)。** 只确保 `tenant_id` 作为分区键流动、`EventStore` 保持后端可换——在服务端需要前**不**做 `for_tenant`、per-tenant keying、或 authz。验证:本地 `tenant_id`=用户路径不变;不排斥以后加 tenant 参数。
+
+风险前置排序:单例/句柄拆分(M1/M2)和确定性生命周期(M3)是承重、最不可逆的部分——先做。绑定(Task 2/3)和事件存储合并(Task 4)建立在冻结的句柄形态之上。
+
+---
+
+---
+
+# 附录 — 已废弃:共享进程 SaaS 配置 / 多租户设计
+
+> ⚠️ **本附录是**原始的 Doc 06**,作为历史记录原样保留。它已**废弃**,不是当前架构。**
+>
+> 它的核心前提——**共享进程多租户**(一个进程通过进程内配置分层、热加载、`ArcSwap`、per-tenant cache/event 分区来服务多个租户)——已被**进程隔离刻意取代**(见上面的当前设计:*一个 Runtime = 一个租户;多租户 = N 个单租户进程*)。
+>
+> 保留在这里**只**是为了把决策留档:这条路被完整考虑过,因性能 / 复杂度 / 死锁原因被搁置。**未先重开进程隔离决策,不要把它的任何部分当成需求复活。**
+>
+> 下面那些*真正仍然相关*的关切(secret 解析、租户生命周期 / GDPR、配额与计费、审计)作为**未来服务端工作**仍然成立——但它们将**per-process** 实现,而非这里描述的进程内机制。
+
+---
+
 # 文档 06 — 配置与多租户管理
 
 > 范围：定义配置的层级、来源、优先级、热加载机制；多租户数据模型与隔离保证；Secret 管理；租户生命周期；配额与计费。
@@ -175,7 +526,6 @@ pub struct TenantOverrides {
     pub middleware_prompt_guard: Option<PromptGuardOverrides>,
     pub cache: Option<CacheOverrides>,
     pub agent_blueprints: Vec<AgentBlueprint>,        // 租户自定义的 Agent
-    pub routing_policy: Option<RoutingPolicyName>,
     pub default_models: Option<HashMap<ModelTier, ProviderId>>,
 }
 ```

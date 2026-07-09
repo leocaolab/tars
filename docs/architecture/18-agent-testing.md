@@ -299,22 +299,23 @@ interface — not an external eval SaaS.** The concrete default is the
 `claude_cli` backend (subscription auth via `claude login`; a strong
 Claude model as judge). No Langsmith/Braintrust integration.
 
-This is already supported at the library level — `LlmJudge` takes
-`Arc<dyn LlmService>`:
+This is already supported at the library level — `LlmJudge` takes a
+concrete `LlmService` (the model is bound on the service, so there's no
+separate model argument):
 
 ```rust
 let judge_provider = registry.get(&ProviderId::new("claude_cli")).unwrap();
-let judge_pipeline = Pipeline::default_chain(judge_provider, opts);
+let opts = ChainOpts::new(ProviderId::new("claude_cli"));
+let judge_service = LlmService::default_chain(judge_provider, "claude-sonnet-4-5", opts);
 let judge = LlmJudge::new(
-    Arc::new(judge_pipeline),
+    judge_service,
     "claude_cli:claude-sonnet-4-5",          // id for anti-incest
-    ModelHint::Explicit("claude-sonnet-4-5".into()),
 );
 ```
 
 Because the judge runs through a normal tars pipeline, it gets for
 free: **event-store** (judge calls appear in `tars events`, auditable),
-**cache** (re-judging the same item hits cache), **retry/fallback**,
+**cache** (re-judging the same item hits cache), **retry**,
 and **budget** (cost-capped; note `claude_cli` token counts are
 unreliable but it's subscription-billed, so per-call cost is moot).
 The judge can be any provider — `claude_cli`, `anthropic` API, OpenAI,

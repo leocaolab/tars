@@ -147,10 +147,15 @@ impl LlmProvider for OpenAIProvider {
 
 ```rust
 pub struct ChatRequest {
-    pub model: ModelHint,
+    // NOTE: there is no `model` field. A ChatRequest is pure,
+    // model-agnostic content. The concrete model is bound at service
+    // construction (`LlmService = provider + model`) and handed to the
+    // provider as an explicit `stream(req, model, ctx)` argument, so one
+    // request is reusable across providers/models.
     pub system: Option<String>,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
+    pub tool_choice: ToolChoice,
     pub structured_output: Option<JsonSchema>,
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -158,8 +163,14 @@ pub struct ChatRequest {
     pub seed: Option<u64>,
     pub cache_directives: Vec<CacheDirective>,
     pub thinking: ThinkingMode,
+    pub enable_chat_template_thinking: Option<bool>,
 }
 
+// Model *selection* still has a vocabulary — it just lives at service
+// construction / role resolution (the `[roles]` map, `[routing.tiers]`),
+// never on the request. `ModelHint` / `ModelTier` describe "which model"
+// for that config + resolver layer, which binds a concrete model into an
+// `LlmService`.
 pub enum ModelHint {
     Explicit(String),
     Tier(ModelTier),
@@ -169,7 +180,7 @@ pub enum ModelHint {
 pub enum ModelTier {
     Reasoning,      // top-tier (Opus / o1 / Gemini Pro)
     Default,        // workhorse (Sonnet / 4o / Flash)
-    Fast,           // routing / classification (4o-mini / Haiku / Flash-8B)
+    Fast,           // classification / cheap (4o-mini / Haiku / Flash-8B)
     Local,          // local (Qwen / Llama)
 }
 
@@ -192,7 +203,7 @@ pub enum ContentBlock {
 }
 ```
 
-**ModelHint is the most important design choice in the abstraction**: upper-layer Agent code writes `ModelTier::Fast` instead of `"gpt-4o-mini"` — the same code can run against Anthropic, OpenAI, or local models simply by switching routing config, no code changes.
+**Model-by-role, not model-by-string, is a core design choice**: upper-layer Agent code names a role (or a `ModelTier::Fast`) instead of `"gpt-4o-mini"`, and the `[roles]` / `[routing.tiers]` config binds that to a concrete provider+model in an `LlmService`. The same code runs against Anthropic, OpenAI, or local models by editing config, no code changes — and because the model is bound on the service, not carried on the request, one `ChatRequest` is reusable across all of them.
 
 ### 4.2 ChatEvent (streaming events)
 
@@ -276,7 +287,7 @@ pub enum PromptCacheKind {
 }
 ```
 
-Upper-layer Routing and Middleware decide based on this:
+A caller selecting among providers (and the pre-flight capability check, `ChatRequest::compatibility_check` / `Capabilities::check_requirements`) decides based on this:
 - Need strict JSON output → filter out providers with `StructuredOutputMode::None`
 - Long system prompt reuse → prefer `ExplicitMarker` or `ExplicitObject`
 - Vision tasks → filter on `modalities_in.contains(Image)`
@@ -737,51 +748,49 @@ The upper-layer retry Middleware decides based only on `class()`; no need to mat
 
 ---
 
-## 12. Routing Layer
+## 12. Provider Registry + role/tier resolution
+
+The registry is a **plain naming namespace** — provider id → provider, plus
+each provider's configured `default_model`. It holds **no routing policy and
+no metrics**: provider *selection* is not a pipeline concern (see below).
 
 ```rust
 pub struct ProviderRegistry {
-    providers: HashMap<ProviderId, Arc<dyn LlmProvider>>,
-    routing: Arc<dyn RoutingPolicy>,
-    metrics: Arc<ProviderMetrics>,
-}
-
-#[async_trait]
-pub trait RoutingPolicy: Send + Sync {
-    async fn select(
-        &self,
-        req: &ChatRequest,
-        candidates: &[(ProviderId, Arc<dyn LlmProvider>)],
-        metrics: &ProviderMetrics,
-    ) -> Result<Vec<ProviderId>, RoutingError>;
+    providers: Arc<HashMap<ProviderId, Arc<dyn LlmProvider>>>,
+    // Per-provider configured default model, captured from `ProviderConfig`
+    // at build time (the `LlmProvider` trait doesn't expose it). The
+    // role/tier resolver reads this to bind a concrete model into an
+    // `LlmService`.
+    default_models: Arc<HashMap<ProviderId, String>>,
 }
 ```
 
-Built-in policies:
-- `ExplicitPolicy`: when req.model is `ModelHint::Explicit(name)`, dispatch directly
-- `TierPolicy`: lookup by `ModelTier`
-- `CostPolicy`: pick cheapest provider that meets capability requirements
-- `LatencyPolicy`: pick fastest by P50 latency from metrics
-- `EnsemblePolicy`: call multiple providers in parallel, merge by strategy (majority vote / fastest / longest)
-- `FallbackChain<P>`: wraps another policy with automatic fallback on failure
-
-Config example:
+A **role name → concrete provider (+ model)** is resolved by
+`tars_handle::resolve_role` / `resolve_role_bound` / `resolve_service`
+against the flat `[roles]` map and the `[routing.tiers]` config
+(`RoutingConfig { tiers: HashMap<ModelTier, Vec<ProviderId>> }`). Resolution
+order: the `[roles]` map → a named tier's first candidate → a literal
+provider id → the `default` tier → the sole provider → else `UnknownRole`.
 
 ```toml
-[routing]
-default = "tier"
+[roles]                              # arbitrary role name → provider id
+critic = "deepseek"
+fixer  = "claude_cli"
 
-[routing.tiers]
+[routing.tiers]                      # a fixed tier → ordered candidate list
 reasoning = ["claude_opus_api", "openai_o1", "gemini_pro"]
 default   = ["claude_sonnet_api", "openai_4o", "gemini_flash"]
 fast      = ["openai_4o_mini", "claude_haiku", "local_qwen_7b"]
 local     = ["local_qwen_32b"]
-
-[routing.fallback]
-on_rate_limit = "next_in_tier"
-on_overload   = "next_in_tier"
-on_auth       = "fail"
 ```
+
+**Provider selection beyond this (cost/latency policies, ensemble, automatic
+fallback) is deliberately NOT built into the registry or the pipeline** — it
+was removed by decision. A pipeline binds exactly one provider+model. A caller
+who wants multi-provider behavior composes several `LlmService`s themselves:
+*ensemble* = build N services, call all, merge; *fallback* = try one, on error
+try the next. Keeping the registry a dumb namespace and the pipeline
+single-provider means neither grows a policy plug-in surface.
 
 ---
 
@@ -876,22 +885,24 @@ Three-layer pyramid:
 ┌─────────────────────────────────────────┐
 │  Agent Runtime (Orchestrator + Workers) │
 └──────────────────┬──────────────────────┘
-                   │ ChatRequest (with ModelHint)
+                   │ ChatRequest (pure content) + a role/tier
                    ▼
 ┌─────────────────────────────────────────┐
-│  Middleware Pipeline                    │
+│  Role/tier resolution (tars-handle)     │
+│  [roles] map + [routing.tiers] →        │
+│  provider + concrete model → LlmService │
+└──────────────────┬──────────────────────┘
+                   │ LlmService (provider + model bound)
+                   ▼
+┌─────────────────────────────────────────┐
+│  Middleware chain (one LlmService)      │
 │  - IAM / Auth                           │
 │  - Cache Lookup + Janitor (LRU active)  │
 │  - Budget Control                       │
 │  - Prompt Guard                         │
 │  - Telemetry                            │
 └──────────────────┬──────────────────────┘
-                   │ ChatRequest (model resolved)
-                   ▼
-┌─────────────────────────────────────────┐
-│  ProviderRegistry + RoutingPolicy       │
-└──────────────────┬──────────────────────┘
-                   │ Provider selected
+                   │ req + model (explicit arg)
                    ▼
 ┌─────────────────────────────────────────┐
 │  LlmProvider impl                       │
@@ -900,9 +911,9 @@ Three-layer pyramid:
 └─────────────────────────────────────────┘
 ```
 
-The Provider layer **is completely unaware** of Cache, IAM, Budget, or Tracing as business concepts — these are handled by Middleware before/after calling Provider. Provider's only job is "I'm a specific backend; give me a standard request, I emit a standard event stream, and I expose atomic capabilities like cache delete".
+The Provider layer **is completely unaware** of Cache, IAM, Budget, or Tracing as business concepts — these are handled by Middleware before/after calling Provider. Provider's only job is "I'm a specific backend; give me a standard request + a model, I emit a standard event stream, and I expose atomic capabilities like cache delete".
 
-Once this boundary is clean, adding a new provider (e.g. xAI Grok ships an API) is just writing one `XaiAdapter` — all Cache / Budget / Routing behavior comes for free.
+Once this boundary is clean, adding a new provider (e.g. xAI Grok ships an API) is just writing one `XaiAdapter` — all Cache / Budget / Telemetry behavior comes for free.
 
 ---
 
@@ -977,18 +988,19 @@ extra_args = []
 
 **Invariant**: every config-side field must be threaded through `registry.rs` into a Builder method. A field deserialized into `ProviderConfig::ClaudeCli` but not passed to the Builder is worse than no field at all — silent no-op. Enforced by a config-roundtrip test.
 
-### 17.4. Composing a Builder-built provider with the Pipeline
+### 17.4. Composing a Builder-built provider into an LlmService
 
-The Pipeline does not care where the provider came from; it operates on `Arc<dyn LlmProvider>`. Three idiomatic patterns:
+An `LlmService` does not care where the provider came from; it binds an
+`Arc<dyn LlmProvider>` plus a concrete model. Three idiomatic patterns:
 
-**(A) Direct — Builder → Pipeline, no Registry:**
+**(A) Direct — Builder → LlmService, no Registry:**
 
 ```rust
 let provider = ClaudeCliProviderBuilder::new("claude")
     .tools(ClaudeCliTools::Disabled)
     .bare(true)
     .build();
-let pipeline = Pipeline::builder(provider)
+let svc = LlmService::builder(provider, "claude-sonnet-5")
     .layer(TelemetryMiddleware::new())          // outermost
     .layer(RetryMiddleware::default())          // innermost
     .build();
@@ -1001,7 +1013,7 @@ let custom: Arc<dyn LlmProvider> =
     ClaudeCliProviderBuilder::new("my-claude").bare(true).build();
 let mut m = HashMap::new();
 m.insert(ProviderId::new("my-claude"), custom);
-let registry = ProviderRegistry::from_map(m);
+let registry = ProviderRegistry::from_providers(m);
 ```
 
 **(C) `map_providers` — override one entry of a config-loaded Registry:**
@@ -1018,7 +1030,7 @@ let registry = ProviderRegistry::from_config(&cfg, ...)?
     });
 ```
 
-`ProviderRegistry::from_map` does **not** auto-wrap middleware. The convention is `registry.get() → Pipeline::builder(p).layer(...).build() → service.call()`; the Registry is the naming namespace, the Pipeline is the middleware stack, and the two compose orthogonally.
+`ProviderRegistry::from_providers` does **not** auto-wrap middleware. The convention is `registry.get() → LlmService::builder(p, model).layer(...).build() → svc.call()`; the Registry is the naming namespace, the `LlmService` is provider+model+middleware, and the two compose orthogonally.
 
 ### 17.5. Test obligations
 

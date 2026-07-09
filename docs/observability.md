@@ -178,7 +178,7 @@ The fields that matter most when debugging:
 | `telemetry.cache_hit` | Was this served from the prompt cache? |
 | `telemetry.retry_count`, `retry_attempts` | How many retries; each with its `error_kind` and backoff |
 | `usage.{input,output,cached_input,thinking}_tokens` | Provider-reported usage. **Sanity-check against response body size** — CLI-backend providers like `claude_cli` can report inflated counts (see [providers/claude-cli.md §1](./providers/claude-cli.md)). |
-| `actual_model` | Post-routing model, not the `ModelHint` the caller asked for |
+| `actual_model` | The concrete model the provider actually replied with (from the response) — can differ from the model bound on the service, e.g. a provider resolving an alias to a dated snapshot |
 | `request_fingerprint` | sha256 of canonical request body — same prompt across tenants hashes the same |
 | `request_ref` / `response_ref` | CAS pointers into `bodies.db` |
 | `result.result` + `result.kind` | `"ok"` or `"error"` + the error class string |
@@ -271,7 +271,7 @@ cargo build --release -p tars-cli --features otlp
 
 # Point it at a collector and run as usual.
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-  tars run --tier default --prompt "..."
+  tars run -P deepseek --prompt "..."
 ```
 
 Spans are tagged `service.name=tars-cli`. Without

@@ -32,9 +32,11 @@ and pray over. TARS refuses all of it.
 - **Parse, don't validate.** `json_decode` takes *your* `T` and returns a valid `T` or a
   typed error — you can never hold an ill-formed one. The strong type is yours; TARS is
   the generic engine that hands it back intact.
-- **The pipeline is an algebra.** telemetry → auth → budget → cache → guard → routing →
+- **The pipeline is an algebra.** telemetry → auth → budget → cache → guard → retry →
   breaker *compose*; capability checks run pre-flight, so an incompatible request fails
-  typed and offline instead of burning a network round-trip.
+  typed and offline instead of burning a network round-trip. (Provider *selection* —
+  routing, ensemble, fallback — is deliberately **not** a pipeline layer: a caller who
+  wants it composes several services.)
 - **Correctness by construction.** A Turn commits or rolls back on `Drop` — there is no
   `armed = false` flag to forget. The invariant is held by the type system, not by a
   reviewer's attention.
@@ -98,7 +100,8 @@ wire it in as one tool.
   read-only. No delegate ever runs unconfined; `--sandbox danger-full-access` is
   the explicit opt-out.
 - **A composable middleware pipeline.** Telemetry → Auth/IAM → Budget → Cache →
-  Guard → Routing → Breaker. The same pipeline runs in-process or as a service.
+  Guard → Retry → Breaker. The same pipeline runs in-process or as a service.
+  (Provider selection isn't a layer — see below.)
 - **Typed all the way down.** Typed errors (not stringly), **pre-flight capability
   checks** (catch a tool-use-against-a-non-tool-model before the round-trip), and a
   generic result-decode seam — hand it a `T`, get back a valid `T` or a typed
@@ -164,8 +167,9 @@ import tars
 p = tars.Pipeline.from_default("anthropic")
 
 resp = p.complete(
-    # omit `model` to use the provider's current default from the model KB,
-    # or pin one explicitly (e.g. "claude-sonnet-5").
+    # the concrete provider-side model — required first arg (the request
+    # itself carries no model; pin one, e.g. "claude-sonnet-5").
+    "claude-sonnet-5",
     system="You are a precise technical reviewer.",
     user="Review this Rust function for race conditions: ...",
     max_output_tokens=2000,
@@ -180,27 +184,25 @@ print(resp.telemetry)    # cache_hit, retry_count, layer trace, latency, cost
 ### Run a completion (Rust)
 
 ```rust
-use tars_pipeline::Pipeline;
-use tars_provider::registry::ProviderRegistry;
-use tars_types::{ChatRequest, Message, ModelHint};
+use tars_pipeline::{LlmService, RetryMiddleware, TelemetryMiddleware};
+use tars_provider::ProviderRegistry;
+use tars_types::{ChatRequest, RequestContext};
 
-let cfg = tars_config::ConfigManager::load_from_default_path()?;
-let registry = ProviderRegistry::from_config(&cfg.providers, http, auth)?;
+// Composition root: install the global config + build the one registry.
+tars_handle::init_from_home(None)?;                 // reads $TARS_HOME/config.toml
+let registry = ProviderRegistry::global()?;
 let provider = registry.get(&"anthropic".into()).unwrap();
 
-let pipeline = Pipeline::builder(provider)
-    .layer(TelemetryMiddleware::new())
-    .layer(CacheLookupMiddleware::new(cache, factory, origin))
-    .layer(RetryMiddleware::default())
+// An LlmService is one provider + one bound model + an ordered middleware
+// chain. The first `.layer(...)` is outermost; the provider is innermost.
+let svc = LlmService::builder(provider, "claude-sonnet-5")
+    .layer(TelemetryMiddleware::new())   // outermost
+    .layer(RetryMiddleware::default())   // closest to the provider
     .build();
 
-let req = ChatRequest {
-    model: ModelHint::Default,        // or ::Explicit("claude-sonnet-5".into())
-    messages: vec![Message::user_text("...")],
-    ..Default::default()
-};
-
-let mut stream = pipeline.call(req, ctx).await?;
+// The request is pure content — the model already lives on the service.
+let req = ChatRequest::user("...");
+let mut stream = svc.call(req, RequestContext::personal(trace_id)).await?;
 while let Some(event) = stream.next().await { /* ... */ }
 ```
 
@@ -235,14 +237,16 @@ Node callers use `response_schema` + `json.loads` / `JSON.parse`. Full recipe:
 
 ---
 
-## The three layers: provider → pipeline → runtime
+## The three seams: provider → service → runtime
 
 tars is a stack of three seams you can enter at whichever level you need:
-a **stateless provider call**, a **resilient validated pipeline** around
-it, or an **orchestrated durable DAG** over many calls. All three hang
-off one per-workspace **`Tars` handle** (`tars-handle`), which owns config
-+ provider registry + the event-store scope, and resolves a **role name**
-to a concrete provider through the `[roles]` map:
+a **stateless provider call**, a **resilient validated `LlmService`** around
+it, or an **orchestrated durable DAG** over many calls. They share one
+composition root — `tars_handle::init(config)` (or `init_from_home(home)`
+for the CLI) installs the process-global `Config` and eagerly builds the one
+`ProviderRegistry`, so `Config::get()` and `ProviderRegistry::global()` are
+live for the rest of the process. A **role name** resolves to a concrete
+provider through the `[roles]` map:
 
 ```toml
 # $TARS_HOME/config.toml
@@ -252,11 +256,12 @@ fixer  = "claude_cli"
 ```
 
 ```rust
-use tars_handle::Tars;
+use tars_config::Config;
+use tars_provider::ProviderRegistry;
 
-// One handle per workspace (a `.<tool>/` marker or `.git` roots it);
-// or `Tars::standalone(tool, session)` when there's no workspace.
-let tars = Tars::for_workspace("myapp", &root)?;
+tars_handle::init_from_home(None)?;          // reads $TARS_HOME/config.toml
+let cfg = Config::get();
+let registry = ProviderRegistry::global()?;
 ```
 
 Role resolution order: the flat `[roles]` map → a routing tier → a literal
@@ -264,48 +269,67 @@ provider id → the `default` tier → the sole provider → else `UnknownRole`.
 
 ### 1 — Provider: one stateless inference call
 
-`handle.provider(role)` hands back an `Arc<dyn LlmProvider>` — the raw,
-stateless LLM seam. `complete` accumulates a whole `ChatResponse`;
-`stream` gives you the event stream.
+`tars_handle::resolve_role(&cfg.roles, &cfg.routing, &registry, role)` hands
+back `(ProviderId, Arc<dyn LlmProvider>)` — the raw, stateless LLM seam. The
+model is an explicit argument (the request is model-agnostic content):
+`complete` accumulates a whole `ChatResponse`; `stream` gives you the event
+stream.
 
 ```rust
-use tars_types::{ChatRequest, Message, ModelHint, RequestContext};
+use tars_types::{ChatRequest, RequestContext};
 
-let provider = tars.provider("critic")?;              // resolves [roles].critic → deepseek
-let req = ChatRequest {
-    model: ModelHint::Default,                        // provider's current default from the model KB
-    messages: vec![Message::user_text("Say hi in 5 words.")],
-    ..Default::default()
-};
-let resp = provider.complete(req, RequestContext::default()).await?;
+let (_id, provider) =
+    tars_handle::resolve_role(&cfg.roles, &cfg.routing, &registry, "critic")?;
+let req = ChatRequest::user("Say hi in 5 words.");
+let resp = provider
+    .complete(req, "deepseek-chat", RequestContext::personal(trace_id))
+    .await?;                                          // model is explicit
 println!("{}", resp.text);
 ```
 
 No retry, no cache, no validation — just the call. Reach here when you
-want the provider and nothing around it.
+want the provider and nothing around it. (`resolve_role_bound` also returns
+the provider's configured `default_model`, so you don't have to name one.)
 
-### 2 — Pipeline: the resilient, validated onion
+### 2 — Service: the resilient, validated onion
 
-`handle.pipeline(role)` wraps that provider in the canonical middleware
-chain — telemetry, cache, retry, circuit-breaker, output validation, and
-event emission — and returns a `Pipeline`. Every response carries a
-`telemetry` block (`cache_hit`, `retry_count`, layer trace, latency,
-cost).
+`LlmService::default_chain(provider, model, opts)` wraps that provider in the
+canonical middleware chain — telemetry, cache, retry, optional circuit-breaker,
+output validation, and event emission — and returns an `LlmService` (the one
+public service type). Every response carries a `telemetry` block (`cache_hit`,
+`retry_count`, layer trace, latency, cost).
 
 ```rust
-let pipeline = tars.pipeline("critic")?;
-let mut stream = pipeline.call(req, ctx).await?;
+use tars_pipeline::{ChainOpts, LlmService};
+
+let (id, provider, model) =
+    tars_handle::resolve_role_bound(&cfg.roles, &cfg.routing, &registry, "critic")?;
+
+// Retry + circuit-breaker are config, not code: [resilience] feeds them.
+let (retry, circuit_breaker) = tars_handle::resilience_configs(&cfg.resilience);
+let mut opts = ChainOpts::new(id.clone());
+opts.retry = retry;
+opts.circuit_breaker = circuit_breaker;
+
+let svc = LlmService::default_chain(provider, model, opts);   // -> LlmService
+let mut stream = svc.call(req, ctx).await?;
 while let Some(event) = stream.next().await { /* deltas + telemetry */ }
 ```
 
-Need output validators and the provider's `Capabilities` (e.g. a
-structured-output / tool-use pre-flight)?
-`handle.pipeline_with(role, validators) -> (Pipeline, Capabilities)`.
+Need output validators or the provider's `Capabilities` (e.g. a
+structured-output / tool-use pre-flight)? Set `opts.validators = vec![...]`,
+and read `provider.capabilities()` for the pre-flight
+(`ChatRequest::compatibility_check`).
+
+`resolve_service(...)` is the business-facing shortcut when you just want a
+model-bound leaf `LlmService` (provider + its `default_model`, no chain); wrap
+it in the onion with `LlmService::builder_with_inner(svc).layer(...).build()`.
 
 Retry and circuit-breaker are **config, not code**: the `[resilience]`
-section (v1.2.3+) feeds the pipeline's `RetryConfig` / `CircuitBreakerConfig`
-so consumers don't re-type the same literals — absent ⇒ tars's default
-chain (default retry, no breaker).
+section (v1.2.3+) feeds `default_chain`'s `RetryConfig` /
+`CircuitBreakerConfig` via `tars_handle::resilience_configs` so consumers
+don't re-type the same literals — absent ⇒ tars's default chain (default
+retry, no breaker).
 
 ```toml
 [resilience.retry]
@@ -319,7 +343,7 @@ cooldown_secs = 30.0
 
 ### 3 — Runtime: orchestrated DAG, ephemeral or durable
 
-`handle.runtime()` returns the `Runtime` for this scope. Pass it to
+Build a `Runtime` (e.g. `LocalRuntime::new(store)`) and hand it to
 **`tars_runtime::run_plan`** to execute a `Plan` (a DAG of `PlanStep`s
 with `depends_on`) of agent steps to completion. `run_plan` runs the
 whole DAG **in one `await`, in memory** — ideal for short, ephemeral,

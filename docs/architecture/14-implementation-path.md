@@ -535,6 +535,13 @@ tars run --prompt "Write a haiku about Rust"
 
 **Goal**: add Anthropic / Gemini, full routing/fallback, production-grade error handling.
 
+> **Update (v1.5.0)**: routing / fallback were later **removed by decision** —
+> provider selection is not a pipeline concern. Ensemble / fallback are caller
+> compositions over several `LlmService`s (build N and call-all-merge, or
+> try-in-order). The `RoutingMiddleware` / `RoutingPolicy` / `FallbackChain`
+> deliverables below are the historical M2 plan; they don't exist in the
+> shipped code.
+
 ### 8.1 Deliverables
 
 ```

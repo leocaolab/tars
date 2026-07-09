@@ -26,8 +26,8 @@ tars has the pieces but not the ergonomics. Two grades of test exist:
 **Single-call, single-response — easy.** `MockProvider::new("mock",
 CannedResponse::text("bug"))` (`tars-provider/src/backends/mock.rs:70`) gives an
 agent one canned answer. `examples/testing/main.rs` shows the blessed pattern:
-give the agent an `Arc<dyn LlmService>` seam, inject the mock. This works and is
-documented.
+build the agent's `LlmService` over a swappable `Arc<dyn LlmProvider>`, inject
+the mock provider. This works and is documented.
 
 **Multi-call DAG / workflow — hand-rolled, every time.** The moment a test
 drives `run_task` (Orchestrator + N steps × {worker, critic, refine}) each call
@@ -67,7 +67,7 @@ a **golden record/replay** provider (real responses, deterministic), and a
 
 | Goal | Description |
 |---|---|
-| **One injection seam, any model** | The agent/DAG under test takes `Arc<dyn LlmService>`. A test swaps in scripted, golden-replay, or (rarely) live — nothing else changes. The seam already exists (`examples/testing/main.rs`); the harness supplies the things you plug into it. |
+| **One injection seam, any model** | The agent/DAG under test holds a concrete `LlmService`; the swap point beneath it is its `Arc<dyn LlmProvider>`. A test plugs in a scripted, golden-replay, or (rarely) live provider — nothing else changes. The seam already exists (`examples/testing/main.rs`); the harness supplies the things you plug into it. |
 | **Match, don't count** | A scripted response is selected by *which call this is* (agent id, model, a predicate on the request), not by FIFO position — so parallel DAGs are deterministic without serializing them. |
 | **Golden = recorded real responses, replayed by fingerprint** | The "golden LLM" is real model output captured once and replayed offline. Reuse Doc 17's `request_fingerprint` as the key and `bodies.db` as the store — **no new golden format**, exactly as arc reuses its critic cache. |
 | **Fail-closed replay** | In golden-replay mode a cache miss is a hard test failure ("golden absent, re-record"), never a silent live call. |
@@ -81,8 +81,8 @@ a **golden record/replay** provider (real responses, deterministic), and a
   validate → persist → entity → render), never the model. Quality is Doc 16/18's
   live dogfood. A golden test passing means "the orchestration still behaves";
   it says nothing about whether the model is good.
-- Not a new mock for every provider. The harness sits at the `LlmService`
-  seam, above all providers — one harness, every backend.
+- Not a new mock for every provider. The harness sits at the provider seam,
+  beneath the `LlmService` middleware — one harness, every backend.
 - Not deleting `MockProvider`. The matcher-scripted provider is `MockProvider`
   leveled up; the single-response form stays for unit tests.
 
@@ -92,10 +92,11 @@ a **golden record/replay** provider (real responses, deterministic), and a
 
 ```
             ┌──────────────────────────────────────────────────────────┐
-agent /     │  Arc<dyn LlmService>  ◀── the one injection seam           │
-DAG  ──────▶│     ├─ ScriptedProvider   (mode A: matcher → canned)       │
-under test  │     ├─ GoldenProvider     (mode B: fingerprint → recorded) │
-            │     └─ real Pipeline       (mode C: record / live)          │
+agent /     │  Arc<dyn LlmProvider>  ◀── the one injection seam          │
+DAG  ──────▶│  (the agent's LlmService wraps whichever you plug in)       │
+under test  │     ├─ ScriptedProvider   (mode A: matcher → canned)       │
+            │     ├─ GoldenProvider     (mode B: fingerprint → recorded) │
+            │     └─ real LlmService     (mode C: record / live)          │
             └──────────────────────────────────────────────────────────┘
 ```
 
@@ -103,7 +104,7 @@ under test  │     ├─ GoldenProvider     (mode B: fingerprint → recorded)
 |---|---|---|---|
 | **A — Scripted** | `ScriptedProvider` | Logic/control-flow tests: does the DAG branch, retry, skip, deadlock-to-human correctly? You're asserting *orchestration*, and a terse hand-authored shape is enough. | You author the responses. |
 | **B — Golden replay** | `GoldenProvider` | Pipeline-fidelity tests: does parse→persist→render still produce the same artifact given a *realistic* model response? | Recorded real bytes, keyed by `request_fingerprint`. |
-| **C — Record / live** | real `Pipeline` + `EventEmitterMiddleware` | One-time golden capture, or a gated live dogfood. | The real model (the only mode that calls it). |
+| **C — Record / live** | real `LlmService` + `EventEmitterMiddleware` | One-time golden capture, or a gated live dogfood. | The real model (the only mode that calls it). |
 
 A is the workhorse for **behavior**; B is the workhorse for **regression
 fidelity**; C runs rarely and on purpose. arc uses exactly this split: `cuj.rs`
@@ -150,7 +151,7 @@ let llm = ScriptedProvider::builder()
     .on(Matcher::Agent("critic"),         verdict("approve"))
     .otherwise(CannedResponse::Error("unexpected call".into()))  // fail loud
     .build();
-run_task(rt, llm.as_service(), task).await?;
+run_task(rt, LlmService::of(llm, "mock-model"), task).await?;
 ```
 
 Why matcher over FIFO (the §1.1 fragility, fixed):
@@ -317,7 +318,7 @@ diff"):
 |---|---|---|
 | `MockProvider` / `CannedResponse` / `with_responses` | `tars-provider/src/backends/mock.rs:70,88` | the single-response base `ScriptedProvider` generalizes |
 | `QueuedProvider` (local) | `tars-runtime/tests/run_task.rs:60` | the hand-roll this doc promotes + replaces with matchers |
-| the `Arc<dyn LlmService>` seam | `examples/examples/testing/main.rs:58` | the one injection point all three modes share |
+| the `Arc<dyn LlmProvider>` seam | `examples/examples/testing/main.rs:58` | the one injection point all three modes share |
 | `request_fingerprint` | Doc 17 / `tars-types/pipeline_events.rs` | the golden lookup key (no new key) |
 | `bodies.db` CAS / `ContentRef` | `tars-storage/body_store.rs` | the golden store (no new store) |
 | `EventEmitterMiddleware` | `tars-pipeline/event_emitter.rs` | record-mode capture (no new capture) |

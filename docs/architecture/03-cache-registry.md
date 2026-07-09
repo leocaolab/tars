@@ -113,6 +113,7 @@ impl CacheKeyFactory {
     pub fn compute(
         &self,
         req: &ChatRequest,
+        model: &str,          // bound on the LlmService; read via next.model()
         ctx: &RequestContext,
     ) -> Result<CacheKey, CacheError> {
         let mut h = Sha256::new();
@@ -136,18 +137,12 @@ impl CacheKeyFactory {
         }
         
         // —— model identity ——
+        // The model is passed explicitly (`model: &str`, bound at service
+        // construction and read off the chain via `next.model()`), and is
+        // always a concrete name by the time the cache layer runs — there is
+        // no unresolved-tier / ensemble case to guard here.
         h.update(b"\0MODEL\0");
-        match &req.model {
-            ModelHint::Explicit(name) => h.update(name.as_bytes()),
-            ModelHint::Tier(tier) => {
-                // Tier cannot be hashed directly; must be resolved to Explicit by Routing first
-                return Err(CacheError::UnresolvedModel);
-            }
-            ModelHint::Ensemble(_) => {
-                // Ensemble typically should not be cached
-                return Err(CacheError::UncacheableRequest);
-            }
-        }
+        h.update(model.as_bytes());
         
         // —— output-determining request parameters ——
         h.update(b"\0PARAMS\0");
@@ -201,7 +196,7 @@ impl CacheKeyFactory {
             fingerprint,
             debug_label: format!(
                 "tenant={} model={} msg_count={}",
-                ctx.tenant_id, req.model.as_str(), req.messages.len()
+                ctx.tenant_id, model, req.messages.len()
             ),
         })
     }
@@ -213,7 +208,7 @@ impl CacheKeyFactory {
 2. **TENANT + SCOPES must come first** — they are logically the namespace; placing them up front aids debugging by raw-byte-stream localization
 3. **Each field uses a `\0` separator + field-name tag** — prevents field concatenation ambiguity attacks ("abc" + "def" vs "ab" + "cdef")
 4. **temperature ≠ 0 rejects caching outright** — caching non-deterministic output is meaningless
-5. **ModelHint must be Explicit** — upstream Routing is responsible for resolution. Does this mean Cache Lookup must happen after Routing? No — Doc 02 places Cache before Routing. **Solution**: at cache lookup time, use only `ModelHint::Tier` to compute a "tenant-level hint key"; a hit requires that any Explicit model within the tenant's Tier can serve it; precise secondary matching is done after Routing. See §4.2
+5. **The model is a concrete name, always** — it's bound on the `LlmService` (`provider + model`) and reaches the cache layer as an explicit `model: &str` (read off the chain via `next.model()`), never a `ModelHint` tier that still needs resolving. So the model participates in the hash directly with no two-phase dance — provider *selection* happens before a service is even built, not inside the pipeline.
 
 ### 3.3 Message Canonicalization
 
@@ -337,32 +332,33 @@ pub struct WriteMetadata {
 }
 ```
 
-### 4.2 Resolving the Two-Phase ModelHint Problem
+### 4.2 The model is already concrete at cache time (no two-phase problem)
 
-Cache Lookup happens before Routing (per Doc 02's layer ordering); at this point `req.model` is still `ModelHint::Tier(...)`. Two-phase lookup:
+There is no tier-resolution to defer. A cache lookup runs inside an
+`LlmService` that already binds one concrete `provider + model`; the model
+arrives at the cache layer as an explicit `model: &str` (read off the chain
+cursor via `next.model()`), never a `ModelHint::Tier(...)` awaiting
+resolution. Provider *selection* — picking which model a request runs on —
+happens **before** a service is built, outside the pipeline entirely.
+
+So there is a **single fingerprint** over `(tenant, scopes, model, params,
+content)` and one lookup:
 
 ```rust
-async fn lookup(&self, key: &CacheKey, policy: &CachePolicy) 
-    -> Result<Option<CachedResponse>, CacheError> 
+async fn lookup(&self, key: &CacheKey, policy: &CachePolicy)
+    -> Result<Option<CachedResponse>, CacheError>
 {
-    // Phase 1: query "responses from any model within this tenant" by Tier
-    if let Some(cached) = self.l1.get_by_tier_key(&key.tier_fingerprint).await {
-        // Hit condition: cached response originates from some Explicit model contained by the current Tier
-        return Ok(Some(cached));
-    }
-    // ...
+    // One exact key — the model in it is already the concrete name the
+    // service is bound to.
+    self.l1.get(&key.fingerprint).await
 }
 ```
 
-**Two independent hashes**:
-- `tier_fingerprint`: computed using the Tier name ("reasoning" / "fast"), shared at Tier level within a tenant
-- `explicit_fingerprint`: computed using the Explicit model, exact match
-
-**Both are stored**. Lookup queries `tier_fingerprint` first and returns on hit (accepts a response from any model in the Tier); Write writes both keys simultaneously. This way:
-- Whichever specific model Routing picks doesn't affect hit rate
-- Requests across Tiers don't pollute each other (a reasoning cache won't be hit by fast)
-
-Cost: cache size doubles. Given responses are typically 1-10KB, this is acceptable.
+An earlier design cached at *tier* granularity (a "reasoning" response could
+satisfy any reasoning-tier model) via a second `tier_fingerprint`; that dual
+hashing is gone along with in-pipeline routing. Requests for different
+concrete models simply produce different keys, which is exactly right — two
+models are two different functions and must not share a cache entry.
 
 ### 4.3 Multi-Tier Lookup Flow
 

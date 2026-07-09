@@ -17,9 +17,9 @@
 | **Single shared implementation** | "Output contract" code like rule_id whitelist / JSON shape check / length check should not be rewritten by every consumer |
 | **Explicit Pass / Filter / Reject / Annotate disposition** | Each outcome has clear semantics; when writing a validator you don't have to wonder "should this transform or throw" |
 | **Reuse existing retry path** | Reject goes through `ProviderError::ValidationFailed`, the existing `RetryMiddleware` decides whether to retry; no second retry mechanism is introduced |
-| **Plugin-style registration** | Caller adds with one line: `Pipeline::builder().layer(ValidationMiddleware::new(vec![...]))`; a few built-ins cover 80% of cases, custom ones implement the trait |
-| **Cross-language** | Python implements via the `tars.OutputValidator` base class; future Node mirrors the shape (same pattern as Stage 3 PyTool) |
-| **Order is explicit** | `add_validator` registration order = execution order, left to right; Filter chains (each one sees the Response after the previous Filter) |
+| **Plugin-style registration** | Caller adds with one line: `LlmService::builder(provider, model).layer(ValidationMiddleware::new(vec![...]))` (or set `ChainOpts::validators` for `default_chain`); a few built-ins cover 80% of cases, custom ones implement the trait |
+| **Cross-language** | Python implements a validator as a plain `(req, resp) -> tars.Pass/FilterText/Reject/Annotate` callable, registered as a `(name, callable)` pair; future Node mirrors the shape (same pattern as Stage 3 PyTool) |
+| **Order is explicit** | `.validators([...])` registration order = execution order, left to right; Filter chains (each one sees the Response after the previous Filter) |
 | **Streaming not blocked** | Validators always operate on the complete Response (called after draining the stream), but the token-by-token streaming UX on the caller side can still be preserved — the validator just runs once synchronously when the stream ends |
 
 **Anti-goals**:
@@ -182,29 +182,42 @@ Downstream consumer handles in one line: `except tars.TarsProviderError as e: if
 ```rust
 // Location: tars-pipeline::validation
 pub struct ValidationMiddleware {
-    validators: Vec<Box<dyn OutputValidator>>,
+    validators: Arc<[Arc<dyn OutputValidator>]>,
 }
 
 impl ValidationMiddleware {
-    pub fn new(validators: Vec<Box<dyn OutputValidator>>) -> Self {
-        Self { validators }
+    pub fn new(validators: Vec<Arc<dyn OutputValidator>>) -> Self {
+        Self { validators: validators.into() }
     }
 }
 
-impl LlmService for ValidationMiddleware {
-    async fn call(
-        self: Arc<Self>,
+// ValidationMiddleware is a handler-chain `Middleware`, not a service:
+// it does pre/post work around `next.run(...)` (the rest of the chain,
+// ending at the provider). It never holds an `inner` service.
+#[async_trait]
+impl Middleware for ValidationMiddleware {
+    fn name(&self) -> &'static str { "validation" }
+
+    async fn handle(
+        &self,
         req: ChatRequest,
         ctx: RequestContext,
+        next: Next<'_>,
     ) -> Result<LlmEventStream, ProviderError> {
         // Telemetry: this layer was traversed.
         if let Ok(mut t) = ctx.telemetry.lock() {
             t.layers.push("validation".into());
         }
 
-        // Drain inner stream into a complete Response. We can't
+        // Empty validator chain → pass straight through, no drain (keeps
+        // the streaming-UX cost off when the layer is present but unused).
+        if self.validators.is_empty() {
+            return next.run(req, ctx).await;
+        }
+
+        // Drain the rest of the chain into a complete Response. We can't
         // validate token-by-token; validators need the whole response.
-        let inner_stream = self.inner.clone().call(req.clone(), ctx.clone()).await?;
+        let inner_stream = next.run(req.clone(), ctx).await?;
         let mut builder = ChatResponseBuilder::new();
         let mut events_held = Vec::new();
         let mut s = inner_stream;
@@ -426,13 +439,20 @@ Four outcome factory functions: `tars.Pass()` / `tars.Filter(response, dropped)`
 ```python
 p = (
     tars.Pipeline.builder("qwen_coder_local")
-        .add_validator(RuleIdWhitelistValidator(KNOWN_IDS))
-        .add_validator(MaxLengthValidator(field="text", max=50_000))
+        .validators([
+            ("rule_id_whitelist", rule_id_whitelist(KNOWN_IDS)),
+            ("max_length",        max_length(field="text", max=50_000)),
+        ])
         .build()
 )
 ```
 
-Requires PyO3 to expose `Pipeline.builder()` — currently only `Pipeline.from_default(id)` and `from_str(toml, id)` exist; a builder API needs to be added (B-6c is already on the TODO list, fold it into this work).
+`Pipeline.builder(id)` now ships alongside `Pipeline.from_default(id)` /
+`from_config(path, id)` / `from_str(toml, id)`. The builder exposes
+`.validators([(name, callable), ...])`, `.retry(...)`, `.cache(enabled)`,
+and `.event_store(dir)`, then `.build()`. Validators are `(name, callable)`
+pairs where the callable is `(req, resp) -> tars.Pass | tars.Reject |
+tars.FilterText | tars.Annotate` — plain callables, not a subclass.
 
 ### 6.3 Sync safety / GIL
 
@@ -484,15 +504,16 @@ class ArcRuleIdWhitelistValidator(tars.OutputValidator):
 # app/core/critic_agent.py adjusted
 self._pipeline = (
     tars.Pipeline.builder("qwen_coder_local")
-        .add_validator(ArcRuleIdWhitelistValidator(rubric_paths))
+        .validators([("consumer_rule_id_whitelist", rule_id_whitelist(rubric_paths))])
         .build()
 )
-# scan_file no longer post-filters — Validator already runs inside Pipeline
-parsed = self._pipeline.complete(...).text  # already Filter'd
+# scan_file no longer post-filters — Validator already runs inside the pipeline.
+# `complete(model, ...)` takes the concrete model as its first argument.
+parsed = self._pipeline.complete("qwen-coder", ...).text  # already Filter'd
 ```
 
 Migration benefits:
-- 50 lines of critic_agent code → 0 lines (moved to validator class, one line of `add_validator`)
+- 50 lines of critic_agent code → 0 lines (moved to a validator callable, one line of `.validators([...])`)
 - Tests: validator unit tests + downstream consumer integration tests verify together
 - Reuse: future tools wanting this just import the same validator
 
@@ -508,7 +529,7 @@ Migration benefits:
 
 ### 8.1 Execution order = registration order
 
-`add_validator(A)`, `add_validator(B)`, `add_validator(C)` → execution order A → B → C.
+`.validators([A, B, C])` (or `ValidationMiddleware::new(vec![A, B, C])`) → execution order A → B → C.
 
 ### 8.2 Filter chains
 
@@ -664,8 +685,8 @@ Follows the milestone style of [Doc 14 §9 Implementation Path](./14-implementat
 
 ## 12. Cross-doc references
 
-- **Doc 02 Middleware Pipeline** — the ValidationMiddleware defined here is layer 4 (between Retry and Provider)
-- **Doc 12 API Specification** — `Pipeline::builder().add_validator(...)` API is normalized there
+- **Doc 02 Middleware Pipeline** — the ValidationMiddleware defined here is one of its layers
+- **Doc 12 API Specification** — the validator-registration API (`LlmService::builder(provider, model).layer(ValidationMiddleware::new(...))` / `ChainOpts::validators`) is normalized there
 - **Doc 16 Evaluation Framework** — evaluation (multi-dimensional scoring / time series / datasets) is a separate concern, see that doc
 - **Doc 04 Agent Runtime** — how an Agent assembles a Pipeline with ValidationMiddleware is covered there
 

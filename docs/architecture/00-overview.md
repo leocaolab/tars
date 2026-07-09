@@ -90,7 +90,7 @@ The Rust trait is the source of truth; HTTP API / gRPC / Python / TypeScript and
                        │  (Doc 02)                 │
                        │  Telemetry → Auth → IAM   │
                        │  → Budget → Cache → Guard │
-                       │  → Routing → Breaker      │
+                       │  → Retry → Breaker        │
                        └───────────┬───────────────┘
                                    │
               ┌────────────────────┼─────────────────┐
@@ -280,16 +280,16 @@ In alphabetical order:
 | **L1/L2/L3 Cache** | In-process / Redis / Provider explicit — three-tier cache | Doc 03 §2 |
 | **MELT** | Metrics/Events/Logs/Traces — the four pillars of observability | Doc 08 |
 | **MCP** | Model Context Protocol — Tool protocol proposed by Anthropic | Doc 05 §5 |
-| **Middleware** | Tower-style onion layer handling cross-cutting concerns | Doc 02 |
-| **ModelHint** | Abstract model selection (Tier / Explicit / Ensemble) | Doc 01 §4.1 |
+| **Middleware** | Handler-chain onion layer handling cross-cutting concerns | Doc 02 |
+| **ModelHint** | Abstract model selection (Tier / Explicit / Ensemble); used at service construction / role resolution, **not** carried on the request | Doc 01 §4.1 |
 | **Orchestrator** | Agent that does no reasoning, only decomposes the task DAG | Doc 04 §2.1 |
 | **PII** | Personally Identifiable Information | Doc 08 §11 + Doc 10 §8 |
-| **Pipeline** | Request handling chain composed of Middleware | Doc 02 |
+| **Pipeline** | The Middleware handler-chain, realized by the concrete `LlmService` (provider + bound model + layers) | Doc 02 |
 | **Principal** | Caller identity (user / service account / subprocess) | Doc 10 §4 |
 | **PromptBuilder** | Three-stage prompt assembler | Doc 04 §11 |
 | **Provider** | LLM backend abstraction (API / CLI / embedded) | Doc 01 |
 | **RequestContext** | Request-scoped context containing trace/tenant/principal/cancel/budget | Doc 02 §3.3 |
-| **Routing Policy** | Provider selection policy (Tier / Cost / Latency / Fallback) | Doc 01 §12 |
+| **Role resolution** | Binds a role/tier to one provider+model (`[roles]` / `[routing.tiers]`). Provider *selection* is a caller concern, **not** a pipeline layer: ensemble/fallback = compose N `LlmService`s | Doc 01 §12 |
 | **SLI / SLO** | Service Level Indicator / Objective | Doc 11 §2 |
 | **SaaS / Self-Hosted / Local-First / Hybrid** | The 4 deployment shapes | Doc 07 §2 |
 | **SecretRef** | Secret reference (vault path / env var name) | Doc 06 §5 |
@@ -380,7 +380,7 @@ batch mode — all visible in `docs/roadmap.md` and `docs/recipes/`.
 |---|---|---|---|
 | **M0** | Foundation | ✅ | tars-types / config / storage / melt all shipped |
 | **M1** | Single Provider, Single Path | ✅ | Shipped 7 HTTP backends, not just 1 |
-| **M2** | Multi-Provider + Routing | ✅ | StaticPolicy/TierPolicy + CircuitBreaker + ErrorClass |
+| **M2** | Multi-Provider + role/tier resolution | ✅ | Tier resolution + CircuitBreaker + ErrorClass (in-pipeline routing policies later removed — provider selection is a caller concern) |
 | **M3** | Agent Runtime Core | ✅ | Trajectory + AgentEvent + Worker + Critic in tars-runtime |
 | **M4** | Tools + MCP | ⚠️ partial | Registry + builtins done; **MCP stdio NOT yet** |
 | **M5** | CLI + TUI | ⚠️ partial | Rich `tars` CLI shipped; **TUI NOT yet** |

@@ -400,7 +400,7 @@ pub struct SkillContext {
     
     /// A Skill can call Tools and the LLM
     pub tool_registry: Arc<dyn ToolRegistry>,
-    pub llm_service: Arc<dyn LlmService>,
+    pub llm_service: LlmService,             // concrete, Clone (Doc 02)
 }
 
 pub enum SkillEvent {

@@ -396,7 +396,7 @@ pub struct SkillContext {
     
     /// Skill 可以调用 Tool 和 LLM
     pub tool_registry: Arc<dyn ToolRegistry>,
-    pub llm_service: Arc<dyn LlmService>,
+    pub llm_service: LlmService,             // 具体类型，Clone（Doc 02）
 }
 
 pub enum SkillEvent {
