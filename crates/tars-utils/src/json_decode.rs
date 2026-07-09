@@ -215,25 +215,31 @@ pub fn decode_json<T: DeserializeOwned>(
 
 /// Decode `text` into a [`JsonAgentResponse`], composing the full seam:
 ///
-/// 1. strip an outer code fence,
-/// 2. if `T::wrapper_tags()` is non-empty, extract the substring between
-///    the first matching `<tag>…</tag>` (→ [`TarsJsonError::MissingBlock`]
-///    if none match); otherwise use the text as-is,
-/// 3. dispatch on `mode` (native → direct parse; chatty → fence-scrape),
-/// 4. if `opts.clamp_ints`, clamp out-of-`i64`-range integers before the
+/// 1. if `T::wrapper_tags()` is non-empty, extract the substring between
+///    the first matching `<tag>…</tag>` from the RAW text (→
+///    [`TarsJsonError::MissingBlock`] if none match); otherwise strip an
+///    outer code fence and use that,
+/// 2. dispatch on `mode` (native → direct parse; chatty → fence-scrape),
+/// 3. if `opts.clamp_ints`, clamp out-of-`i64`-range integers before the
 ///    final deserialize.
+///
+/// The wrapper-tag block is extracted BEFORE any fence stripping: a reply
+/// that narrates a fenced ```diff block and then emits its `<tag>…</tag>`
+/// envelope must have the envelope found, not discarded when
+/// `strip_code_fences` consumes the leading fence. Stripping first (which a
+/// refactor briefly did) drops the envelope for exactly that shape — the
+/// fixer's `<fix_report>` / `<agent_reply>` after a diff — and the decode
+/// fails with `MissingBlock`.
 pub fn decode<T: JsonAgentResponse>(
     text: &str,
     mode: StructuredOutputMode,
     opts: DecodeOpts,
 ) -> Result<T, TarsJsonError> {
-    let body = strip_code_fences(text);
-
     let tags = T::wrapper_tags();
     let inner = if tags.is_empty() {
-        body
+        strip_code_fences(text)
     } else {
-        extract_tag_block(body, tags).ok_or_else(|| TarsJsonError::MissingBlock {
+        extract_tag_block(text, tags).ok_or_else(|| TarsJsonError::MissingBlock {
             tried: tags.iter().map(|t| (*t).to_string()).collect(),
         })?
     };
@@ -627,6 +633,20 @@ mod tests {
     #[test]
     fn decode_extracts_json_from_envelope_tag() {
         let text = "Preamble.\n<report>{\"x\":1,\"y\":2}</report>\nEpilogue.";
+        let w: Wrapped = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
+        assert_eq!(w, Wrapped { x: 1, y: 2 });
+    }
+
+    #[test]
+    fn decode_extracts_envelope_that_follows_a_code_fence() {
+        // Regression: a reply that narrates a fenced ```diff block and THEN
+        // emits its `<report>…</report>` envelope must have the envelope found.
+        // The wrapper block is extracted from the RAW text before any fence
+        // stripping — stripping first consumes the leading fence and discards
+        // the envelope that follows it (the fixer's `<fix_report>` after a diff),
+        // failing with MissingBlock. This is the shape the agent fixer emits.
+        let text = "```diff\n--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n```\n\
+                    <report>{\"x\":1,\"y\":2}</report>";
         let w: Wrapped = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
         assert_eq!(w, Wrapped { x: 1, y: 2 });
     }
