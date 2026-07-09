@@ -56,6 +56,7 @@ tracing.workspace = true
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
+tars-utils = { path = "../tars-utils" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 wiremock.workspace = true
 serde_json.workspace = true

@@ -733,7 +733,7 @@ fn run_bless(args: EvalBlessArgs) -> Result<()> {
         let output = read_optional_text(&case_dir.join("output.txt"))?.unwrap_or_default();
         // Tolerant decode: an eval output may be chatty prose around JSON.
         let value: serde_json::Value =
-            match tars_types::decode_json(&output, tars_types::StructuredOutputMode::None) {
+            match tars_utils::decode_json(&output, tars_types::StructuredOutputMode::None) {
                 Ok(v) => v,
                 Err(e) => {
                     println!("  {} … skipped (not JSON: {e})", case.case_id);

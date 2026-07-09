@@ -132,7 +132,7 @@ pub struct BlessResult {
 #[napi]
 pub fn bless_check(path: String, text: String) -> Result<BlessResult> {
     let value: serde_json::Value =
-        tars_types::decode_json(&text, tars_types::StructuredOutputMode::None)
+        tars_utils::decode_json(&text, tars_types::StructuredOutputMode::None)
             .map_err(|e| Error::from_reason(format!("bless decode: {e}")))?;
     let bless = tars_types::Bless::load(std::path::Path::new(&path))
         .map_err(|e| Error::from_reason(format!("bless load: {e}")))?;

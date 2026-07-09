@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/tars-types",
+    "crates/tars-utils",
     "crates/tars-sandbox",
     "crates/tars-agent",
     "crates/tars-config",
@@ -37,6 +38,7 @@ members = [
 # the platform-tagged artifact + index.js / index.d.ts for npm.
 default-members = [
     "crates/tars-types",
+    "crates/tars-utils",
     "crates/tars-sandbox",
     "crates/tars-config",
     "crates/tars-provider",

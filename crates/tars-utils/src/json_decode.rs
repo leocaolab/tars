@@ -31,11 +31,11 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::capabilities::StructuredOutputMode;
-use crate::response::ChatResponse;
+use tars_types::ChatResponse;
+use tars_types::capabilities::StructuredOutputMode;
 
 /// Typed failure of the decode family ([`decode_json`] / [`decode`] /
-/// [`ChatResponse::json`]).
+/// [`ResponseJsonExt::json`]).
 #[derive(Debug, thiserror::Error)]
 pub enum TarsJsonError {
     /// The response text was empty — the stream produced no assistant
@@ -408,19 +408,27 @@ fn find_balanced(bytes: &[u8], start: usize, open: u8, close: u8) -> Option<usiz
     None
 }
 
-impl ChatResponse {
-    /// Decode this response's assistant [`text`](ChatResponse::text) into
-    /// a typed `T`, using `mode` to pick the decode strategy. Convenience
-    /// wrapper over [`decode_json`]; see it for the mode semantics.
+/// Extension trait adding a `json` decode method to
+/// [`tars_types::ChatResponse`].
+///
+/// `ChatResponse` is defined in `tars-types`, so the orphan rule forbids
+/// an inherent `impl` here in `tars-utils`; the method rides in on this
+/// trait instead. Bring it into scope (`use tars_utils::ResponseJsonExt;`)
+/// at any `resp.json::<T>(mode)` call site.
+pub trait ResponseJsonExt {
+    /// Decode this response's assistant `text` into a typed `T`, using
+    /// `mode` to pick the decode strategy. Convenience wrapper over
+    /// [`decode_json`]; see it for the mode semantics.
     ///
     /// `mode` is the [`StructuredOutputMode`] the request/provider used
-    /// (from the provider's [`Capabilities`](crate::capabilities::Capabilities)),
+    /// (from the provider's [`Capabilities`](tars_types::capabilities::Capabilities)),
     /// so the caller — which knows how the response was produced — tells
     /// the decoder whether `text` is clean JSON or chatty prose.
-    pub fn json<T: DeserializeOwned>(
-        &self,
-        mode: StructuredOutputMode,
-    ) -> Result<T, TarsJsonError> {
+    fn json<T: DeserializeOwned>(&self, mode: StructuredOutputMode) -> Result<T, TarsJsonError>;
+}
+
+impl ResponseJsonExt for ChatResponse {
+    fn json<T: DeserializeOwned>(&self, mode: StructuredOutputMode) -> Result<T, TarsJsonError> {
         decode_json(&self.text, mode)
     }
 }

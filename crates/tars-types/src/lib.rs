@@ -16,7 +16,6 @@
 //! - [`response`]       — ChatResponse + builder for non-streaming consumers
 //! - [`usage`]          — Usage / CostUsd / Pricing
 //! - [`capabilities`]   — Capabilities / StructuredOutputMode / PromptCacheKind
-//! - [`json_decode`]    — result-side, mode-aware JSON decode (`decode` / `decode_json` / `ChatResponse::json`)
 //! - [`error`]          — ProviderError + ErrorClass
 //! - [`context`]        — RequestContext for cross-layer plumbing
 //! - [`secret`]         — SecretRef + SecretString (redacting wrapper)
@@ -37,7 +36,6 @@ pub mod error;
 pub mod events;
 pub mod http_extras;
 pub mod ids;
-pub mod json_decode;
 pub mod model;
 pub mod pipeline_events;
 pub mod principal;
@@ -68,9 +66,6 @@ pub use http_extras::HttpProviderExtras;
 pub use ids::{
     AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId,
     TenantId, TraceId, TrajectoryId,
-};
-pub use json_decode::{
-    DecodeOpts, JsonAgentResponse, JsonValueType, TarsJsonError, decode, decode_json,
 };
 pub use model::{ModelHint, ModelTier, ThinkingMode};
 pub use pipeline_events::{

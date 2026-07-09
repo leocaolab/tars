@@ -2026,7 +2026,7 @@ fn version() -> String {
 #[pyfunction]
 fn bless_check<'py>(py: Python<'py>, path: String, text: String) -> PyResult<Bound<'py, PyDict>> {
     let value: serde_json::Value =
-        tars_types::decode_json(&text, tars_types::StructuredOutputMode::None)
+        tars_utils::decode_json(&text, tars_types::StructuredOutputMode::None)
             .map_err(|e| crate::errors::TarsProviderError::new_err(format!("bless decode: {e}")))?;
     let bless = tars_types::Bless::load(std::path::Path::new(&path))
         .map_err(|e| crate::errors::TarsConfigError::new_err(format!("bless load: {e}")))?;

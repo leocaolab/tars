@@ -73,7 +73,7 @@ async fn cassette_reply_decodes_into_typed_review() {
     let text = replay_text().await;
     // Cassette replay → decode seam → local strong type.
     let review: Review =
-        tars_types::decode_json(&text, StructuredOutputMode::None).expect("pinned reply decodes");
+        tars_utils::decode_json(&text, StructuredOutputMode::None).expect("pinned reply decodes");
     assert!(!review.summary.is_empty());
     assert_eq!(review.severity, 8, "pinned model reply severity");
 }
@@ -97,7 +97,7 @@ fn bless_path() -> PathBuf {
 }
 
 async fn pinned_value() -> serde_json::Value {
-    tars_types::decode_json(&replay_text().await, StructuredOutputMode::None)
+    tars_utils::decode_json(&replay_text().await, StructuredOutputMode::None)
         .expect("pinned reply decodes to a JSON value")
 }
 
