@@ -34,25 +34,41 @@
 //! ## Composition order
 //!
 //! Call order **is** chain order: the first `.layer(...)` is OUTERMOST
-//! (runs first inbound, last outbound); the provider is innermost. The
-//! canonical chain assembled by `Pipeline::default_chain` /
-//! `Pipeline::chain_over` (each layer conditional on its `PipelineOpts`
-//! field):
+//! (runs first inbound, last outbound); the provider is innermost.
+//!
+//! Canonical order (Doc 02 §2). Unchanged except that **Routing and
+//! Fallback are gone** — provider selection is no longer a pipeline
+//! concern:
 //!
 //! ```text
-//! EventEmitter (outermost)
-//!  └─ Telemetry
-//!      └─ Validation
+//! Telemetry (outermost)
+//!  └─ Auth / IAM
+//!      └─ Budget
 //!          └─ Cache Lookup
-//!              └─ Retry
-//!                  └─ Provider call (innermost)
+//!              └─ Prompt Guard
+//!                  └─ Retry
+//!                      └─ Circuit Breaker   (a provider wrapper, not a layer)
+//!                          └─ Provider call (innermost)
+//! ```
+//!
+//! (Doc 02 §2 drew the breaker *above* Retry; the code puts it below —
+//! see [`CircuitBreaker`] — so an open breaker rejects each attempt
+//! before the provider is hit and Retry reacts to that rejection.)
+//!
+//! What `Pipeline::default_chain` / `Pipeline::chain_over` actually
+//! assemble today (each layer conditional on its `PipelineOpts` field),
+//! with the rest filling in as their dependencies come online:
+//!
+//! ```text
+//! EventEmitter → Telemetry → Validation → Cache Lookup → Retry → [CircuitBreaker] provider
 //! ```
 //!
 //! The circuit breaker is **not** a middleware: [`CircuitBreaker`] wraps
-//! the [`LlmProvider`](tars_provider::LlmProvider) itself, *below* the
-//! chain, so an open breaker rejects before the provider is hit. The
-//! budget layers ([`PerCallBudgetMiddleware`], [`TenantBudgetMiddleware`])
-//! are opt-in via `.layer(...)`, not part of the default chain.
+//! the [`LlmProvider`](tars_provider::LlmProvider) itself, so it is
+//! applied below the chain rather than added with `.layer(...)`. Auth /
+//! IAM and Prompt Guard are not implemented yet. The budget layers
+//! ([`PerCallBudgetMiddleware`], [`TenantBudgetMiddleware`]) exist and are
+//! opt-in via `.layer(...)`, not part of the default chain.
 //!
 //! **Provider selection is not a pipeline concern.** There is no routing,
 //! ensemble or fallback layer. A caller who wants them composes several
