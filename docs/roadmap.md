@@ -1,16 +1,18 @@
 # tars roadmap — cost & reliability for production agent serving
 
-> **Status: v1 closed — all 5 features shipped.** Gemini batch is
-> deferred-with-stub; everything else is fully implemented + tested.
-> See [What's next](#whats-next-beyond-this-roadmap) for the next
-> set of larger gaps.
+> **Status: v1 closed.** Five features originally shipped; the
+> Fallback / degrade middleware was **removed in v1.5.0**, leaving the
+> four below (renumbered). Gemini batch is deferred-with-stub;
+> everything else is fully implemented + tested. See
+> [What's next](#whats-next-beyond-this-roadmap) for the next set of
+> larger gaps.
 >
-> **Update (v1.5.0):** Feature #2 (Fallback / degrade middleware) was
-> subsequently **removed**. Provider *selection* — routing, ensemble,
-> fallback — is no longer a pipeline concern: a caller who wants
-> fallback composes several `LlmService`s and, on `Err`, tries the next.
-> The §2 design below is retained as historical record; the pipeline
-> ships no `FallbackMiddleware`.
+> **Why fallback was removed:** provider *selection* — routing,
+> ensemble, fallback — is not a pipeline concern. A caller who wants
+> fallback composes several `LlmService`s and, on a typed `Err`, tries
+> the next (ensemble: build N services, call all, merge). The pipeline
+> ships no fallback middleware; that design was dropped, not kept as a
+> section here.
 >
 > Last updated 2026-06-10.
 
@@ -27,16 +29,15 @@ that uses it, then the bigger access-pattern shift (batch).
 | # | Feature | Effort | Status | Commit(s) |
 |---|---|---|---|---|
 | 1 | [Rate-limit max_wait + cancel propagation](#1-rate-limit-max-wait--cancel-propagation) | 1-2 days | ✅ shipped | `2b10167` |
-| 2 | [Fallback / degrade middleware](#2-fallback--degrade-middleware) | 1-2 weeks | ✅ shipped · ⚠️ **removed in v1.5.0** (re-scoped as a caller composition) | `2b10167` |
-| 3 | [Per-call budget middleware](#3-per-call-budget-middleware) | 1 week | ✅ shipped | `8088499` |
-| 4 | [Tenant budget middleware (stateful)](#4-tenant-budget-middleware-stateful) | 2-3 weeks | ✅ shipped | `c92ec8e` |
-| 5 | [Batch mode (BatchSubmitter trait)](#5-batch-mode-batchsubmitter-trait) | 3-4 weeks | ✅ Anthropic + OpenAI / ⛔ Gemini deferred | `48fb341` `f038fd8` `e81aa2a` `342cfc3` |
+| 2 | [Per-call budget middleware](#2-per-call-budget-middleware) | 1 week | ✅ shipped | `8088499` |
+| 3 | [Tenant budget middleware (stateful)](#3-tenant-budget-middleware-stateful) | 2-3 weeks | ✅ shipped | `c92ec8e` |
+| 4 | [Batch mode (BatchSubmitter trait)](#4-batch-mode-batchsubmitter-trait) | 3-4 weeks | ✅ Anthropic + OpenAI / ⛔ Gemini deferred | `48fb341` `f038fd8` `e81aa2a` `342cfc3` |
 
-Features 1+2 paired — `max_wait` without fallback creates dead
-paths, fallback without `max_wait` makes "wait 30 minutes" a
-plausible default. Shipped in the same release. (Fallback was later
-removed in v1.5.0 — see the update note above; `max_wait` stays, and it
-now bubbles a too-long wait to the *caller*, who can try another service.)
+`max_wait` (feature 1) originally paired with the fallback feature:
+without a cap, "wait 30 minutes inside one call" was a plausible
+default. Fallback was removed in v1.5.0 (see the note above); `max_wait`
+stays, and a too-long wait now bubbles to the *caller*, who can try
+another `LlmService`.
 
 ## v1 outcomes — what production agents can do now
 
@@ -62,10 +63,10 @@ let job = submitter.submit(items, "claude-opus-4-1", &ctx).await?;  // model is 
 ```
 
 **Quantitative tally** of what landed:
-- **5 new middlewares** (`PerCallBudgetMiddleware`, `TenantBudgetMiddleware`, `FallbackMiddleware` — since removed in v1.5.0, plus the `RetryMiddleware.max_wait` extension)
+- **2 new cost middlewares** (`PerCallBudgetMiddleware`, `TenantBudgetMiddleware`) + the `RetryMiddleware.max_wait` extension (a fallback middleware also shipped in v1 but was removed in v1.5.0)
 - **2 new traits** (`BudgetStore`, `BatchSubmitter`) + their reference impls
 - **2 vendor batch implementations** (Anthropic + OpenAI), 1 stub (Gemini)
-- **~60 new unit / wiremock tests** across the four cost middlewares + the three batch backends
+- **~60 new unit / wiremock tests** across the three cost middlewares + the three batch backends
 - **3 new user-facing docs** (`recipes/cost-and-reliability.md`, `recipes/batch.md`, `roadmap.md` itself)
 
 > **Using these in practice**: copy-paste recipes for composing the
@@ -100,8 +101,9 @@ or Postgres. Same for `BatchJobStore`.
 
 `Retry-After` from Anthropic/OpenAI can be hours during outages. The
 current `RetryMiddleware` will sleep that long. An agent should never
-sleep 30 minutes inside one call — better to bubble the error to a
-fallback layer (§2) or to the caller.
+sleep 30 minutes inside one call — better to bubble the error to the
+caller, who can try another `LlmService` (provider fallback is a caller
+composition, not a middleware layer).
 
 ### Current state (verified 2026-05-20)
 
@@ -141,8 +143,8 @@ Logic:
 if let Some(retry_after) = err.retry_after() {
     if retry_after > cfg.max_wait {
         // Bubble the error unchanged — the caller decides whether to try
-        // another service. (Originally an outer FallbackMiddleware could
-        // switch provider here; that layer was removed in v1.5.0 — §2.)
+        // another service. Provider fallback is a caller composition
+        // (build several LlmServices, try the next on Err), not a layer.
         return Err(err);
     }
     cancellable_sleep(retry_after, &ctx.cancel).await;
@@ -166,108 +168,7 @@ if let Some(retry_after) = err.retry_after() {
 
 ---
 
-## 2. Fallback / degrade middleware
-
-> ⚠️ **Removed in v1.5.0.** This feature shipped, then was removed by
-> decision: provider *selection* (routing / ensemble / fallback) is not a
-> pipeline concern. A caller who wants fallback builds several
-> `LlmService`s and, on a typed `Err`, tries the next; ensemble builds N
-> services, calls all, and merges. The design below is retained as
-> historical record — the pipeline no longer ships `FallbackMiddleware`,
-> `FallbackTrigger`, or `RoutingPolicy`, and the code samples in this
-> section describe the *removed* API.
-
-### Motivation
-
-At the time, `RoutingPolicy` picked a provider **once** at request open. If
-that provider returns `BudgetExceeded`, `RateLimited` (with long
-retry-after), `ContextTooLong`, or `ModelOverloaded`, the call dies
-even if another configured provider would have succeeded. Peter
-explicitly wants Opus → Sonnet → Haiku → local degradation; this is
-the standard cost+availability strategy in production.
-
-Routing handles "which provider for *this* request shape." Fallback
-handles "what to do when that provider failed in a typed, retryable
-way." They are different concerns and should be separate middlewares.
-
-### Design
-
-```rust
-use tars_pipeline::{FallbackMiddleware, FallbackTrigger};
-use tars_types::ErrorClass;
-
-let mw = FallbackMiddleware::builder(registry.clone())
-    .primary(ProviderId::new("anthropic_opus"))
-    .fallback_to(
-        ProviderId::new("anthropic_sonnet"),
-        FallbackTrigger::on(&[
-            ErrorClass::BudgetExceeded,
-            ErrorClass::ContextTooLong,
-        ]),
-    )
-    .fallback_to(
-        ProviderId::new("vllm_local"),
-        FallbackTrigger::on(&[
-            ErrorClass::RateLimited,
-            ErrorClass::ModelOverloaded,
-            ErrorClass::Network,
-        ]),
-    )
-    .build();
-
-let pipeline = Pipeline::builder(initial_provider)
-    .layer(TelemetryMiddleware::new())
-    .layer(mw)                              // Fallback OUTSIDE
-    .layer(RetryMiddleware::default())      // Retry INSIDE — same-provider attempts first
-    .build();
-```
-
-### Composition decisions
-
-| Decision | Choice | Reason |
-|---|---|---|
-| Fallback layer position | **Outside Retry** | Retry handles short-term flakes on one provider; Fallback handles long-term capacity / cost / context problems. Reverse would burn fallback slots on every 429. |
-| Trigger spec | Per-hop set of `ErrorClass` | Different errors warrant different fallback strategies (cost vs availability). Explicit is better than a single global trigger list. |
-| `Permanent` error class | **Never triggers fallback** | 400 Bad Request means the request is wrong. Trying the same request on another provider fails the same way. |
-| Each fallback hop runs Retry? | Yes — every hop is an independent "primary attempt" | Otherwise a transient flake on the fallback provider terminates the call. |
-| Fingerprint stability across hops | `request_fingerprint` is provider-agnostic by construction | Free — schema already does this. Enables cross-provider analytics ("how often does this prompt fall back?"). |
-| Cooperation with Budget MW | Pre-check on Opus rejects → Fallback catches → re-checks on Sonnet (different pricing) | Two middlewares, one shared concept (typed error) — no special-casing needed. |
-
-### Telemetry
-
-Each fallback hop emits:
-
-```
-tracing::warn!(
-    event = "fallback.triggered",
-    from = %from_provider_id,
-    to = %to_provider_id,
-    error_class = ?err.class(),
-    trace_id = %ctx.trace_id,
-)
-```
-
-These show up in the existing `--log-format json` stream and (Phase 2) in `pipeline_events.db` as a new `PipelineEvent::FallbackTriggered` variant.
-
-### Not doing
-
-- **Sticky session** ("always use the same provider for the same conversation_id") — caller sets `RequestContext.attributes.preferred_provider_id` and a custom RoutingPolicy reads it. Out of fallback scope.
-- **Cost-aware ordering** ("dynamically pick the cheapest provider that meets capability"). Phase 2 if at all; for now an explicit ordered list is enough and transparent.
-- **Cross-trajectory memory** ("provider X failed last hour, skip it this time"). That's a circuit-breaker concern — `CircuitBreaker` middleware already exists at a lower layer.
-- **Auto-discovery of capable fallback providers** — caller spells out the chain. Magic here would hide real cost decisions.
-
-### Tests
-
-- BudgetExceeded on primary → switches to sonnet → succeeds
-- RateLimited on primary with retry_after > max_wait → bubbles past Retry → caught by Fallback → switches to vllm_local
-- Permanent error on primary → does NOT fall back; error surfaces immediately
-- All hops fail → final error includes the *last* error from the chain plus a `hops_tried` list in the error message
-- Fallback chain order respected (sonnet attempted before vllm_local for budget errors)
-- Cancel mid-fallback → terminates immediately
-
----
-
-## 3. Per-call budget middleware
+## 2. Per-call budget middleware
 
 ### Motivation
 
@@ -300,7 +201,7 @@ Pre-call:
 3. Multiply by `Capabilities.pricing` → upper-bound USD cost
 4. If `>= cap_usd` → return `ProviderError::BudgetExceeded` immediately, no provider call
 
-Post-call (after stream drains): no debit — `PerCallBudgetMiddleware` is stateless. `TenantBudgetMiddleware` (§4) does the debit.
+Post-call (after stream drains): no debit — `PerCallBudgetMiddleware` is stateless. `TenantBudgetMiddleware` (§3) does the debit.
 
 ### Pricing-zero handling
 
@@ -346,11 +247,11 @@ LlmService::builder(provider, "claude-opus-4-1")
 
 ---
 
-## 4. Tenant budget middleware (stateful)
+## 3. Tenant budget middleware (stateful)
 
 ### Motivation
 
-`PerCallBudgetMiddleware` (§3) is stateless — perfect for the "one
+`PerCallBudgetMiddleware` (§2) is stateless — perfect for the "one
 call can't exceed X" Peter requirement, useless for "tenant-X gets
 $100/day." Real multi-tenant deployments need the second one.
 
@@ -393,7 +294,7 @@ Documented as a tradeoff in the middleware's doc-comment.
 
 ---
 
-## 5. Batch mode (`BatchSubmitter` trait)
+## 4. Batch mode (`BatchSubmitter` trait)
 
 ### Motivation
 
