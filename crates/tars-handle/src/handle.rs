@@ -136,6 +136,13 @@ pub struct PipelineOverrides {
     /// forces a FRESH provider built with this timeout (not the warm shared
     /// one) — the rare big-budget path. `None` ⇒ the shared warm provider.
     pub timeout_secs: Option<u64>,
+    /// Override the retry + circuit-breaker policy for this pipeline. `None` ⇒
+    /// the handle's own `[resilience]` (from the global config; tars's lean
+    /// default when the config has no `[resilience]` section). A consumer with a
+    /// stricter default (arc/concer both want the 6-attempt + breaker
+    /// `llm_default` even absent an explicit section) supplies it here — policy
+    /// stays in the consumer, not baked into the handle's default.
+    pub resilience: Option<ResilienceConfig>,
 }
 
 impl Tars {
@@ -264,11 +271,12 @@ impl Tars {
         let capabilities = provider.capabilities().clone();
         let mut opts = PipelineOpts::new(id);
         opts.validators = overrides.validators;
-        // Feed the global `[resilience]` section into the pipeline's retry +
-        // circuit-breaker knobs. Both `None` (no `[resilience]` config) ⇒
-        // `default_chain` produces exactly today's chain (default retry, no
-        // breaker); a populated section overrides.
-        let (retry, circuit_breaker) = crate::resilience::resilience_configs(&self.resilience);
+        // Feed the resilience policy into the pipeline's retry + circuit-breaker
+        // knobs. A consumer-supplied override wins; else the handle's own
+        // `[resilience]` (both `None` ⇒ `default_chain` produces today's lean
+        // chain: default retry, no breaker).
+        let resilience = overrides.resilience.as_ref().unwrap_or(&self.resilience);
+        let (retry, circuit_breaker) = crate::resilience::resilience_configs(resilience);
         opts.retry = retry;
         opts.circuit_breaker = circuit_breaker;
         match overrides.events {

@@ -42,6 +42,7 @@ mod error;
 mod event;
 mod executor;
 pub mod judge;
+pub mod judge_stats;
 mod llm_adapters;
 mod message;
 mod tars_agent;
@@ -75,6 +76,9 @@ pub use executor::{
 };
 pub use judge::{
     DEFAULT_JUDGE_PROMPT, Judge, JudgeError, LlmJudge, ensure_anti_incest, run_judge_pass,
+};
+pub use judge_stats::{
+    JudgeItem, JudgeReport, JudgeVerdict, JudgedItem, McNemarResult, mcnemar,
 };
 pub use llm_adapters::{LlmCritic, LlmWorker};
 pub use message::{AgentMessage, VerdictKind};

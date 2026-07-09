@@ -38,7 +38,6 @@ pub mod events;
 pub mod http_extras;
 pub mod ids;
 pub mod json_decode;
-pub mod judge;
 pub mod model;
 pub mod pipeline_events;
 pub mod principal;
@@ -73,7 +72,6 @@ pub use ids::{
 pub use json_decode::{
     DecodeOpts, JsonAgentResponse, JsonValueType, TarsJsonError, decode, decode_json,
 };
-pub use judge::{JudgeItem, JudgeReport, JudgeVerdict, JudgedItem, McNemarResult, mcnemar};
 pub use model::{ModelHint, ModelTier, ThinkingMode};
 pub use pipeline_events::{
     CallResult, EvaluationScored, LlmCallFinished, PersistenceMode, PipelineEvent,

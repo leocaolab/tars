@@ -34,10 +34,9 @@ use futures::StreamExt;
 use thiserror::Error;
 
 use tars_pipeline::LlmService;
-use tars_types::{
-    ChatRequest, ChatResponseBuilder, JudgeItem, JudgeReport, JudgeVerdict, JudgedItem, ModelHint,
-    ProviderError, RequestContext,
-};
+use tars_types::{ChatRequest, ChatResponseBuilder, ModelHint, ProviderError, RequestContext};
+
+use crate::judge_stats::{JudgeItem, JudgeReport, JudgeVerdict, JudgedItem};
 
 /// Async judging trait. One verdict per item.
 #[async_trait]
