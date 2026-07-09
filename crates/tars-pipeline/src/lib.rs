@@ -40,41 +40,30 @@
 //! Layer order matches the call order: the first `.layer(...)` wraps
 //! everything else and runs first on the inbound, last on the outbound.
 
-mod budget;
-mod cache;
-mod circuit_breaker;
-mod event_emitter;
-mod fallback;
-mod latency_stats;
 mod middleware;
-mod retry;
-mod routing;
 mod service;
-mod telemetry;
-mod tenant_budget;
-mod validation;
 
-pub use budget::{BudgetConfigError, PerCallBudgetMiddleware};
-pub use cache::{CacheLookupMiddleware, set_cache_policy};
-pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-pub use event_emitter::EventEmitterMiddleware;
-pub use fallback::{FallbackBuilder, FallbackMiddleware, FallbackTrigger};
-pub use latency_stats::{LatencyMetric, LatencyStats, LatencyStatsRegistry};
-pub use middleware::{EventStores, Middleware, Pipeline, PipelineBuilder, PipelineOpts};
-pub use retry::{RetryConfig, RetryMiddleware};
-pub use routing::{
+pub use middleware::budget::{BudgetConfigError, PerCallBudgetMiddleware};
+pub use middleware::cache::{CacheLookupMiddleware, set_cache_policy};
+pub use middleware::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+pub use middleware::event_emitter::EventEmitterMiddleware;
+pub use middleware::fallback::{FallbackBuilder, FallbackMiddleware, FallbackTrigger};
+pub use middleware::latency_stats::{LatencyMetric, LatencyStats, LatencyStatsRegistry};
+pub use middleware::retry::{RetryConfig, RetryMiddleware};
+pub use middleware::routing::{
     CostPolicy, EnsembleService, LatencyPolicy, RoutingPolicy, RoutingService, StaticPolicy,
     TierPolicy,
 };
-pub use service::{LlmService, ProviderService};
-pub use telemetry::TelemetryMiddleware;
-pub use tenant_budget::{
+pub use middleware::telemetry::TelemetryMiddleware;
+pub use middleware::tenant_budget::{
     BudgetStore, BudgetStoreError, InMemoryBudgetStore, TenantBudgetMiddleware,
 };
-pub use validation::{
+pub use middleware::validation::{
     OutputValidator, ValidationMiddleware,
     builtin::{JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, OnExceed, ResponseField},
 };
+pub use middleware::{EventStores, Middleware, Pipeline, PipelineBuilder, PipelineOpts};
+pub use service::{LlmService, ProviderService};
 
 // Re-export the few tars-types items that show up in middleware
 // signatures so callers don't need a separate `use tars_types::…`.

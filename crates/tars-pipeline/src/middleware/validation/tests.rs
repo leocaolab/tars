@@ -368,7 +368,7 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
     use tars_cache::{CacheKeyFactory, CachePolicy, CacheRegistry, MemoryCacheRegistry};
     use tars_types::{ChatResponseBuilder, ProviderId};
 
-    use crate::cache::CacheLookupMiddleware;
+    use crate::middleware::cache::CacheLookupMiddleware;
 
     // Provider returns "hello world" (raw). MaxLength filter truncates
     // to 5 chars → caller sees "hello". Cache, sitting OUTSIDE Validation
@@ -445,7 +445,7 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
     use tars_cache::{CacheKeyFactory, MemoryCacheRegistry};
     use tars_types::ProviderId;
 
-    use crate::cache::CacheLookupMiddleware;
+    use crate::middleware::cache::CacheLookupMiddleware;
 
     // Doc 15 §2 contract: validators are pure → cheap to rerun → cache
     // hits MUST rerun the chain. With W4's onion (Validation OUTSIDE

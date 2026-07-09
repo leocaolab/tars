@@ -11,6 +11,18 @@ use tars_types::{ChatRequest, ProviderError, RequestContext};
 
 use crate::service::{LlmService, ProviderService};
 
+pub(crate) mod budget;
+pub(crate) mod cache;
+pub(crate) mod circuit_breaker;
+pub(crate) mod event_emitter;
+pub(crate) mod fallback;
+pub(crate) mod latency_stats;
+pub(crate) mod retry;
+pub(crate) mod routing;
+pub(crate) mod telemetry;
+pub(crate) mod tenant_budget;
+pub(crate) mod validation;
+
 /// A middleware factory — given an inner [`LlmService`], produce a
 /// new [`LlmService`] that wraps it. Equivalent to `tower::Layer`.
 ///
@@ -98,7 +110,7 @@ impl Pipeline {
         // before assembling the routed inner, so the field is theirs to
         // ignore.
         let provider = match &opts.circuit_breaker {
-            Some(cfg) => crate::circuit_breaker::CircuitBreaker::wrap(provider, cfg.clone()),
+            Some(cfg) => crate::middleware::circuit_breaker::CircuitBreaker::wrap(provider, cfg.clone()),
             None => provider,
         };
         Self::chain_over(crate::service::ProviderService::new(provider), opts)
@@ -127,14 +139,14 @@ impl Pipeline {
         let mut builder = Self::builder_with_inner(inner);
 
         if let Some(EventStores { events: ev, bodies }) = events {
-            builder = builder.layer(crate::event_emitter::EventEmitterMiddleware::new(
+            builder = builder.layer(crate::middleware::event_emitter::EventEmitterMiddleware::new(
                 ev, bodies,
             ));
         }
-        builder = builder.layer(crate::telemetry::TelemetryMiddleware::new());
+        builder = builder.layer(crate::middleware::telemetry::TelemetryMiddleware::new());
 
         if !validators.is_empty() {
-            builder = builder.layer(crate::validation::ValidationMiddleware::new(validators));
+            builder = builder.layer(crate::middleware::validation::ValidationMiddleware::new(validators));
         }
 
         if cache {
@@ -142,7 +154,7 @@ impl Pipeline {
                 .unwrap_or_else(|| tars_cache::MemoryCacheRegistry::default_arc() as _);
             let cache_factory =
                 cache_factory.unwrap_or_else(|| tars_cache::CacheKeyFactory::new(1));
-            builder = builder.layer(crate::cache::CacheLookupMiddleware::new(
+            builder = builder.layer(crate::middleware::cache::CacheLookupMiddleware::new(
                 cache_registry,
                 cache_factory,
                 cache_origin,
@@ -150,7 +162,7 @@ impl Pipeline {
         }
 
         let retry_cfg = retry.unwrap_or_default();
-        builder = builder.layer(crate::retry::RetryMiddleware::new(retry_cfg));
+        builder = builder.layer(crate::middleware::retry::RetryMiddleware::new(retry_cfg));
 
         builder.build()
     }
@@ -177,7 +189,7 @@ pub struct PipelineOpts {
     /// Output validators (Filter / Reject / Annotate). Run outside
     /// Cache, on every call. Empty Vec = no ValidationMiddleware layer
     /// at all (saves the stream-drain cost on cache hits).
-    pub validators: Vec<Arc<dyn crate::validation::OutputValidator>>,
+    pub validators: Vec<Arc<dyn crate::middleware::validation::OutputValidator>>,
 
     /// EventEmitter stores. `None` = no event emission — pipeline still
     /// works, but `tars events list` / trajectory tooling won't see
@@ -196,7 +208,7 @@ pub struct PipelineOpts {
 
     /// Retry policy override. `None` = `RetryConfig::default()`
     /// (3 attempts, exp backoff, 30s cap).
-    pub retry: Option<crate::retry::RetryConfig>,
+    pub retry: Option<crate::middleware::retry::RetryConfig>,
 
     /// Per-provider circuit breaker. `None` (default) = no breaker.
     /// When set, [`Pipeline::default_chain`] wraps the provider with
@@ -212,7 +224,7 @@ pub struct PipelineOpts {
     /// when it's down). Ignored by [`Pipeline::chain_over`] — a routed
     /// inner has no single provider to wrap; routed callers wrap each
     /// candidate provider individually before building the inner.
-    pub circuit_breaker: Option<crate::circuit_breaker::CircuitBreakerConfig>,
+    pub circuit_breaker: Option<crate::middleware::circuit_breaker::CircuitBreakerConfig>,
 
     /// Include the `CacheLookup` layer. `true` (default) matches the
     /// canonical chain. Set `false` to skip caching entirely — useful
@@ -375,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn default_chain_layers_match_documented_onion() {
         // Validators present, events present → full onion.
-        use crate::validation::{OutputValidator, builtin::NotEmptyValidator};
+        use crate::middleware::validation::{OutputValidator, builtin::NotEmptyValidator};
         use tars_storage::{
             SqliteBodyStore, SqliteBodyStoreConfig, SqlitePipelineEventStore,
             SqlitePipelineEventStoreConfig,
@@ -476,7 +488,7 @@ mod tests {
 
         let mut opts = PipelineOpts::new(ProviderId::new("p"));
         opts.cache = false;
-        opts.retry = Some(crate::retry::RetryConfig {
+        opts.retry = Some(crate::middleware::retry::RetryConfig {
             max_attempts: 1,
             initial_backoff: Duration::ZERO,
             max_backoff: Duration::ZERO,
@@ -486,7 +498,7 @@ mod tests {
             max_wait: Duration::MAX,
             jitter: Duration::ZERO,
         });
-        opts.circuit_breaker = Some(crate::circuit_breaker::CircuitBreakerConfig {
+        opts.circuit_breaker = Some(crate::middleware::circuit_breaker::CircuitBreakerConfig {
             failure_threshold: 2,
             cooldown: Duration::from_secs(30),
         });

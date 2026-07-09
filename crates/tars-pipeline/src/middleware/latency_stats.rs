@@ -1,5 +1,5 @@
 //! Per-provider rolling latency stats — the minimal B-8 metrics slice
-//! that feeds [`crate::routing::LatencyPolicy`].
+//! that feeds [`crate::middleware::routing::LatencyPolicy`].
 //!
 //! Scope is deliberately small: a bounded rolling window of recent
 //! dispatch latencies per provider, plus percentile/mean readout. This
@@ -9,7 +9,7 @@
 //! `CircuitBreaker` already keeps, that a routing policy can consult at
 //! selection time.
 //!
-//! Fed by [`crate::routing::RoutingService`] (constructed via
+//! Fed by [`crate::middleware::routing::RoutingService`] (constructed via
 //! `with_latency_stats`), which records each successful provider
 //! dispatch's latency. Read by `LatencyPolicy`, which reorders
 //! candidates by the chosen metric.

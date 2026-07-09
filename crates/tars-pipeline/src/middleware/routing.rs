@@ -66,7 +66,7 @@ use tars_types::{
     Pricing, ProviderError, ProviderId, RequestContext,
 };
 
-use crate::latency_stats::{LatencyMetric, LatencyStatsRegistry};
+use crate::middleware::latency_stats::{LatencyMetric, LatencyStatsRegistry};
 use crate::service::LlmService;
 
 /// Decide which providers can serve `req`, in priority order.
@@ -1165,7 +1165,7 @@ mod tests {
 
     // ── LatencyPolicy (B-8) ─────────────────────────────────────────────
 
-    use crate::latency_stats::{LatencyMetric, LatencyStatsRegistry};
+    use crate::middleware::latency_stats::{LatencyMetric, LatencyStatsRegistry};
 
     #[tokio::test]
     async fn latency_policy_orders_candidates_fastest_first() {

@@ -550,7 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn validation_summary_propagates_into_event() {
-        use crate::validation::{
+        use crate::middleware::validation::{
             OutputValidator, ValidationMiddleware, builtin::MaxLengthValidator,
         };
 
@@ -588,7 +588,7 @@ mod tests {
         // `validation_reason` (it can't ride `validation_summary` — a
         // reject short-circuits before a Response). EventEmitter sees the
         // reject as `Err(ValidationFailed)` from its inner.call().
-        use crate::validation::{
+        use crate::middleware::validation::{
             OutputValidator, ValidationMiddleware, builtin::NotEmptyValidator,
         };
         use tars_types::ValidationReason;
