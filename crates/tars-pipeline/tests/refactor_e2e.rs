@@ -1,10 +1,9 @@
 //! End-to-end tests for the refactors in commits cf818a5 / 426b2fb /
 //! 979dd4d / bf1b61f — beyond the per-batch unit tests, these exercise
-//! the boundary contracts that matter to consumers: which `ProviderError`
-//! variants a `FallbackTrigger::cost_related` / `availability` actually
-//! catches, how `PerCallBudgetMiddleware::try_*` behaves wrapped into
-//! a real pipeline, and what `read_policy_raw` / `CircuitBreaker::check`
-//! return under intentionally-induced lock poisoning.
+//! the boundary contracts that matter to consumers: typed equality on
+//! `ProviderErrorKind` sets, how `PerCallBudgetMiddleware::try_*` behaves
+//! wrapped into a real pipeline, and what `read_policy_raw` /
+//! `CircuitBreaker::check` return under intentionally-induced lock poisoning.
 
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};

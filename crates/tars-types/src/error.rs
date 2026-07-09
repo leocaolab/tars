@@ -9,8 +9,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::chat::CompatibilityReason;
-use crate::ids::ProviderId;
 use crate::validation::ValidationReason;
 
 #[derive(Debug, Error)]
@@ -47,8 +45,9 @@ pub enum ProviderError {
     /// Circuit breaker is open for this provider — recent failure rate
     /// crossed the configured threshold. The breaker rejects calls
     /// without contacting the provider until `until`.
-    /// Class is Retriable so a RoutingService fallback chain skips to
-    /// the next candidate immediately. Doc 02 §4.7.
+    /// Class is Retriable so a fallback chain (a caller composing
+    /// several `LlmService`s) skips to the next candidate immediately.
+    /// Doc 02 §4.7.
     #[error("circuit open until {until:?}")]
     CircuitOpen { until: std::time::Instant },
 
@@ -75,31 +74,6 @@ pub enum ProviderError {
     /// system prompt updated to stop suggesting it).
     #[error("model called unknown tool: {name}")]
     UnknownTool { name: String },
-
-    /// Routing layer exhausted its fallback chain because every
-    /// candidate was incompatible with the request's feature set
-    /// (tools / thinking / context / etc.) — see
-    /// [`crate::CompatibilityReason`]. Surfaced by `RoutingService`
-    /// when **no candidate was even contacted** (every one was
-    /// skipped via local capability check).
-    ///
-    /// **Permanent class** — retry won't help because the request
-    /// shape is fundamentally incompatible with every provider in
-    /// the chain. Caller needs to either (a) widen the candidate
-    /// list to include a provider with the missing capability, or
-    /// (b) modify the request to drop the unsupported feature.
-    ///
-    /// Each entry in `skipped` carries the candidate id + the
-    /// specific reasons that candidate was skipped, so callers (and
-    /// log aggregators) can branch / facet on the structured detail
-    /// rather than parse the message string.
-    #[error(
-        "no candidate could honour request capabilities; skipped {} providers",
-        skipped.len()
-    )]
-    NoCompatibleCandidate {
-        skipped: Vec<(ProviderId, Vec<CompatibilityReason>)>,
-    },
 
     /// `ValidationMiddleware` rejected the response from an
     /// `OutputValidator::Reject` outcome. Always classified as
@@ -147,7 +121,6 @@ impl ProviderError {
             | ContentFiltered { .. }
             | BudgetExceeded
             | UnknownTool { .. }
-            | NoCompatibleCandidate { .. }
             | ValidationFailed { .. } => ErrorClass::Permanent,
             Parse(_) | Internal(_) | CliSubprocessDied { .. } => ErrorClass::MaybeRetriable,
         }
@@ -166,8 +139,9 @@ impl ProviderError {
     }
 
     /// Typed discriminator — the variant of this error as a value type
-    /// (no payload), useful for: trigger matching ([`crate`]'s
-    /// `FallbackTrigger`), telemetry (`RetryAttempt.error_kind`),
+    /// (no payload), useful for: trigger matching (a fallback chain
+    /// deciding whether to try the next provider), telemetry
+    /// (`RetryAttempt.error_kind`),
     /// Python-side classification (`TarsProviderError.kind`), and the
     /// `LlmCallFinished` event's `CallResult::Error { kind }`. Round-
     /// trips to the same snake_case string everywhere via serde and
@@ -188,7 +162,6 @@ impl ProviderError {
             Parse(_) => K::Parse,
             CliSubprocessDied { .. } => K::CliSubprocessDied,
             UnknownTool { .. } => K::UnknownTool,
-            NoCompatibleCandidate { .. } => K::NoCompatibleCandidate,
             ValidationFailed { .. } => K::ValidationFailed,
             Internal(_) => K::Internal,
         }
@@ -216,7 +189,6 @@ pub enum ProviderErrorKind {
     Parse,
     CliSubprocessDied,
     UnknownTool,
-    NoCompatibleCandidate,
     ValidationFailed,
     Internal,
 }
@@ -241,7 +213,6 @@ impl ProviderErrorKind {
             Parse => "parse",
             CliSubprocessDied => "cli_subprocess_died",
             UnknownTool => "unknown_tool",
-            NoCompatibleCandidate => "no_compatible_candidate",
             ValidationFailed => "validation_failed",
             Internal => "internal",
         }

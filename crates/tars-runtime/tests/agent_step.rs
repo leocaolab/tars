@@ -7,7 +7,7 @@
 //! tars-runtime::execute_agent_step
 //!  ├── Agent::execute (via SingleShotAgent)
 //!  │    └── ctx.llm: LlmService  ← from tars-pipeline
-//!  │          └── ProviderService → MockProvider (tars-provider)
+//!  │          └── LlmService terminal → MockProvider (tars-provider)
 //!  └── runtime.append → SqliteAgentEventLog (tars-storage on disk)
 //! ```
 //!
@@ -34,8 +34,8 @@ async fn full_stack_agent_step_lands_in_trajectory_log() {
         open_agent_event_log_at_path(&dir.path().join("events.sqlite")).unwrap();
     let runtime = LocalRuntime::new(store.clone());
 
-    // Pipeline with just ProviderService at the leaf — keep the
-    // pipeline minimal so any failure points at the agent code, not
+    // LlmService with just the provider terminal at the leaf — keep the
+    // chain minimal so any failure points at the agent code, not
     // a middleware quirk.
     let mock_provider = MockProvider::new("mock_for_agent", CannedResponse::text("hello"));
     let inner: LlmService = LlmService::of(mock_provider, "gpt-4o");

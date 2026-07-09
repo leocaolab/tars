@@ -6,7 +6,6 @@
 //! back exactly the JSON shape a real model would emit when given the
 //! critique system prompt + the strict Verdict JSON schema.
 
-use std::sync::Arc;
 
 use tars_pipeline::LlmService;
 use tars_provider::backends::mock::{CannedResponse, MockProvider};

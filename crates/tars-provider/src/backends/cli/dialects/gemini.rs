@@ -230,7 +230,7 @@ fn extract_usage(payload: &Value, model: &str) -> Usage {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tars_types::{ModelHint, ModelTier};
+    
 
     fn dialect() -> GeminiCliDialect {
         GeminiCliDialect::new("gemini".into(), Duration::from_secs(300))

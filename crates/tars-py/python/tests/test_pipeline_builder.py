@@ -17,7 +17,7 @@ MODEL = "qwen/qwen3-coder-30b"
 
 def test_builder_exported_and_constructs():
     b = tars.Pipeline.builder(PROVIDER_ID)
-    assert isinstance(b, tars.PipelineBuilder)
+    assert isinstance(b, tars.LlmServiceBuilder)
     assert "qwen_coder_local" in repr(b)
 
 

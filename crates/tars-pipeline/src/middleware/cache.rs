@@ -45,16 +45,16 @@ use tars_types::{
 use crate::middleware::Middleware;
 use crate::service::Next;
 
-/// Builder-and-factory for [`CacheLookupService`]. The inner Arcs are
+/// Builder-and-factory for [`CacheLookupMiddleware`]. The inner Arcs are
 /// the real moving parts; the middleware is just a thin layer holder.
 #[derive(Clone)]
 pub struct CacheLookupMiddleware {
     registry: Arc<dyn CacheRegistry>,
     factory: CacheKeyFactory,
-    /// Identifier stamped on `CachedResponse.origin_provider`. M1 has
-    /// no Routing layer, so the binding to a single provider id at
-    /// build time is fine; once Routing exists this becomes a hint
-    /// the inner service overrides per call.
+    /// Identifier stamped on `CachedResponse.origin_provider`. Each
+    /// `LlmService` binds to a single provider id at build time; a
+    /// caller that wants provider fallback composes several
+    /// `LlmService`s, each carrying its own origin id.
     origin_provider: ProviderId,
 }
 
@@ -364,7 +364,7 @@ fn is_cacheable_outcome(response: &ChatResponse) -> bool {
 /// Callers that need a hard guarantee that their policy was applied
 /// (e.g. compliance-driven cache disable) should write to
 /// `ctx.attributes` themselves and surface the lock-poisoning error,
-/// or check the resulting policy via [`read_policy`] in their own
+/// or check the resulting policy via `read_policy` in their own
 /// audit path. The signature stays `()` here because policy-setting
 /// is an advisory hint, not a request-critical operation.
 pub fn set_cache_policy(ctx: &RequestContext, policy: &CachePolicy) {

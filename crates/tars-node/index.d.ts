@@ -21,22 +21,39 @@ export interface JsContext {
   tags?: Array<string>
 }
 /**
- * Load the process-global config **once** (Doc 06 §C1): providers + keys +
- * tier routing + any global `[roles]`, built from `~/.tars/config.toml`
- * (or `--tars_home` / `$TARS_HOME`; `home` overrides). Also eagerly builds
- * the shared provider registry so a bad provider/key surfaces here, at
- * startup, rather than on the first role resolution — and so opening a second
- * workspace never rebuilds it. Idempotent (a second call is a no-op).
+ * Load the process-global config + build the shared provider registry once
+ * (Doc 06 §C1). Idempotent (a second call is a no-op). A bad provider / key
+ * surfaces here, at startup, not on the first role resolution.
  */
 export declare function init(home?: string | undefined | null): void
 /** Whether [`init`] has run (the global config is loaded). */
 export declare function isInitialized(): boolean
 /**
- * Resolve the tars home dir that [`init`] would read from
- * (`home` > `$TARS_HOME` > `~/.tars`). `None` only when no home is
- * discoverable at all.
+ * Resolve the tars home dir (`home` > `$TARS_HOME` > `~/.tars`) without
+ * loading anything. `None` only when no home is discoverable.
  */
 export declare function tarsHome(home?: string | undefined | null): string | null
+/**
+ * Resolve `role` → a raw [`Provider`] (layer 1) against the process-global
+ * config + registry. Optional `ctx` binds an explicit call context.
+ */
+export declare function provider(role: string, ctx?: JsContext | undefined | null): Provider
+/**
+ * Resolve `role` → a middleware-wrapped [`Pipeline`] (the canonical default
+ * chain) against the process-global config + registry. Optional `ctx` binds
+ * an explicit call context.
+ */
+export declare function pipeline(role: string, ctx?: JsContext | undefined | null): Pipeline
+/**
+ * Resolve `path` to a canonical workspace root for `tool` (walk-up; `.<tool>/`
+ * marker beats `.git`). `null` when neither a marker nor `.git` is found.
+ */
+export declare function resolveWorkspaceRoot(tool: string, path: string): string | null
+/**
+ * The per-project store dir for `tool` under `root`: `<root>/.<tool>/tars/`.
+ * A plain path — the caller opens whatever stores it wants there.
+ */
+export declare function workspaceStoreDir(tool: string, root: string): string
 /**
  * Smoke-test export — `import { hello } from '@leocaolab/tars-node'`
  * and `hello('world')` returns `'tars-node says hi, world'`. Pure
@@ -65,7 +82,7 @@ export interface BlessResult {
  */
 export declare function blessCheck(path: string, text: string): BlessResult
 /**
- * Options for [`Pipeline::complete`]. Mirrors `tars-py`'s
+ * Options for [`LlmService::complete`]. Mirrors `tars-py`'s
  * `Pipeline.complete(**kwargs)` in camelCase.
  */
 export interface CompleteOptions {
@@ -101,7 +118,7 @@ export interface CompleteOptions {
   /** Free-form cohort tags surfaced in trajectory + event logs. */
   tags?: Array<string>
 }
-/** Result shape from [`Pipeline::complete`]. */
+/** Result shape from [`LlmService::complete`]. */
 export interface CompleteResult {
   /** Aggregated assistant text. */
   text: string
@@ -124,83 +141,9 @@ export interface UsageJs {
   thinkingTokens: number
 }
 /**
- * Multi-workspace manager — the napi mirror of
- * `Mutex<HashMap<canonical_root, Tars>>` (Doc 06 §10). One per tool. Opening a
- * second workspace does **not** rebuild the global registry; `close` cancels +
- * drops the scope.
- */
-export declare class Workspaces {
-  /**
-   * A manager for `tool` (e.g. `"arc"`). Its marker dir (`.<tool>/`) is what
-   * [`Workspaces::open`] walks up to find.
-   */
-  constructor(tool: string)
-  /**
-   * Resolve `path` to a canonical workspace root (`.<tool>/` marker beats
-   * `.git` — the monorepo rule; a bare dir with neither is opened as its own
-   * root) and return the cached-or-newly-opened handle.
-   */
-  open(path: string): TarsHandle
-  /** The already-open handle for `path`, or `null` if not open. Does not open. */
-  get(path: string): TarsHandle | null
-  /**
-   * Close `path`: remove it from the map and cancel its scope. Returns
-   * whether a handle was open. The scope's stores drain once any in-flight
-   * job releases its `Arc` (deterministic `Drop`).
-   */
-  close(path: string): boolean
-  /** Canonical roots currently open. */
-  roots(): Array<string>
-  /** Close every open workspace (cancel + drop each scope). */
-  closeAll(): void
-}
-/**
- * A per-scope handle bound to one workspace (or standalone). Cheap to hold —
- * shares the underlying [`Tars`] scope by `Arc`, plus the explicit
- * [`RequestContext`] this handle carries into its calls (default: a fresh
- * single-user context; override with [`TarsHandle::context`]).
- */
-export declare class TarsHandle {
-  /**
-   * A handle with no workspace (Doc 06 §7 standalone): store lives under
-   * `~/.tars/standalone/<tool>/<session>/`. `session` defaults to `"local"`.
-   */
-  static standalone(tool: string, session?: string | undefined | null): TarsHandle
-  /**
-   * Open a handle for an explicit workspace `root` (no walk-up). Prefer
-   * [`Workspaces::open`] for the cached/marker-resolving path; this is the
-   * direct `--workspace <dir>` form.
-   */
-  static forWorkspace(tool: string, root: string): TarsHandle
-  /**
-   * A derived handle that carries the given explicit [`JsContext`] into every
-   * call it makes (the FFI ctx boundary — see [`crate::ctx`]). Shares the same
-   * underlying scope; only the context differs.
-   */
-  context(ctx: JsContext): TarsHandle
-  /**
-   * Layer 1 — the raw provider for `role` (no middleware), resolved via the
-   * workspace `[roles]` map → global `[roles]` → tier → literal id.
-   */
-  provider(role: string): Provider
-  /**
-   * Layer 2 — the middleware-wrapped pipeline for `role`, with this scope's
-   * event sink wired in. Same `complete()` surface as [`Provider`].
-   */
-  pipeline(role: string): Pipeline
-  /** The canonical workspace root this handle is bound to. */
-  root(): string
-  /** The tool this handle was opened for. */
-  get tool(): string
-  /**
-   * Cancel this scope's in-flight work (idempotent). The `Workspaces`
-   * lifecycle owns removal from the map; this just fires the token.
-   */
-  close(): void
-}
-/**
- * Layer 1 provider handle — a raw backend bound to a role + this scope's ctx.
- * Same call surface as [`Pipeline`] so a caller can swap one for the other.
+ * Layer 1 provider handle — a raw backend bound to a role + call context.
+ * Same `complete()` surface as [`Pipeline`] so a caller can swap one for the
+ * other.
  */
 export declare class Provider {
   /** The role name this provider was resolved for. */

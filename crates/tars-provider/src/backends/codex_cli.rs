@@ -145,7 +145,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::Value;
-    use tars_types::{ChatRequest, ModelHint, ProviderError, RequestContext};
+    use tars_types::{ChatRequest, ProviderError, RequestContext};
 
     use crate::provider::LlmProvider;
 

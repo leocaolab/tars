@@ -279,7 +279,7 @@ fn clone_provider_error(e: &ProviderError) -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_types::{ChatRequest, ModelHint, RequestContext};
+    use tars_types::{ChatRequest, RequestContext};
 
     fn req(text: &str) -> ChatRequest {
         ChatRequest::user(text)

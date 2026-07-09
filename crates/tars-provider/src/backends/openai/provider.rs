@@ -435,7 +435,7 @@ impl OpenAiProvider {
 #[cfg(test)]
 mod dialect_seam_tests {
     use super::*;
-    use tars_types::{Message, ModelHint};
+    use tars_types::Message;
 
     /// M0 seam: a provider built without an explicit dialect defaults to
     /// `StandardDialect`, and the public request path routes THROUGH it. The

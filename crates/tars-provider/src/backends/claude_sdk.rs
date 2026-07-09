@@ -690,7 +690,7 @@ struct RawUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_types::ModelHint;
+    
 
     #[test]
     fn serialize_single_user_message() {

@@ -26,7 +26,6 @@ fn expected_kind_wire_pairs() -> Vec<(ProviderErrorKind, &'static str)> {
         (K::Parse, "parse"),
         (K::CliSubprocessDied, "cli_subprocess_died"),
         (K::UnknownTool, "unknown_tool"),
-        (K::NoCompatibleCandidate, "no_compatible_candidate"),
         (K::ValidationFailed, "validation_failed"),
         (K::Internal, "internal"),
     ]

@@ -162,7 +162,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
-    use tars_types::{ModelHint, ModelTier};
+    
 
     fn dialect() -> ClaudeCliDialect {
         ClaudeCliDialect::new(

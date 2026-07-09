@@ -60,7 +60,7 @@ fn registry_from_toml(toml_str: &str) -> ProviderRegistry {
 // ── 1. Happy path ───────────────────────────────────────────────────────────
 //
 // Wiremock returns one full streaming response. The pipeline (Telemetry +
-// Retry + ProviderService → real OpenAI HTTP adapter) parses it and we
+// Retry → real OpenAI HTTP adapter at the provider terminal) parses it and we
 // assert the final Finished event carries the usage from the SSE bytes
 // (proves the parser ran inside the pipeline, not just on a fake stream).
 
@@ -207,9 +207,9 @@ async fn retry_middleware_actually_replays_http_call_on_5xx() {
 //
 // Smaller smoke test: the only assertion is that the type chain
 // (TOML → ProvidersConfig → ProviderRegistry → Arc<dyn LlmProvider>
-// → Pipeline → Arc<dyn LlmService>) actually compiles + runs through
-// to a successful pipeline.call(). Catches Arc/dyn/trait-object mismatches
-// that compile in isolation but break when composed.
+// → LlmService default chain) actually compiles + runs through to a
+// successful svc.call(). Catches Arc/dyn/trait-object mismatches that
+// compile in isolation but break when composed.
 
 #[tokio::test]
 async fn registry_built_from_toml_can_drive_pipeline_call() {

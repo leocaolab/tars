@@ -12,10 +12,14 @@
 //!
 //! ## Design notes
 //!
-//! Both `Provider` and `Pipeline` hold an `Arc<dyn LlmService>` —
-//! they only differ in construction. Sharing the call-site machinery
-//! lets the Python API stay symmetric: a user can swap `Provider` for
-//! `Pipeline` (or vice versa) without changing call sites.
+//! `LlmService` is a concrete struct (one provider + one model + an
+//! ordered list of middleware), so both surfaces build one per call
+//! once the caller names the model: `Provider` holds the raw
+//! `Arc<dyn LlmProvider>` and wraps it with `LlmService::of`, while
+//! `Pipeline` holds a factory that assembles the model-bound middleware
+//! chain (`LlmService::default_chain`). They share the same `complete()`
+//! surface, so a user can swap `Provider` for `Pipeline` (or vice versa)
+//! without changing call sites.
 //!
 //! Async is bridged via a process-wide multi-threaded tokio runtime
 //! (`TOKIO`). `complete()` releases the GIL via `py.allow_threads`

@@ -31,9 +31,9 @@
 //! `N`s. Single-client callers leave it at zero.
 //!
 //! `max_wait` caps how long we'll honour a `Retry-After`. Past the
-//! cap, we bubble the error unchanged so an outer FallbackMiddleware
-//! (or the caller) can decide — agents should never sleep 30 minutes
-//! inside a single call. See `docs/roadmap.md §1`.
+//! cap, we bubble the error unchanged so the caller — e.g. a fallback
+//! chain composing several `LlmService`s — can decide; agents should
+//! never sleep 30 minutes inside a single call. See `docs/roadmap.md §1`.
 
 use std::time::Duration;
 
@@ -62,9 +62,9 @@ pub struct RetryConfig {
     pub max_attempts_maybe_retriable: u32,
     /// Upper bound on how long we'll wait between attempts — applies to
     /// both `Retry-After` headers and computed backoff. If the wait we'd
-    /// pick exceeds this, the error bubbles up unchanged so an outer
-    /// `FallbackMiddleware` (or the caller) can switch providers
-    /// instead of sleeping. Default: 30 s. Set to `Duration::MAX` to
+    /// pick exceeds this, the error bubbles up unchanged so the caller
+    /// (e.g. a fallback chain over several `LlmService`s) can switch
+    /// providers instead of sleeping. Default: 30 s. Set to `Duration::MAX` to
     /// disable (don't — agents shouldn't sleep for minutes).
     pub max_wait: Duration,
     /// Maximum random jitter ADDED to each *computed* backoff, to de-sync
@@ -209,10 +209,10 @@ impl Middleware for RetryMiddleware {
                 (with_jitter(backoff, cfg.jitter), false)
             };
 
-            // Don't sleep past the cap — bubble the error so an outer
-            // FallbackMiddleware (or the caller) can switch providers
-            // instead. Agents are not meant to sleep for minutes
-            // inside a single call.
+            // Don't sleep past the cap — bubble the error so the caller
+            // (e.g. a fallback chain over several `LlmService`s) can
+            // switch providers instead. Agents are not meant to sleep
+            // for minutes inside a single call.
             if wait > cfg.max_wait {
                 tracing::debug!(
                     attempt,
@@ -536,8 +536,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn bubbles_when_retry_after_exceeds_max_wait() {
         // Provider says "wait 5 minutes", but we cap at 10 s — bubble
-        // the original error so an outer FallbackMiddleware can
-        // switch providers instead of sleeping.
+        // the original error so the caller (a fallback chain over several
+        // `LlmService`s) can switch providers instead of sleeping.
         let cfg = RetryConfig {
             max_attempts: 5,
             initial_backoff: Duration::ZERO,
@@ -563,8 +563,9 @@ mod tests {
             .await
             .err()
             .expect("bubble RateLimited");
-        // Must surface the *original* RateLimited so FallbackMiddleware
-        // (or the caller) can pattern-match on `retry_after`.
+        // Must surface the *original* RateLimited so the caller (a
+        // fallback chain over several `LlmService`s) can pattern-match
+        // on `retry_after`.
         match err {
             ProviderError::RateLimited { retry_after } => {
                 assert_eq!(retry_after, Some(Duration::from_secs(300)));

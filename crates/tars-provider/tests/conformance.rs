@@ -281,7 +281,7 @@ macro_rules! conformance_suite {
         mod $name {
             use super::*;
 
-            fn req(model: &str) -> ChatRequest {
+            fn req(_model: &str) -> ChatRequest {
                 ChatRequest::user("x")
             }
 

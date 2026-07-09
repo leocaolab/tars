@@ -241,7 +241,7 @@ impl Invariant for ValidatorInvariant {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_types::{ChatResponse, ModelHint, StopReason, Usage};
+    use tars_types::{ChatResponse, StopReason, Usage};
 
     fn req() -> ChatRequest {
         ChatRequest::user("x")

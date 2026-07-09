@@ -9,15 +9,15 @@ use one Rust-backed handle for any provider — `claude` / `openai` / `gemini` /
 `vllm` / `mlx` / `llamacpp` / `claude_cli` / `gemini_cli` / `claude_sdk` /
 `codex_cli`.
 
-> **Status — `0.2.0-alpha.0` (scaffold, M1)**
+> **Status — `0.2.0-alpha.0` (alpha)**
 >
 > The build pipeline (cargo + napi-build → `libtars_node.dylib` →
 > `napi build` → `.node` + `index.js` + `index.d.ts`) is in place and
-> the JS-side smoke test rounds-trips through the napi boundary. The
-> milestone after this (M2) wires `Pipeline.complete()` against the
-> real `Arc<dyn LlmService>` — until M2 lands, `complete()` returns a
-> synthetic echo so the marshalling can be exercised without a
-> provider. **Do not depend on this for production calls yet.**
+> `complete()` drives a real provider through TARS's middleware chain
+> (a concrete `LlmService`). The role spine (`init` / `provider(role)` /
+> `pipeline(role)`) resolves roles against the process-global config.
+> The public surface is still **provisional** and may change before a
+> stable release.
 
 ## Build
 
@@ -109,7 +109,7 @@ node examples/node/schema-validation.mjs                          # replay (offl
 ## Why a separate binding?
 
 Same answer as `tars-py`: every layer above the provider — cache, retry,
-fallback routing, telemetry, validation, circuit breaker, budget — is
+telemetry, validation, circuit breaker, budget — is
 Rust code we don't want to re-implement in TypeScript. The binding
 hands a single handle (`Pipeline`) across the FFI boundary; the Node
 caller never sees the middleware chain, just `complete(opts) → Promise<result>`.
@@ -118,13 +118,12 @@ caller never sees the middleware chain, just `complete(opts) → Promise<result>
 
 | Milestone | What lands |
 |-----------|------------|
-| **M1** (this release) | scaffold, build pipeline, smoke test |
-| **M2** | real `Pipeline.complete()` wired to `Arc<dyn LlmService>` |
-| **M3** | `npm publish` of platform-tagged tarballs (darwin x64/arm64, linux gnu x64/arm64) |
-| M4 | streaming (`stream()` → AsyncIterator over ChatEvent) |
-| M5 | `run_task(...)` over the DAG executor (Doc 04 §4) |
-| M6 | tool calling, tool_choice, structured tool results |
-| M7 | per-call cancellation token |
+| ✅ done | scaffold + build pipeline, real `complete()` through the middleware chain, role spine (`init` / `provider` / `pipeline`) |
+| next | `npm publish` of platform-tagged tarballs (darwin x64/arm64, linux gnu x64/arm64) |
+| later | streaming (`stream()` → AsyncIterator over ChatEvent) |
+| later | `run_task(...)` over the DAG executor (Doc 04 §4) |
+| later | tool calling, tool_choice, structured tool results |
+| later | per-call cancellation token |
 
 Out of scope for the napi binding: spawning agents (use the Rust
 runtime in-process); training / fine-tuning (not in TARS scope at all).
@@ -137,9 +136,9 @@ runtime in-process); training / fine-tuning (not in TARS scope at all).
   as `tars-py::TOKIO`. Each `complete()` blocks on this runtime via
   `napi-rs`'s async glue; the JS caller's event loop is never
   serialised.
-- `Pipeline` napi class holds `Arc<dyn LlmService>` once `from_config_path`
-  resolves the provider through `ProviderRegistry::from_config` +
-  `tars_pipeline::Pipeline::builder_with_inner`.
+- `Pipeline` napi class holds a concrete `LlmService` once `from_config_path`
+  resolves the provider through `ProviderRegistry::from_config_default` +
+  `LlmService::default_chain`.
 - Request building (`CompleteOptions` → `ChatRequest`) is in-line —
   the napi-friendly camelCase struct maps 1:1 to the snake_case
   ChatRequest fields. JSON Schemas pass through as opaque

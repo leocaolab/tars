@@ -667,7 +667,7 @@ mod tests {
     async fn cassette_records_then_replays_via_config() {
         use crate::provider::LlmProvider;
         use futures::StreamExt;
-        use tars_types::{ChatEvent, ChatRequest, ModelHint, RequestContext};
+        use tars_types::{ChatEvent, ChatRequest, RequestContext};
 
         let path = std::env::temp_dir()
             .join(format!("tars_cassette_cfg_{}.json", std::process::id()));
@@ -797,7 +797,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_provider_built_from_config_actually_responds() {
-        use tars_types::{ChatRequest, ModelHint, RequestContext};
+        use tars_types::{ChatRequest, RequestContext};
 
         let cfg = ConfigManager::load_from_str(
             r#"

@@ -48,7 +48,7 @@ impl LlmProvider for EventQueueProvider {
     async fn stream(
         self: Arc<Self>,
         _req: ChatRequest,
-        model: &str,
+        _model: &str,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let next = self

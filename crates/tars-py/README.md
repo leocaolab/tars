@@ -154,20 +154,16 @@ for role, reqs in roles.items():
 ```python
 try:
     p.complete(model="...", user="...")
-except tars.TarsRoutingExhaustedError as e:
-    # e.skipped_candidates: list[tuple[provider_id, list[CompatibilityReason]]]
-    for pid, reasons in e.skipped_candidates:
-        log.warn(f"{pid} skipped: {[r.kind for r in reasons]}")
 except tars.TarsProviderError as e:
     if e.kind == "rate_limited":
         await asyncio.sleep(e.retry_after or 30)
     elif e.kind == "validation_failed" and not e.is_retriable:
-        log.fatal(f"validator rejected output permanently: {e}")
+        log.fatal(f"validator {e.validator} rejected output permanently: {e}")
     elif e.kind == "unknown_tool":
         log.fatal(f"register tool {e.tool_name}")
 ```
 
-Hierarchy: `TarsError` → `TarsConfigError` / `TarsProviderError` / `TarsRuntimeError`. Subclasses (e.g. `TarsRoutingExhaustedError`) for variants needing structured access; generic catch-all (`except TarsProviderError`) still matches.
+Hierarchy: `TarsError` → `TarsConfigError` / `TarsProviderError` / `TarsRuntimeError` / `TarsHandleError`. `TarsProviderError` carries structured attributes (`kind`, `retry_after`, `is_retriable`, plus per-variant fields like `validator` / `tool_name`) so callers branch on structure rather than the message; the generic catch-all (`except TarsProviderError`) still matches every backend error.
 
 ## Tests
 

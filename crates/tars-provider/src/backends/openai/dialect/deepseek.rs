@@ -54,7 +54,7 @@ mod tests {
     use super::*;
     use crate::backends::openai::provider::DEFAULT_BASE_URL;
     use crate::http_base::HttpProviderExtras;
-    use tars_types::{Message, ModelHint, StructuredOutputMode};
+    use tars_types::{Message, StructuredOutputMode};
 
     fn req(t: ThinkingMode) -> ChatRequest {
         ChatRequest {

@@ -15,7 +15,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { init, Workspaces } from '../index.js';
+import { init, provider, pipeline } from '../index.js';
 
 const HOME = mkdtempSync(join(tmpdir(), 'tars-node-unknown-home-'));
 writeFileSync(
@@ -34,23 +34,18 @@ critic = "mock1"
 `,
 );
 
-const WORKSPACE = mkdtempSync(join(tmpdir(), 'tars-node-unknown-ws-'));
-
 test('an unmapped role throws with a discriminable .code = TarsUnknownRole', () => {
   init(HOME);
-  const ws = new Workspaces('arc');
-  const handle = ws.open(WORKSPACE);
 
   // Mapped role still resolves through the flat [roles] map.
-  assert.equal(handle.provider('critic').role, 'critic');
+  assert.equal(provider('critic').role, 'critic');
 
   // Unmapped: not in [roles], not a tier, not a literal provider id, no
   // `default` tier, and >1 provider so no sole-provider fallback → typed error.
   try {
-    handle.pipeline('no_such_role');
+    pipeline('no_such_role');
     assert.fail('expected pipeline() to throw for an unmapped role');
   } catch (e) {
     assert.equal(e.code, 'TarsUnknownRole');
   }
-  ws.closeAll();
 });

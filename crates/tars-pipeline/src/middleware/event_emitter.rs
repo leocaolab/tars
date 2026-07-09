@@ -76,8 +76,9 @@ impl Middleware for EventEmitterMiddleware {
         let tags = ctx.tags.clone();
 
         // Capture inline request properties before moving into inner.
-        // `provider_id` is stamped on telemetry by `ProviderService`
-        // once routing resolves; we read it back in `build_event`.
+        // `provider_id` is stamped on telemetry by the `LlmService`
+        // provider terminal once the call reaches the provider; we read
+        // it back in `build_event`.
         // None here = "not resolved yet"; when no provider ever ran
         // (cache hit short-circuit, early validation failure) the
         // event will carry `provider_id: None` rather than the legacy
@@ -296,8 +297,8 @@ fn build_event(i: EventInputs) -> LlmCallFinished {
         }
     };
 
-    // Provider id is stamped onto telemetry by `ProviderService` once
-    // routing has resolved which provider runs. If telemetry never
+    // Provider id is stamped onto telemetry by the `LlmService` provider
+    // terminal once the call reaches the provider. If telemetry never
     // saw a provider (cache hit short-circuited, early validation
     // failure, …) the event simply carries `provider_id: None`. No
     // sentinel string anymore — ARC-L5-SW-10 killed the "unresolved"

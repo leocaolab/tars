@@ -9,7 +9,7 @@
 //! underlying error text (never a sterile sentinel that throws the truth away).
 //!
 //! ```js
-//! try { handle.pipeline('critic'); }
+//! try { pipeline('critic'); }
 //! catch (e) {
 //!   if (e.code === 'TarsUnknownRole') { /* branch on the variant */ }
 //! }
@@ -17,8 +17,8 @@
 //!
 //! ## Sync vs async
 //!
-//! Every **synchronous** boundary (`init`, `Workspaces.open`,
-//! `TarsHandle.provider` / `.pipeline`, …) returns `Result<T, String>` — the
+//! Every **synchronous** boundary (`init`, `provider(role)` /
+//! `pipeline(role)`, `resolveWorkspaceRoot`, …) returns `Result<T, String>` — the
 //! napi alias `Result<T, S = Status>` with `S = String`, i.e.
 //! `Result<T, napi::Error<String>>` — so `.code` is our domain string.
 //! The **async** `complete()` path is locked by napi to

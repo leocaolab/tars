@@ -356,7 +356,7 @@ fn reasoning_text(rc: &ReasoningContentBlock) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tars_types::{JsonSchema, ModelHint, ToolSpec};
+    use tars_types::{JsonSchema, ToolSpec};
 
     #[test]
     fn build_converse_shapes_system_messages_and_tools() {

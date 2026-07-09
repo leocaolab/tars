@@ -70,10 +70,10 @@ pub struct TelemetryAccumulator {
     /// Useful for debugging "why didn't middleware X fire?".
     pub layers: Vec<String>,
 
-    /// `ProviderId` of the provider that actually ran the call,
-    /// resolved post-routing. `None` until the innermost
-    /// `ProviderService` writes it. Read by `EventEmitterMiddleware`
-    /// when building `LlmCallFinished.provider_id`.
+    /// `ProviderId` of the provider that actually ran the call.
+    /// `None` until the `LlmService` provider terminal writes it. Read
+    /// by `EventEmitterMiddleware` when building
+    /// `LlmCallFinished.provider_id`.
     #[serde(default)]
     pub provider_id: Option<String>,
 }

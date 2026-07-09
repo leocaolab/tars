@@ -61,7 +61,7 @@ impl LlmProvider for EventQueueProvider {
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
-        model: &str,
+        _model: &str,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         self.history.lock().unwrap().push(req);

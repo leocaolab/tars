@@ -194,7 +194,7 @@ fn clamp_to_output_budget(
 mod tests {
     use super::*;
     use serde_json::{Value, json};
-    use tars_types::{ModelHint, Usage};
+    use tars_types::Usage;
 
     /// Records the invocation and returns a canned payload — the FakeRunner
     /// pattern from the pre-refactor claude_cli suite.

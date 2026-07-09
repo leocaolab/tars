@@ -27,21 +27,24 @@
 //!     Node process never spawns one per call. napi-rs's `tokio_rt`
 //!     feature dispatches our `async fn` onto it transparently.
 //!   - **`Pipeline.from*` constructors** mirror tars-py
-//!     (`from_config_path` / `from_str` / `from_default`). They run
+//!     (`from_config_path` / `from_str`). They run
 //!     `ConfigManager::load_*` → `ProviderRegistry::from_config` →
-//!     `LlmService::default_chain` and store an `Arc<dyn LlmService>`.
+//!     `LlmService::default_chain` and store a concrete `LlmService`.
+//!   - **Role spine** (`init` / `provider(role)` / `pipeline(role)`)
+//!     resolves a role against the process-global config + registry via
+//!     `tars_handle::resolve_role`, mirroring tars-py's free functions.
 //!   - **`complete(opts)`** maps the napi-friendly camelCase
 //!     `CompleteOptions` → `tars_types::ChatRequest`, drives the
-//!     held `Arc<dyn LlmService>`, drains the event stream into a
+//!     held `LlmService`, drains the event stream into a
 //!     `ChatResponse`, projects to `CompleteResult`.
 //!   - **Errors** map `ConfigError` / `ProviderError` / inner async
 //!     failures to `napi::Error`, which surfaces in JS as a rejected
 //!     Promise.
 //!
-//! Out of scope for this milestone (M2): streaming AsyncIterator,
-//! `run_task(...)` over the DAG executor, tool-calling
-//! marshalling, per-call cancellation tokens, validator chains,
-//! event-store wiring. Each is additive on top of this surface.
+//! Not yet covered by the Node surface: streaming AsyncIterator,
+//! `run_task(...)` over the DAG executor, tool-calling marshalling,
+//! per-call cancellation tokens, validator chains, event-store wiring.
+//! Each is additive on top of this surface.
 
 mod ctx;
 mod errors;
@@ -223,9 +226,9 @@ pub struct Pipeline {
     /// `id` getter so callers can introspect which provider a
     /// handle wraps.
     id: String,
-    /// The assembled middleware-stack-wrapped LlmService. Holds an
-    /// `Arc<dyn LlmService>` so calls don't move it — `complete()`
-    /// can `Arc::clone` and drive on the tokio runtime.
+    /// The assembled middleware-stack-wrapped service. `LlmService` is a
+    /// concrete, cheaply-cloneable struct, so `complete()` clones it and
+    /// drives the clone on the tokio runtime without moving `self`.
     inner: LlmService,
     /// The explicit call context re-scoped onto `RUN_CONTEXT` at the binding
     /// boundary for each `complete()` (Doc 06 §9). The `from_*` factories set a

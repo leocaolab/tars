@@ -30,7 +30,7 @@
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyDict;
 
 use tars_config::ConfigError;
 use tars_types::ValidationReason;
@@ -45,11 +45,6 @@ create_exception!(tars._tars_py, TarsRuntimeError, TarsError);
 // still matches; carries a typed `kind` tag (+ `role`/`tried` for the
 // unknown-role case) so callers branch on structure, not the message.
 create_exception!(tars._tars_py, TarsHandleError, TarsError);
-// Subclass of TarsProviderError — `isinstance(e, TarsProviderError)` still
-// matches, so existing catch-all blocks keep working. Caller can branch
-// on `except TarsRoutingExhaustedError` for typed access to
-// `skipped_candidates` without adding `hasattr` checks on the parent.
-create_exception!(tars._tars_py, TarsRoutingExhaustedError, TarsProviderError);
 
 /// Map a `ConfigError` to its Python exception.
 pub fn config_to_py(err: ConfigError) -> PyErr {
@@ -156,10 +151,7 @@ fn build_provider_exc(
     // gives callers idiomatic `except SubclassError as e` branching with
     // typed attributes; generic variants stay on the base
     // `TarsProviderError`.
-    let exc = match err {
-        ProviderError::NoCompatibleCandidate { .. } => TarsRoutingExhaustedError::new_err(message),
-        _ => TarsProviderError::new_err(message),
-    };
+    let exc = TarsProviderError::new_err(message);
 
     // Common attributes — set on every TarsProviderError (and therefore
     // on subclasses too via Python attribute lookup).
@@ -197,70 +189,9 @@ fn build_provider_exc(
             }
             value.setattr("validation_reason", d)?;
         }
-        ProviderError::NoCompatibleCandidate { skipped } => {
-            // `skipped_candidates: list[(provider_id: str,
-            // reasons: list[CompatibilityReason])]`. Each reason re-uses
-            // the existing `CompatibilityReasonPy` class so callers get
-            // the same kind/message/detail surface they get from
-            // `Pipeline.check_compatibility`.
-            let py_skipped = PyList::empty(py);
-            for (id, reasons) in skipped {
-                let id_str = id.to_string();
-                let py_reasons = PyList::empty(py);
-                for r in reasons {
-                    let kind = r.kind().to_string();
-                    let message = r.to_string();
-                    let detail_json = compat_reason_detail(r);
-                    let item = pyo3::Py::new(
-                        py,
-                        crate::CompatibilityReasonPy {
-                            kind,
-                            message,
-                            detail_json,
-                        },
-                    )?;
-                    py_reasons.append(item)?;
-                }
-                // `(str, list)` → `Bound<PyTuple>`; the tuple's
-                // `IntoPyObject` is fallible, so `?` covers element
-                // conversion without an `unwrap` panic path.
-                let tuple = (id_str, py_reasons).into_pyobject(py)?;
-                py_skipped.append(tuple)?;
-            }
-            value.setattr("skipped_candidates", py_skipped)?;
-        }
         _ => {}
     }
     Ok(exc)
-}
-
-/// Mirror of the detail-extraction logic in `compatibility_to_py` so
-/// the same structured fields show up on `TarsRoutingExhaustedError`'s
-/// reasons as on `Pipeline.check_compatibility` results. Kept here
-/// (and not factored to a shared helper) because lib.rs's
-/// `compatibility_to_py` consumes `CompatibilityReason` by value while
-/// here we have `&CompatibilityReason` — different ownership shapes.
-fn compat_reason_detail(r: &tars_types::CompatibilityReason) -> Option<serde_json::Value> {
-    use tars_types::CompatibilityReason as R;
-    match r {
-        R::ToolUseUnsupported { tool_count } => {
-            Some(serde_json::json!({"tool_count": *tool_count}))
-        }
-        R::ThinkingUnsupported { mode } => Some(serde_json::json!({"mode": format!("{mode:?}")})),
-        R::ContextWindowExceeded {
-            estimated_prompt_tokens,
-            max_context_tokens,
-        } => Some(serde_json::json!({
-            "estimated_prompt_tokens": *estimated_prompt_tokens,
-            "max_context_tokens": *max_context_tokens,
-        })),
-        R::MaxOutputTokensExceeded { requested, max } => Some(serde_json::json!({
-            "requested": *requested,
-            "max": *max,
-        })),
-        R::StructuredOutputUnsupported | R::VisionUnsupported => None,
-        _ => None,
-    }
 }
 
 /// Structured `detail` payload for a [`ValidationReason`], mirroring
@@ -298,9 +229,5 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("TarsProviderError", py.get_type::<TarsProviderError>())?;
     m.add("TarsRuntimeError", py.get_type::<TarsRuntimeError>())?;
     m.add("TarsHandleError", py.get_type::<TarsHandleError>())?;
-    m.add(
-        "TarsRoutingExhaustedError",
-        py.get_type::<TarsRoutingExhaustedError>(),
-    )?;
     Ok(())
 }

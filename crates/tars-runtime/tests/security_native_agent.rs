@@ -45,7 +45,7 @@ use tars_types::{
 };
 
 /// Build the `LlmService` a `Session` drives, from a mock `LlmProvider` —
-/// same `ProviderService` → `Pipeline` wrapping the live path uses.
+/// same `LlmService` wrapping the live path uses.
 fn build_llm(provider: Arc<dyn LlmProvider>) -> LlmService {
     let inner: LlmService = LlmService::of(provider, "gpt-4o");
     LlmService::builder_with_inner(inner).build()

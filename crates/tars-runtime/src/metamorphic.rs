@@ -304,7 +304,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_types::{ChatEvent, ChatRequest, ChatResponseBuilder, ModelHint, StopReason, Usage};
+    use tars_types::{ChatEvent, ChatRequest, ChatResponseBuilder, StopReason, Usage};
 
     fn user_req(text: &str) -> ChatRequest {
         ChatRequest::user(text)

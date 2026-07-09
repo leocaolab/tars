@@ -10,9 +10,10 @@
 //! Each provider has its own breaker. When a provider fails repeatedly
 //! the breaker opens; subsequent calls reject immediately with
 //! [`ProviderError::CircuitOpen`]. Because that error class is
-//! `Retriable`, an upstream [`crate::RoutingService`] sees it as
-//! "this candidate isn't healthy right now" and falls through to the
-//! next candidate without paying the failure latency.
+//! `Retriable`, an upstream fallback chain (the caller composing
+//! several `LlmService`s) sees it as "this candidate isn't healthy
+//! right now" and falls through to the next candidate without paying
+//! the failure latency.
 //!
 //! After a cooldown the breaker enters HalfOpen and lets the next call
 //! through as a probe. Probe success → closed. Probe failure → open
@@ -858,7 +859,7 @@ mod tests {
         );
     }
 
-    // ── Reject error class is Retriable so RoutingService falls through
+    // ── Reject error class is Retriable so a fallback chain falls through
     #[test]
     fn circuit_open_classifies_as_retriable() {
         use tars_types::ErrorClass;

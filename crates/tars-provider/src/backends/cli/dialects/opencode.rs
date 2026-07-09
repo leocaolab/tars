@@ -301,7 +301,7 @@ fn flatten_blocks(blocks: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_types::{ModelHint, ModelTier};
+    
 
     fn dialect() -> OpenCodeDialect {
         OpenCodeDialect::new("opencode".into(), Duration::from_secs(300))

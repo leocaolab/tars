@@ -379,7 +379,7 @@ fn flatten_blocks(blocks: &[ContentBlock]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tars_types::{ModelHint, ModelTier};
+    
 
     fn dialect() -> CodexCliDialect {
         CodexCliDialect::new(

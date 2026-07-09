@@ -523,7 +523,7 @@ impl WorkerAgent {
         ctx: AgentContext,
         initial_input: ChatRequest,
         registry: Arc<ToolRegistry>,
-        mut observers: &mut Option<(
+        observers: &mut Option<(
             &mut (dyn FnMut(&str) + Send),
             &mut (dyn FnMut(&str) + Send),
         )>,
