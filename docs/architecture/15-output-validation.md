@@ -16,7 +16,7 @@
 |---|---|
 | **Single shared implementation** | "Output contract" code like rule_id whitelist / JSON shape check / length check should not be rewritten by every consumer |
 | **Explicit Pass / Filter / Reject / Annotate disposition** | Each outcome has clear semantics; when writing a validator you don't have to wonder "should this transform or throw" |
-| **Reuse existing retry path** | Reject goes through `ProviderError::ValidationFailed`, the existing `RetryMiddleware` decides whether to retry; no second retry mechanism is introduced |
+| **No hidden retry loop** | A Reject surfaces as `ProviderError::ValidationFailed` (always `ErrorClass::Permanent`) and short-circuits to the caller; the middleware never re-invokes the model. Re-asking a rejected answer is a caller decision (catch it, call the service again), not a layer |
 | **Plugin-style registration** | Caller adds with one line: `LlmService::builder(provider, model).layer(ValidationMiddleware::new(vec![...]))` (or set `ChainOpts::validators` for `default_chain`); a few built-ins cover 80% of cases, custom ones implement the trait |
 | **Cross-language** | Python implements a validator as a plain `(req, resp) -> tars.Pass/FilterText/Reject/Annotate` callable, registered as a `(name, callable)` pair; future Node mirrors the shape (same pattern as Stage 3 PyTool) |
 | **Order is explicit** | `.validators([...])` registration order = execution order, left to right; Filter chains (each one sees the Response after the previous Filter) |
@@ -112,11 +112,12 @@ pub enum ValidationOutcome {
     },
 
     /// Validator considers the response unacceptable. Surfaces as
-    /// `ProviderError::ValidationFailed`; existing RetryMiddleware
-    /// decides whether to retry based on the `retriable` flag.
+    /// `ProviderError::ValidationFailed`, classified `ErrorClass::Permanent`
+    /// — it short-circuits to the caller and no layer retries it.
+    /// `reason` is a typed `ValidationReason` (callers match on
+    /// `reason.kind()`, not a message string).
     Reject {
-        reason: String,
-        retriable: bool,
+        reason: ValidationReason,
     },
 
     /// Response unchanged. Validator wants to record per-call metrics
@@ -156,13 +157,12 @@ pub enum ProviderError {
     ...existing variants...
 
     /// An OutputValidator rejected the response. This is the bridge
-    /// between the validation layer and the existing retry/error
-    /// handling — surfaces through normal error class machinery.
+    /// between the validation layer and the caller's error handling —
+    /// surfaces through normal error class machinery.
     #[error("validation failed: {validator}: {reason}")]
     ValidationFailed {
         validator: String,
-        reason: String,
-        retriable: bool,
+        reason: ValidationReason,
     },
 }
 
@@ -170,8 +170,8 @@ impl ProviderError {
     pub fn class(&self) -> ErrorClass {
         match self {
             ...existing arms...
-            ValidationFailed { retriable: true, .. } => ErrorClass::Retriable,
-            ValidationFailed { retriable: false, .. } => ErrorClass::Permanent,
+            // Always Permanent: a Reject is a final verdict — no layer retries it.
+            ValidationFailed { .. } => ErrorClass::Permanent,
         }
     }
 }
@@ -180,8 +180,10 @@ impl ProviderError {
 **Python exposure (tars-py::errors)**:
 - `kind = "validation_failed"`
 - `validator: str` — name of the validator that triggered
-- `reason: str` — rejection reason (same as message)
-- `is_retriable: bool` — existing field, auto-populated
+- `validation_reason: {kind, message, detail}` — the typed reason; a fix-stage
+  branches on `validation_reason["kind"]` instead of parsing the message
+- classified `ErrorClass::Permanent`, so the raised exception's `is_retriable` is
+  `False` and no layer re-invokes the model
 
 Downstream consumer handles in one line: `except tars.TarsProviderError as e: if e.kind == "validation_failed": ...`.
 
@@ -254,11 +256,11 @@ impl Middleware for ValidationMiddleware {
                     response = new_resp;
                     // Subsequent validators see the filtered response.
                 }
-                ValidationOutcome::Reject { reason, retriable } => {
+                ValidationOutcome::Reject { reason } => {
+                    // Always Permanent — short-circuit to the caller, no retry.
                     return Err(ProviderError::ValidationFailed {
                         validator: v.name().to_string(),
                         reason,
-                        retriable,
                     });
                 }
                 ValidationOutcome::Annotate { metrics } => {
@@ -343,7 +345,7 @@ pub struct JsonShapeValidator {
     on_fail: ShapeFailMode,  // Reject | Annotate
 }
 
-pub enum ShapeFailMode { Reject { retriable: bool }, Annotate }
+pub enum ShapeFailMode { Reject, Annotate }
 ```
 
 Behavior: try `serde_json::from_str(&resp.text)`, then validate using the [jsonschema](https://crates.io/crates/jsonschema) crate.
@@ -425,7 +427,7 @@ class RuleIdWhitelistValidator(tars.OutputValidator):
         try:
             data = json.loads(resp.text)
         except json.JSONDecodeError as e:
-            return tars.Reject(reason=f"not valid JSON: {e}", retriable=True)
+            return tars.Reject(reason=f"not valid JSON: {e}")
 
         unknowns = []
         for finding in data.get("findings", []):
@@ -439,12 +441,11 @@ class RuleIdWhitelistValidator(tars.OutputValidator):
         if not unknowns:
             return tars.Pass()
 
-        # Build a new Response with the rewritten text.
-        new_resp = resp.with_text(json.dumps(data))
-        return tars.Filter(response=new_resp, dropped=unknowns)
+        # Emit the rewritten text; the middleware rebuilds the Response.
+        return tars.FilterText(json.dumps(data), dropped=unknowns)
 ```
 
-Four outcome factory functions: `tars.Pass()` / `tars.Filter(response, dropped)` / `tars.Reject(reason, retriable)` / `tars.Annotate(metrics)`.
+Four outcome factory functions: `tars.Pass()` / `tars.FilterText(text, dropped)` / `tars.Reject(reason)` (or `tars.Reject.typed(kind, message, detail)`) / `tars.Annotate(metrics)`.
 
 ### 6.2 Registering with Pipeline
 
@@ -557,7 +558,7 @@ Each Filter validator sees the Response after the previous Filter.
 
 The first Reject immediately aborts the entire validation chain. Subsequent validators do not run.
 
-Rationale: Reject already triggers retry / fail, no point continuing to accumulate metrics.
+Rationale: Reject already fails the call (permanently), no point continuing to accumulate metrics.
 
 ### 8.4 Annotate does not affect control flow
 
@@ -581,7 +582,7 @@ Annotate writes metrics to `summary.outcomes`, response unchanged, subsequent va
 
 ### 9.1 Layer trace
 
-ValidationMiddleware adds a "validation" tag to `Response.telemetry.layers`. Caller sees the layer chain as `["telemetry", "cache_lookup", "retry", "validation", "provider"]`.
+ValidationMiddleware adds a "validation" tag to `Response.telemetry.layers`. Caller sees the layer chain as `["telemetry", "validation", "cache_lookup", "retry", "provider"]`.
 
 ### 9.2 Telemetry on OutputValidator failure
 
