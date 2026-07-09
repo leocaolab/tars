@@ -611,6 +611,44 @@ impl ProviderConfig {
         }
     }
 
+    /// Return a copy with the per-subprocess `timeout_secs` overridden, for the
+    /// CLI/SDK-shaped backends that carry one. A consumer that needs a bigger
+    /// wall-clock budget for one call (e.g. a long merge/reconcile turn) builds
+    /// a *fresh* provider from the patched config rather than re-timing the warm
+    /// shared one, since the timeout is baked in at provider construction.
+    ///
+    /// Exhaustive on purpose: every variant that carries a `timeout_secs` MUST
+    /// be handled here, and the no-timeout variants are listed explicitly (no
+    /// `_ => {}`) so that adding a new CLI-shaped backend breaks this build
+    /// instead of silently dropping the override.
+    #[must_use]
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        use ProviderConfig::*;
+        match &mut self {
+            ClaudeCli { timeout_secs, .. }
+            | GeminiCli { timeout_secs, .. }
+            | ClaudeSdk { timeout_secs, .. }
+            | CodexCli { timeout_secs, .. }
+            | Opencode { timeout_secs, .. }
+            | Antigravity { timeout_secs, .. } => *timeout_secs = secs,
+            // HTTP-shape providers carry no per-call `timeout_secs` (their
+            // timeout lives in `HttpProviderBase`); `Bedrock` likewise (SDK/HTTP
+            // layer); `Mock` has none; `Cassette` wraps another provider whose
+            // timeout lives on the wrapped config. Nothing to override.
+            Openai { .. }
+            | OpenaiCompat { .. }
+            | Anthropic { .. }
+            | Gemini { .. }
+            | Bedrock { .. }
+            | Vllm { .. }
+            | Mlx { .. }
+            | Llamacpp { .. }
+            | Mock { .. }
+            | Cassette { .. } => {}
+        }
+        self
+    }
+
     /// In-place validation that doesn't need any external state.
     /// Cross-provider checks (uniqueness, etc.) live on [`ProvidersConfig`].
     pub fn validate_self(&self, id: &ProviderId, sink: &mut Vec<ValidationError>) {
@@ -1082,6 +1120,27 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn with_timeout_secs_patches_cli_variants_and_noops_http() {
+        // A CLI-shaped provider (carries timeout_secs) → patched.
+        let cli: ProviderConfig = toml::from_str(
+            "type = \"claude_cli\"\ndefault_model = \"claude-sonnet-4-5\"\ntimeout_secs = 300\n",
+        )
+        .unwrap();
+        match cli.with_timeout_secs(1800) {
+            ProviderConfig::ClaudeCli { timeout_secs, .. } => assert_eq!(timeout_secs, 1800),
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        // A provider with no per-call timeout → unchanged (variant preserved).
+        let none: ProviderConfig =
+            toml::from_str("type = \"mock\"\ncanned_response = \"hi\"\n").unwrap();
+        assert!(
+            matches!(none.with_timeout_secs(1800), ProviderConfig::Mock { .. }),
+            "mock has no timeout_secs; with_timeout_secs must be a no-op that preserves the variant"
+        );
     }
 
     #[test]

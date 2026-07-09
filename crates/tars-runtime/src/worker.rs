@@ -51,11 +51,14 @@ use serde::{Deserialize, Serialize};
 use tars_pipeline::LlmService;
 use tars_tools::{ToolContext, ToolRegistry};
 use tars_types::{
-    AgentId, ChatRequest, ChatResponseBuilder, ContentBlock, Message, RequestContext, ThinkingMode,
+    AgentId, ChatRequest, ChatResponseBuilder, ContentBlock, Message, ThinkingMode, ToolChoice,
 };
 use thiserror::Error;
 
-use crate::agent::{Agent, AgentContext, StepError, AgentOutput, AgentRole, AgentStepResult};
+use crate::agent::{
+    build_llm_request_context, drive_llm_call_with_observers, observe_stream_event_with, Agent,
+    AgentContext, StepError, AgentOutput, AgentRole, AgentStepResult,
+};
 use crate::message::AgentMessage;
 use crate::orchestrator::{Plan, PlanStep};
 use crate::prompt::PromptBuilder;
@@ -111,6 +114,10 @@ pub struct WorkerAgent {
     /// Optional domain overrides (own system prompt + output schema). `None`
     /// = the built-in worker protocol. See [`Self::with_persona`].
     persona: Option<WorkerPersona>,
+    /// When true, after `max_tool_iterations` tool rounds the worker runs ONE
+    /// more LLM call with tools disabled so the step always ends in text
+    /// (degrade gracefully — Concer's interactive comment responder).
+    force_final_text_answer: bool,
 }
 
 impl WorkerAgent {
@@ -130,6 +137,7 @@ impl WorkerAgent {
             max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
             thinking: ThinkingMode::Off,
             persona: None,
+            force_final_text_answer: false,
         })
     }
 
@@ -156,6 +164,7 @@ impl WorkerAgent {
             max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
             thinking: ThinkingMode::Off,
             persona: None,
+            force_final_text_answer: false,
         })
     }
 
@@ -170,6 +179,22 @@ impl WorkerAgent {
             max_tool_iterations: n,
             thinking: self.thinking,
             persona: self.persona.clone(),
+            force_final_text_answer: self.force_final_text_answer,
+        })
+    }
+
+    /// After the tool-loop cap, run one final text-only LLM call instead of
+    /// erroring when the model would keep calling tools.
+    pub fn with_force_final_text_answer(self: Arc<Self>, force: bool) -> Arc<Self> {
+        Arc::new(Self {
+            id: self.id.clone(),
+            model: self.model.clone(),
+            domain: self.domain.clone(),
+            tools: self.tools.clone(),
+            max_tool_iterations: self.max_tool_iterations,
+            thinking: self.thinking,
+            persona: self.persona.clone(),
+            force_final_text_answer: force,
         })
     }
 
@@ -186,6 +211,7 @@ impl WorkerAgent {
             max_tool_iterations: self.max_tool_iterations,
             thinking,
             persona: self.persona.clone(),
+            force_final_text_answer: self.force_final_text_answer,
         })
     }
 
@@ -203,6 +229,7 @@ impl WorkerAgent {
             max_tool_iterations: self.max_tool_iterations,
             thinking: self.thinking,
             persona: Some(persona),
+            force_final_text_answer: self.force_final_text_answer,
         })
     }
 
@@ -445,19 +472,39 @@ impl Agent for WorkerAgent {
         ctx: AgentContext,
         input: ChatRequest,
     ) -> Result<AgentStepResult, StepError> {
-        // Take the Arc<ToolRegistry> out via clone so the subsequent
-        // `self` move into `drive_with_tools` doesn't conflict with
-        // the borrow used to read `self.tools`.
+        self.execute_internal(ctx, input, &mut None).await
+    }
+}
+
+impl WorkerAgent {
+    /// Like [`Agent::execute`], but fires `on_delta` / `on_tool_call_start` as
+    /// each streamed [`ChatEvent`] arrives (Concer's live gutter).
+    pub async fn execute_streaming(
+        self: Arc<Self>,
+        ctx: AgentContext,
+        input: ChatRequest,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+        on_tool_call_start: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<AgentStepResult, StepError> {
+        let mut observers = Some((on_delta, on_tool_call_start));
+        self.execute_internal(ctx, input, &mut observers).await
+    }
+
+    async fn execute_internal(
+        self: Arc<Self>,
+        ctx: AgentContext,
+        input: ChatRequest,
+        observers: &mut Option<(
+            &mut (dyn FnMut(&str) + Send),
+            &mut (dyn FnMut(&str) + Send),
+        )>,
+    ) -> Result<AgentStepResult, StepError> {
         let tools = self.tools.clone();
         match tools {
-            // Stub Worker — same single-call shape as Orchestrator /
-            // Critic; the typed parsing happens in
-            // `execute_step` / `parse_worker_response`.
-            None => crate::agent::drive_llm_call(ctx, input).await,
-            // Tool-using Worker — drive the multi-call dispatch loop.
-            // See module docs for the trajectory observability tradeoff
-            // (one Agent::execute hides N internal LLM calls).
-            Some(registry) => self.drive_with_tools(ctx, input, registry).await,
+            None => drive_llm_call_with_observers(ctx, input, observers).await,
+            Some(registry) => {
+                self.drive_with_tools(ctx, input, registry, observers).await
+            }
         }
     }
 }
@@ -476,12 +523,20 @@ impl WorkerAgent {
         ctx: AgentContext,
         initial_input: ChatRequest,
         registry: Arc<ToolRegistry>,
+        mut observers: &mut Option<(
+            &mut (dyn FnMut(&str) + Send),
+            &mut (dyn FnMut(&str) + Send),
+        )>,
     ) -> Result<AgentStepResult, StepError> {
         let mut req = initial_input;
         // Ground the model in its ABSOLUTE working directory (see
         // `ground_system_with_cwd`) so it doesn't guess and loop against a
         // hallucinated path until it burns `max_tool_iterations`.
         req.system = ground_system_with_cwd(req.system.take(), ctx.cwd.as_deref());
+        if req.tools.is_empty() {
+            req.tools = registry.to_tool_specs();
+            req.tool_choice = ToolChoice::Auto;
+        }
 
         let mut total_usage = tars_types::Usage::default();
         // Count consecutive iterations in which *every* dispatched tool
@@ -502,7 +557,7 @@ impl WorkerAgent {
         for iteration in 0..self.max_tool_iterations {
             // One LLM round-trip — same cancel-aware drain shape as
             // `agent::drive_llm_call`.
-            let response = drain_one_call(&ctx, req.clone()).await?;
+            let response = drain_one_call(&ctx, req.clone(), observers).await?;
             total_usage = total_usage.merge(response.usage);
 
             if response.tool_calls.is_empty() {
@@ -553,9 +608,9 @@ impl WorkerAgent {
             let permission: std::sync::Arc<dyn tars_tools::PermissionView> = {
                 let perms = ctx.permissions.clone();
                 std::sync::Arc::new(move |name: &str| match perms.decide(name) {
-                    tars_model::Decision::Allow => tars_tools::ToolDecision::Allow,
-                    tars_model::Decision::Deny => tars_tools::ToolDecision::Deny,
-                    tars_model::Decision::Ask => tars_tools::ToolDecision::Ask,
+                    tars_agent::Decision::Allow => tars_tools::ToolDecision::Allow,
+                    tars_agent::Decision::Deny => tars_tools::ToolDecision::Deny,
+                    tars_agent::Decision::Ask => tars_tools::ToolDecision::Ask,
                 })
             };
             // Resolve the OS-confinement policy this step's tools run under
@@ -605,6 +660,21 @@ impl WorkerAgent {
             );
         }
 
+        if self.force_final_text_answer {
+            req.tools = Vec::new();
+            req.tool_choice = ToolChoice::None;
+            let response = drain_one_call(&ctx, req, observers).await?;
+            total_usage = total_usage.merge(response.usage);
+            let output = AgentOutput::from_response_parts(response.text, vec![]);
+            return Ok(AgentStepResult {
+                output,
+                usage: total_usage,
+                created: response.created,
+                tool_calls: tool_names,
+                tool_call_args: tool_args,
+            });
+        }
+
         // Surface the TAIL of the tool trajectory — a bare "kept emitting
         // tool calls" is undebuggable (which tool? on what?). Show the last
         // few calls (name + a truncated args preview) so a release-build
@@ -643,28 +713,12 @@ impl WorkerAgent {
 async fn drain_one_call(
     ctx: &AgentContext,
     input: ChatRequest,
+    observers: &mut Option<(
+        &mut (dyn FnMut(&str) + Send),
+        &mut (dyn FnMut(&str) + Send),
+    )>,
 ) -> Result<tars_types::ChatResponse, StepError> {
-    // Same RequestContext construction as `agent::drive_llm_call` —
-    // the canonical agent LLM path. `AgentContext` carries no
-    // RequestContext (only `cancel`), so cancel is the only field
-    // there is to forward; IAM / principal / tenant land once
-    // tars-security exists, at which point AgentContext gains a real
-    // RequestContext and both this and `drive_llm_call` thread it.
-    let mut req_ctx = RequestContext::test_default();
-    req_ctx.cancel = ctx.cancel.clone();
-    // Native-agent providers (claude_cli `--tools default`, …) spawn a
-    // subprocess running their OWN Read/Edit/Bash; without this the
-    // subprocess inherits arc's process cwd, not the fix worktree, so the
-    // agent edits the wrong tree. Forward the agent's working dir so the
-    // provider can set the subprocess `current_dir`.
-    req_ctx.cwd = ctx.cwd.clone();
-    // OS-confinement policy (G10). A CLI-delegate provider spawns a subprocess
-    // that runs its OWN Read/Edit/Bash; forward the per-role sandbox so that
-    // spawn is jailed by the same `[sandbox]`/`--sandbox` policy the worker's
-    // own tools obey — unifying the delegate spawn onto the real policy path
-    // (the legacy `TARS_CLAUDE_SANDBOX` env gate still works as a fallback).
-    req_ctx.sandbox = ctx.sandbox.clone();
-
+    let req_ctx = build_llm_request_context(ctx);
     let llm: Arc<dyn LlmService> = ctx.llm.clone();
 
     let stream_result = tokio::select! {
@@ -682,7 +736,10 @@ async fn drain_one_call(
             ev = stream.next() => ev,
         };
         match event {
-            Some(Ok(ev)) => builder.apply(ev),
+            Some(Ok(ev)) => {
+                observe_stream_event_with(ctx, &ev, observers);
+                builder.apply(ev);
+            }
             Some(Err(e)) => return Err(StepError::Provider(e)),
             None => break,
         }
@@ -978,7 +1035,7 @@ mod tests {
             llm: Arc::new(CapturingLlm(captured.clone())),
             cancel: Default::default(),
             cwd: Some(wt.clone()),
-            permissions: tars_model::Permissions::allow_all(),
+            permissions: tars_agent::Permissions::allow_all(),
             readable_roots: vec![],
             sandbox: Default::default(),
         };
@@ -989,7 +1046,8 @@ mod tests {
             .unwrap();
         rt.block_on(async {
             let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
-            let _ = super::drain_one_call(&ctx, req).await;
+            let mut observers = None;
+            let _ = super::drain_one_call(&ctx, req, &mut observers).await;
         });
 
         assert_eq!(

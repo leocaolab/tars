@@ -2,7 +2,7 @@
 //! agent's advertised capabilities and its dispatchable [`ToolRegistry`]
 //! can't drift apart (Doc 21 §5, closed by Doc 23 M3).
 //!
-//! A [`Skill`](tars_model::Skill) is the *advertised* capability (what the
+//! A [`Skill`](tars_agent::Skill) is the *advertised* capability (what the
 //! agent says it can do); a [`Tool`] is the *executable* primitive. By
 //! convention they share a name (`fs.write_file`, `bash.run`). `bind` builds
 //! the registry and asserts every advertised skill has a tool of the same
@@ -10,12 +10,12 @@
 //! bug at construction, not at the first model call.
 //!
 //! This lives in `tars-runtime` (not `tars-tools`) on purpose: `tars-tools`
-//! is a leaf crate and must not depend on `tars-model`, where `SkillSet`
+//! is a leaf crate and must not depend on `tars-agent`, where `SkillSet`
 //! lives.
 
 use std::sync::Arc;
 
-use tars_model::SkillSet;
+use tars_agent::SkillSet;
 use tars_tools::{Tool, ToolRegistry, ToolRegistryError};
 
 /// Why a [`bind`] failed.
@@ -50,7 +50,7 @@ pub fn bind(skills: &SkillSet, tools: Vec<Arc<dyn Tool>>) -> Result<ToolRegistry
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_model::Skill;
+    use tars_agent::Skill;
     use tars_tools::builtins::WriteFileTool;
 
     #[test]

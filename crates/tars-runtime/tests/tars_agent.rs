@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::stream;
 
-use tars_model::{Agent, AgentContext, Permissions, Skill, SkillSet, Task, TaskId};
+use tars_agent::{Agent, AgentContext, Permissions, Skill, SkillSet, Task, TaskId};
 use tars_pipeline::{LlmService, Pipeline, ProviderService};
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::TarsAgent;

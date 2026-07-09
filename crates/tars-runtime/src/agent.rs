@@ -36,9 +36,18 @@ use tokio_util::sync::CancellationToken;
 
 use tars_pipeline::LlmService;
 use tars_types::{
-    AgentId, ChatRequest, ChatResponseBuilder, ProviderError, RequestContext, ToolCall,
-    TrajectoryId, Usage,
+    AgentId, ChatEvent, ChatRequest, ChatResponseBuilder, ProviderError, RequestContext,
+    ToolCall, TrajectoryId, Usage,
 };
+
+/// Optional live-stream callbacks for agent-layer LLM drains (Concer gutter,
+/// tars-desktop chat). The pipeline still owns retry/breaker; hooks fire on
+/// each streamed [`ChatEvent`] as the agent loop drains one call.
+#[derive(Default)]
+pub struct LlmStreamHooks {
+    pub on_delta: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    pub on_tool_call_start: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+}
 
 /// What an agent IS, what it does, and how callers identify its kind
 /// when routing inter-agent traffic. Mirrors Doc 04 §4.1's enum but
@@ -88,7 +97,7 @@ pub struct AgentContext {
     /// tool runs (a `Deny` skill yields an `is_error` tool result the model
     /// can adapt to, instead of running). Default `allow_all` keeps the
     /// historical behaviour: everything the model can call, it may.
-    pub permissions: tars_model::Permissions,
+    pub permissions: tars_agent::Permissions,
     /// Extra READ-ONLY roots threaded into the per-dispatch
     /// [`tars_tools::ToolContext`] so search/read tools may reach a
     /// dependency's source beyond `cwd` (write tools stay confined to `cwd`).
@@ -102,6 +111,85 @@ pub struct AgentContext {
     /// behaviour, so every existing construction site is unchanged unless it
     /// opts in.
     pub sandbox: tars_tools::SandboxPolicy,
+    /// Pipeline correlation (trace/session/tags). When set, every internal LLM
+    /// call in an agent tool loop uses this instead of [`RequestContext::test_default`].
+    pub llm_request_ctx: Option<RequestContext>,
+    /// Live delta / tool-start hooks for UIs that stream agent output.
+    pub stream_hooks: Option<Arc<LlmStreamHooks>>,
+}
+
+impl AgentContext {
+    /// Minimal step context for a direct `Agent::execute` call outside the
+    /// full runtime executor (tests, Concer's comment responder).
+    pub fn for_execute(llm: Arc<dyn LlmService>) -> Self {
+        Self {
+            trajectory_id: TrajectoryId::new("direct"),
+            step_seq: 1,
+            llm,
+            cancel: CancellationToken::new(),
+            cwd: None,
+            permissions: tars_agent::Permissions::default(),
+            readable_roots: Vec::new(),
+            sandbox: tars_tools::SandboxPolicy::default(),
+            llm_request_ctx: None,
+            stream_hooks: None,
+        }
+    }
+
+    pub fn with_cwd(mut self, cwd: impl Into<std::path::PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    pub fn with_llm_request_ctx(mut self, ctx: RequestContext) -> Self {
+        self.llm_request_ctx = Some(ctx);
+        self
+    }
+
+    pub fn with_stream_hooks(mut self, hooks: Arc<LlmStreamHooks>) -> Self {
+        self.stream_hooks = Some(hooks);
+        self
+    }
+}
+
+/// Build the [`RequestContext`] forwarded to [`LlmService::call`] for one agent
+/// step. Shared by [`drive_llm_call`] and the worker tool loop's
+/// `drain_one_call`.
+pub(crate) fn build_llm_request_context(ctx: &AgentContext) -> RequestContext {
+    let mut req_ctx = ctx
+        .llm_request_ctx
+        .clone()
+        .unwrap_or_else(RequestContext::test_default);
+    req_ctx.cancel = ctx.cancel.clone();
+    req_ctx.sandbox = ctx.sandbox.clone();
+    req_ctx.cwd = ctx.cwd.clone();
+    req_ctx
+}
+
+/// Fire optional stream hooks for one [`ChatEvent`] while draining an LLM call.
+pub(crate) fn observe_stream_event(ctx: &AgentContext, ev: &ChatEvent) {
+    observe_stream_event_with(ctx, ev, &mut None);
+}
+
+/// Like [`observe_stream_event`], but direct `&mut` observers win over
+/// `ctx.stream_hooks` (Concer's live gutter while a worker drains).
+pub(crate) fn observe_stream_event_with(
+    ctx: &AgentContext,
+    ev: &ChatEvent,
+    observers: &mut Option<(
+        &mut (dyn FnMut(&str) + Send),
+        &mut (dyn FnMut(&str) + Send),
+    )>,
+) {
+    if let Some((on_delta, on_tool)) = observers.as_mut() {
+        match ev {
+            ChatEvent::Delta { text } => on_delta(text),
+            ChatEvent::ToolCallStart { name, .. } => on_tool(name),
+            _ => {}
+        }
+        return;
+    }
+    observe_stream_event(ctx, ev);
 }
 
 /// What an Agent returns from one execute() call.
@@ -306,23 +394,20 @@ pub(crate) async fn drive_llm_call(
     ctx: AgentContext,
     input: ChatRequest,
 ) -> Result<AgentStepResult, StepError> {
-    // Shape an LLM RequestContext from what AgentContext gives us.
-    // IAM / principal / tenant come once tars-security exists; for
-    // now we use the test default and inherit cancel.
-    let mut req_ctx = RequestContext::test_default();
-    req_ctx.cancel = ctx.cancel.clone();
-    // OS-confinement policy (G10) — forward the per-role sandbox so a
-    // CLI-delegate provider jails its subprocess spawn under the same
-    // `[sandbox]`/`--sandbox` policy the agent's tools obey.
-    req_ctx.sandbox = ctx.sandbox.clone();
-    // Worktree cwd (G10 remainder) — thread the per-step working directory so a
-    // CLI-delegate's write-jail is rooted at the SAME tree its sibling tools act
-    // on (`AgentContext.cwd`). Without this the delegate spawn falls back to the
-    // process cwd for its jail root; a delegate is confined either way (default-
-    // confine, Doc 32 FR-3), but threading the worktree scopes the jail to the
-    // intended tree. `None` = no per-step worktree (run_plan today) → process cwd.
-    req_ctx.cwd = ctx.cwd.clone();
+    drive_llm_call_with_observers(ctx, input, &mut None).await
+}
 
+/// Like [`drive_llm_call`], with optional per-delta / tool-start observers for
+/// live UIs (Concer gutter).
+pub(crate) async fn drive_llm_call_with_observers(
+    ctx: AgentContext,
+    input: ChatRequest,
+    observers: &mut Option<(
+        &mut (dyn FnMut(&str) + Send),
+        &mut (dyn FnMut(&str) + Send),
+    )>,
+) -> Result<AgentStepResult, StepError> {
+    let req_ctx = build_llm_request_context(&ctx);
     let llm = ctx.llm.clone();
 
     // Race the LLM open against cancel — fast-fail if cancelled
@@ -342,7 +427,10 @@ pub(crate) async fn drive_llm_call(
             ev = stream.next() => ev,
         };
         match event {
-            Some(Ok(ev)) => builder.apply(ev),
+            Some(Ok(ev)) => {
+                observe_stream_event_with(&ctx, &ev, observers);
+                builder.apply(ev);
+            }
             Some(Err(e)) => return Err(StepError::Provider(e)),
             None => break,
         }

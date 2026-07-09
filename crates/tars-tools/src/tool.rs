@@ -30,7 +30,7 @@ pub struct ToolContext {
     pub cwd: Option<PathBuf>,
     /// Permission decision source the dispatch gate consults by tool name.
     /// `None` = allow-all (historical behaviour). The runtime adapts its
-    /// `tars_model::Permissions` into a [`PermissionView`] closure here.
+    /// `tars_agent::Permissions` into a [`PermissionView`] closure here.
     pub permission: Option<Arc<dyn PermissionView>>,
     /// Human-approval channel for `Ask` decisions. `None` = fail closed
     /// (`Ask` treated as `Deny`, Doc 23 NFR-2).

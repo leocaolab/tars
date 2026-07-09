@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 tars-types = { path = "../tars-types" }
 tars-storage = { path = "../tars-storage" }
-tars-model = { path = "../tars-model" }
+tars-agent = { path = "../tars-agent" }
 tars-pipeline = { path = "../tars-pipeline" }
 tars-tools = { path = "../tars-tools" }
 

@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/tars-types",
     "crates/tars-sandbox",
-    "crates/tars-model",
+    "crates/tars-agent",
     "crates/tars-config",
     "crates/tars-provider",
     "crates/tars-bedrock",

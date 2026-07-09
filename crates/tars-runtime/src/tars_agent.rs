@@ -1,4 +1,4 @@
-//! [`TarsAgent`] — the LLM-backed implementer of [`tars_model::Agent`].
+//! [`TarsAgent`] — the LLM-backed implementer of [`tars_agent::Agent`].
 //!
 //! THIS is the "native agent" of Doc 20: you hand it a [`Task`], and it
 //! internally turns the task into an LLM prompt and drives a tool loop over
@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use tars_model::{
+use tars_agent::{
     Agent, AgentContext, TaskError, AgentId, AgentOutput, AgentRole, SkillSet, Task,
 };
 use tars_pipeline::LlmService;
@@ -124,12 +124,12 @@ impl TarsAgent {
 }
 
 /// Lift a [`WorkerError`] (runtime layer) to the task-level
-/// [`tars_model::TaskError`] WITHOUT burning the typed provider error.
+/// [`tars_agent::TaskError`] WITHOUT burning the typed provider error.
 ///
 /// The inner worker chain keeps the [`ProviderError`](tars_types::ProviderError)
 /// typed all the way up: `ProviderError` → `runtime::StepError::Provider` →
 /// `WorkerError::Agent`. When that's the shape, we hand the SAME typed
-/// `ProviderError` to `tars_model::TaskError::Provider`, so a consumer
+/// `ProviderError` to `tars_agent::TaskError::Provider`, so a consumer
 /// (arc) classes the failure by matching the variant (rate-limit / auth /
 /// overloaded) instead of grepping a stringified message. A bare cancel
 /// maps to the typed `Cancelled`. Every other `WorkerError`
@@ -190,9 +190,11 @@ impl Agent for TarsAgent {
             readable_roots: ctx.readable_roots.clone(),
             // The native-agent path runs one worker step directly (no executor
             // WorkerContext). Its per-role sandbox would come from the
-            // `tars_model::AgentContext` once that boundary carries a policy;
+            // `tars_agent::AgentContext` once that boundary carries a policy;
             // until then it's unconfined (DangerFullAccess), same as before.
             sandbox: tars_tools::SandboxPolicy::default(),
+            llm_request_ctx: None,
+            stream_hooks: None,
         };
 
         let msg = self
@@ -280,7 +282,7 @@ impl Worker for TarsAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_model::TaskId;
+    use tars_agent::TaskId;
     use tars_pipeline::LlmEventStream;
     use tars_types::{ChatRequest, ProviderError, ProviderErrorKind, RequestContext};
 
@@ -304,7 +306,7 @@ mod tests {
 
     /// The load-bearing guarantee: a provider failure inside the inner
     /// worker chain surfaces at the `Agent::run` boundary as a TYPED
-    /// [`tars_model::TaskError::Provider`], carrying the same
+    /// [`tars_agent::TaskError::Provider`], carrying the same
     /// [`ProviderError`] — NOT flattened into `Execution(String)`. Proved
     /// by MATCHING the variant + reading `kind()` (typed), never by
     /// grepping the message.

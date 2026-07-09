@@ -1,4 +1,4 @@
-//! `tars-model` — the domain model: the **Agent** abstraction + its
+//! `tars-agent` — the domain model: the **Agent** abstraction + its
 //! vocabulary. Pure contracts, zero implementation.
 //!
 //! ## Why this crate exists
@@ -10,7 +10,7 @@
 //! the foundational home for the abstractions, and its dependency boundary
 //! ENFORCES the discipline:
 //!
-//! > `tars-model` depends ONLY on `tars-types` (primitives). It may NOT
+//! > `tars-agent` depends ONLY on `tars-types` (primitives). It may NOT
 //! > depend on `tars-pipeline` (`LlmService`) or `tars-tools`
 //! > (`ToolRegistry`). So the `Agent` trait physically cannot reference the
 //! > LLM machinery — a user agent that uses no LLM stays first-class.
@@ -18,7 +18,7 @@
 //! ```text
 //! tars-types  (primitives)
 //!    ↑
-//! tars-model  (Agent / Task / Skill / Permission — THIS crate)
+//! tars-agent  (Agent / Task / Skill / Permission — THIS crate)
 //!    ↑
 //! tars-pipeline · tars-tools   (lower-concern implementations)
 //!    ↑

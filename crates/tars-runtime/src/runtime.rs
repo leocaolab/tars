@@ -375,6 +375,8 @@ pub async fn execute_agent_step(
         // Per-role confinement (D5), passed through from the executor's
         // WorkerContext/CriticContext. Default = DangerFullAccess (unconfined).
         sandbox,
+        llm_request_ctx: None,
+        stream_hooks: None,
     };
     let result = agent.clone().execute(ctx, input).await;
 

@@ -41,7 +41,7 @@ pub mod paths;
 pub mod resilience;
 
 pub use error::TarsError;
-pub use handle::{Tars, WorkspaceHandles};
+pub use handle::{EventsOverride, PipelineOverrides, Tars, WorkspaceHandles};
 pub use resilience::resilience_configs;
 pub use paths::{
     StoreScope, WorkspaceResolution, resolve_workspace_root, standalone_store_dir,

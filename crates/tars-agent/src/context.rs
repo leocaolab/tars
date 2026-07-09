@@ -4,7 +4,7 @@
 //! Deliberately implementation-agnostic — NO `LlmService`, NO
 //! `ToolRegistry`. A native agent reads `cwd` + `permissions` and builds
 //! its own Session internally; a user agent uses whatever it needs. This is
-//! the discipline the `tars-model` crate boundary enforces: the contract
+//! the discipline the `tars-agent` crate boundary enforces: the contract
 //! can't reach into the implementation.
 
 use std::path::PathBuf;

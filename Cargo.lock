@@ -6010,6 +6010,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
+name = "tars-agent"
+version = "1.3.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tars-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "tars-bedrock"
 version = "1.3.0"
 dependencies = [
@@ -6180,19 +6193,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tars-model"
-version = "1.3.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tars-types",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "tars-node"
 version = "1.3.0"
 dependencies = [
@@ -6301,7 +6301,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tars-model",
+ "tars-agent",
  "tars-pipeline",
  "tars-provider",
  "tars-storage",

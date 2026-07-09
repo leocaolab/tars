@@ -1,4 +1,4 @@
-//! [`EnsembleAgent`] — agent-level hedging over `tars_model::Agent`.
+//! [`EnsembleAgent`] — agent-level hedging over `tars_agent::Agent`.
 //!
 //! Doc 19/20: routing/ensemble lifts to the **Agent** (task granularity),
 //! not just the LlmService (completion granularity). An `EnsembleAgent`
@@ -16,7 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::future::{BoxFuture, select_all};
 
-use tars_model::{
+use tars_agent::{
     Agent, AgentContext, TaskError, AgentId, AgentOutput, AgentRole, SkillSet, Task,
 };
 
@@ -125,7 +125,7 @@ impl Agent for EnsembleAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_model::{Skill, TaskId};
+    use tars_agent::{Skill, TaskId};
 
     /// A canned agent: either succeeds with a summary or fails.
     struct CannedAgent {
