@@ -28,32 +28,33 @@
 
 use napi::Error;
 
-use tars_config::ConfigError;
-use tars_handle::TarsError;
+use tars_handle::{InitError, TarsError};
 use tars_provider::RegistryError;
 use tars_types::ProviderError;
 
 /// A JS-facing error whose `.code` is a domain-typed string (see module docs).
 pub(crate) type JsError = Error<String>;
 
-/// Map a [`TarsError`] to a JS error with a discriminable `.code`. One code per
-/// variant; the message is the variant's real `Display` text (the truth), never
-/// a placeholder.
+/// Map a [`TarsError`] to a JS error with a discriminable `.code`. Its only
+/// variant now is the role-resolution failure; the message is the real
+/// `Display` text (the truth), never a placeholder.
 pub(crate) fn tars_to_js(err: TarsError) -> JsError {
     let code = match &err {
-        TarsError::Registry(_) => "TarsRegistryError",
-        TarsError::Storage(_) => "TarsStorageError",
-        TarsError::MeltStore(_) => "TarsEventStoreError",
-        TarsError::WorkspaceConfig(_) => "TarsWorkspaceConfigError",
-        TarsError::Io(_) => "TarsIoError",
         TarsError::UnknownRole { .. } => "TarsUnknownRole",
     };
     Error::new(code.to_string(), err.to_string())
 }
 
-/// Map a [`ConfigError`] (global config load / parse) to `TarsConfigError`.
-pub(crate) fn config_to_js(err: ConfigError) -> JsError {
-    Error::new("TarsConfigError".to_string(), err.to_string())
+/// Map a composition-root [`InitError`] to a discriminable JS error `.code`.
+pub(crate) fn init_to_js(err: InitError) -> JsError {
+    match err {
+        InitError::Config(e) => Error::new("TarsConfigError".to_string(), e.to_string()),
+        InitError::Registry(e) => Error::new("TarsRegistryError".to_string(), e.to_string()),
+        InitError::AlreadyInitialized => Error::new(
+            "TarsAlreadyInitialized".to_string(),
+            "tars already initialized".to_string(),
+        ),
+    }
 }
 
 /// Map a [`RegistryError`] (provider-registry build) to `TarsRegistryError`.
@@ -64,15 +65,6 @@ pub(crate) fn registry_to_js(err: RegistryError) -> JsError {
 /// Map a filesystem error at a handle boundary to `TarsIoError`.
 pub(crate) fn io_to_js(err: std::io::Error) -> JsError {
     Error::new("TarsIoError".to_string(), err.to_string())
-}
-
-/// A poisoned `Workspaces` mutex (a prior panic while holding it). Surfaced
-/// typed rather than `unwrap`-panicking the whole Node process.
-pub(crate) fn poisoned() -> JsError {
-    Error::new(
-        "TarsPoisoned".to_string(),
-        "workspaces registry lock poisoned by a prior panic".to_string(),
-    )
 }
 
 /// Async-path reason for a provider-call [`ProviderError`]. napi's async

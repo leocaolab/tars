@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The `Tars` per-scope runtime handle (Doc 06 §6 C3) — binds the global registry + workspace roles + observability sink + cancellation into one entry."
+description = "tars composition-root facade: process-global init, standalone role→provider resolution, and store-dir path helpers."
 
 [lints]
 workspace = true
@@ -13,21 +13,12 @@ workspace = true
 tars-types = { path = "../tars-types" }
 tars-config = { path = "../tars-config" }
 tars-provider = { path = "../tars-provider" }
+# resilience.rs bridges the `[resilience]` config onto the pipeline's knobs.
 tars-pipeline = { path = "../tars-pipeline" }
-tars-runtime = { path = "../tars-runtime" }
-tars-storage = { path = "../tars-storage" }
-# Observability E-pillar stores (PipelineEventLog + LlmRecordStore).
-tars-melt = { path = "../tars-melt" }
 
-serde.workspace = true
-toml.workspace = true
 thiserror.workspace = true
-tokio-util.workspace = true
-tracing.workspace = true
+# paths.rs hashes the canonical root for the tars-home store-dir fallback.
 sha2.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
-futures.workspace = true
-async-trait.workspace = true
 tempfile = "3"

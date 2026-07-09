@@ -48,10 +48,16 @@ impl Config {
         CONFIG.get().is_some()
     }
 
-    /// Test hook: install a config directly, bypassing the file load. No-op if
-    /// already set (first wins), mirroring [`Config::load`].
-    #[doc(hidden)]
-    pub fn install_global(cfg: Config) {
+    /// Install an already-constructed config as the process global — the DI
+    /// entry point.
+    ///
+    /// Where [`Config::load`] reads `<home>/config.toml` off disk, `set` takes
+    /// a [`Config`] value the caller already built (an embedding app that owns
+    /// its own config discovery, a test). Same first-wins / double-init
+    /// semantics as [`Config::load`]: a second call is a no-op (the first
+    /// install wins), so the DI entry and the disk-loading entry compose
+    /// without fighting over the singleton.
+    pub fn set(cfg: Config) {
         let _ = CONFIG.set(cfg);
     }
 }

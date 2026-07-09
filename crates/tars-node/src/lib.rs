@@ -54,7 +54,10 @@ mod handle;
 // live). The `#[napi]` registration is unaffected — it fires at the definition
 // site, not this re-export.
 pub use ctx::JsContext;
-pub use handle::{Provider, TarsHandle, Workspaces, init, is_initialized, tars_home};
+pub use handle::{
+    Provider, init, is_initialized, pipeline, provider, resolve_workspace_root, tars_home,
+    workspace_store_dir,
+};
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -69,9 +72,7 @@ use crate::errors::provider_reason;
 
 use tars_config::ConfigManager;
 use tars_pipeline::{LlmService, Pipeline as RsPipeline, PipelineOpts};
-use tars_provider::{
-    LlmProvider, auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry,
-};
+use tars_provider::{LlmProvider, registry::ProviderRegistry};
 use tars_types::{
     Message, RUN_CONTEXT, RequestContext,
     chat::{ChatRequest, ContentBlock},
@@ -228,8 +229,8 @@ pub struct Pipeline {
     inner: Arc<dyn LlmService>,
     /// The explicit call context re-scoped onto `RUN_CONTEXT` at the binding
     /// boundary for each `complete()` (Doc 06 §9). The `from_*` factories set a
-    /// fresh single-user default; the handle path
-    /// ([`handle::TarsHandle::pipeline`]) threads the handle's ctx.
+    /// fresh single-user default; the role path
+    /// ([`handle::pipeline`]) threads an explicit ctx.
     ctx: RequestContext,
 }
 
@@ -296,9 +297,9 @@ impl Pipeline {
         }
     }
 
-    /// Wrap an already-assembled `LlmService` (the handle path: the scope's
-    /// pipeline for a role) with an explicit call context. Shared by
-    /// [`handle::TarsHandle::pipeline`].
+    /// Wrap an already-assembled `LlmService` (the role path: the default
+    /// chain for a role) with an explicit call context. Shared by
+    /// [`handle::pipeline`].
     pub(crate) fn from_service(id: String, inner: Arc<dyn LlmService>, ctx: RequestContext) -> Self {
         Self { id, inner, ctx }
     }
@@ -355,9 +356,7 @@ fn build_provider_from_cfg(
     cfg: &tars_config::Config,
     provider_id: &str,
 ) -> Result<Arc<dyn LlmProvider>> {
-    let http = HttpProviderBase::default_arc()
-        .map_err(|e| Error::from_reason(format!("build HTTP base: {e}")))?;
-    let registry = ProviderRegistry::from_config(&cfg.providers, http, basic())
+    let registry = ProviderRegistry::from_config_default(&cfg.providers)
         .map_err(|e| Error::from_reason(format!("build provider registry: {e}")))?;
     let pid = ProviderId::new(provider_id.to_string());
     registry.get(&pid).ok_or_else(|| {

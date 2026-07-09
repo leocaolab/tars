@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 
 use tars_pipeline::{LlmService, Pipeline, PipelineOpts};
 use tars_provider::registry::ProviderRegistry;
-use tars_provider::{auth::basic, http_base::HttpProviderBase};
 use tars_types::{
     ChatEvent, ChatRequest, ChatResponseBuilder, ContentBlock, Message, ModelHint, ProviderError,
     ProviderId, RequestContext, StopReason, TraceId, Usage,
@@ -62,9 +61,7 @@ impl AppState {
         config: &tars_config::Config,
         default_provider: Option<String>,
     ) -> anyhow::Result<Arc<Self>> {
-        let http = HttpProviderBase::default_arc()
-            .map_err(|e| anyhow::anyhow!("building HTTP base: {e}"))?;
-        let registry = ProviderRegistry::from_config(&config.providers, http, basic())
+        let registry = ProviderRegistry::from_config_default(&config.providers)
             .map_err(|e| anyhow::anyhow!("building provider registry: {e}"))?;
 
         let mut providers = HashMap::new();

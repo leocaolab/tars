@@ -13,29 +13,31 @@ use std::sync::{Arc, OnceLock};
 
 use tars_config::Config;
 
-use crate::auth;
-use crate::http_base::HttpProviderBase;
 use crate::registry::{ProviderRegistry, RegistryError};
 
+/// The one process-global registry cell. This is the single registry global
+/// in the workspace (Doc 06 §C2): the facade `tars_handle::init` populates it,
+/// and every consumer reads it via [`ProviderRegistry::global`] /
+/// [`ProviderRegistry::try_global`]. It lives in `tars-provider` (not the
+/// facade) because `global()` is defined here and the facade sits *above*
+/// this crate — moving the cell up would invert the dependency.
 static REGISTRY: OnceLock<Arc<ProviderRegistry>> = OnceLock::new();
 
 impl ProviderRegistry {
     /// The process-global provider registry, built once from
     /// [`Config::get`]. The first caller eagerly builds every declared
-    /// provider (see [`ProviderRegistry::from_config`]); every later caller
-    /// just clones the shared `Arc`.
+    /// provider (see [`ProviderRegistry::from_config_default`]); every later
+    /// caller just clones the shared `Arc`.
     ///
-    /// Requires [`Config::load`] to have run at the composition root —
-    /// [`Config::get`] panics otherwise, the sanctioned startup contract.
+    /// Requires [`Config::load`] / [`Config::set`] to have run at the
+    /// composition root — [`Config::get`] panics otherwise, the sanctioned
+    /// startup contract.
     pub fn global() -> Result<Arc<ProviderRegistry>, RegistryError> {
         if let Some(existing) = REGISTRY.get() {
             return Ok(existing.clone());
         }
         let cfg = Config::get();
-        let http = HttpProviderBase::default_arc()
-            .map_err(|e| RegistryError::HttpBaseInit(e.to_string()))?;
-        let auth = auth::basic();
-        let built = Arc::new(ProviderRegistry::from_config(&cfg.providers, http, auth)?);
+        let built = Arc::new(ProviderRegistry::from_config_default(&cfg.providers)?);
         // First writer wins. On a lost race our freshly-built copy is dropped
         // and we return the winner; either way every caller sees one registry.
         let _ = REGISTRY.set(built);
@@ -43,6 +45,13 @@ impl ProviderRegistry {
             .get()
             .expect("REGISTRY set above (by us or the race winner)")
             .clone())
+    }
+
+    /// The process-global registry if it has already been built, else `None`.
+    /// Non-building, non-panicking — for defensive callers/tests that must not
+    /// trigger a lazy build or require `Config` to be loaded.
+    pub fn try_global() -> Option<Arc<ProviderRegistry>> {
+        REGISTRY.get().cloned()
     }
 }
 
@@ -55,7 +64,7 @@ mod tests {
     fn global_is_built_once_and_shared() {
         // Install a minimal config directly (bypasses the file load).
         if !Config::is_loaded() {
-            Config::install_global(Config::default());
+            Config::set(Config::default());
         }
         let a = ProviderRegistry::global().expect("empty providers config builds cleanly");
         let b = ProviderRegistry::global().expect("second call clones the cached Arc");

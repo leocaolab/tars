@@ -81,6 +81,42 @@ impl ProviderRegistry {
         }
     }
 
+    /// Build a registry directly from a provider map — the DI / test seam.
+    ///
+    /// Bypasses [`ProviderConfig`] entirely: the caller hands over
+    /// already-constructed `Arc<dyn LlmProvider>` instances (an embedder
+    /// injecting its own backends, a test wiring a [`crate::backends::mock`]).
+    /// No configured `default_models` are captured — tier resolution
+    /// ([`Self::default_model`]) returns `None` for every id, which is the
+    /// honest answer when the providers didn't come from config. A caller that
+    /// needs tier resolution should build [`Self::from_config`] instead.
+    pub fn from_providers(providers: HashMap<ProviderId, Arc<dyn LlmProvider>>) -> Self {
+        Self {
+            providers: Arc::new(providers),
+            default_models: Arc::new(HashMap::new()),
+        }
+    }
+
+    /// A single-provider registry — the smallest DI seam. Shorthand for
+    /// [`Self::from_providers`] with one entry.
+    pub fn single(id: ProviderId, provider: Arc<dyn LlmProvider>) -> Self {
+        let mut map: HashMap<ProviderId, Arc<dyn LlmProvider>> = HashMap::new();
+        map.insert(id, provider);
+        Self::from_providers(map)
+    }
+
+    /// Build every declared provider using the standard HTTP base + basic
+    /// auth resolver. This is the ONE place the
+    /// `from_config(cfg, HttpProviderBase::default_arc(), basic())` incantation
+    /// lives — every consumer (CLI, bindings, desktop, server, the global
+    /// singleton) routes through here rather than re-pasting it. A caller that
+    /// needs a custom HTTP base or auth resolver drops to [`Self::from_config`].
+    pub fn from_config_default(cfg: &ProvidersConfig) -> Result<Self, RegistryError> {
+        let http = HttpProviderBase::default_arc()
+            .map_err(|e| RegistryError::HttpBaseInit(e.to_string()))?;
+        Self::from_config(cfg, http, crate::auth::basic())
+    }
+
     /// Build all providers declared in `cfg`. The shared HTTP base + auth
     /// resolver are passed once and reused across HTTP-backed providers.
     pub fn from_config(

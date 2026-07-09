@@ -35,8 +35,6 @@ use tars_pipeline::{
     CircuitBreaker, CircuitBreakerConfig, CostPolicy, EnsembleService, LatencyPolicy,
     LatencyStatsRegistry, LlmService, RoutingService, StaticPolicy,
 };
-use tars_provider::auth::basic;
-use tars_provider::http_base::HttpProviderBase;
 use tars_provider::registry::ProviderRegistry;
 use tars_types::{ModelTier, ProviderId};
 
@@ -289,8 +287,7 @@ pub fn build_registry_with_breaker(
 }
 
 fn build_registry(cfg: &Config) -> Result<ProviderRegistry> {
-    let http = HttpProviderBase::default_arc().context("constructing reqwest client")?;
-    ProviderRegistry::from_config(&cfg.providers, http, basic())
+    ProviderRegistry::from_config_default(&cfg.providers)
         .context("building provider registry from config")
 }
 

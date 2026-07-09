@@ -56,58 +56,46 @@ pub fn config_to_py(err: ConfigError) -> PyErr {
     TarsConfigError::new_err(err.to_string())
 }
 
-/// Map a [`tars_handle::TarsError`] to its Python exception, preserving the
-/// typed variant as a `kind` attribute (and `role`/`tried` for the
-/// role-resolution case) rather than collapsing to one opaque string.
-///
-/// A workspace `config.toml` parse failure routes to `TarsConfigError` (it is
-/// a config-shaped error the caller fixes in the file); everything else — the
-/// registry, store, filesystem-bootstrap, and unknown-role failures — is a
-/// handle-layer failure and routes to `TarsHandleError`.
+/// Map a [`tars_handle::TarsError`] to a `TarsHandleError`, preserving the
+/// structured `role` + `tried` fields (and a `kind` tag) so a caller branches
+/// on them rather than parsing the message. Its only variant is the
+/// role-resolution failure (the old registry/store/io/workspace-config
+/// failures went away with the scope facade).
 pub fn handle_to_py(err: tars_handle::TarsError) -> PyErr {
-    use tars_handle::TarsError as E;
-    // A parse of the workspace config file is config-shaped: same class the
-    // provider-config path uses, so callers catch config errors uniformly.
-    if let E::WorkspaceConfig(_) = &err {
-        return TarsConfigError::new_err(err.to_string());
-    }
-    let kind = match &err {
-        E::Registry(_) => "registry",
-        E::Storage(_) => "storage",
-        E::MeltStore(_) => "event_store",
-        E::Io(_) => "io",
-        E::UnknownRole { .. } => "unknown_role",
-        // `WorkspaceConfig` handled above; kept exhaustive so a new variant
-        // is a compile error here rather than a silent mis-tag.
-        E::WorkspaceConfig(_) => "workspace_config",
-    };
     let message = err.to_string();
-    Python::with_gil(|py| {
-        match build_handle_exc(py, &err, kind, message) {
-            Ok(exc) => exc,
-            Err(decorate_err) => decorate_err,
-        }
+    Python::with_gil(|py| match build_handle_exc(py, &err, message) {
+        Ok(exc) => exc,
+        Err(decorate_err) => decorate_err,
     })
 }
 
-/// Build a decorated [`TarsHandleError`]: sets `kind` on every instance and,
-/// for the role-resolution failure, the structured `role` + `tried` fields so
-/// a caller branches on them instead of parsing the message.
+/// Build a decorated [`TarsHandleError`]: sets `kind` + the structured `role` /
+/// `tried` fields for the role-resolution failure.
 fn build_handle_exc(
     py: Python<'_>,
     err: &tars_handle::TarsError,
-    kind: &'static str,
     message: String,
 ) -> PyResult<PyErr> {
     use tars_handle::TarsError as E;
     let exc = TarsHandleError::new_err(message);
     let value = exc.value(py);
-    value.setattr("kind", kind)?;
-    if let E::UnknownRole { role, tried } = err {
-        value.setattr("role", role)?;
-        value.setattr("tried", tried.as_ref().map(|p| p.to_string()))?;
-    }
+    value.setattr("kind", "unknown_role")?;
+    let E::UnknownRole { role, tried } = err;
+    value.setattr("role", role)?;
+    value.setattr("tried", tried.as_ref().map(|p| p.to_string()))?;
     Ok(exc)
+}
+
+/// Map a [`tars_handle::InitError`] (composition-root failure) to its Python
+/// exception: config-load failures are config-shaped; registry-build failures
+/// are runtime/wiring.
+pub fn init_to_py(err: tars_handle::InitError) -> PyErr {
+    use tars_handle::InitError as E;
+    match err {
+        E::Config(e) => config_to_py(e),
+        E::Registry(e) => runtime_to_py("provider registry", e),
+        E::AlreadyInitialized => TarsRuntimeError::new_err("tars already initialized"),
+    }
 }
 
 /// Map a generic runtime/wiring error (HTTP base build, registry build,

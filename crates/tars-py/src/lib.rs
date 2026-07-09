@@ -52,9 +52,7 @@ use tars_pipeline::{
     CostPolicy, EnsembleService, LatencyMetric, LatencyPolicy, LatencyStatsRegistry, LlmService,
     Pipeline as RsPipeline, ProviderService, RoutingService, StaticPolicy,
 };
-use tars_provider::{
-    LlmProvider, auth::basic, http_base::HttpProviderBase, registry::ProviderRegistry,
-};
+use tars_provider::{LlmProvider, registry::ProviderRegistry};
 use tars_types::{
     ChatRequest, ChatResponseBuilder, ContentBlock, Message, ModelHint, ProviderId, RUN_CONTEXT,
     RequestContext, StopReason,
@@ -526,32 +524,6 @@ impl Pipeline {
         self.capabilities_full.clone()
     }
 
-    /// Wrap an **already-built** `tars_pipeline::Pipeline` as the layer-2
-    /// `Pipeline` pyclass. Used by the handle path (`Tars::pipeline`), where
-    /// the Rust handle composes the canonical onion with the workspace's
-    /// observability sink already wired in — so we adopt that chain wholesale
-    /// rather than re-running `default_chain` here (which would drop the
-    /// sink). `id` / `capabilities_full` come from the resolved provider.
-    pub(crate) fn from_built(
-        id: String,
-        pipeline: RsPipeline,
-        capabilities_full: tars_types::Capabilities,
-    ) -> Self {
-        let capabilities_summary = CapabilitiesSummary::from(&capabilities_full);
-        let layer_names: Vec<String> =
-            pipeline.layer_names().iter().map(|s| s.to_string()).collect();
-        let inner: Arc<dyn LlmService> = Arc::new(pipeline);
-        Self {
-            id: id.clone(),
-            inner,
-            capabilities_summary,
-            capabilities_full,
-            layer_names,
-            latency_stats: None,
-            candidate_ids: vec![id],
-        }
-    }
-
     /// Internal: wrap a built provider in TARS's default middleware
     /// stack (Telemetry → CacheLookup → Retry → Validation? →
     /// Provider). When `validators` is non-empty, ValidationMiddleware
@@ -619,9 +591,7 @@ impl Pipeline {
 /// config (every configured provider, not just one). Used by the routed
 /// pipeline constructor so a [`RoutingService`] can choose among them.
 fn build_registry_from_cfg(cfg: &Config) -> PyResult<Arc<ProviderRegistry>> {
-    let http =
-        HttpProviderBase::default_arc().map_err(|e| runtime_to_py("building HTTP base", e))?;
-    let registry = ProviderRegistry::from_config(&cfg.providers, http, basic())
+    let registry = ProviderRegistry::from_config_default(&cfg.providers)
         .map_err(|e| runtime_to_py("building provider registry", e))?;
     Ok(Arc::new(registry))
 }
@@ -1703,9 +1673,7 @@ fn default_config_path_py() -> Option<String> {
 /// between the `from_config` (file-path) and `from_str` (inline TOML)
 /// constructors so error mapping stays uniform.
 fn build_provider_from_cfg(cfg: &Config, provider_id: &str) -> PyResult<Arc<dyn LlmProvider>> {
-    let http =
-        HttpProviderBase::default_arc().map_err(|e| runtime_to_py("building HTTP base", e))?;
-    let registry = ProviderRegistry::from_config(&cfg.providers, http, basic())
+    let registry = ProviderRegistry::from_config_default(&cfg.providers)
         .map_err(|e| runtime_to_py("building provider registry", e))?;
     let pid = ProviderId::new(provider_id.to_string());
     registry.get(&pid).ok_or_else(|| {
@@ -2062,8 +2030,12 @@ fn _tars_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(handle::init, m)?)?;
     m.add_function(wrap_pyfunction!(handle::is_initialized, m)?)?;
     m.add_function(wrap_pyfunction!(handle::tars_home, m)?)?;
-    m.add_class::<handle::Workspaces>()?;
-    m.add_class::<handle::Handle>()?;
+    m.add_function(wrap_pyfunction!(handle::provider, m)?)?;
+    m.add_function(wrap_pyfunction!(handle::pipeline, m)?)?;
+    m.add_function(wrap_pyfunction!(handle::role_provider, m)?)?;
+    m.add_function(wrap_pyfunction!(handle::context, m)?)?;
+    m.add_function(wrap_pyfunction!(handle::resolve_root, m)?)?;
+    m.add_function(wrap_pyfunction!(handle::store_dir, m)?)?;
     m.add_class::<context::ContextGuard>()?;
     m.add_class::<Provider>()?;
     m.add_class::<Pipeline>()?;

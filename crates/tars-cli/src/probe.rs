@@ -42,8 +42,6 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use futures::StreamExt;
 
-use tars_provider::auth::basic;
-use tars_provider::http_base::HttpProviderBase;
 use tars_provider::registry::ProviderRegistry;
 use tars_types::{ChatEvent, ChatRequest, ModelHint, ProviderId, RequestContext};
 
@@ -105,8 +103,7 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
         .unwrap_or_else(|| provider_cfg.default_model().to_string());
     let prompt = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
 
-    let http = HttpProviderBase::default_arc().context("constructing reqwest client")?;
-    let registry = ProviderRegistry::from_config(&cfg.providers, http, basic())
+    let registry = ProviderRegistry::from_config_default(&cfg.providers)
         .context("building provider registry from config")?;
     let provider = registry.get(&provider_id).ok_or_else(|| {
         anyhow::anyhow!("config entry exists for `{provider_id}` but registry.get() returned None",)
