@@ -1751,6 +1751,8 @@ async fn run_worker_case(
         // `cwd` + `with_root`; the OS-confinement policy stays unconfined
         // (DangerFullAccess) here, unchanged from before M4.
         sandbox: Default::default(),
+        llm_request_ctx: None,
+        stream_hooks: None,
     };
     match worker.execute(ctx, req).await {
         Ok(result) => {

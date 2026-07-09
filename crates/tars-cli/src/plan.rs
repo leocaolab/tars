@@ -163,6 +163,8 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
             permissions: Default::default(),
             readable_roots: Vec::new(),
             sandbox: Default::default(),
+            llm_request_ctx: None,
+            stream_hooks: None,
         };
         agent
             .plan(ctx, &goal)
