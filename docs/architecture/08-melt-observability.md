@@ -1,6 +1,10 @@
 # Doc 08 — MELT (Metrics / Events / Logs / Traces) Observability Design
 
-> Scope: defines the observability data architecture of the Runtime — responsibility split, collection, storage, querying, and alerting across the four pillars (M/E/L/T).
+> Scope: defines the observability data architecture of the Runtime — the four pillars M/E/L/T, all owned by **`tars-melt`** (there is no separate `tars-log` crate). Two directional halves:
+> - **E pillar = `tars_melt::event`** — a durable, **read-able** event store: `PipelineEventLog` plus the per-call `ChatRequest`/`ChatResponse` records themselves (no wrapper type — the thing formerly, badly, called "body" is just melt's event content; see §3). Kept **full fidelity** for **debug / replay / eval / test** (the standard big-shop scenario: keep the exact bytes so a call can be re-run and diffed). Downstream tools (`tars events`, eval, debug) read it; the producing pipeline **never reads it back**.
+> - **M / L / T egress** — **write-only**, redacted, sampled → OTLP/external backends. Nobody reads it back (the Datadog test).
+>
+> The pipeline emits **once** into `tars-melt`; melt durably stores the event under `event/` **and** fires the redacted M/L/T egress independently (the egress is never gated on the durable write — ops must stay visible even when the store is behind). Recovery's `AgentEventLog` (business truth, used to replay a trajectory) is **not** MELT — it stays in tars-storage (§3). "Storage" in §12 means MELT's *own* signal-retention tiers (Prometheus/Loki/Tempo/S3), a separate concern from the `event/` store.
 >
 > Context: this doc, Doc 04 §3.2 `AgentEvent` (event sourcing), and Doc 06 §10 `AuditLog` (compliance audit) are **three distinct data flows**; see §3 for disambiguation.
 >
@@ -50,6 +54,17 @@ The four pillars are **complementary**, not substitutes. A single LLM call shoul
 ---
 
 ## 3. Disambiguating the Three Data Flows
+
+**The core principle is directionality: a read-able event store vs a write-only egress.** Whatever you read back is, by definition, an event store — not egress. Two sides:
+
+- **Read-able side (event stores — you read the bytes back).**
+  - `tars_melt::event` — MELT's own durable, full-fidelity `event/` store: `PipelineEventLog` (one `PipelineEvent` per `Pipeline.call`) plus the per-call `LlmRecord` (the `ChatRequest` + `ChatResponse` of one LLM call, held under a `ContentRef`). Never sampled. Read back by eval / `tars events` / debug / test / replay (keep exact bytes so a call can be re-run and diffed). This is the **E pillar**.
+  - `AgentEventLog` — recovery's trajectory log (`AgentEvent`, Doc 04). Lives in **tars-storage, NOT MELT**. Business truth, used to replay/resume a trajectory; must not be downsampled.
+- **Write-only side (egress — nobody reads it back).** The **M / L / T egress**: redacted, sampled OTLP signals → external backends (Datadog / Prometheus / Jaeger). You never read your data back out of Datadog. Payloads NEVER egress — only redacted metadata. The full `ChatRequest`/`ChatResponse` live ONLY in `tars_melt::event`, never in an exported signal.
+
+**Producer never reads back; emit once, fan out independently.** The producing pipeline emits **once** into `tars-melt` and NEVER reads the store back. Melt durably stores the event under `event/` **and** fires the redacted M/L/T egress independently — the egress is never gated on, nor reads from, the durable write, so ops stay visible even when the store lags. (Today the pipeline double-represents each call — a durable `PipelineEvent` in `EventEmitterMiddleware` PLUS separate `tracing` events that melt's `MetricsBridge` consumes; the target is ONE event object feeding both sinks.)
+
+In the diagram and table below, the **"MELT" column means the write-only M/L/T egress**; MELT's own read-able `event/` store sits on the read-able (left) side alongside `AgentEvent`, carrying full-fidelity observability/eval data.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -270,6 +285,10 @@ const COST_BUCKETS: &[f64] = &[0.0001, 0.001, 0.01, 0.1, 1.0, 10.0];
 
 **Important**: "Events" in this section is not Doc 04 §3.2's `AgentEvent` (event sourcing), but the discrete business events that form one of the four MELT pillars — emitted to OTel Logs (event type) or a standalone event bus, for SRE / product analysis.
 
+Two distinct things wear the word "event" inside MELT and must not be confused:
+- **`tars_melt::event` (the read-able E-pillar store)** — `PipelineEventLog` + per-call `LlmRecord`, full fidelity, never sampled, read back by eval / `tars events` / debug / replay (§3). The `TelemetryEvent` egress below is written **from** this data but is a separate, samplable, write-only signal.
+- **`TelemetryEvent` (this section, the samplable egress)** — the discrete ops moments below, downsamplable, emitted write-only to OTel / event bus, never read back.
+
 ### 6.1 When to Use Event Instead of Metric
 
 | Scenario | Use Metric | Use Event |
@@ -319,9 +338,11 @@ pub enum TelemetryEvent {
 |---|---|
 | Business truth, required for replay | Ops snapshot, loss is acceptable |
 | 100% collected | Downsamplable |
-| Written to Postgres event_log | Written to OTel logs (event flag) / event bus |
+| Written to `AgentEventLog` (tars-storage, recovery — NOT MELT) | Written to OTel logs (event flag) / event bus |
 | Every step of every trajectory | Across business, the moments ops cares about |
 | Fields are business inputs/outputs | Fields are ops metadata |
+
+Note a third store distinct from both: the read-able `tars_melt::event` store (`PipelineEventLog` + `LlmRecord`, §3) is full-fidelity like `AgentEventLog` but is MELT's observability/eval E-pillar (per `Pipeline.call`), not recovery's trajectory truth (per agent decision) and not the samplable `TelemetryEvent` egress.
 
 **Relationship between the two**: some AgentEvents **derive** TelemetryEvents. For example, `AgentEvent::TrajectoryAbandoned` may derive `TelemetryEvent::BacktrackTriggered` (if reason is critic reject) and `MetricUpdate("agent.backtrack_total")`. Derivation is performed by a dedicated `TelemetryProjector`.
 
@@ -759,6 +780,8 @@ tracing::info!(prompt.hash = %hash(&prompt_string), prompt.tokens = token_count,
 ---
 
 ## 12. Storage and Retention
+
+**Scope of "storage" here**: MELT owns two retention concerns — (a) its **own telemetry-signal tiers** (Prometheus / Loki / Tempo / S3, this section) for the write-only M/L/T egress, and (b) the read-able `tars_melt::event` store (`PipelineEventLog` + `LlmRecord`, §3). It does **not** hold recovery's `AgentEventLog` — that is business truth in tars-storage (Doc 09), not MELT.
 
 ### 12.1 Storage Tiers
 

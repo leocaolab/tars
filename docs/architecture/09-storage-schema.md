@@ -34,7 +34,9 @@ Allocation by deployment shape:
 
 | Data type | Personal | Team / SaaS | Hybrid |
 |---|---|---|---|
-| Event log | SQLite (WAL mode) | Postgres (partitioned) | SQLite (local) |
+| Recovery event log (`AgentEventLog`, tars-storage) | SQLite (WAL mode) | Postgres (partitioned) | SQLite (local) |
+| Pipeline event log + `LlmRecord` (`tars_melt::event`) | SQLite / JSONL | Postgres / SQLite | SQLite (local) |
+| Blackboard (coordination, tars-storage) | SQLite (WAL mode) | Postgres | SQLite (local) |
 | Audit log | SQLite (separate file) | Postgres + S3 mirror + SIEM | SQLite + no upload |
 | Billing events | SQLite | Postgres | SQLite (local rollup → upload anonymized metric) |
 | Tenant config | TOML file (no DB) | Postgres | TOML + cloud sync |
@@ -52,9 +54,35 @@ Allocation by deployment shape:
 
 - **SQLite + WAL**: Personal mode is single-process, no operational overhead, performance is sufficient (<1k events/s is plenty)
 - **Postgres**: required for Team/SaaS multi-replica, strong transactional guarantees, mature partitioning
-- **Redis**: atomic decrement + pub/sub + high QPS — best fit for Budget and Cache L2
+- **Redis**: atomic decrement + pub/sub + high QPS — best fit for Budget, Cache L2, and the blackboard **activation-notify transport**; **never the durable log** (§2.2)
 - **S3**: large objects + cold archive + cross-region replication
 - **OS keychain / Vault**: secret values must never sit alongside the business DB
+
+### 2.2 The Durable Event/Coordination Stores Are Three Distinct Homes
+
+The old too-generic `EventStore` name is retired. There is no single shared `EventStore<E>`. Three separate stores, each with its own owner, reader, and reliability contract:
+
+| Store | Owner crate | What it holds | Read back by | Reliability contract |
+|---|---|---|---|---|
+| `AgentEventLog` | **tars-storage** | `AgentEvent` (Doc 04), one per agent decision | Runtime itself, to replay/resume a trajectory | **Recovery plane**: fsync-before-ack; complete + ordered per trajectory; idempotent = exactly-once **effect** (via `StepIdempotencyKey`), not exactly-once delivery. **MUST NOT be downsampled** — business truth, not MELT. |
+| `PipelineEventLog` + `LlmRecord` | **`tars_melt::event`** (Doc 08 §3) | one `PipelineEvent` per `Pipeline.call`, plus the per-call `LlmRecord` (the `ChatRequest` + `ChatResponse`, held under a `ContentRef`) | eval / `tars events` / debug / test / replay | Read-able **observability/eval** E-pillar. Full fidelity, never sampled, durable. The producing pipeline never reads it back. Not recovery truth. |
+| Blackboard | **tars-storage** | coordination substrate (entities + append-only per-entity timeline) | steps, to read current scoped state | **Coordination plane**. The durable board is the truth; the **activation** design (notify + reconcile) is **deferred — not designed here** (see principle below). |
+
+**`LlmRecord`, never "body".** The per-call request+response record is an `LlmRecord`. There is no `BodyStore` and no "body" concept — that name is retired. `ContentRef` remains the generic tenant-scoped CAS reference type; the thing it points at, for an LLM call, is an `LlmRecord`.
+
+**Backends — one guarantee, three realizations.** Every durable log commits to the same guarantee (**durable, append-only, forever**), realized by one of:
+
+| Backend | When | Note |
+|---|---|---|
+| **JSONL file** | simplest, greppable | Personal / local debug |
+| **SQLite** | embedded + indexed | Personal / single-node |
+| **Postgres** | networked + indexed + `LISTEN/NOTIFY` | Team / SaaS |
+
+- **Never Redis or in-memory as the durable log** — volatile ≠ system-of-record. In-memory is **test-only**. Redis is legitimate ONLY as the activation-notify transport (pub/sub) or budget/cache (§5), never the log. Records cold-tier to S3 (§6). (Physical placement of the durable log / event store is out of scope for this doc.)
+
+**Per-plane reliability.**
+- **Recovery (`AgentEventLog`)**: fsync-before-ack + idempotent exactly-once effect (above). A failed append fails the trajectory (Doc 08 §3 key invariant).
+- **Activation (blackboard)**: the notify is a **hint** — ephemeral, best-effort (in-proc `tokio::Notify`/`watch` locally; Redis pub/sub or Postgres `LISTEN/NOTIFY` networked); the **truth** is the durable board. Reliability = **reconcile-against-state** (edge-triggered notify + level-triggered reconcile, like Kubernetes controllers): a dropped notify is caught by the next reconcile, a crash triggers full reconcile, and a wake never blocks on the durable write. Full activation design is **deferred** (Doc 19 §4).
 
 ---
 
@@ -472,28 +500,28 @@ Note: SQLite has no tenant_id field (Personal is always single-tenant, hardcoded
 
 ### 4.4 Sharing Code Between SQLite and Postgres
 
-Through `sqlx`'s `Database` abstraction, business code is shielded by a trait:
+Through `sqlx`'s `Database` abstraction, business code is shielded by a trait. This is the **recovery** log (§2.2) — `AgentEventLog`, holding `AgentEvent`; it is not the generic `EventStore` name (retired) and not `tars_melt::event`:
 
 ```rust
 #[async_trait]
-pub trait EventStore: Send + Sync {
+pub trait AgentEventLog: Send + Sync {
     async fn append(&self, event: AgentEvent) -> Result<EventOffset, StoreError>;
     async fn fetch(&self, traj: TrajectoryId, since: EventOffset) -> Result<Vec<AgentEvent>, StoreError>;
 }
 
-pub struct SqliteEventStore { pool: Pool<SqliteConnectionManager> }
-pub struct PostgresEventStore { pool: PgPool }
+pub struct SqliteAgentEventLog { pool: Pool<SqliteConnectionManager> }
+pub struct PostgresAgentEventLog { pool: PgPool }
 
-#[async_trait] impl EventStore for SqliteEventStore { ... }
-#[async_trait] impl EventStore for PostgresEventStore { ... }
+#[async_trait] impl AgentEventLog for SqliteAgentEventLog { ... }
+#[async_trait] impl AgentEventLog for PostgresAgentEventLog { ... }
 ```
 
 Implementation chosen at startup based on `mode` configuration:
 
 ```rust
-let event_store: Arc<dyn EventStore> = match config.storage.backend {
-    StorageBackend::Sqlite => Arc::new(SqliteEventStore::new(...).await?),
-    StorageBackend::Postgres => Arc::new(PostgresEventStore::new(...).await?),
+let event_log: Arc<dyn AgentEventLog> = match config.storage.backend {
+    StorageBackend::Sqlite => Arc::new(SqliteAgentEventLog::new(...).await?),
+    StorageBackend::Postgres => Arc::new(PostgresAgentEventLog::new(...).await?),
 };
 ```
 
@@ -908,7 +936,7 @@ async fn record_llm_call(&self, event: AgentEvent, billing: BillingEvent) -> Res
 // Postgres + Redis spans stores; transaction not possible
 async fn record_with_budget(&self, event: AgentEvent, cost: f64) -> Result<()> {
     // Step 1: write Postgres event (business truth, must succeed)
-    self.event_store.append(event).await?;
+    self.event_log.append(event).await?;
     
     // Step 2: deduct Redis budget (failure does not block business; record metric, async reconcile)
     if let Err(e) = self.budget.deduct(&tenant, cost).await {
@@ -934,7 +962,7 @@ async fn append_with_large_payload(&self, traj: TrajectoryId, payload: Vec<u8>) 
         output_ref: content_ref,
         ...
     };
-    self.event_store.append(event).await?;
+    self.event_log.append(event).await?;
     
     // Failure handling:
     // - Step 1 succeeds + Step 2 fails → S3 has an orphan, GC'd by Janitor via refcount=0
@@ -1044,7 +1072,7 @@ async fn migrations_idempotent() {
 
 ```rust
 // Same contract test runs twice - must pass against both SQLite and Postgres
-async fn event_store_contract_test(store: Arc<dyn EventStore>) {
+async fn agent_event_log_contract_test(store: Arc<dyn AgentEventLog>) {
     let event = AgentEvent::TaskCreated { /* ... */ };
     let offset = store.append(event.clone()).await.unwrap();
     
@@ -1054,15 +1082,15 @@ async fn event_store_contract_test(store: Arc<dyn EventStore>) {
 }
 
 #[tokio::test]
-async fn sqlite_event_store_satisfies_contract() {
-    let store = SqliteEventStore::new(test_sqlite_path()).await.unwrap();
-    event_store_contract_test(Arc::new(store)).await;
+async fn sqlite_agent_event_log_satisfies_contract() {
+    let store = SqliteAgentEventLog::new(test_sqlite_path()).await.unwrap();
+    agent_event_log_contract_test(Arc::new(store)).await;
 }
 
 #[tokio::test]
-async fn postgres_event_store_satisfies_contract() {
-    let store = PostgresEventStore::new(test_pg_pool()).await.unwrap();
-    event_store_contract_test(Arc::new(store)).await;
+async fn postgres_agent_event_log_satisfies_contract() {
+    let store = PostgresAgentEventLog::new(test_pg_pool()).await.unwrap();
+    agent_event_log_contract_test(Arc::new(store)).await;
 }
 ```
 

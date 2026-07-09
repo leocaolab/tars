@@ -1,7 +1,7 @@
 # Doc 17 — Pipeline Event Store
 
 **Status**: shipped. Designed 2026-05-08; implemented via the B-20 W3
-enabler — `pipeline_events.db` + `bodies.db` (CAS) + `EventEmitterMiddleware`,
+enabler — `pipeline_events.db` + `llm_records.db` (`LlmRecord` CAS) + `EventEmitterMiddleware`,
 queryable through `tars events`. This doc remains the design contract;
 see [`observability.md`](../observability.md) for usage and
 [CHANGELOG.md](../../CHANGELOG.md) for the shipped slices.
@@ -16,15 +16,18 @@ A durable, queryable stream of **one event per `Pipeline.call`
 boundary** — distinct from the existing trajectory `AgentEvent` stream
 which is at agent-decision grain (Doc 04).
 
-Two streams, one trait:
+Two streams, two distinct named homes — **no shared generic
+`EventStore<E>`** (that too-generic name is retired; see Doc 09 §2.2):
 
-| Stream            | Grain                  | Schema (`tars-types`)         | Crate that emits     |
-|-------------------|------------------------|-------------------------------|----------------------|
-| Trajectory events | Agent decision         | `AgentEvent`                  | `tars-runtime`       |
-| Pipeline events   | One LLM call boundary  | `PipelineEvent`               | `tars-pipeline`      |
+| Stream            | Grain                  | Named home                          | Schema (`tars-types`) | Crate that emits |
+|-------------------|------------------------|-------------------------------------|-----------------------|------------------|
+| Trajectory events | Agent decision         | `AgentEventLog` (tars-storage, **recovery**) | `AgentEvent`          | `tars-runtime`   |
+| Pipeline events   | One LLM call boundary  | `PipelineEventLog` (**`tars_melt::event`**, observability/eval) | `PipelineEvent`       | `tars-pipeline`  |
 
-Both ride on `EventStore<E>` from `tars-storage`. Independent instances,
-no cross-stream join required at the storage layer.
+Independent stores with independent contracts — recovery truth vs. the
+read-able observability/eval E-pillar (Doc 08 §3). No cross-stream join
+at the storage layer. `PipelineEventLog` is what this doc designs;
+`AgentEventLog` is Doc 09's recovery log.
 
 ## 2. Use cases
 
@@ -39,12 +42,12 @@ Each is a query that becomes possible *only* with this in place:
 - **Online evaluator** (Doc 16 §4): subscribe to `LlmCallFinished`,
   run an evaluator (cheap deterministic or expensive LLM-as-judge),
   emit `EvaluationScored` for downstream rollups.
-- **Offline evaluator / replay** (Doc 16 §5): pull last N call bodies,
-  re-issue against a new prompt or model, compare scores.
+- **Offline evaluator / replay** (Doc 16 §5): pull last N call
+  `LlmRecord`s, re-issue against a new prompt or model, compare scores.
 - **Compliance audit** (M6+): "all LLM calls for tenant X in last 30
   days" — `WHERE tenant_id = ? AND timestamp > ?`.
-- **Dataset bootstrap** (B-28): export `(request_body, response_body)`
-  for cohort, build SFT training data.
+- **Dataset bootstrap** (B-28): export the `LlmRecord`
+  (`ChatRequest` + `ChatResponse`) for cohort, build SFT training data.
 
 The first three drive W3; the rest are downstream multipliers.
 
@@ -103,7 +106,7 @@ pub struct LlmCallFinished {
     pub temperature: Option<f32>,
     pub max_output_tokens: Option<u32>,
 
-    // bodies — out-of-row via tenant-scoped ContentRef
+    // LlmRecord — out-of-row via tenant-scoped ContentRef
     pub request_ref: ContentRef,
     pub response_ref: Option<ContentRef>,  // None on error
 
@@ -139,9 +142,9 @@ pub struct EvaluationScored {
 
 | Layer | What                                                      | Why |
 |-------|-----------------------------------------------------------|-----|
-| Inline scalars in event row | model, provider, fingerprint, has_tools, temperature, telemetry, validation_summary, tags | Filtered by 99% of queries; full-row scans on tagged dashboards must not pay body-fetch latency |
-| `ContentRef` (out-of-row)   | system prompt, messages (full), tool specs, response body, response_schema | Bytes (KB-MB scale); evaluator replay path fetches on demand; storage / TTL tunable independently |
-| Not stored                  | per-token `ChatEvent::Delta`, HTTP wire bytes, intermediate retry response bodies | Cardinality / cost / privacy not justified by use cases |
+| Inline scalars in event row | model, provider, fingerprint, has_tools, temperature, telemetry, validation_summary, tags | Filtered by 99% of queries; full-row scans on tagged dashboards must not pay `LlmRecord`-fetch latency |
+| `ContentRef` (out-of-row → `LlmRecord`) | the `LlmRecord`: system prompt, messages (full), tool specs, response, response_schema | Bytes (KB-MB scale); evaluator replay path fetches on demand; storage / TTL tunable independently |
+| Not stored                  | per-token `ChatEvent::Delta`, HTTP wire bytes, intermediate retry responses | Cardinality / cost / privacy not justified by use cases |
 
 ## 6. Tenant isolation (`ContentRef` shape)
 
@@ -150,45 +153,47 @@ Lives in `tars-types/src/content_ref.rs`:
 ```rust
 pub struct ContentRef {
     tenant_id: TenantId,
-    body_hash: [u8; 32],
+    content_hash: [u8; 32],
 }
 ```
 
-Self-contained — `BodyStore::fetch(&ContentRef)` enforces tenant
+Self-contained — `LlmRecordStore::fetch(&ContentRef)` enforces tenant
 scoping internally; no caller-provided `tenant_id` parameter, no
-foot-gun, no probe vector.
+foot-gun, no probe vector. (`ContentRef` stays the generic CAS
+reference type; the thing it points at, for an LLM call, is an
+`LlmRecord`.)
 
-**Cross-tenant body dedup is forbidden** — Doc 06 §1 (tenant isolation
-sacred) trumps any storage-saving argument. Same body bytes from two
-tenants get two distinct `ContentRef` (different `tenant_id` prefixes
-in store key). Within-tenant dedup is fine and gives most of the
-storage benefit anyway.
+**Cross-tenant `LlmRecord` dedup is forbidden** — Doc 06 §1 (tenant
+isolation sacred) trumps any storage-saving argument. The same record
+bytes from two tenants get two distinct `ContentRef` (different
+`tenant_id` prefixes in store key). Within-tenant dedup is fine and
+gives most of the storage benefit anyway.
 
 `request_fingerprint` (analytics hash on the event row) is
-tenant-agnostic on purpose — it's a 32-byte hash with no body
+tenant-agnostic on purpose — it's a 32-byte hash with no `LlmRecord`
 recoverable, used for "this prompt template appeared 10000 times
-across tenants" rollups. Fingerprint ≠ body pointer.
+across tenants" rollups. Fingerprint ≠ `LlmRecord` pointer.
 
-## 6.1 BodyStore physical layout 
+## 6.1 LlmRecordStore physical layout 
 
-`BodyStore` is a trait. v1 impl is single-table SQLite; trait shape
-keeps room for an established date-partitioned strategy as v2:
+`LlmRecordStore` is a trait. v1 impl is single-table SQLite; trait
+shape keeps room for an established date-partitioned strategy as v2:
 
 ```rust
 #[async_trait]
-pub trait BodyStore: Send + Sync {
+pub trait LlmRecordStore: Send + Sync {
     async fn put(&self, r: &ContentRef, bytes: Bytes) -> Result<()>;
     async fn fetch(&self, r: &ContentRef) -> Result<Bytes>;
 
-    /// Drop all bodies older than `cutoff`. Implementations CAN do
+    /// Drop all records older than `cutoff`. Implementations CAN do
     /// this efficiently (codex-style YYYY/MM/DD dirs → `rm -rf`)
     /// or with `DELETE WHERE created_at < ?`. The trait commits to
     /// the operation existing, not to its cost.
     async fn purge_before(&self, cutoff: SystemTime) -> Result<u64>;
 
-    /// Drop a tenant's entire body footprint — required for
+    /// Drop a tenant's entire `LlmRecord` footprint — required for
     /// tenant-delete compliance. Implementations MUST partition by
-    /// tenant_id internally so this is O(tenant) not O(all bodies).
+    /// tenant_id internally so this is O(tenant) not O(all records).
     async fn purge_tenant(&self, tenant_id: &TenantId) -> Result<u64>;
 }
 ```
@@ -197,12 +202,12 @@ The `purge_*` methods exist in the trait so v2 backends (date-partitioned
 sqlite-per-day, S3 with lifecycle rules, postgres bytea with index)
 can implement retention as physical operations rather than full-table
 scans. Codex's `~/.codex/sessions/YYYY/MM/DD/...` shows the value:
-"delete all bodies older than 7d" becomes `rmdir` instead of a
+"delete all records older than 7d" becomes `rmdir` instead of a
 multi-million-row DELETE.
 
-v1 impl: single SQLite table with `(tenant_id, body_hash)` PK,
+v1 impl: single SQLite table with `(tenant_id, content_hash)` PK,
 `created_at` index. `purge_before` runs `DELETE WHERE created_at < ?`.
-Acceptable until body store hits ~100M rows; v2 partitioning kicks
+Acceptable until the store hits ~100M rows; v2 partitioning kicks
 in by then.
 
 ## 7. Where things live (crate placement)
@@ -211,29 +216,41 @@ in by then.
 tars-types/                       ← data contracts (no backends)
 ├── pipeline_events.rs            ← PipelineEvent / LlmCallFinished / EvaluationScored / CallResult
 ├── content_ref.rs                ← ContentRef
+├── llm_record.rs                 ← LlmRecord (ChatRequest + ChatResponse of one call)
 └── ... (existing AgentEvent, ChatRequest, etc.)
 
+tars-melt/                        ← observability subsystem (Doc 08)
+└── event/                        ← PipelineEventLog + LlmRecordStore (the read-able E-pillar)
+    ├── pipeline_event_log.rs     ← PipelineEventLog trait + SqlitePipelineEventLog impl
+    └── llm_record_store.rs       ← LlmRecordStore trait + SqliteLlmRecordStore impl
+
 tars-storage/                     ← backends + traits needing them
-├── event_store.rs                ← EventStore<E> trait + SqliteEventStore (existing — generalise)
-├── body_store.rs                 ← NEW: BodyStore trait + SqliteBodyStore impl
+├── agent_event_log.rs           ← AgentEventLog (recovery, trajectory; Doc 09 §2.2) — separate store
 └── kv_store.rs                   ← (B-7, deferred)
 
 tars-pipeline/                    ← middleware / business logic
-└── event_emitter.rs              ← NEW: EventEmitterMiddleware
+└── event_emitter.rs              ← NEW: EventEmitterMiddleware (emits into tars-melt)
 ```
 
-Dependency direction: `tars-pipeline → tars-storage → tars-types`.
-`tars-types` has zero downstream dependencies. Backend swap doesn't
-touch the schema or anything that imports it.
+Dependency direction: `tars-pipeline → tars-melt → tars-types` and
+`tars-runtime → tars-storage → tars-types`. `tars-types` has zero
+downstream dependencies. The **`PipelineEventLog` + `LlmRecordStore`
+live in `tars_melt::event`** (Doc 08 §3), not tars-storage — they are
+the read-able observability/eval E-pillar. Recovery's `AgentEventLog`
+is the separate store in tars-storage. Backend swap doesn't touch the
+schema or anything that imports it.
 
 ## 8. Emit semantics
 
 - **Position in onion**: outermost middleware, before Telemetry (or
   fold into Telemetry — see open question below).
 - **Trigger**: after `Pipeline.call` returns (Ok or Err). Fire-and-forget
-  write to `EventStore<PipelineEvent>` and `BodyStore`. Write failures
-  degrade silently with a warn log (same pattern as
-  `cache.rs` write fire-and-forget).
+  write to `PipelineEventLog` and `LlmRecordStore` (both in
+  `tars_melt::event`). Write failures degrade silently with a warn log
+  (same pattern as `cache.rs` write fire-and-forget). The pipeline emits
+  **once** into melt; melt stores the event durably **and** fires the
+  redacted M/L/T egress independently (Doc 08 §3) — the producer never
+  reads the store back.
 - **Sampling**: full emit by default. `EventSampler` trait point left
   open (`AlwaysEmit` impl ships); per-tag rate limiting belongs to
   `OnlineEvaluatorRunner`'s scheduling, not the event-emit path —
@@ -245,7 +262,7 @@ Two modes, per-tenant configurable, default `Limited`:
 
 ```rust
 pub enum PersistenceMode {
-    /// Default. Inline scalars + ContentRef bodies. Sufficient for
+    /// Default. Inline scalars + ContentRef `LlmRecord`. Sufficient for
     /// metric rollups, cohort filtering, regression gates.
     Limited,
 
@@ -275,22 +292,24 @@ overkill for v1.
    `Other` catchall) + supporting structs (`CallResult`,
    `PersistenceMode`) in `tars-types`. `EvaluationScored` defined but
    not yet emitted (Phase 2).
-3. `BodyStore` trait + `SqliteBodyStore` impl in `tars-storage`.
-4. `PipelineEventStore` trait + `SqlitePipelineEventStore` impl in
-   `tars-storage`. **Existing `EventStore` (trajectory) stays
-   unchanged** — Q1 decided two independent traits, not generic.
-   Internal `SqliteEventStoreCore` may share scaffolding between the
-   two impls.
+3. `LlmRecordStore` trait + `SqliteLlmRecordStore` impl in
+   `tars_melt::event`.
+4. `PipelineEventLog` trait + `SqlitePipelineEventLog` impl in
+   `tars_melt::event`. **Recovery's `AgentEventLog` (trajectory,
+   tars-storage) stays a separate store** — there is no shared generic
+   `EventStore<E>` (Doc 09 §2.2). Internal SQLite scaffolding may be
+   shared between the melt impls.
 5. `EventEmitterMiddleware` in `tars-pipeline`. Emits
-   `LlmCallFinished` post-call. Outermost layer (before Telemetry).
-6. `Pipeline.with_event_store(...)` builder method on
+   `LlmCallFinished` post-call into `tars-melt`. Outermost layer
+   (before Telemetry).
+6. `Pipeline.with_event_log(...)` builder method on
    `tars-py::Pipeline` and the Rust builder.
 7. Integration test: drive `Pipeline.call`, assert event landed in
-   `SqlitePipelineEventStore` with expected fields + body fetchable
-   from `SqliteBodyStore`.
+   `SqlitePipelineEventLog` with expected fields + `LlmRecord` fetchable
+   from `SqliteLlmRecordStore`.
 
 **Phase 2 — Subscription / OnlineEvaluatorRunner** (W3 main body):
-8. `EventStore::subscribe()` API → stream of `PipelineEvent`.
+8. `PipelineEventLog::subscribe()` API → stream of `PipelineEvent`.
 9. `OnlineEvaluatorRunner` consumes `LlmCallFinished`, dispatches to
    `Evaluator` impls, emits `EvaluationScored`.
 10. `EventSampler` trait + `AlwaysEmit` / `Rate(f64)` /
@@ -302,7 +321,7 @@ overkill for v1.
     for evaluator iteration.
 
 **Phase 4 — Backend extensibility** (driven by deployment shape):
-13. `PostgresEventStore`, `S3BodyStore`, retention policies.
+13. `PostgresPipelineEventLog`, `S3LlmRecordStore`, retention policies.
 
 ## 10. Open questions
 
@@ -310,15 +329,15 @@ Tagged with the decision needed.
 
 | # | Question | Default if undecided |
 |---|----------|----------------------|
-| Q1 | Is `EventStore<E>` actually generic, or two independent traits? | **Decided 2026-05-08: two independent traits**. Existing `EventStore` (trajectory, keyed by `TrajectoryId`) stays unchanged. New `PipelineEventStore` trait with `query(time_range, tenant, tags)` / `subscribe()` / `purge_before(cutoff)` / `purge_tenant(id)`. Underlying SQLite scaffolding shared via internal `SqliteEventStoreCore`. Reasons: existing trait is deliberately `dyn`-friendly + JSON-at-boundary, generic over E breaks the first; access patterns are too divergent for one trait (only `append` would actually be shared). |
+| Q1 | Is `EventStore<E>` actually generic, or two independent stores? | **Decided 2026-05-08: two independent stores with distinct named homes** — the generic `EventStore<E>` name is retired (Doc 09 §2.2). Recovery's `AgentEventLog` (trajectory, keyed by `TrajectoryId`, tars-storage) stays a separate store. This doc's `PipelineEventLog` lives in `tars_melt::event` with `query(time_range, tenant, tags)` / `subscribe()` / `purge_before(cutoff)` / `purge_tenant(id)`. Reasons: the two have different owners and contracts (recovery truth vs. read-able observability/eval E-pillar); access patterns are too divergent for one trait (only `append` would actually be shared). Internal SQLite scaffolding may still be shared within melt. |
 | Q2 | Place `EventEmitterMiddleware` outside Telemetry, or fold into it? | **Decided 2026-05-08: separate layer**. Single responsibility; lifecycle differs — telemetry is in-mem accumulator dropped at call end, event is durable async write. |
-| Q3 | `request_fingerprint` algorithm — what's in the canonicalised body? | model + messages + tools (sorted) + temperature + max_tokens + response_schema. **Not** in fingerprint: tenant_id, IAM scopes, request_id, trace_id (those go in cache key but are tenant-scoping concerns not semantic ones). |
+| Q3 | `request_fingerprint` algorithm — what's in the canonicalised request? | model + messages + tools (sorted) + temperature + max_tokens + response_schema. **Not** in fingerprint: tenant_id, IAM scopes, request_id, trace_id (those go in cache key but are tenant-scoping concerns not semantic ones). |
 | Q4 | `EvaluationScored.score: f64` flat, or richer typed `Score { dim, value }`? | Flat `f64` for v1; `dim: String` already separable via `evaluator_name`. Punt typed scoring until a 2-dim evaluator ships. |
-| Q5 | `ContentRef` body store + cache-registry body store: same physical store or separate? | Same. Both are "tenant-scoped CAS by sha256(tenant + body)"; deduping the implementation removes a class of "which one am I writing to" bugs. |
+| Q5 | `LlmRecordStore` + cache-registry content store: same physical store or separate? | Same. Both are "tenant-scoped CAS by sha256(tenant + content)"; deduping the implementation removes a class of "which one am I writing to" bugs. |
 | Q6 | Failed-call event has `response_ref: None` — does it also store the `ProviderError` chain detail? | `result: CallResult::Error { kind }` + `telemetry.retry_attempts` cover the patterns evaluators want. Full error chain only in the per-attempt log line, not the event. |
-| Q7 | TTL defaults — 90d events / 7d bodies — per-tenant override at what layer? | `tars-config` `[tenant.{id}.retention]` block; absent = global default. Implementation deferred to M6 multi-tenant. |
+| Q7 | TTL defaults — 90d events / 7d `LlmRecord`s — per-tenant override at what layer? | `tars-config` `[tenant.{id}.retention]` block; absent = global default. Implementation deferred to M6 multi-tenant. |
 | Q8 | Schema versioning — bump `LlmCallFinished` adding a field — back-compat? | `#[serde(default)]` on every new field, `#[non_exhaustive]` enum, **plus `Other(serde_json::Value)` catchall variant** (— old readers don't fail on unknown variants). No explicit version field until a breaking change forces one. |
-| Q9 | `BodyStore` v1 physical layout — single SQLite table, date-partitioned, or pluggable? | Pluggable trait. v1 impl is single-table SQLite (simplest); trait commits to `purge_before` / `purge_tenant` ops so v2 (codex-style date-partitioned sqlite-per-day or S3 + lifecycle rules) can replace without consumer changes. |
+| Q9 | `LlmRecordStore` v1 physical layout — single SQLite table, date-partitioned, or pluggable? | Pluggable trait. v1 impl is single-table SQLite (simplest); trait commits to `purge_before` / `purge_tenant` ops so v2 (codex-style date-partitioned sqlite-per-day or S3 + lifecycle rules) can replace without consumer changes. Backends: jsonl / sqlite / postgres / S3 — never redis or in-memory as the durable store (Doc 09 §2.2). |
 
 Most defaults are safe to ship as Phase 1 lands; Q1 and Q2 are the
 two needing explicit sign-off before enabler implementation starts.

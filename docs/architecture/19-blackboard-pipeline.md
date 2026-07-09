@@ -146,6 +146,12 @@ per-entity event log with per-event provenance, (c) concurrency-safe writes,
 (d) consistency after every commit. tars supplies the Worker/Plan machinery
 (Doc 04) and the event store (Doc 17); the consumer supplies a backing.
 
+> **Deferred**: the blackboard's **activation** design (how a step is woken when
+> its scope has work) — an edge-triggered **notify** (a best-effort hint) plus a
+> level-triggered **reconcile-against-state** (the durable board is the truth) —
+> is **not designed in this doc**. The principle only: a dropped notify is caught
+> by the next reconcile, a wake never blocks on the durable write (Doc 09 §2.2).
+
 ### 4.1 The blackboard is a MODEL — and how a step obtains it
 
 The blackboard is an **abstract model, not a database**. No tables, no files, no
@@ -413,12 +419,12 @@ to forget, nothing to hide.
 
 ---
 
-## 11. One invocation interface: mcp · tool · worker · pipeline
+## 11. One invocation interface: tool · worker · pipeline
 
 A worker (one step) and a pipeline (a DAG of workers) are, to a caller, the same kind
-of thing a tool or an MCP endpoint is — a **callable**: a name, a typed input
+of thing a tool is — a **callable**: a name, a typed input
 schema, and `invoke(args) -> result`. The goal is a SINGLE interface so an LLM
-has ONE way to call anything — a leaf MCP tool, a native tool, a single worker, or
+has ONE way to call anything — a native tool, a single worker, or
 a whole multi-step pipeline — without knowing which it is.
 
 Model it on the **skill contract** (cf. Claude skills, Doc 05): a capability is
@@ -428,7 +434,6 @@ one-shot is an implementation detail behind `invoke`. Under that one contract:
 
 | Callable | Steps | Backed by |
 |---|---|---|
-| MCP tool | leaf | external server (Doc 05) |
 | native tool | leaf | in-proc fn (Doc 05 / Doc 23 unified tool layer) |
 | **worker** | 1 | one blackboard-based step that commits its own transitions (§10) |
 | **pipeline** | DAG | composed workers → a `Plan` run via `run_plan` |
@@ -437,8 +442,8 @@ So a one-shot tool and a `run_plan` DAG **register the same way and present the
 same face**. The driving LLM (TarsAgent, Doc 20/21) reasons over a flat list of
 callables and picks the granularity it needs — a single tool or a whole pipeline
 — with no per-kind wiring. The unified registry + the description/schema contract
-is **Doc 05's** concern (tools · MCP · skills); **Doc 23** (unified tool layer) is
-where worker/pipeline join tool/MCP under one surface. This section asserts only
+is **Doc 05's** concern (tools · skills); **Doc 23** (unified tool layer) is
+where worker/pipeline join native tools under one surface. This section asserts only
 that *a blackboard pipeline IS such a callable*, not a special case — a `Plan`
 behind an `invoke`, registered like any skill.
 
