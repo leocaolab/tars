@@ -525,12 +525,14 @@ impl Pipeline {
         self.capabilities_full.clone()
     }
 
-    /// Internal: wrap a built provider in TARS's default middleware
-    /// stack (Telemetry → CacheLookup → Retry → Validation? →
-    /// Provider). When `validators` is non-empty, ValidationMiddleware
-    /// is layered between Retry and Provider so Reject{retriable=true}
-    /// outcomes are caught by the existing RetryMiddleware. Shared
-    /// between `from_config`, `from_str`, and `from_default`.
+    /// Internal: wrap a built provider in TARS's canonical middleware
+    /// stack by delegating to `LlmService::default_chain`, i.e.
+    /// `EventEmitter? → Telemetry → Validation? → Cache? → Retry →
+    /// Provider`. Validation sits *outside* Retry: a `Reject` short-
+    /// circuits with `ProviderError::ValidationFailed`, which is
+    /// `ErrorClass::Permanent` and is never retried (the W1
+    /// "retriable Reject re-invokes the model" path was cut in W4).
+    /// Shared between `from_config`, `from_str`, and `from_default`.
     fn from_provider(
         id: String,
         provider: Arc<dyn LlmProvider>,

@@ -32,34 +32,46 @@
 
 ## 2. Architecture overview
 
-ValidationMiddleware sits in the [Doc 02 §2 onion diagram](./02-middleware-pipeline.md) at: **inside Retry, outside Provider**.
+In the chain `LlmService::default_chain` assembles, ValidationMiddleware sits
+**outside Cache and outside Retry** — see [Doc 02](./02-middleware-pipeline.md):
 
 ```
-   ... → Retry → ValidationMiddleware → Provider
-                       │
-                       │ (drain stream into Response)
-                       ▼
+   EventEmitter? → Telemetry → ValidationMiddleware → Cache? → Retry → Provider
+                                       │
+                                       │ (drain stream into Response)
+                                       ▼
                   ┌─────────────────────────────────┐
                   │  validators[0].validate(resp)   │
                   │  ↓ Pass | Filter | Reject | Annotate
                   │  validators[1].validate(resp')  │
                   │  ↓ ...                          │
                   └─────────────────────────────────┘
-                       │
+                                       │
                        │ Pass        → flow back unchanged
                        │ Filter      → resp replaced with transformed, flow back transformed
-                       │ Reject      → Err(ProviderError::ValidationFailed{retriable})
-                       │              ↑ Retry sees this and decides whether to retry
+                       │ Reject      → Err(ProviderError::ValidationFailed { validator, reason })
+                       │              ↳ ErrorClass::Permanent — short-circuits, never retried
                        │ Annotate    → flow back unchanged, but write metrics to RequestContext.attributes
-                       ▼
+                                       ▼
                   Response received by caller
 ```
 
-**Why inside Retry, outside Provider**:
+**Why outside Retry**:
 
-- **Outside Retry** (inside Provider) means a validation failure cannot trigger retry — the validator rejected and we want to call the model again, but Pipeline has already returned, too late
-- **Inside Retry** (the layer inside Provider), ValidationMiddleware throws `ValidationFailed { retriable: true }`, the outer RetryMiddleware sees `ErrorClass::Retriable` and naturally retries, **reusing the existing retry infrastructure with zero extra coupling**
-- **Inside Provider** (further in) means ValidationMiddleware can't see the Response, because Provider directly produces the stream
+- A `Reject` is a **permanent** verdict: `ProviderError::ValidationFailed` is classified
+  `ErrorClass::Permanent`, so it short-circuits to the caller and no layer retries it.
+  (An earlier design — "W1" — had `Reject { retriable: true }` bubble to an outer
+  RetryMiddleware so a rejected answer would re-invoke the model. **That path was cut
+  in W4**; `ValidationOutcome::Reject` carries only a `reason`. Do not re-document it.)
+- Sitting outside Cache means a validator also sees **cache hits**, not just fresh
+  provider responses — every answer handed to the caller has been validated.
+- It must stay **outside Provider**: the provider emits a token stream, and a validator
+  is a post-stream concept (see below), so it can only run where a whole `Response`
+  exists.
+
+If you want a rejected answer re-asked, that is a **caller** decision today: catch
+`ValidationFailed` and call the service again (the same shape as provider fallback —
+composition, not a layer).
 
 **Why we must drain the entire stream**:
 
