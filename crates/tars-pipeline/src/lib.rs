@@ -1,52 +1,78 @@
 //! Middleware pipeline framework — Doc 02.
 //!
-//! The pipeline is a stack of [`Middleware`] layers wrapping an inner
-//! [`LlmService`]. Each layer is a Tower-style "wrap the inner service,
-//! return a new service" — same shape as `tower::Layer`, but with our
-//! own trait so we can stay `async_trait`-native and avoid the
-//! pinned-future generics tower forces on you.
+//! An [`LlmService`] is a concrete, reusable callable: **one provider +
+//! one model + an ordered list of [`Middleware`] layers**. It is the one
+//! public service concept — there is no service trait, no per-layer
+//! wrapper service, no `dyn LlmService`.
 //!
-//! Composition order (Doc 02 §2):
+//! Calling it drives the layers as a **handler chain**: each layer gets
+//! the request and a [`Next`] cursor, does its pre-work, calls
+//! `next.run(req, ctx)` — zero times to short-circuit (cache hit, budget
+//! reject), once normally, many times to retry — then post-processes.
+//! The terminal of the chain is `provider.stream(req, model, ctx)`.
 //!
-//! ```text
-//! Telemetry (outermost)
-//!  └─ Auth / IAM
-//!      └─ Budget
-//!          └─ Cache Lookup
-//!              └─ Prompt Guard
-//!                  └─ Routing
-//!                      └─ Circuit Breaker
-//!                          └─ Retry / Fallback
-//!                              └─ Provider call (innermost)
+//! A middleware is ONE type with ONE method:
+//!
+//! ```ignore
+//! #[async_trait]
+//! impl Middleware for MyGuard {
+//!     fn name(&self) -> &'static str { "my_guard" }
+//!     async fn handle(&self, req: ChatRequest, ctx: RequestContext, next: Next<'_>)
+//!         -> Result<LlmEventStream, ProviderError> {
+//!         // pre-work …
+//!         let out = next.run(req, ctx).await?;
+//!         // post-work …
+//!         Ok(out)
+//!     }
+//! }
 //! ```
 //!
-//! M1 ships only Telemetry + Retry + the [`ProviderService`] adapter at
-//! the bottom. The other layers fill in as their dependencies (cache
-//! crate, IAM crate, budget store) come online.
+//! **The model lives on the service**, not on the request and not on the
+//! context. Layers that need it — cache key, telemetry label, event
+//! record — read `next.model()`; the rest never see it.
 //!
-//! ## Building a pipeline
+//! ## Composition order
+//!
+//! Call order **is** chain order: the first `.layer(...)` is OUTERMOST
+//! (runs first inbound, last outbound); the provider is innermost. The
+//! canonical chain assembled by `Pipeline::default_chain` /
+//! `Pipeline::chain_over` (each layer conditional on its `PipelineOpts`
+//! field):
+//!
+//! ```text
+//! EventEmitter (outermost)
+//!  └─ Telemetry
+//!      └─ Validation
+//!          └─ Cache Lookup
+//!              └─ Retry
+//!                  └─ Provider call (innermost)
+//! ```
+//!
+//! The circuit breaker is **not** a middleware: [`CircuitBreaker`] wraps
+//! the [`LlmProvider`](tars_provider::LlmProvider) itself, *below* the
+//! chain, so an open breaker rejects before the provider is hit. The
+//! budget layers ([`PerCallBudgetMiddleware`], [`TenantBudgetMiddleware`])
+//! are opt-in via `.layer(...)`, not part of the default chain.
+//!
+//! **Provider selection is not a pipeline concern.** There is no routing,
+//! ensemble or fallback layer. A caller who wants them composes several
+//! `LlmService`s: ensemble = build N services, call all, merge; fallback
+//! = try one, on error try the next.
+//!
+//! ## Building a service
 //!
 //! ```ignore
 //! use std::sync::Arc;
 //! use tars_pipeline::{Pipeline, RetryMiddleware, TelemetryMiddleware};
 //!
 //! let provider: Arc<dyn LlmProvider> = /* registry.get(&id).unwrap() */;
-//! let pipeline = Pipeline::builder(provider, "test-model")
+//! let svc = Pipeline::builder(provider, "claude-sonnet-5")
 //!     .layer(TelemetryMiddleware::new())   // outermost
-//!     .layer(RetryMiddleware::default())   // closest to provider
-//!     .build();
-//! ```
+//!     .layer(RetryMiddleware::default())   // closest to the provider
+//!     .build();                            // -> LlmService
 //!
-//! Layer order matches the call order: the first `.layer(...)` wraps
-//! everything else and runs first on the inbound, last on the outbound.
-
-// The public composition API (`Middleware`, `PipelineBuilder::layer`,
-// `FallbackBuilder`) is deliberately expressed over the crate-private
-// `Service` trait — the one public service concept is the concrete
-// `LlmService`. That intentional public-over-private asymmetry trips
-// `private_interfaces`; allow it crate-wide rather than scatter
-// per-impl `#[allow]`s.
-#![allow(private_interfaces)]
+//! let stream = svc.call(req, ctx).await?;  // `req` carries no model
+//! ```
 
 mod middleware;
 mod service;
