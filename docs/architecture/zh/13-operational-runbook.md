@@ -186,11 +186,11 @@ Tier 4: 厂商 support (Anthropic/OpenAI/Google) + 客户成功
    - 如果其他人测试也通不 → provider outage
 
 **Mitigation**:
-- ✅ Circuit breaker 自动失败转移到 fallback provider (Doc 02 §4.7)
-- ✅ Routing policy 应已切到备用 provider (Doc 02 §4.6)
+- ✅ Circuit breaker 对故障 provider 快速失败(连续 N 次失败后 open → `CircuitOpen`),让调用方不再对它空烧整轮 retry
+- ✅ Provider 失败转移是**调用方组合**,不是 pipeline 层:需要它的 app 构建多个 `LlmService`,遇到 provider 错误就试下一个;运维也可以通过 config reload 把受影响的 role 重新指向健康的 provider
 - 监控 fallback provider 的负载是否能承担——如果不能,启用降级 (短回复 / 跳过非关键 step)
 
-**手动干预**（如自动 fallback 不工作）:
+**手动干预**（如调用方侧的失败转移跟不上）:
 
 ```bash
 # 1. 强制 disable 故障 provider (TBD: 实际命令)
@@ -207,8 +207,8 @@ tars admin provider disable --id <provider_id> --reason "outage" --duration 1h
 - 如果有积压请求,batch 处理避免再次过载
 
 **预防**:
-- 至少 2 个 provider 配置可作 fallback (每个 tier)
-- Routing policy 包含 `LatencyPolicy` 不是死配置
+- 每个 role 至少配 2 个 provider,让 app 有健康的 provider 可失败转移
+- 在调用方实现 provider 失败转移(试一个 `LlmService`,出错就试下一个),而不是依赖 pipeline 的 routing policy
 
 ### 5.2 LLM Provider 限流 (rate limited)
 
@@ -224,7 +224,7 @@ tars admin provider disable --id <provider_id> --reason "outage" --duration 1h
 **Mitigation**:
 1. **短期**：retry middleware 自动按 retry_after 退避
 2. **中期**：申请 provider 配额提升
-3. **长期**：多账号 + Routing 分散
+3. **长期**：调用方侧多账号 fan-out——把负载分散到多个 provider 账号 / `LlmService`
 
 **强制单租户限流** (如某 tenant 滥用):
 ```bash
@@ -249,7 +249,7 @@ tars admin tenant rate-limit --id <tenant> --tpm 1000 --duration 4h
 Soft limit (告警) → 通知 tenant 管理员 (邮件/IM),不阻塞业务
 
 Soft limit + 异常增速 (5x baseline) → 自动降级
-  - Routing 切到便宜 model tier
+  - 调用方切到便宜 model tier(换一个 LlmService)
   - 提示 tenant 检查
 
 Hard limit 即将触发 → 主动暂停非关键 task
@@ -670,7 +670,7 @@ tars admin provider add \
   --base-url "https://api.groq.com/openai/v1" \
   --auth-secret "secret/data/tars/groq"
 
-# 修改 routing policy (谨慎)
+# 调整 [resilience] retry / circuit-breaker 或 [roles] 映射 (谨慎)
 # 通过 config reload (不是直接 admin API),保留 git 痕迹
 ```
 
@@ -936,7 +936,7 @@ tars admin <whatever-needed>
 
 ```
 1. 立即向 provider 申请 quota 临时提升 (大账户通常 < 4h 响应)
-2. 启用 routing 偏向其他 provider
+2. 在调用方把负载切到其他 provider(改用另一个 LlmService)
 3. 评估是否需要长期 quota 提升 (跟商务谈)
 ```
 
@@ -989,7 +989,7 @@ tars admin <whatever-needed>
 | 级别 | 例子 | 审批 |
 |---|---|---|
 | Standard | Docker image patch / log level 调整 | 自助 |
-| Normal | 新 provider 上线 / 新 routing rule | Lead approve |
+| Normal | 新 provider 上线 / 新 [roles] 或 [resilience] rule | Lead approve |
 | Emergency | 修复 P0 的 hot fix | Director approve + post-fact review |
 | Significant | 数据库 schema 重大变更 / 架构调整 | CAB review |
 

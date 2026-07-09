@@ -98,7 +98,7 @@ pub struct LlmCallFinished {
 
     // request — inline scalars (filter / group-by maps to these)
     pub provider_id: ProviderId,
-    pub actual_model: String,              // routing-resolved, not ModelHint
+    pub actual_model: String,              // the concrete model the service was bound to (read via `next.model()`)
     pub request_fingerprint: [u8; 32],     // tenant-agnostic semantic hash
     pub has_tools: bool,
     pub has_thinking: bool,
@@ -302,9 +302,11 @@ overkill for v1.
 5. `EventEmitterMiddleware` in `tars-pipeline`. Emits
    `LlmCallFinished` post-call into `tars-melt`. Outermost layer
    (before Telemetry).
-6. `Pipeline.with_event_log(...)` builder method on
-   `tars-py::Pipeline` and the Rust builder.
-7. Integration test: drive `Pipeline.call`, assert event landed in
+6. Event-store wiring: `ChainOpts::events` (an `EventStores { events, records }`)
+   fed to `LlmService::default_chain` on the Rust side, and the
+   `event_store_dir=` kwarg (or `.event_store(dir)` on the builder) on
+   `tars-py::Pipeline`.
+7. Integration test: drive `LlmService::call`, assert event landed in
    `SqlitePipelineEventLog` with expected fields + `LlmRecord` fetchable
    from `SqliteLlmRecordStore`.
 

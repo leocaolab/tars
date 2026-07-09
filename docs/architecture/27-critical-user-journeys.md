@@ -199,10 +199,12 @@ racing the same task across multiple agents.
 > `ensemble.run(task, ctx)`, which exists ONLY in Rust
 > (`crates/tars-runtime/src/ensemble_agent.rs:24,35,71`). It has **no Python
 > binding** — `grep -rn 'EnsembleAgent|TarsAgent' crates/tars-py` (minus
-> `.venv`) returns nothing. The only ensemble reachable from Python is the
-> **completion-level** `EnsembleService` (`crates/tars-py/src/lib.rs:50,1027`) —
-> precisely the thing this CUJ sits *above*. So this CUJ is satisfied at the
-> **Rust crate API surface only**, not at the Python caller surface.
+> `.venv`) returns nothing. There is no built-in **completion-level** ensemble
+> type any more — provider selection is not a pipeline concern, so a
+> completion-level hedge is just a caller composition (build N `LlmService`s,
+> call all, merge) rather than an `EnsembleService`. This CUJ is the
+> agent-level hedge *above* that, satisfied at the **Rust crate API surface
+> only**, not at the Python caller surface.
 
 **Steps**
 1. Implement/obtain N agents satisfying
@@ -287,15 +289,20 @@ automatically prefer the cheapest provider that can serve them.
 
 **Steps**
 1. Have multiple providers configured (e.g. a free local model plus a paid API model).
-2. `p = tars.Pipeline.routed(["local_vllm", "openai", "anthropic"], policy="cost")`.
-3. The bottom of the onion becomes a `RoutingService` that orders candidates by
-   *estimated* cost of THIS request from each provider's static pricing
-   (`CostPolicy::select` → `Pricing::estimate_chat_cost`,
-   `crates/tars-pipeline/src/routing.rs:308-313`).
-4. Call `complete()`; the cheapest compatible candidate is tried first, with the
-   static fallback chain behind it.
-5. `cache` defaults to False for routed pipelines (a shared cache could serve
-   one provider's response for another).
+2. **Provider selection is a caller composition, not a pipeline layer** — there
+   is no built-in router. For each candidate provider, skip it when
+   `req.compatibility_check(provider.capabilities())` returns `Incompatible`,
+   and score the survivors by *estimated* cost of THIS request from each
+   provider's static pricing
+   (`provider.capabilities().pricing.estimate_chat_cost(&req, default_max_output)`,
+   `crates/tars-types/src/usage.rs:160-193`).
+3. Pick the cheapest compatible candidate and build a service over it —
+   `LlmService::of(provider, model)`, or `LlmService::default_chain(provider,
+   model, opts)` for the full onion — then `call()` it.
+4. Keep the remaining candidates as an ordered fallback list: on error, try the
+   next (fallback is also a caller composition, not a middleware).
+5. If you cache, key per provider (a shared cache could serve one provider's
+   response for another): give each candidate's service its own `cache_origin`.
 
 > **Cost-accuracy boundary (load-bearing — the `cost-accounts-for-cache`
 > invariant).** `Pricing::estimate_chat_cost`
@@ -303,30 +310,38 @@ automatically prefer the cheapest provider that can serve them.
 > full `input_per_million` rate (usage.rs:173,179) and **never** references
 > `cached_input_per_million` — even though the `Pricing` struct carries that
 > field (usage.rs:116, "typical 25-50% of standard") and `is_zero()` checks it
-> (usage.rs:143). Because `CostPolicy::select` sorts candidates by exactly this
-> cache-blind estimate, the cost ORDERING between a cache-heavy provider (e.g.
-> Anthropic re-sending a ~90% prompt-cached system prompt) and a no-cache
+> (usage.rs:143). Because a cost-preferring caller sorts candidates by exactly
+> this cache-blind estimate, the cost ORDERING between a cache-heavy provider
+> (e.g. Anthropic re-sending a ~90% prompt-cached system prompt) and a no-cache
 > provider can **invert**: the pre-call sort prices every input token at full
 > rate regardless of prompt-cache discounts. The post-call `cost_for`
 > (usage.rs:195+) *does* honor cached/cache-creation rates, so reconciliation is
-> correct; it is only the **routing sort key** that is cache-blind. Treat
-> cost-ordered routing as "cheapest-first by full-rate estimate," NOT
+> correct; it is only the **selection sort key** that is cache-blind. Treat
+> cost-ordered selection as "cheapest-first by full-rate estimate," NOT
 > "cheapest-first accounting for prompt cache."
 
 **Scope limits (grounded in code/TODO):**
-- (a) The hard "cap my spend / reject over budget" path —
-  `PerCallBudgetMiddleware` (`tars-pipeline/src/budget.rs`) — is shipped in Rust
-  but is NOT exposed in the Python surface today, so a Python caller gets
-  cheapest-first ordering, not a typed budget-exceeded rejection.
-- (b) Per-tenant *running-total* budget enforcement (`TenantBudgetMiddleware`)
-  and the Auth/IAM/Budget onion are M6 work, "still not started" per `TODO.md`
-  (see **CUJ-14**).
+- (a) There is **no built-in cost router** any more: provider selection was
+  removed from the pipeline (it's a caller composition), so the cheapest-first
+  loop above is a Rust-surface pattern over `compatibility_check` +
+  `estimate_chat_cost` — not a one-argument policy, and not reachable from the
+  Python `Pipeline` surface (which exposes `check_compatibility` but not the
+  pricing estimate).
+- (b) The hard "cap my spend / reject over budget" path —
+  `PerCallBudgetMiddleware` (`tars-pipeline/src/middleware/budget.rs`) — is
+  shipped in Rust as an opt-in `.layer(...)` but is NOT exposed in the Python
+  surface today.
+- (c) Per-tenant *running-total* budget enforcement (`TenantBudgetMiddleware`,
+  `tars-pipeline/src/middleware/tenant_budget.rs`) and the Auth/IAM/Budget onion
+  are M6 work, "still not started" per `TODO.md` (see **CUJ-14**).
 
-**Success:** A Python developer routes by cheapest-compatible-provider-first
-with one `policy="cost"` argument and an unchanged call site. The journey is
-honest about three boundaries: the ordering is by a **cache-blind** full-rate
-estimate; a hard per-call USD cap exists only in Rust (not bound); and
-per-tenant cumulative budget enforcement is unstarted M6.
+**Success:** A Rust developer prefers the cheapest-compatible provider by
+composing `compatibility_check` + `estimate_chat_cost` over the candidate
+providers, then builds one `LlmService` over the winner (with the rest as an
+ordered fallback). The journey is honest about three boundaries: the ordering
+is by a **cache-blind** full-rate estimate; provider selection is a caller
+composition with no Python binding; and per-tenant cumulative budget
+enforcement is unstarted M6.
 
 ---
 

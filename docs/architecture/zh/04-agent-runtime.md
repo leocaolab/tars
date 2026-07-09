@@ -238,7 +238,7 @@ pub struct AgentContext {
     pub principal: Principal,
     pub deadline: Option<Instant>,
     pub cancel: CancellationToken,
-    pub llm_service: Arc<dyn LlmService>,    // Doc 02 的 pipeline
+    pub llm_service: LlmService,             // Doc 02 的中间件服务（具体类型，Clone）
     pub context_store: Arc<dyn ContextStore>,
     pub tool_registry: Arc<dyn ToolRegistry>, // Doc 05
 }
@@ -313,13 +313,18 @@ pub enum AgentMessage {
 
 ### 4.3 模型分层（不让 LLM 自己路由）
 
+档位在 agent 的 `LlmService` **被解析时**就确定了（role → tier → provider +
+model；见 Doc 06），而不是逐请求打在 `ChatRequest` 上。`AgentContext` 交给每个
+agent 的 `LlmService` 已经绑定好了对应的模型，所以 `ChatRequest` 只承载纯内容
+（不带 model）：
+
 ```rust
 impl Agent for OrchestratorAgent {
     async fn execute(&self, ctx: AgentContext, input: AgentInput) -> ... {
+        // ctx.llm_service 已按 "default" 档解析 —— L1 主力档，要求稳定 JSON。
         let req = ChatRequest {
-            model: ModelHint::Tier(ModelTier::Default),  // L1 主力档,要求稳定 JSON
             structured_output: Some(AgentMessage::schema_for(AgentRole::Orchestrator)),
-            ...
+            ..ChatRequest::user(input.prompt())
         };
         // ...
     }
@@ -327,10 +332,9 @@ impl Agent for OrchestratorAgent {
 
 impl Agent for ReasoningWorker {
     fn execute(&self, ctx: AgentContext, input: AgentInput) -> ... {
-        let req = ChatRequest {
-            model: ModelHint::Tier(ModelTier::Reasoning),  // L2 顶级模型
-            ...
-        };
+        // ctx.llm_service 已按 "reasoning" 档解析 —— L2 顶级模型。
+        let req = ChatRequest::user(input.prompt());
+        // ...
     }
 }
 
@@ -743,12 +747,12 @@ async fn execute(&self, ctx: AgentContext, input: AgentInput) -> Result<...> {
 
 ## 10. 与 Pipeline 的集成
 
-Agent Runtime 是 Pipeline 的**消费者**，不是 wrapper。每个 Agent 通过 `AgentContext::llm_service` 调用 Pipeline，获得已经过 IAM / Cache / Guard / Routing 处理的 LLM 能力：
+Agent Runtime 是 Pipeline 的**消费者**，不是 wrapper。每个 Agent 通过 `AgentContext::llm_service` 调用自己的 `LlmService`，获得已经过 IAM / Cache / Guard / Retry 处理的 LLM 能力。该服务绑定的档位在解析时就已确定，所以请求只承载纯内容：
 
 ```rust
 async fn execute(&self, ctx: AgentContext, input: AgentInput) -> Result<...> {
+    // ctx.llm_service 已按 reasoning 档解析（Doc 06）。
     let req = ChatRequest {
-        model: ModelHint::Tier(ModelTier::Reasoning),
         system: Some(self.build_system_prompt()),     // 详见 §11
         messages: self.build_messages(&input),
         structured_output: Some(self.output_schema()),

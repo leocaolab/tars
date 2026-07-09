@@ -239,7 +239,7 @@ pub struct AgentContext {
     pub principal: Principal,
     pub deadline: Option<Instant>,
     pub cancel: CancellationToken,
-    pub llm_service: Arc<dyn LlmService>,    // pipeline from Doc 02
+    pub llm_service: LlmService,             // middleware-wrapped service from Doc 02 (concrete, Clone)
     pub context_store: Arc<dyn ContextStore>,
     pub tool_registry: Arc<dyn ToolRegistry>, // Doc 05
 }
@@ -314,13 +314,19 @@ pub enum AgentMessage {
 
 ### 4.3 Model tiering (don't let the LLM route itself)
 
+The tier is chosen when the agent's `LlmService` is **resolved** (role → tier
+→ provider + model; Doc 06), not stamped on each request. `AgentContext` hands
+each agent an `LlmService` already bound to the right model, so the
+`ChatRequest` stays pure content (it carries no model):
+
 ```rust
 impl Agent for OrchestratorAgent {
     async fn execute(&self, ctx: AgentContext, input: AgentInput) -> ... {
+        // ctx.llm_service was resolved for the "default" tier — L1 workhorse,
+        // requires stable JSON.
         let req = ChatRequest {
-            model: ModelHint::Tier(ModelTier::Default),  // L1 workhorse, requires stable JSON
             structured_output: Some(AgentMessage::schema_for(AgentRole::Orchestrator)),
-            ...
+            ..ChatRequest::user(input.prompt())
         };
         // ...
     }
@@ -328,10 +334,9 @@ impl Agent for OrchestratorAgent {
 
 impl Agent for ReasoningWorker {
     fn execute(&self, ctx: AgentContext, input: AgentInput) -> ... {
-        let req = ChatRequest {
-            model: ModelHint::Tier(ModelTier::Reasoning),  // L2 top-tier model
-            ...
-        };
+        // ctx.llm_service was resolved for the "reasoning" tier — L2 top model.
+        let req = ChatRequest::user(input.prompt());
+        // ...
     }
 }
 
@@ -744,12 +749,12 @@ async fn execute(&self, ctx: AgentContext, input: AgentInput) -> Result<...> {
 
 ## 10. Integration with the Pipeline
 
-Agent Runtime is a **consumer** of the Pipeline, not a wrapper. Each Agent calls the Pipeline through `AgentContext::llm_service`, getting LLM capability that has already been processed by IAM / Cache / Guard / Routing:
+Agent Runtime is a **consumer** of the Pipeline, not a wrapper. Each Agent calls its `LlmService` through `AgentContext::llm_service`, getting LLM capability that has already been processed by IAM / Cache / Guard / Retry. The tier that service is bound to was fixed at resolution time, so the request is pure content:
 
 ```rust
 async fn execute(&self, ctx: AgentContext, input: AgentInput) -> Result<...> {
+    // ctx.llm_service was resolved for the reasoning tier (Doc 06).
     let req = ChatRequest {
-        model: ModelHint::Tier(ModelTier::Reasoning),
         system: Some(self.build_system_prompt()),     // see §11
         messages: self.build_messages(&input),
         structured_output: Some(self.output_schema()),

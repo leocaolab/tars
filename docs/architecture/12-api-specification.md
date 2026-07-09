@@ -396,10 +396,13 @@ Client cert fingerprints map to a Principal (Doc 10 §4.2 `MtlsClientCert`).
 
 ## 6. Python Binding (PyO3)
 
-Projects Doc 06's **config + runtime-handle** model (global config → `Workspaces`
-manager → per-workspace handle → per-call context → provider / pipeline / runtime).
-There is **no** task-submission surface (`submit(TaskSpec, Principal)` / `subscribe`) —
-that server/task shape is gone; a consumer opens a workspace and calls into its handle.
+Projects Doc 06's **config + role-resolution** model (global config, loaded once →
+free-function role resolvers → per-call context → provider / pipeline). After the
+scope-facade simplification there is **no** per-workspace handle object: `tars-py`
+exposes module-level functions (`tars.init`, `tars.provider(role)`,
+`tars.pipeline(role)`, `tars.context(...)`) over the process-global `Config` +
+`ProviderRegistry`. There is also **no** task-submission surface
+(`submit(TaskSpec, Principal)` / `subscribe`) — that server/task shape is gone.
 
 ### 6.1 Design Choice
 
@@ -423,153 +426,111 @@ So the Python surface is **plain blocking methods**, not coroutines; concurrency
 from GIL-release + the internal multi-thread runtime, not from `asyncio`. This matches
 Python's common script/notebook idiom (no event loop to spin up).
 
-The binding reuses the existing `Provider` (`lib.rs:350`) and `Pipeline` (`lib.rs:504`)
-pyclasses; it adds `init`, a `Workspaces` manager, and a `Tars` handle over Doc 06's
-`Config::load` / `Tars::for_workspace` / `RUN_CONTEXT`.
+The binding reuses the existing `Provider` (layer 1) and `Pipeline` (layer 2)
+pyclasses and adds a small set of **module-level functions** over
+`tars_handle::init_from_home` / `resolve_role` / `RUN_CONTEXT`. The old
+`Workspaces` / `Tars` per-scope classes are **gone** — providers are global (built
+once by `init`), and a role resolves against the process-global `Config` +
+`ProviderRegistry`.
 
-`tars-py` crate:
+`tars-py` crate (matches `src/handle.rs`):
 
 ```rust
-// src/lib.rs
+// src/handle.rs — the process-global spine (post scope-facade)
 use pyo3::prelude::*;
+use tars_config::{Config, resolve_home};
+use tars_handle::{resolve_role, resolve_workspace_root, workspace_store_dir, WorkspaceResolution};
+use tars_provider::ProviderRegistry;
 
-#[pymodule]
-fn _tars_py(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(init, m)?)?;   // global config, once
-    m.add_class::<Workspaces>()?;                  // manager: open/close/get/roots
-    m.add_class::<Tars>()?;                        // per-workspace handle
-    m.add_class::<Provider>()?;                    // reused (layer 1)
-    m.add_class::<Pipeline>()?;                    // reused (layer 2)
-    m.add_class::<Runtime>()?;                     // DAG (run a Plan)
-    m.add_class::<Plan>()?;
-    errors::register(py, m)?;                      // TarsError hierarchy
-    Ok(())
-}
-
-/// Global config load — once per process. `home` maps to
-/// `Config::resolve_home` (--tars_home > $TARS_HOME > ~/.tars) and also
-/// loads `~/.tars/.env` (the GUI env-void). Providers/keys are GLOBAL,
-/// built once, shared by every workspace.
+/// Load the process-global config once and eagerly build the one provider
+/// registry. `home` maps to `resolve_home` (--tars_home > $TARS_HOME > ~/.tars)
+/// and reads `<home>/config.toml` (+ its `.env`). Idempotent: a second call is a
+/// no-op (first load wins). Providers / keys are global — built once, shared.
 #[pyfunction]
 #[pyo3(signature = (home = None))]
 fn init(home: Option<PathBuf>) -> PyResult<()> {
-    tars_config::Config::load(home).map_err(config_to_py)
-}
-
-/// Multi-workspace manager — the mirror of Rust
-/// `Mutex<HashMap<canonical_root, Tars>>`. Opening a 2nd workspace does
-/// NOT rebuild the global registry.
-#[pyclass]
-struct Workspaces {
-    tool: String,
-    open: Mutex<HashMap<PathBuf, Py<Tars>>>,
-}
-
-#[pymethods]
-impl Workspaces {
-    #[new]
-    fn new(tool: String) -> Self {
-        Self { tool, open: Mutex::new(HashMap::new()) }
-    }
-
-    /// Resolve `path` to a canonical workspace root (walk-up where a
-    /// `.<tool>/` marker BEATS `.git` — the monorepo rule) and return
-    /// the cached-or-new handle. Blocking; releases the GIL.
-    fn open(&self, py: Python<'_>, path: PathBuf) -> PyResult<Py<Tars>> {
-        py.allow_threads(|| {
-            let root = resolve_workspace_root(&self.tool, &path).map_err(handle_to_py)?;
-            let mut open = self.open.lock();
-            if let Some(h) = open.get(&root) { return Ok(h.clone_ref(py)); }
-            let inner = tars_runtime::Tars::for_workspace(&self.tool, &root)
-                .map_err(handle_to_py)?;
-            let handle = Py::new(py, Tars::wrap(inner))?;
-            open.insert(root, handle.clone_ref(py));
-            Ok(handle)
-        })
-    }
-
-    /// Deterministic close: cancel() + store drain (Doc 06 §10 Drop).
-    fn close(&self, path: PathBuf) -> PyResult<()> { /* remove → cancel() → Drop */ }
-    fn get(&self, path: PathBuf) -> PyResult<Option<Py<Tars>>> { /* … */ }
-    fn roots(&self) -> Vec<PathBuf> { /* … */ }
-    fn close_all(&self) { /* … */ }
-}
-
-#[pyclass]
-struct Tars { inner: tars_runtime::Tars }
-
-#[pymethods]
-impl Tars {
-    /// No-directory session → ~/.tars fallback (Doc 06 CUJ-4).
-    #[staticmethod]
-    fn standalone(tool: String, session: String) -> PyResult<Self> {
-        tars_runtime::Tars::standalone(&tool, SessionId::from(session))
-            .map(|inner| Self { inner }).map_err(handle_to_py)
-    }
-
-    /// Existing Provider/Pipeline pyclasses, bound to THIS workspace's
-    /// store + [roles] and the global registry.
-    fn provider(&self, role: String) -> PyResult<Provider> { /* roles→id→registry */ }
-    fn pipeline(&self, role: String) -> PyResult<Pipeline> { /* sink wired */ }
-    fn runtime(&self) -> Runtime { /* LocalRuntime over the workspace store */ }
-    /// Inspect the [roles] mapping without building anything.
-    fn role_provider(&self, role: String) -> PyResult<String> { /* … */ }
-
-    /// FFI boundary law (Doc 06 §9): task_local NEVER crosses into
-    /// Python. `with handle.context(...)` re-establishes RUN_CONTEXT.scope
-    /// for the calls inside it; the binding re-scopes per call.
-    #[pyo3(signature = (session = None, tags = None))]
-    fn context(&self, session: Option<String>, tags: Option<Vec<String>>) -> ContextGuard {
-        ContextGuard::new(RequestContext::new(session, tags.unwrap_or_default()))
+    match tars_handle::init_from_home(home) {
+        Ok(()) | Err(tars_handle::InitError::AlreadyInitialized) => Ok(()),
+        Err(e) => Err(init_to_py(e)),
     }
 }
+
+/// Resolve `role` → a raw `Provider` (layer 1, no middleware) against the
+/// global config + registry. Requires `init`.
+#[pyfunction]
+fn provider(role: String) -> PyResult<Provider> {
+    let (id, prov) = resolve_global_role(&role)?;
+    Ok(Provider::from_provider(id, prov))
+}
+
+/// Resolve `role` → a middleware-wrapped `Pipeline` (the canonical default
+/// chain) against the global config + registry. Requires `init`.
+#[pyfunction]
+fn pipeline(role: String) -> PyResult<Pipeline> {
+    let (id, prov) = resolve_global_role(&role)?;
+    Ok(Pipeline::from_provider(id, prov, vec![], None))
+}
+
+/// Inspect the `[roles]` mapping without building anything.
+#[pyfunction]
+fn role_provider(role: String) -> PyResult<String> { Ok(resolve_global_role(&role)?.0) }
+
+fn resolve_global_role(role: &str) -> PyResult<(String, Arc<dyn LlmProvider>)> {
+    let registry = ProviderRegistry::global().map_err(/* … */)?;
+    let cfg = Config::get();
+    let (id, prov) = resolve_role(&cfg.roles, &cfg.routing, &registry, role).map_err(handle_to_py)?;
+    Ok((id.to_string(), prov))
+}
+
+/// Context manager: establishes a `RequestContext` for the calls inside its
+/// `with` block. Each `complete()` inside re-scopes `RUN_CONTEXT` from it.
+#[pyfunction]
+#[pyo3(signature = (session = None, tags = None, tenant = None, trace = None))]
+fn context(session: Option<String>, tags: Option<Vec<String>>,
+           tenant: Option<String>, trace: Option<String>) -> ContextGuard {
+    ContextGuard::new(session, tags, tenant, trace)
+}
+
+// Kept path helpers (plain "where does it live", NOT a scope handle):
+//   resolve_root(tool, path) -> Option<String>   — canonical workspace root
+//   store_dir(tool, root)    -> String           — <root>/.<tool>/tars/
 ```
 
+The per-workspace store survives only as a **path helper** (`store_dir`) the caller
+opens itself — tars no longer bundles roles + store + cancel into a scope object.
 Every method that reaches the network follows the `Provider`/`Pipeline` precedent:
 `py.allow_threads(|| TOKIO.block_on(async { RUN_CONTEXT.scope(ctx, …).await }))` — the
-ctx from the active `context(...)` (or a per-call `ctx=`) is re-scoped inside the block,
-because `task_local` does not survive the FFI hop.
+ctx from the active `context(...)` is re-scoped inside the block, because `task_local`
+does not survive the FFI hop. The model is bound on the service, so `complete(model, …)`
+takes the concrete model as its first argument (the `ChatRequest` carries none).
 
 ### 6.3 Python Usage
 
-The full spine — `init` → `Workspaces` → `open` → `with context` → provider / pipeline /
-runtime+DAG → `close`:
+The spine — `init` → `with context` → provider / pipeline:
 
 ```python
 import tars
 
-tars.init()                                  # global config, once (~/.tars, + .env)
+tars.init()                                        # global config, once (~/.tars, + .env)
 
-ws = tars.Workspaces("arc")                  # one manager per tool
-handle = ws.open("/repo/myproject")          # canonical root; store under .arc/tars/
-
-with handle.context(session="sess-abc", tags=["dogfood"]):
-    # layer 1 — one raw call
-    text = handle.provider("critic").complete(model="…", user="review this")
+with tars.context(session="sess-abc", tags=["dogfood"]):
+    # layer 1 — one raw call, no middleware
+    resp = tars.provider("critic").complete("deepseek-chat", user="review this")
 
     # layer 2 — same surface, middleware (cache/retry/telemetry) engaged
-    resp = handle.pipeline("critic").complete(model="…", user="review this")
+    resp = tars.pipeline("critic").complete("deepseek-chat", user="review this")
+    print(resp.text, resp.telemetry)               # cache_hit, retry_count, latency, …
 
-    # layer 3 — a dependency-scheduled DAG; workers are auto LLM agents per role
-    plan = (
-        tars.Plan("scan-fix", "review then fix")
-            .stage("scan", role="critic",  instruction="review {item}",
-                   fan="per_item", items=files)
-            .stage("fix",  role="fixer",   instruction="fix {item}",
-                   fan="per_item", deps=["scan"], when=("scan", '"has_findings":true'))
-            .stage("merge", role="merger", instruction="merge {item}",
-                   fan="chain",   deps=["fix"])
-            .build()
-    )
-    outcome = handle.runtime().run(plan, on_event=lambda ev: print(ev))
-
-ws.close("/repo/myproject")                  # cancel() + store drain (deterministic)
+# where the per-project store lives, if the caller wants to open one itself:
+root = tars.resolve_root("arc", "/repo/myproject") # canonical workspace root, or None
+store = tars.store_dir("arc", root)                # <root>/.arc/tars/
 ```
 
-The caller describes **data + role names** and writes **no worker code** — each stage's
-worker is an auto-built `LlmWorker` resolved from the workspace `[roles]` mapping.
-(Python-callback workers are a noted **future**, not available now.) `on_event` receives
-the trajectory events as they land.
+`tars.provider(role)` / `tars.pipeline(role)` resolve the role against the global
+`[roles]` map + registry; `complete(model, …)` takes the concrete provider-side model as
+its first argument. The **layer-3 agent-runtime / DAG** surface (a `Plan` of role-based
+stages) is **deferred** in the bindings — it lands in a follow-on and is driven from Rust
+(`tars_runtime::run_plan`) today, not from Python.
 
 ### 6.4 Type stubs (.pyi)
 
@@ -577,46 +538,37 @@ the trajectory events as they land.
 
 ```python
 # tars.pyi (snippet)
-from typing import Any, Callable, Optional
+from typing import Optional
 from contextlib import AbstractContextManager
 
 def init(home: Optional[str] = None) -> None: ...
+def is_initialized() -> bool: ...
+def tars_home(home: Optional[str] = None) -> Optional[str]: ...
 
-class Workspaces:
-    def __init__(self, tool: str) -> None: ...
-    def open(self, path: str) -> "Tars": ...
-    def close(self, path: str) -> None: ...
-    def get(self, path: str) -> Optional["Tars"]: ...
-    def roots(self) -> list[str]: ...
-    def close_all(self) -> None: ...
+# role → provider / pipeline, resolved against the global config + registry
+def provider(role: str) -> "Provider": ...
+def pipeline(role: str) -> "Pipeline": ...
+def role_provider(role: str) -> str: ...
 
-class Tars:
+def context(session: Optional[str] = None, tags: Optional[list[str]] = None,
+            tenant: Optional[str] = None,
+            trace: Optional[str] = None) -> AbstractContextManager: ...
+
+# kept path helpers (plain paths, not a scope handle)
+def resolve_root(tool: str, path: str) -> Optional[str]: ...
+def store_dir(tool: str, root: str) -> str: ...
+
+class Pipeline:
     @staticmethod
-    def standalone(tool: str, session: str) -> "Tars": ...
-    def provider(self, role: str) -> "Provider": ...
-    def pipeline(self, role: str) -> "Pipeline": ...
-    def runtime(self) -> "Runtime": ...
-    def role_provider(self, role: str) -> str: ...
-    def context(self, session: Optional[str] = None,
-                tags: Optional[list[str]] = None) -> AbstractContextManager: ...
-
-class Plan:
-    def __init__(self, plan_id: str, goal: str) -> None: ...
-    def stage(self, name: str, role: str, instruction: str, *,
-              fan: str = "per_item", items: Optional[list[Any]] = None,
-              deps: Optional[list[str]] = None,
-              when: Optional[tuple[str, str]] = None) -> "Plan": ...
-    def build(self) -> "Plan": ...
-
-class Runtime:
-    def run(self, plan: Plan,
-            on_event: Optional[Callable[[Any], None]] = None) -> Any: ...
+    def from_default(provider_id: str, *, validators=None,
+                     event_store_dir: Optional[str] = None) -> "Pipeline": ...
+    def complete(self, model: str, *, user: Optional[str] = None,
+                 system: Optional[str] = None, **kwargs) -> "Response": ...
 ```
 
 Stubs make IDE completion + mypy type checking work. Errors are a typed hierarchy —
-`TarsError → TarsConfigError / TarsProviderError / TarsHandleError` (workspace-open /
-role-resolution failures), mapped from the Rust typed errors (`errors.rs:38`), never
-collapsed to one string.
+`TarsError → TarsConfigError / TarsProviderError / TarsHandleError` (role-resolution
+failures), mapped from the Rust typed errors, never collapsed to one string.
 
 ### 6.5 Packaging and Distribution
 
@@ -636,13 +588,15 @@ publish:
 
 ## 7. TypeScript / Node Binding
 
-Mirrors the same Doc 06 spine as Python (global config → `Workspaces` → per-workspace
-handle → per-call context → provider / pipeline / runtime), but in the **JS-idiomatic**
-shape: napi async functions returning **Promises**, so callers `await`. That async choice
-is fine and expected here (unlike Python's deliberate sync-blocking); the ctx boundary law
-still holds — ctx is passed explicitly and re-scoped per call inside the binding, never
-carried across the FFI hop as a `task_local`. No `submit(TaskSpec, Principal)` / task
-model — that is gone.
+Mirrors the same Doc 06 spine as Python (global config, once → free-function role
+resolvers → per-call context → provider / pipeline), but in the **JS-idiomatic** shape:
+napi functions with `complete` returning a **Promise**, so callers `await`. That async
+choice is fine and expected here (unlike Python's deliberate sync-blocking); the ctx
+boundary law still holds — ctx is passed explicitly and re-scoped per call inside the
+binding, never carried across the FFI hop as a `task_local`. Like `tars-py`, `tars-node`
+dropped the `Workspaces` / `TarsHandle` per-scope classes: `init` / `provider` /
+`pipeline` are free functions over the process-global config + registry. No
+`submit(TaskSpec, Principal)` / task model — that is gone.
 
 ### 7.1 Three TS Paths
 
@@ -652,112 +606,81 @@ model — that is gone.
 | **B. Tauri command** (desktop app, e.g. concer) | DMG/desktop GUI | **NOT napi** — tars stays entirely in Rust behind Tauri commands; the TS frontend only calls `invoke('cmd', …)` and never sees tars |
 | **C. HTTP client** (`@tars/client-http`) | Browser / remote | REST + SSE to a tars server (§7.5) |
 
-> **Desktop apps do not bind tars via napi.** A Tauri app holds the `Workspaces` map in
-> Rust (`tauri::State<Mutex<HashMap<PathBuf, Tars>>>`, Doc 06 §10) and exposes
-> `open_workspace` / `run_plan` / … as `#[tauri::command]`s. The webview calls
-> `invoke('open_workspace', { path })`; the handle, registry, and `RUN_CONTEXT` live on
-> the Rust side. Only path **A** (Node) actually links the napi binding below.
+> **Desktop apps do not bind tars via napi.** A Tauri app initializes tars once in Rust
+> (`tars_handle::init`), keeps whatever per-workspace scope it needs in its own state, and
+> exposes its own `#[tauri::command]`s. The webview calls `invoke('cmd', …)`; the global
+> registry and `RUN_CONTEXT` live on the Rust side. Only path **A** (Node) actually links
+> the napi binding below.
 
 ### 7.2 napi-rs binding (`tars-node`)
 
 ```rust
-// src/lib.rs
-use napi::bindgen_prelude::*;
+// src/handle.rs — free functions over the process-global config + registry
 use napi_derive::napi;
 
-/// Global config, once (Config::resolve_home: --tars_home > $TARS_HOME > ~/.tars;
-/// also loads ~/.tars/.env). Providers/keys are global, built once, shared.
+/// Global config, once (`home` > $TARS_HOME > ~/.tars; also loads its `.env`).
+/// Builds the shared registry eagerly; idempotent (a 2nd call is a no-op).
 #[napi]
-pub async fn init(home: Option<String>) -> Result<()> {
-    tars_config::Config::load(home.map(Into::into)).map_err(to_napi)
+pub fn init(home: Option<String>) -> Result<(), String> {
+    match tars_handle::init_from_home(home.map(PathBuf::from)) {
+        Ok(()) | Err(tars_handle::InitError::AlreadyInitialized) => Ok(()),
+        Err(e) => Err(init_to_js(e)),
+    }
 }
 
-/// Multi-workspace manager — mirror of Mutex<HashMap<canonical_root, Tars>>.
+/// Resolve `role` → a raw `Provider` (layer 1). Optional `ctx` binds an
+/// explicit call context. The concrete model is bound from the role's
+/// `default_model` at resolution — the request carries none.
 #[napi]
-pub struct Workspaces { tool: String, open: Mutex<HashMap<PathBuf, Tars>> }
-
-#[napi]
-impl Workspaces {
-    #[napi(constructor)]
-    pub fn new(tool: String) -> Self { Self { tool, open: Mutex::new(HashMap::new()) } }
-
-    /// Resolve canonical root (`.<tool>/` marker beats `.git` — the
-    /// monorepo rule) and return the cached-or-new handle. Opening a 2nd
-    /// workspace does NOT rebuild the global registry.
-    #[napi]
-    pub async fn open(&self, path: String) -> Result<TarsHandle> { /* for_workspace */ }
-
-    #[napi] pub async fn close(&self, path: String) -> Result<()> { /* cancel + drain */ }
-    #[napi] pub fn get(&self, path: String) -> Option<TarsHandle> { /* … */ }
-    #[napi] pub fn roots(&self) -> Vec<String> { /* … */ }
-    #[napi] pub async fn close_all(&self) { /* … */ }
+pub fn provider(role: String, ctx: Option<JsContext>) -> Result<Provider, String> {
+    let (_id, prov, model) = resolve_global(&role)?;
+    Ok(Provider { role, inner: LlmService::of(prov, model), ctx: /* … */ })
 }
 
+/// Resolve `role` → a middleware-wrapped `Pipeline` (the canonical default
+/// chain). Same shape as `provider`, but the service is `default_chain`.
 #[napi]
-pub struct TarsHandle { inner: tars_runtime::Tars }
-
-#[napi]
-impl TarsHandle {
-    #[napi(factory)]
-    pub fn standalone(tool: String, session: String) -> Result<TarsHandle> { /* ~/.tars */ }
-
-    // Provider/Pipeline bound to this workspace's store + [roles] + global registry.
-    #[napi] pub fn provider(&self, role: String) -> Result<Provider> { /* … */ }
-    #[napi] pub fn pipeline(&self, role: String) -> Result<Pipeline> { /* … */ }
-    #[napi] pub fn runtime(&self) -> RuntimeHandle { /* DAG */ }
-    #[napi] pub fn roleProvider(&self, role: String) -> Result<String> { /* [roles] */ }
-
-    /// FFI boundary law (Doc 06 §9): ctx is explicit. `withContext` runs
-    /// the callback with RUN_CONTEXT.scope re-established for its calls.
-    #[napi]
-    pub async fn withContext(&self, ctx: JsContext, body: JsFunction) -> Result<()> { /* … */ }
+pub fn pipeline(role: String, ctx: Option<JsContext>) -> Result<Pipeline, String> {
+    let (id, prov, model) = resolve_global(&role)?;
+    let inner = LlmService::default_chain(prov, model, ChainOpts::new(ProviderId::new(id.clone())));
+    Ok(Pipeline::from_service(id, inner, /* ctx */))
 }
+
+/// Kept path helpers (plain paths, not a scope handle):
+///   resolve_workspace_root(tool, path) -> Option<String>   — canonical root
+///   workspace_store_dir(tool, root)    -> String           — <root>/.<tool>/tars/
 ```
 
-Each async method does `RUN_CONTEXT.scope(ctx, async { … }).await` on the tokio side —
-the ctx from the surrounding `withContext` (or a per-call `ctx`) is re-established because
-`task_local` does not cross the boundary.
+`Provider` / `Pipeline` each carry the bound `LlmService` + a `RequestContext`; their
+async `complete(opts)` re-scopes `RUN_CONTEXT` with that ctx at the boundary (Doc 06 §9),
+because `task_local` does not cross the FFI hop. The per-workspace store survives only as
+a path helper — there is no scope-handle object to `open`/`close`.
 
 ### 7.3 TypeScript Usage
 
-The spine — `init` → `Workspaces` → `open` → provider / pipeline / runtime+DAG:
+The spine — `init` → resolve a role → `complete`:
 
 ```typescript
-import { init, Workspaces, Plan } from '@tars/runtime';
+import { init, pipeline, provider } from '@tars/runtime';
 
 async function main() {
-  await init();                                   // global config, once
+  init();                                          // global config, once
 
-  const ws = new Workspaces('arc');               // one manager per tool
-  const handle = await ws.open('/repo/myproject'); // canonical root; .arc/tars/ store
-
-  await handle.withContext({ session: 'sess-abc', tags: ['dogfood'] }, async () => {
-    // layer 1 / 2 — raw provider vs middleware-wrapped pipeline
-    const resp = await handle.pipeline('critic').complete({ model, user: 'review this' });
-
-    // layer 3 — a dependency-scheduled DAG; workers are auto LLM agents per role
-    const plan = new Plan('scan-fix', 'review then fix')
-      .stage('scan',  { role: 'critic', instruction: 'review {item}',
-                        fan: 'per_item', items: files })
-      .stage('fix',   { role: 'fixer',  instruction: 'fix {item}',
-                        fan: 'per_item', deps: ['scan'],
-                        when: ['scan', '"has_findings":true'] })
-      .stage('merge', { role: 'merger', instruction: 'merge {item}',
-                        fan: 'chain',    deps: ['fix'] })
-      .build();
-    const outcome = await handle.runtime().run(plan, (ev) => console.log(ev));
-  });
-
-  await ws.close('/repo/myproject');              // deterministic cancel + drain
+  // layer 1 / 2 — raw provider vs middleware-wrapped pipeline. The context
+  // (session / tags) is passed explicitly; the model is bound from the role's
+  // default_model at resolution.
+  const p = pipeline('critic', { session: 'sess-abc', tags: ['dogfood'] });
+  const resp = await p.complete({ user: 'review this' });
+  console.log(resp.text, resp.telemetry);          // cache_hit, retry_count, latency
 }
 
 main().catch(console.error);
 ```
 
-The caller describes **data + role names** and writes **no worker code** — each stage runs
-an auto-built `LlmWorker` from the workspace `[roles]` mapping. Errors surface as a typed
-class hierarchy `TarsError → TarsConfigError / TarsProviderError / TarsHandleError`, mapped
-from the Rust typed errors (not a single stringified message).
+Errors surface as a typed class hierarchy `TarsError → TarsConfigError /
+TarsProviderError / TarsHandleError`, mapped from the Rust typed errors (not a single
+stringified message). The **layer-3 agent-runtime / DAG** surface is **deferred** in the
+bindings — driven from Rust (`tars_runtime::run_plan`) today, not from Node.
 
 ### 7.4 Type Definition Generation
 
@@ -765,43 +688,27 @@ from the Rust typed errors (not a single stringified message).
 
 ```typescript
 // index.d.ts (snippet)
-export function init(home?: string): Promise<void>;
+export function init(home?: string): void;
+export function isInitialized(): boolean;
+export function tarsHome(home?: string): string | null;
 
-export class Workspaces {
-  constructor(tool: string);
-  open(path: string): Promise<TarsHandle>;
-  close(path: string): Promise<void>;
-  get(path: string): TarsHandle | null;
-  roots(): string[];
-  closeAll(): Promise<void>;
+// role → provider / pipeline, resolved against the global config + registry
+export function provider(role: string, ctx?: Context): Provider;
+export function pipeline(role: string, ctx?: Context): Pipeline;
+
+// kept path helpers (plain paths, not a scope handle)
+export function resolveWorkspaceRoot(tool: string, path: string): string | null;
+export function workspaceStoreDir(tool: string, root: string): string;
+
+export interface Context { session?: string; tags?: string[]; tenant?: string; trace?: string; }
+
+export class Pipeline {
+  get role(): string;
+  complete(opts: CompleteOptions): Promise<CompleteResult>;
 }
-
-export class TarsHandle {
-  static standalone(tool: string, session: string): TarsHandle;
-  provider(role: string): Provider;
-  pipeline(role: string): Pipeline;
-  runtime(): RuntimeHandle;
-  roleProvider(role: string): string;
-  withContext(ctx: Context, body: () => Promise<void>): Promise<void>;
-}
-
-export interface StageOpts {
-  role: string;
-  instruction: string;
-  fan?: 'per_item' | 'chain' | 'collect';
-  items?: unknown[];
-  deps?: string[];
-  when?: [string, string];          // [upstreamStage, summaryContains] gate
-}
-
-export class Plan {
-  constructor(planId: string, goal: string);
-  stage(name: string, opts: StageOpts): Plan;
-  build(): Plan;
-}
-
-export class RuntimeHandle {
-  run(plan: Plan, onEvent?: (ev: unknown) => void): Promise<unknown>;
+export class Provider {
+  get role(): string;
+  complete(opts: CompleteOptions): Promise<CompleteResult>;
 }
 ```
 

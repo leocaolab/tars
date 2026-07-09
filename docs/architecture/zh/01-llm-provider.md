@@ -147,10 +147,14 @@ impl LlmProvider for OpenAIProvider {
 
 ```rust
 pub struct ChatRequest {
-    pub model: ModelHint,
+    // 注意：没有 `model` 字段。ChatRequest 是纯粹的、与模型无关的内容。
+    // 具体模型在 service 构造时绑定（`LlmService = provider + model`），
+    // 并作为显式参数传给 provider 的 `stream(req, model, ctx)`，因此同一个
+    // 请求可跨 provider/model 复用。
     pub system: Option<String>,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
+    pub tool_choice: ToolChoice,
     pub structured_output: Option<JsonSchema>,
     pub max_output_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -158,8 +162,13 @@ pub struct ChatRequest {
     pub seed: Option<u64>,
     pub cache_directives: Vec<CacheDirective>,
     pub thinking: ThinkingMode,
+    pub enable_chat_template_thinking: Option<bool>,
 }
 
+// 模型*选择*仍然有一套词汇——它只是活在 service 构造 / 角色解析层
+//（`[roles]` 映射、`[routing.tiers]`），不再挂在请求上。`ModelHint` /
+// `ModelTier` 描述"选哪个模型",供配置 + 解析层用来把一个具体模型绑进
+// `LlmService`。
 pub enum ModelHint {
     Explicit(String),
     Tier(ModelTier),
@@ -169,7 +178,7 @@ pub enum ModelHint {
 pub enum ModelTier {
     Reasoning,      // 顶级模型 (Opus / o1 / Gemini Pro)
     Default,        // 主力 (Sonnet / 4o / Flash)
-    Fast,           // 路由 / 分类 (4o-mini / Haiku / Flash-8B)
+    Fast,           // 分类 / 便宜 (4o-mini / Haiku / Flash-8B)
     Local,          // 本地 (Qwen / Llama)
 }
 
@@ -192,7 +201,7 @@ pub enum ContentBlock {
 }
 ```
 
-**ModelHint 是抽象层最重要的设计**：上层 Agent 写 `ModelTier::Fast` 而不是 `"gpt-4o-mini"`——同一份代码可以在切换 routing 配置时跑在 Anthropic、OpenAI、本地模型上而无需修改。
+**"按角色选模型"而非"按字符串选模型"是核心设计**：上层 Agent 写一个角色名（或 `ModelTier::Fast`）而不是 `"gpt-4o-mini"`,由 `[roles]` / `[routing.tiers]` 配置把它绑定成 `LlmService` 里具体的 provider+model。同一份代码只需改配置即可跑在 Anthropic、OpenAI、本地模型上而无需改代码——而且因为模型绑在 service 上、不挂在请求上,一个 `ChatRequest` 可以在它们之间复用。
 
 ### 4.2 ChatEvent（流式事件）
 
@@ -276,7 +285,7 @@ pub enum PromptCacheKind {
 }
 ```
 
-上层 Routing 和 Middleware 据此做决策：
+在多个 provider 间做选择的调用方（以及预检能力检查 `ChatRequest::compatibility_check` / `Capabilities::check_requirements`）据此做决策：
 - 需要 strict JSON 输出 → 过滤掉 `StructuredOutputMode::None` 的 provider
 - 长 system prompt 复用 → 优先 `ExplicitMarker` 或 `ExplicitObject`
 - 视觉任务 → 过滤 `modalities_in.contains(Image)`
@@ -737,51 +746,46 @@ impl ProviderError {
 
 ---
 
-## 12. Routing 层
+## 12. Provider Registry + 角色/tier 解析
+
+Registry 是一个**纯命名空间**——provider id → provider,外加每个 provider 配置的
+`default_model`。它**不持有 routing policy,也不持有 metrics**：provider *选择*
+不是 pipeline 的职责（见下）。
 
 ```rust
 pub struct ProviderRegistry {
-    providers: HashMap<ProviderId, Arc<dyn LlmProvider>>,
-    routing: Arc<dyn RoutingPolicy>,
-    metrics: Arc<ProviderMetrics>,
-}
-
-#[async_trait]
-pub trait RoutingPolicy: Send + Sync {
-    async fn select(
-        &self,
-        req: &ChatRequest,
-        candidates: &[(ProviderId, Arc<dyn LlmProvider>)],
-        metrics: &ProviderMetrics,
-    ) -> Result<Vec<ProviderId>, RoutingError>;
+    providers: Arc<HashMap<ProviderId, Arc<dyn LlmProvider>>>,
+    // 每个 provider 配置的默认模型,构建时从 `ProviderConfig` 抓取
+    //（`LlmProvider` trait 本身不暴露它）。角色/tier 解析器读它,把一个
+    // 具体模型绑进 `LlmService`。
+    default_models: Arc<HashMap<ProviderId, String>>,
 }
 ```
 
-内置策略：
-- `ExplicitPolicy`：req.model 是 `ModelHint::Explicit(name)` 时直接定位
-- `TierPolicy`：根据 `ModelTier` 查表
-- `CostPolicy`：在能力满足前提下选最便宜
-- `LatencyPolicy`：根据 metrics 里的 P50 延迟选最快
-- `EnsemblePolicy`：并行调多个 provider,按策略合并（majority vote / fastest / longest）
-- `FallbackChain<P>`：包装其他 policy,失败自动降级
-
-配置示例：
+**角色名 → 具体 provider（+ model）** 由 `tars_handle::resolve_role` /
+`resolve_role_bound` / `resolve_service` 针对扁平的 `[roles]` 映射与
+`[routing.tiers]` 配置（`RoutingConfig { tiers: HashMap<ModelTier, Vec<ProviderId>> }`）
+解析。解析顺序：`[roles]` 映射 → 某个 tier 的首选候选 → 字面 provider id →
+`default` tier → 唯一 provider → 否则 `UnknownRole`。
 
 ```toml
-[routing]
-default = "tier"
+[roles]                              # 任意角色名 → provider id
+critic = "deepseek"
+fixer  = "claude_cli"
 
-[routing.tiers]
+[routing.tiers]                      # 固定 tier → 有序候选列表
 reasoning = ["claude_opus_api", "openai_o1", "gemini_pro"]
 default   = ["claude_sonnet_api", "openai_4o", "gemini_flash"]
 fast      = ["openai_4o_mini", "claude_haiku", "local_qwen_7b"]
 local     = ["local_qwen_32b"]
-
-[routing.fallback]
-on_rate_limit = "next_in_tier"
-on_overload   = "next_in_tier"
-on_auth       = "fail"
 ```
+
+**超出这一步的 provider 选择（cost/latency 策略、ensemble、自动 fallback）
+被刻意地不做进 registry 或 pipeline**——它们已按决策移除。一个 pipeline
+只绑定一个 provider+model。想要多 provider 行为的调用方自己组合多个
+`LlmService`：*ensemble* = 建 N 个 service,全调后合并；*fallback* = 调一个,
+出错再调下一个。让 registry 保持哑命名空间、pipeline 保持单 provider,
+两者都不会长出策略插件面。
 
 ---
 
@@ -876,22 +880,24 @@ threshold = 0.85
 ┌─────────────────────────────────────────┐
 │  Agent Runtime (Orchestrator + Workers) │
 └──────────────────┬──────────────────────┘
-                   │ ChatRequest (with ModelHint)
+                   │ ChatRequest (纯内容) + 一个角色/tier
                    ▼
 ┌─────────────────────────────────────────┐
-│  Middleware Pipeline                    │
+│  角色/tier 解析 (tars-handle)            │
+│  [roles] 映射 + [routing.tiers] →        │
+│  provider + 具体 model → LlmService      │
+└──────────────────┬──────────────────────┘
+                   │ LlmService (已绑定 provider + model)
+                   ▼
+┌─────────────────────────────────────────┐
+│  Middleware chain (单个 LlmService)      │
 │  - IAM / Auth                           │
 │  - Cache Lookup + Janitor (LRU 主动回收) │
 │  - Budget Control                       │
 │  - Prompt Guard                         │
 │  - Telemetry                            │
 └──────────────────┬──────────────────────┘
-                   │ ChatRequest (model resolved)
-                   ▼
-┌─────────────────────────────────────────┐
-│  ProviderRegistry + RoutingPolicy       │
-└──────────────────┬──────────────────────┘
-                   │ Provider 选定
+                   │ req + model (显式参数)
                    ▼
 ┌─────────────────────────────────────────┐
 │  LlmProvider impl                       │
@@ -900,9 +906,9 @@ threshold = 0.85
 └─────────────────────────────────────────┘
 ```
 
-Provider 层**完全不感知** Cache、IAM、Budget、Tracing 业务概念——这些是 Middleware 在调用 Provider 之前/之后处理的。Provider 只负责"我是某个具体后端,给我标准请求,我吐标准事件流,我提供 cache delete 等原子能力"。
+Provider 层**完全不感知** Cache、IAM、Budget、Tracing 业务概念——这些是 Middleware 在调用 Provider 之前/之后处理的。Provider 只负责"我是某个具体后端,给我标准请求 + 一个 model,我吐标准事件流,我提供 cache delete 等原子能力"。
 
-这个边界划清楚之后,新增一个 provider（比如 xAI Grok 出 API 了）只需要写一个 `XaiAdapter`,其余所有 Cache / Budget / Routing 自动可用。
+这个边界划清楚之后,新增一个 provider（比如 xAI Grok 出 API 了）只需要写一个 `XaiAdapter`,其余所有 Cache / Budget / Telemetry 自动可用。
 
 ---
 

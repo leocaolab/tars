@@ -8,19 +8,39 @@
 > Event-store internals are **out of scope** — deferred to Task 4 (only the
 > *placement* decision is fixed here).
 
+> **⚠️ Update (post scope-facade simplification).** The single bundled **`Tars` handle**
+> this doc designed (§C3 / §4 SCOPE box / §10) was **subsequently removed**. `tars-handle`
+> is now a *thin bundle of standalone pieces*, not a per-scope handle:
+> - **global config + registry:** `tars_handle::init(Config)` (DI) / `init_from_home(home)`
+>   (CLI) install the process-global `Config` (`Config::get()`) and eagerly build the one
+>   `ProviderRegistry` (`ProviderRegistry::global()` / `try_global()`); `is_initialized()`.
+> - **role → provider/service:** the free functions `resolve_role` / `resolve_role_bound` /
+>   `resolve_service` / `resolve_provider_id` (against an explicit `&cfg.roles`,
+>   `&cfg.routing`, `&registry`) — no scope object.
+> - **paths:** `resolve_workspace_root`, `workspace_store_dir`, `tars_home_store_dir`,
+>   `standalone_store_dir`, `StoreScope` (the §7 path law, still live).
+> - **resilience:** `resilience_configs(&cfg.resilience)` → `(RetryConfig, CircuitBreakerConfig)`.
+> The load-bearing *decisions* below (process isolation, config layering, the path law,
+> observability-only store) all stand; only the **bundling** into one `Tars` struct — and
+> its per-scope sink + cancel + deterministic-Drop lifecycle — is gone. Scope/lifecycle is
+> now the **consumer's** to own (tars ships DI seams, not a handle). Read the sections below
+> with that substitution in mind.
+
 ---
 
 ## 1. Overview & goal
 
 tars today has all the pieces of an agentic runtime — `Config`, `ProviderRegistry`,
-`Pipeline`, `LocalRuntime`, `EventStore` — but **no single entry that binds them for a
+`LlmService`, `LocalRuntime`, `EventStore` — but **no single entry that binds them for a
 scope**, so every consumer hand-wires `load_from_file → from_config → builder → new`
 independently (the "scatter"). This refactor introduces:
 
 1. A **global layer** (process-wide, immutable): `Config` + `ProviderRegistry`,
    loaded once, shared.
-2. A **scope layer**: one **`Tars` handle** per *workspace* (local) or *tenant×workspace*
-   (server), carrying the scope's roles + observability sink + cancellation.
+2. A **scope layer**: per-*workspace* (local) or *tenant×workspace* (server) roles +
+   observability + cancellation. **(As shipped, this is not a bundled `Tars` handle —
+   see the update banner: tars provides standalone pieces and the consumer owns the
+   scope.)**
 3. A **path-resolution law**: where config lives, where the store lives, how a
    workspace is discovered — one rule for CLI, GUI/DMG, standalone, and server.
 4. A **context law**: `tokio::task_local!` inside Rust; explicit ctx at every language
@@ -53,7 +73,7 @@ authz) into "spin another process."
 | Axis | **rig** (lib) | **OpenClaw** (daemon) | **Hermes** (daemon) | **tars → this design** |
 |---|---|---|---|---|
 | Shape | library, everything a trait | opinionated daemon | opinionated daemon | **library** (like rig) |
-| Entry | `openai::Client::from_env()` (stateless, cheap) | `$OPENCLAW_STATE_DIR` (`~/.openclaw`) | `$HERMES_HOME` (`~/.hermes`) | **`Tars::for_workspace()` handle** + global `Config::get()` |
+| Entry | `openai::Client::from_env()` (stateless, cheap) | `$OPENCLAW_STATE_DIR` (`~/.openclaw`) | `$HERMES_HOME` (`~/.hermes`) | **`tars_handle::init` + global `Config::get()` / `ProviderRegistry::global()`; role via `resolve_service`** |
 | Config home | app-provided | `~/.openclaw/openclaw.json` | `~/.hermes/*.json` | `~/.tars/config.toml`, **flag > env > default** |
 | Data location | app decides (pluggable stores) | `~/.openclaw/memory/<agentId>.sqlite` | `~/.hermes/state.db` | **per-workspace** `<root>/.<tool>/tars/` (default); `~/.tars` fallback |
 | Partition key | `PromptRequest::conversation` | **agentId** | **session** | **`tenant_id` × workspace** |
@@ -99,38 +119,38 @@ and the global home is the *fallback* for the non-directory (standalone) case.
 └──────────────────────────────────────────────────────────────────────────┘
              │ shared Arc ref
 ┌─ SCOPE  (per workspace [local] / per tenant×workspace [server]) ─────────┐
-│  Tars {                                                                   │
-│     registry: Arc<ProviderRegistry>,   // shared ref to the global        │
-│     roles:    RoutingConfig,           // <root>/.<tool>/config.toml       │
-│     sink:     EventSink,               // per-scope obs sink (Task 4)      │
-│     cancel:   CancellationToken,       // cancel-on-close                  │
-│     root:     WorkspaceRoot,                                              │
-│  }                                                                        │
+│  Standalone pieces — no bundled handle. The CONSUMER owns the scope:      │
+│     cfg.roles / cfg.routing            // role → provider id (from Config) │
+│     ProviderRegistry::global()         // shared ref to the global        │
+│     resolve_service(roles, routing, registry, role) -> LlmService         │
+│     (store dir via workspace_store_dir(...); StoreScope §C4 — consumer-    │
+│      opened; cancel/lifecycle consumer-owned)                             │
 └──────────────────────────────────────────────────────────────────────────┘
              │ DI (Tauri State keyed by root / CLI main / per-request)
 ┌─ CALL   (per operation) ────────────────────────────────────────────────┐
 │  RUN_CONTEXT (task_local): { tenant, session, trace, tags }  — ids only  │
-│  tars.provider(role) / tars.pipeline(role) / tars.runtime()              │
+│  resolve_role(...) / resolve_service(...)   (Rust)                        │
+│  tars.provider(role) / tars.pipeline(role)  (py/node bindings)           │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Why the split:** the registry is a function of the *global* config → build once, share
-(a global immutable singleton is correct under process isolation). The roles + store are a
-function of the *workspace* → must be per-handle (a singleton would break multi-workspace).
-The call context is per-operation → task_local, ids only (kept light; see §9).
+(a global immutable singleton is correct under process isolation). The roles are a
+function of the *workspace* config → resolved per call against `cfg` (a global that a
+consumer swaps per workspace). The call context is per-operation → task_local, ids only
+(kept light; see §9).
 
 ### Three entry paths (a consumer picks its depth)
 
-A consumer enters at exactly the layer it needs — the handle exposes all three; the layers
-nest internally:
+A consumer enters at exactly the layer it needs — the three nest internally:
 
-| Entry | Accessor | Use |
-|---|---|---|
-| provider-only | `tars.provider(role)` | one raw LLM call, stateless |
-| pipeline (bypass runtime) | `tars.pipeline(role)` | single agent call w/ retry/cache/obs — no DAG |
-| runtime (DAG) | `tars.runtime()` → `run_plan(...)` | dependency-scheduled multi-step workflow |
+| Entry | Rust | py/node binding | Use |
+|---|---|---|---|
+| provider-only | `resolve_role(...)` → `Arc<dyn LlmProvider>` | `tars.provider(role)` | one raw LLM call, stateless |
+| service (bypass runtime) | `resolve_service(...)` / `LlmService::default_chain(...)` | `tars.pipeline(role)` | single agent call w/ retry/cache/obs — no DAG |
+| runtime (DAG) | `LocalRuntime::new(store)` → `run_plan(...)` | *(deferred in bindings)* | dependency-scheduled multi-step workflow |
 
-A single agent call does **not** go through `run_plan` — it's one call at the pipeline layer,
+A single agent call does **not** go through `run_plan` — it's one call at the service layer,
 not a one-node DAG.
 
 ---
@@ -194,26 +214,30 @@ design realizes only the two layers that matter now and leaves the rest as decla
   - **Open (measure later):** `from_config` is eager (builds every declared provider even if
     unused). Acceptable for now; a lazy per-id build is a future optimization, not a blocker.
 
-### C3 — `Tars` handle (per scope)
-- **Reuse:** `Pipeline::builder(provider)` `middleware.rs:45`; `EventStores` `:160`;
-  `LocalRuntime::new(event_store)` `runtime.rs:128`; `run_plan` `executor.rs:695`;
-  `CancellationToken` (`executor.rs:748`); `RoutingConfig` `routing.rs:26`.
-- **New:**
+### C3 — role resolution (standalone functions; **supersedes** the earlier `Tars` handle)
+- **Reuse:** `LlmService::default_chain(provider, model, opts)` (canonical onion);
+  `LlmService::of(provider, model)` (leaf); `LocalRuntime::new(event_store)`
+  `runtime.rs`; `run_plan` `executor.rs:695`; `RoutingConfig` `routing.rs`.
+- **Shipped surface** (`tars-handle`, no scope struct — every input a plain argument):
   ```rust
-  pub struct Tars { registry: Arc<ProviderRegistry>, roles: RoutingConfig,
-                    sink: EventSink, cancel: CancellationToken, root: WorkspaceRoot }
-  impl Tars {
-      pub fn for_workspace(tool: &str, root: &Path) -> Result<Tars, TarsError>;
-      pub fn standalone(tool: &str, session: SessionId) -> Result<Tars, TarsError>;
-      pub fn provider(&self, role: &str) -> Result<Arc<dyn LlmProvider>, TarsError>;
-      pub fn pipeline(&self, role: &str) -> Result<Pipeline, TarsError>; // wires self.sink into EventEmitter
-      pub fn runtime(&self)              -> Arc<dyn Runtime>;             // LocalRuntime::new(store); pass to run_plan(...)
-      pub fn cancel(&self);              // fire before Drop on close
-  }
-  impl Drop for Tars { /* cancel(); drop sink Sender → writer drains → store closes */ }
+  // Composition root: install the process-global Config + build the one registry.
+  pub fn init(config: Config) -> Result<(), InitError>;          // DI (embedder)
+  pub fn init_from_home(home: Option<PathBuf>) -> Result<(), InitError>; // CLI
+  pub fn is_initialized() -> bool;
+
+  // role → provider / model-bound service, against an EXPLICIT registry + routing + roles.
+  pub fn resolve_role(roles, routing, registry, role) -> Result<(ProviderId, Arc<dyn LlmProvider>), TarsError>;
+  pub fn resolve_role_bound(roles, routing, registry, role) -> Result<(ProviderId, Arc<dyn LlmProvider>, String), TarsError>;
+  pub fn resolve_service(roles, routing, registry, role) -> Result<LlmService, TarsError>; // business-facing leaf
+  pub fn resolve_provider_id(roles, routing, registry, role) -> Result<ProviderId, TarsError>;
   ```
-  Role resolution = `self.roles` (workspace) → provider id → `self.registry` (global). Two
-  config layers meet here (§5).
+  Role resolution = `cfg.roles` (flat `[roles]` map) → tier → literal id → `default` tier
+  → sole provider → `UnknownRole`. Two config layers meet here (§5). The provider+model
+  come from `cfg`/`registry`; `resolve_service` returns a leaf `LlmService` (wrap it in the
+  onion with `LlmService::default_chain` / `builder_with_inner`). **The per-scope
+  observability sink + cancel + deterministic-Drop lifecycle of the old handle are no longer
+  a tars type — the consumer owns the scope + its store handle** (the store is a write-only
+  side-log, Task 4; §C4 placement still applies).
 
 ### C4 — `StoreScope` (placement; sink internals = Task 4)
 - **Reuse:** `default_personal_event_store_path` `sqlite.rs:292`; Personal/Team split
@@ -226,7 +250,7 @@ design realizes only the two layers that matter now and leaves the rest as decla
       Off,                // opt-out
   }
   ```
-  Resolved by `for_workspace` (§7). **Only placement is fixed here; the sink (MPSC single
+  Resolved by the consumer at workspace-root resolution (§7). **Only placement is fixed here; the sink (MPSC single
   writer, best-effort, EventStore-trait backend) is Task 4.**
   - **What the store is NOT (fixed now, so Task 4 stays honest):** observability only — a
     write-only side-log. It is **never** the scheduler and **never** the durability source
@@ -250,7 +274,7 @@ design realizes only the two layers that matter now and leaves the rest as decla
     `events.sequence_no` (already the PK, `sqlite.rs`), NOT `SystemTime::now()` (NTP / sleep-wake
     can invert two events); timestamps are UI-only (reconcile reads domain state, not this log,
     so drift can't stall the DAG — but keep the invariant);
-    (7) **corruption graceful-degrade** — `for_workspace` catches `SQLITE_CORRUPT` (power loss
+    (7) **corruption graceful-degrade** — store-open catches `SQLITE_CORRUPT` (power loss
     mid-WAL, NFS/Dropbox mounts), renames the bad file to `events.db.corrupted.bak`, opens a
     fresh empty store, and **starts anyway** — never lock the user out of a workspace over a
     corrupt *observability* log (precisely why the store is observability, not durability).
@@ -323,7 +347,8 @@ also holds `concer` docs):
 **tars never discovers the location itself.** The library must not call `current_dir()` — a
 GUI has no meaningful CWD, and self-sourcing breaks DI. The **consumer** resolves the root
 from its entry (GUI: OS Open-Folder dialog → held in app state; CLI: CWD + walk-up to
-git-root, or `--workspace`) and injects it via `Tars::for_workspace(tool, root)`.
+git-root, or `--workspace`) via `resolve_workspace_root(tool, entry)`, then builds its
+scope from the global registry + `cfg.roles` (e.g. `resolve_service`).
 
 ---
 
@@ -371,13 +396,17 @@ per-tenant registry keying, or server authz until a real server needs them.
 
 ## 10. Lifecycle (deterministic Drop + cancel)
 
-```
-tauri::State<Mutex<HashMap<PathBuf, Tars>>>   // no LRU/TTL — explicit lifecycle
+The lifecycle is now the **consumer's** (tars no longer bundles a scope handle). A typical
+Tauri consumer keeps its own per-root scope struct — the registry stays global/shared:
 
-open_workspace(X):   root=resolve(X); map.entry(root).or_insert_with(|| Tars::for_workspace(tool, root))
-switch A→B:          registry NOT rebuilt (shared); B gets/creates its handle; A stays cached
-close_workspace(A):  if let Some(t)=map.remove(A) { t.cancel(); }   // Drop after in-flight jobs release Arc
-restart:             reopen remembered root(s) → rebuild handle → reconnect on-disk store → domain resume
+```
+tauri::State<Mutex<HashMap<PathBuf, ConsumerScope>>>   // consumer-owned; no LRU/TTL
+
+open_workspace(X):   root=resolve_workspace_root(tool, X); map.entry(root)
+                       .or_insert_with(|| ConsumerScope::new(ProviderRegistry::global()?, &cfg.roles, root))
+switch A→B:          registry NOT rebuilt (global, shared); B gets/creates its scope; A stays cached
+close_workspace(A):  map.remove(A) → the consumer cancels its own jobs + drains its own store
+restart:             reopen remembered root(s) → rebuild scope → reconnect on-disk store → domain resume
 ```
 
 - **Drop is deterministic:** `remove` → (in-flight jobs still hold `Arc` → they finish/cancel
@@ -397,10 +426,10 @@ restart:             reopen remembered root(s) → rebuild handle → reconnect 
 |---|---|---|
 | tars-config → runtime | `Config::get() -> &'static Config` | global immutable |
 | tars-provider → handle | `ProviderRegistry::global() -> Arc<…>` | built once |
-| handle → tars-pipeline | `Pipeline::builder(provider)` `middleware.rs:45` | sink wired into `EventStores` `:160` |
+| scope → tars-pipeline | `LlmService::default_chain(provider, model, opts)` | events wired via `ChainOpts.events` (`EventStores`) |
 | handle → tars-runtime | `LocalRuntime::new(store)` `runtime.rs:128`; `run_plan(...)` `executor.rs:695` | cancel token threaded |
 | runtime/pipeline → sink | `EventSink::emit(ev)` (Task 4) | ids from `RUN_CONTEXT` |
-| bindings → handle | `Tars::for_workspace` / `Config::load` | Tasks 2 (PyO3) / 3 (napi) — ctx explicit at boundary |
+| bindings → tars-handle | `tars_handle::init_from_home` / `resolve_role` | Tasks 2 (PyO3) / 3 (napi) — ctx explicit at boundary |
 
 ---
 
@@ -433,15 +462,18 @@ restart:             reopen remembered root(s) → rebuild handle → reconnect 
 | `default_config_path` | `paths.rs:25` | `resolve_home` default |
 | `RoutingConfig` | `routing.rs:26` | workspace `[roles]` layer |
 | `ProviderRegistry` / `from_config` | `registry.rs:64` / `:86` | global registry (built once) |
-| `Pipeline::builder` / `EventStores` | `middleware.rs:45` / `:160` | `tars.pipeline(role)` |
-| `LocalRuntime::new` / `run_plan` | `runtime.rs:128` / `executor.rs:695` | `tars.runtime()` |
+| `LlmService::default_chain` / `EventStores` | `tars-pipeline` `service.rs` / `middleware.rs` | `resolve_service(role)` / `tars.pipeline(role)` |
+| `LocalRuntime::new` / `run_plan` | `runtime.rs` / `executor.rs:695` | `LocalRuntime::new(store)` → `run_plan(...)` |
 | `CancellationToken` | `executor.rs:748` | cancel-on-close |
 | `default_personal_event_store_path` / Personal-Team | `sqlite.rs:292` / `event_store.rs:5-6` | StoreScope fallback / backend axis |
 | tars-py `Provider` / `Pipeline` / `EventStorePair` | `tars-py/src/lib.rs:350` / `:504` / `:605` | Task 2 binding baseline |
 
 New abstractions (justified): `Config::get`/`Registry::global` (collapse the scatter under
-process isolation), `Tars` handle (the missing single entry, rig-style), `StoreScope`
-(placement law), `RUN_CONTEXT` task_local (context law), deterministic-Drop lifecycle.
+process isolation), the `tars-handle` standalone resolvers (`resolve_role` /
+`resolve_service` — the "single entry" that, post-simplification, replaced the originally
+proposed bundled `Tars` handle, rig-style), `StoreScope` (placement law), `RUN_CONTEXT`
+task_local (context law). *(The per-scope deterministic-Drop lifecycle is now
+consumer-owned — see the update banner.)*
 
 ---
 
@@ -450,14 +482,15 @@ process isolation), `Tars` handle (the missing single entry, rig-style), `StoreS
 - **M1 — global layer.** `Config::load/get/resolve_home` (`$TARS_HOME`/flag) +
   `ProviderRegistry::global()`. Verify: two consumers resolve the same registry; flag>env>default
   path test. *(no behavior change to existing load)*
-- **M2 — `Tars` handle + StoreScope placement.** `for_workspace` / `standalone`,
-  `provider/pipeline/runtime` accessors wired to the global registry + workspace roles;
-  StoreScope resolution (workspace / tars_home / off) — **sink still the current store
-  impl** (real consolidation is Task 4). Verify: CUJ-1/2/4 resolve correct paths; role→provider
-  through both layers.
-- **M3 — lifecycle.** `Mutex<HashMap<root, Tars>>` pattern, `cancel()` + deterministic Drop,
-  workspace-root resolution (canonical + walk-up), reconstruct-on-restart. Verify: CUJ-3/5
-  (switch/close/restart) — registry not rebuilt, Drop closes cleanly, in-flight survives switch.
+- **M2 — role resolvers + StoreScope placement.** `resolve_role` / `resolve_role_bound` /
+  `resolve_service` over the global registry + workspace roles; StoreScope resolution
+  (workspace / tars_home / off) — **store still the current impl** (real consolidation is
+  Task 4). Verify: CUJ-1/2/4 resolve correct paths; role→provider through both layers.
+  *(As shipped: standalone functions, not a bundled `Tars` handle — see banner.)*
+- **M3 — lifecycle (consumer-owned).** The consumer's `Mutex<HashMap<root, ConsumerScope>>`
+  pattern, cancel + drain, workspace-root resolution (canonical + walk-up),
+  reconstruct-on-restart. Verify: CUJ-3/5 (switch/close/restart) — registry not rebuilt,
+  in-flight survives switch.
 - **M4 — context law.** `RUN_CONTEXT` task_local; entry scoping; spawn re-scope rule
   documented + a spawn test. Verify: deep call reads ctx without threading; spawned job
   re-scopes.
@@ -671,7 +704,6 @@ pub struct TenantOverrides {
     pub middleware_prompt_guard: Option<PromptGuardOverrides>,
     pub cache: Option<CacheOverrides>,
     pub agent_blueprints: Vec<AgentBlueprint>,        // tenant-defined Agents
-    pub routing_policy: Option<RoutingPolicyName>,
     pub default_models: Option<HashMap<ModelTier, ProviderId>>,
 }
 ```

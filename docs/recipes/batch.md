@@ -22,25 +22,26 @@ note below.
 ```rust
 use std::sync::Arc;
 use tars_provider::ProviderRegistry;
-use tars_types::{BatchItemId, ChatRequest, ModelHint, ProviderId};
+use tars_types::{BatchItemId, ChatRequest, ProviderId};
 
 let provider = registry.get(&ProviderId::new("anthropic")).unwrap();
 let submitter = provider
     .as_batch_submitter()
     .expect("anthropic supports batch");
 
-// 1) Submit.
+// 1) Submit. Each `ChatRequest` is pure content — the model is a single
+// explicit arg for the whole batch (the request carries no model), and
+// `ctx` is the caller's RequestContext (principal / tenant / trace the
+// auth resolver needs to mint a real credential).
 let job_id = submitter
-    .submit(vec![
-        (
-            BatchItemId::new("draft-1"),
-            ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "first prompt"),
-        ),
-        (
-            BatchItemId::new("draft-2"),
-            ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "second prompt"),
-        ),
-    ])
+    .submit(
+        vec![
+            (BatchItemId::new("draft-1"), ChatRequest::user("first prompt")),
+            (BatchItemId::new("draft-2"), ChatRequest::user("second prompt")),
+        ],
+        "claude-opus-4-7",
+        &ctx,
+    )
     .await?;
 
 // 2) Persist the job_id somewhere — caller is responsible for this.
@@ -49,7 +50,7 @@ my_db.save_batch_job(&job_id);
 // 3) Later (or in another process): poll status.
 loop {
     use tars_types::BatchStatus;
-    match submitter.status(&job_id).await? {
+    match submitter.status(&job_id, &ctx).await? {
         BatchStatus::Completed => break,
         BatchStatus::Failed { kind, message } => {
             return Err(format!("batch failed: {kind}: {message}").into());
@@ -61,7 +62,7 @@ loop {
 }
 
 // 4) Fetch results.
-for item in submitter.results(&job_id).await? {
+for item in submitter.results(&job_id, &ctx).await? {
     match item.result {
         Ok(resp) => println!("{}: {}", item.item_id, resp.text),
         Err(e)   => eprintln!("{} failed: {e}", item.item_id),
@@ -97,7 +98,7 @@ rapid polling burns your sync-API rate limit budget for no benefit.
 
 ```rust
 loop {
-    let st = submitter.status(&job_id).await?;
+    let st = submitter.status(&job_id, &ctx).await?;
     if st.is_terminal() {
         break st;
     }

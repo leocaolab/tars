@@ -88,7 +88,7 @@ User Input
    │  ↓ <1ms   axum handler 解析 + auth
    │
 Middleware Stack
-   │  ↓ <10ms  auth/iam/budget/cache_lookup (miss)/guard fast/routing
+   │  ↓ <10ms  auth/iam/budget/cache_lookup (miss)/guard fast
    │
 Provider Adapter
    │  ↓ <5ms   prompt 拼装 + reqwest send
@@ -137,7 +137,7 @@ Response → User
 | 文件句柄 | 65535 (per process) | ✅ |
 | Postgres 连接 | 100-500 (含池) | ❌ (DB 是中心) |
 | Redis 连接 | 10000+ | ❌ |
-| Provider QPS | 由 provider 决定 | 部分 (多账号 + routing) |
+| Provider QPS | 由 provider 决定 | 部分 (多账号,调用方侧 fan-out) |
 | Provider TPM | 由 provider 决定 | 部分 |
 | LLM 月成本 | 由预算决定 | ❌ |
 
@@ -567,25 +567,26 @@ Optimization Opportunities:
 
 ### 8.4 自动降级
 
-```rust
-pub struct CostBasedRouter {
-    base_router: Arc<dyn RoutingPolicy>,
-    cost_threshold: f64,
-}
+模型/provider 选择是**调用方**的事,而非 pipeline 层,所以自动降级只是调用方在
+`call` 之前做的一个决定:持有一个贵的和一个便宜的 `LlmService`(各自绑定自己的
+model),按剩余预算挑一个。`LlmService` 是 `Clone` 的。
 
-impl RoutingPolicy for CostBasedRouter {
-    async fn select(&self, req: &ChatRequest, ...) -> Result<Vec<ProviderId>, _> {
-        let tenant_remaining = self.budget.remaining(&ctx.tenant_id).await?;
-        let estimated = estimate_cost(req);
-        
-        // 预算紧张时降档
-        if tenant_remaining < estimated * 10.0 {
-            // 把 reasoning tier 降级为 default tier
-            let downgraded_req = req.with_tier(ModelTier::Default);
-            return self.base_router.select(&downgraded_req, ...).await;
-        }
-        
-        self.base_router.select(req, ...).await
+```rust
+async fn choose_service(
+    budget: &BudgetLedger,
+    tenant: &TenantId,
+    req: &ChatRequest,
+    reasoning: &LlmService,   // 更贵,绑定 reasoning tier 的 model
+    cheap: &LlmService,       // 更便宜,绑定 default tier 的 model
+) -> LlmService {
+    let remaining = budget.remaining(tenant).await;
+    let estimated = estimate_cost(req);
+
+    // 预算紧张时降级到便宜的 service
+    if remaining < estimated * 10.0 {
+        cheap.clone()
+    } else {
+        reasoning.clone()
     }
 }
 ```

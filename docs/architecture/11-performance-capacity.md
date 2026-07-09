@@ -88,7 +88,7 @@ User Input
    │  ↓ <1ms   axum handler parse + auth
    │
 Middleware Stack
-   │  ↓ <10ms  auth/iam/budget/cache_lookup (miss)/guard fast/routing
+   │  ↓ <10ms  auth/iam/budget/cache_lookup (miss)/guard fast
    │
 Provider Adapter
    │  ↓ <5ms   prompt assembly + reqwest send
@@ -137,7 +137,7 @@ As QPS rises, bottlenecks appear in order:
 | File handles | 65535 (per process) | ✅ |
 | Postgres connections | 100-500 (incl. pool) | ❌ (DB is centralized) |
 | Redis connections | 10000+ | ❌ |
-| Provider QPS | Provider-determined | Partial (multi-account + routing) |
+| Provider QPS | Provider-determined | Partial (multiple provider accounts, caller-side fan-out) |
 | Provider TPM | Provider-determined | Partial |
 | Monthly LLM spend | Budget-determined | ❌ |
 
@@ -567,25 +567,27 @@ Optimization Opportunities:
 
 ### 8.4 Auto-degradation
 
-```rust
-pub struct CostBasedRouter {
-    base_router: Arc<dyn RoutingPolicy>,
-    cost_threshold: f64,
-}
+Model/provider selection is a **caller** concern, not a pipeline layer, so
+auto-degradation is just a decision the caller makes before `call`: hold a
+pricey and a cheap `LlmService` (each bound to its own model), and pick by
+remaining budget. `LlmService` is `Clone`.
 
-impl RoutingPolicy for CostBasedRouter {
-    async fn select(&self, req: &ChatRequest, ...) -> Result<Vec<ProviderId>, _> {
-        let tenant_remaining = self.budget.remaining(&ctx.tenant_id).await?;
-        let estimated = estimate_cost(req);
-        
-        // when budget is tight, downgrade tier
-        if tenant_remaining < estimated * 10.0 {
-            // demote reasoning tier to default tier
-            let downgraded_req = req.with_tier(ModelTier::Default);
-            return self.base_router.select(&downgraded_req, ...).await;
-        }
-        
-        self.base_router.select(req, ...).await
+```rust
+async fn choose_service(
+    budget: &BudgetLedger,
+    tenant: &TenantId,
+    req: &ChatRequest,
+    reasoning: &LlmService,   // pricier, bound to the reasoning-tier model
+    cheap: &LlmService,       // cheaper, bound to the default-tier model
+) -> LlmService {
+    let remaining = budget.remaining(tenant).await;
+    let estimated = estimate_cost(req);
+
+    // when budget is tight, degrade to the cheaper service
+    if remaining < estimated * 10.0 {
+        cheap.clone()
+    } else {
+        reasoning.clone()
     }
 }
 ```

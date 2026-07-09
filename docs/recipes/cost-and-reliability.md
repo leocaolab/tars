@@ -1,13 +1,18 @@
 # Cost & reliability stack — recipes
 
-How to actually use the four middlewares shipped in roadmap §1–§4:
+How to actually use the cost & reliability middlewares (roadmap §1–§4):
 
 | Middleware | Stateless? | Solves |
 |---|---|---|
 | `RetryMiddleware` (with `max_wait`) | yes | Transient flake on one provider |
 | `PerCallBudgetMiddleware` | yes | "No single call can cost more than $X" |
 | `TenantBudgetMiddleware` | stateful (via `BudgetStore`) | "Tenant Y has $Z left this month" |
-| `FallbackMiddleware` | yes | Provider dies / over-budget → try another |
+
+> **Provider fallback is not a middleware.** The old `FallbackMiddleware`
+> was removed in v1.5.0: provider *selection* (routing / ensemble /
+> fallback) is not a pipeline concern. "Provider dies / over-budget → try
+> another" is now a **caller composition** — build one `LlmService` per
+> provider and, on a typed `Err`, try the next (Recipe 3).
 
 The design rationale is in
 [`docs/roadmap.md`](../roadmap.md). This doc is the **how to use it**
@@ -21,21 +26,21 @@ The minimum stack that solves Cando-Peter's `<$0.05/draft` requirement.
 No tenant tracking; each call is checked independently.
 
 ```rust
-use std::sync::Arc;
 use tars_pipeline::{
-    Pipeline, PerCallBudgetMiddleware, RetryMiddleware, TelemetryMiddleware,
+    LlmService, PerCallBudgetMiddleware, RetryMiddleware, TelemetryMiddleware,
 };
 
 let provider = registry.get(&ProviderId::new("anthropic")).unwrap();
 let caps = provider.capabilities();
 
-let pipeline = Pipeline::builder(provider)
+// LlmService = provider + one bound model + a middleware chain.
+let svc = LlmService::builder(provider, "claude-sonnet-4-5")
     .layer(TelemetryMiddleware::new())
     .layer(PerCallBudgetMiddleware::new(0.05, caps))   // <$0.05/call
     .layer(RetryMiddleware::default())
     .build();
 
-match Arc::new(pipeline).call(req, ctx).await {
+match svc.call(req, ctx).await {
     Ok(stream) => { /* consume */ }
     Err(ProviderError::BudgetExceeded) => {
         // Pre-call estimate exceeded the cap; nothing was sent.
@@ -63,7 +68,7 @@ multi-tenant production setup.
 ```rust
 use std::sync::Arc;
 use tars_pipeline::{
-    Pipeline, PerCallBudgetMiddleware, TenantBudgetMiddleware,
+    LlmService, PerCallBudgetMiddleware, TenantBudgetMiddleware,
     InMemoryBudgetStore, RetryMiddleware, TelemetryMiddleware,
 };
 use tars_types::TenantId;
@@ -75,7 +80,7 @@ store.set(&TenantId::new("acme"),       100.00).await;  // $100 cap
 store.set(&TenantId::new("dev-team"),    10.00).await;  // $10 cap
 // "ghost" tenant has no entry → treated as unlimited.
 
-let pipeline = Pipeline::builder(provider)
+let svc = LlmService::builder(provider, "claude-sonnet-4-5")
     .layer(TelemetryMiddleware::new())
     .layer(PerCallBudgetMiddleware::new(0.05, caps))
     .layer(TenantBudgetMiddleware::new(store.clone(), caps))
@@ -104,15 +109,18 @@ match remaining {
 ## Recipe 3 — full production stack with fallback
 
 What you actually want in production: cost control + capacity
-fallback + retry. This is the stack Cando-Peter would adopt today.
+fallback + retry. Fallback is **not** a middleware — build one
+correctly-priced `LlmService` per provider, then try them in order,
+falling through on a typed error. This is the stack Cando-Peter would
+adopt today.
 
 ```rust
 use std::sync::Arc;
 use tars_pipeline::{
-    Pipeline, PerCallBudgetMiddleware, TenantBudgetMiddleware,
-    InMemoryBudgetStore, FallbackMiddleware, FallbackTrigger,
-    RetryMiddleware, TelemetryMiddleware, CacheLookupMiddleware,
+    LlmService, PerCallBudgetMiddleware, TenantBudgetMiddleware,
+    InMemoryBudgetStore, RetryMiddleware, TelemetryMiddleware, CacheLookupMiddleware,
 };
+use tars_types::ErrorClass;
 
 // Construct three providers in priority order.
 let opus   = registry.get(&ProviderId::new("anthropic_opus")).unwrap();
@@ -122,18 +130,38 @@ let local  = registry.get(&ProviderId::new("vllm_local")).unwrap();
 let store = Arc::new(InMemoryBudgetStore::new());
 store.set(&TenantId::new("acme"), 100.00).await;
 
-let pipeline = Pipeline::builder(opus.clone())                       // primary
-    .layer(TelemetryMiddleware::new())                                // outermost
-    .layer(CacheLookupMiddleware::new(cache))                         // free on hit
-    .layer(PerCallBudgetMiddleware::new(0.05, opus.capabilities()))   // hard cap
-    .layer(TenantBudgetMiddleware::new(store.clone(),                 // tenant cap
-                                       opus.capabilities()))
-    .layer(FallbackMiddleware::builder()                              // typed degrade
-        .fallback_to_provider(sonnet.clone(), FallbackTrigger::cost_related())
-        .fallback_to_provider(local.clone(),  FallbackTrigger::availability())
-        .build())
-    .layer(RetryMiddleware::default())                                // single-provider flakes
-    .build();
+// One service per provider. Each carries its OWN correctly-priced budget
+// layers (Recipe gotcha #7) plus telemetry / cache / retry.
+let stack = |p: Arc<dyn LlmProvider>, model: &str| {
+    LlmService::builder(p.clone(), model)
+        .layer(TelemetryMiddleware::new())                          // outermost
+        .layer(CacheLookupMiddleware::new(cache_registry.clone(),   // free on hit
+                                          cache_factory.clone(),
+                                          ProviderId::new(model)))
+        .layer(PerCallBudgetMiddleware::new(0.05, p.capabilities())) // hard cap
+        .layer(TenantBudgetMiddleware::new(store.clone(), p.capabilities()))
+        .layer(RetryMiddleware::default())                          // single-provider flakes
+        .build()
+};
+let chain = [
+    stack(opus.clone(),   "claude-opus-4-1"),
+    stack(sonnet.clone(), "claude-sonnet-4-5"),
+    stack(local.clone(),  "qwen-local"),
+];
+
+// Fallback = a caller loop: try each service in priority order; on a
+// retriable/cost error try the next, but let a Permanent error (e.g. a
+// malformed request) surface immediately — another provider fails the same way.
+let mut last_err = None;
+let mut got = None;
+for svc in &chain {
+    match svc.call(req.clone(), ctx.clone()).await {
+        Ok(stream) => { got = Some(stream); break; }
+        Err(e) if matches!(e.class(), ErrorClass::Permanent) => return Err(e),
+        Err(e) => { last_err = Some(e); continue; }
+    }
+}
+let stream = got.ok_or_else(|| last_err.unwrap())?;
 ```
 
 ### What this stack does on each scenario
@@ -142,29 +170,32 @@ let pipeline = Pipeline::builder(opus.clone())                       // primary
 |---|---|
 | Normal call | Telemetry → Cache miss → Budget OK → Tenant OK → Retry → Opus → response |
 | Cache hit | Telemetry → Cache hit → response (everything below cache is skipped, **including budget checks** — cache hits are free) |
-| Opus over per-call budget | `PerCallBudget` rejects with `BudgetExceeded` → `FallbackMiddleware` catches → tries Sonnet (cheaper pricing → fits) → response |
-| Opus 429 with short Retry-After | Retry sleeps and retries on Opus → success |
-| Opus 429 with 30+ min Retry-After | `RetryMiddleware` bubbles past `max_wait` → Fallback catches → tries Sonnet → if also 429, tries vllm_local → response |
-| Opus + Sonnet both rate-limited, vllm_local healthy | Fallback walks the chain → succeeds on vllm_local |
-| `tenant=acme` has $0.02 left, $0.04 call | `TenantBudget` rejects with `BudgetExceeded` → Fallback → Sonnet cap might also reject (or pass if pricing is lower) → eventually fails or succeeds on cheap-enough hop |
-| Invalid request (400) | `Permanent` error class — Fallback does **not** trigger; bubbles immediately |
+| Opus over per-call budget | Opus service rejects with `BudgetExceeded` → caller loop catches → tries Sonnet (cheaper pricing → fits) → response |
+| Opus 429 with short Retry-After | Opus's Retry sleeps and retries on Opus → success |
+| Opus 429 with 30+ min Retry-After | Opus's `RetryMiddleware` bubbles past `max_wait` → caller loop catches → tries Sonnet → if also 429, tries vllm_local → response |
+| Opus + Sonnet both rate-limited, vllm_local healthy | caller loop walks the chain → succeeds on vllm_local |
+| `tenant=acme` has $0.02 left, $0.04 call | Opus service's `TenantBudget` rejects with `BudgetExceeded` → caller loop → Sonnet's cap might also reject (or pass if pricing is lower) → eventually fails or succeeds on a cheap-enough hop |
+| Invalid request (400) | `Permanent` error class — the caller loop returns immediately; it does **not** try another provider |
 
 ### Layer ordering rationale (read top-to-bottom = outside-in)
 
+Each per-provider service is a fixed onion; the caller loop sits *above* all
+of them:
+
 ```
-Telemetry          ← sees everything, even cache hits
-  Cache            ← short-circuits cheaply
-    PerCallBudget  ← stateless USD upper-bound check
-      TenantBudget ← stateful per-tenant debit
-        Fallback   ← typed errors below this point → switch provider
-          Retry    ← same-provider short flakes; bubbles long waits past Fallback
+for each service in priority order:      ← caller loop = "fallback"
+  Telemetry          ← sees everything, even cache hits
+    Cache            ← short-circuits cheaply
+      PerCallBudget  ← stateless USD upper-bound check
+        TenantBudget ← stateful per-tenant debit
+          Retry      ← same-provider short flakes; bubbles long waits to the loop
             Provider call
 ```
 
 The two important non-obvious orderings:
 
 1. **Cache outside Budget.** Cache hits are free — no point pre-checking budget for them.
-2. **Fallback outside Retry.** Each fallback hop gets its own full retry budget on its own provider. The reverse would burn fallback slots on a single 429.
+2. **Fallback (the loop) outside Retry.** Each service gets its own full retry budget on its own provider before the loop moves on. Retrying *inside* one service and falling back *across* services are separate concerns — the reverse would burn fallback hops on a single 429.
 
 ---
 
@@ -255,56 +286,60 @@ through. **There is no way to cap subscription calls in USD** —
 that's not what the subscription billing model exposes. If you need
 caps, use the HTTP API path.
 
-### 4. Fallback triggers are keyed on error **kind**, not class
+### 4. Decide which errors fall through on **kind**, not class
 
-`ErrorClass` is too coarse: `BudgetExceeded` and `ContextTooLong` are
-both `Permanent`, but want different fallback strategies. So
-`FallbackTrigger::on(&["budget_exceeded"])` uses
-`ProviderError::kind()` strings — see the
-[full list of kinds](../../crates/tars-types/src/error.rs).
-
-Shipped canned triggers:
+`ErrorClass` is coarse: `BudgetExceeded` and `ContextTooLong` are both
+`Permanent`, yet you may want to fall through to a cheaper/bigger
+provider on those while surfacing a genuine `invalid_request`
+immediately. In the caller loop, branch on `ProviderError::kind()` (a
+typed [`ProviderErrorKind`](../../crates/tars-types/src/error.rs)), not
+just `class()`:
 
 ```rust
-FallbackTrigger::cost_related()   // budget_exceeded + context_too_long
-FallbackTrigger::availability()   // rate_limited + model_overloaded + circuit_open + network
-FallbackTrigger::any()            // last-resort kitchen sink (use sparingly)
+let fall_through = matches!(
+    e.kind(),
+    // cost / capacity — another provider may succeed
+    ProviderErrorKind::BudgetExceeded
+        | ProviderErrorKind::ContextTooLong
+        | ProviderErrorKind::RateLimited
+        | ProviderErrorKind::ModelOverloaded
+        | ProviderErrorKind::CircuitOpen
+        | ProviderErrorKind::Network,
+);
+if fall_through { last_err = Some(e); continue; } else { return Err(e); }
 ```
 
-### 5. Don't use `FallbackTrigger::any()` on hop 1
+### 5. Don't fall through on **every** error
 
-`any()` is for the **last** hop only — it would mask real bugs
-(`invalid_request` on hop 1 would silently retry on hop 2 with the
-same broken input). Keep early hops tied to specific recoverable
-kinds.
+Falling through unconditionally masks real bugs — an `invalid_request`
+on hop 1 would silently re-send the same broken input to hop 2. Gate the
+loop to specific recoverable kinds (as above), and let everything else
+surface at the first provider.
 
-### 6. `max_wait` cooperates with `Fallback`, not against it
+### 6. `max_wait` cooperates with the fallback loop, not against it
 
-`RetryMiddleware`'s `max_wait` (default 30 s) is the **bridge** to
-Fallback. When a provider says "wait 1 hour," Retry bubbles past
-its cap → outer Fallback catches and switches provider. Without
-Fallback, the error reaches the caller — exactly what you want for
-"don't sleep 30 minutes inside one call."
+`RetryMiddleware`'s `max_wait` (default 30 s) is the **bridge** to the
+caller loop. When a provider says "wait 1 hour," Retry bubbles past its
+cap → the `Err` leaves that service → the loop tries the next provider.
+With no next provider, the error reaches the caller — exactly what you
+want for "don't sleep 30 minutes inside one call."
 
 ### 7. Pricing is per-provider — pass the right capabilities
 
 ```rust
 // WRONG: using primary's caps for everyone
 PerCallBudgetMiddleware::new(0.05, opus_caps)
-// applied to Sonnet via fallback → estimates Opus pricing → too strict
+// applied to a Sonnet service → estimates Opus pricing → too strict
 
-// RIGHT: each provider gets its own middleware in its own pipeline
-let sonnet_svc = Pipeline::builder(sonnet.clone())
+// RIGHT: each provider gets its own service with its own properly-priced budget
+let sonnet_svc = LlmService::builder(sonnet.clone(), "claude-sonnet-4-5")
     .layer(PerCallBudgetMiddleware::new(0.05, sonnet.capabilities()))
     .layer(RetryMiddleware::default())
     .build();
-let mw = FallbackMiddleware::builder()
-    .fallback_to_service(Arc::new(sonnet_svc), FallbackTrigger::cost_related())
-    .build();
 ```
 
-The `fallback_to_service` form (vs `fallback_to_provider`) lets each
-hop have its own properly-priced budget middleware.
+Because each hop in the fallback loop is its own `LlmService`, its budget
+middleware sees the correct pricing for its own provider — no cross-wiring.
 
 ---
 
@@ -323,8 +358,9 @@ Then:
 # Budget rejections in the last hour
 jq -c 'select(.message | test("budget.*exceeded"))' tars.jsonl
 
-# Fallback hops fired and why
-jq -c 'select(.message=="fallback: primary failed, switching to next hop")' tars.jsonl
+# Fallback hops fired and why — the pipeline no longer emits these; the
+# caller loop owns fallback, so log the hop yourself (e.g. tracing::warn!)
+# and grep your own message here.
 
 # Retry exhaustions
 jq -c 'select(.message | test("retry.*exhausted|retry.*bubbling"))' tars.jsonl

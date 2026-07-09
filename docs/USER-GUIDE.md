@@ -241,42 +241,51 @@ p = tars.Provider.from_default("anthropic")  # no middleware
 
 **Rust**
 
-The shortest path loads the same `$TARS_HOME/config.toml` (default `~/.tars`) and goes through
-`ProviderRegistry::from_config`. No `Pipeline.from_default` analogue
-exists in Rust today — you stack middleware explicitly.
+The shortest path installs the global config from the same
+`$TARS_HOME/config.toml` (default `~/.tars`) via
+`tars_handle::init_from_home`, then pulls the process-wide
+`ProviderRegistry`. There's no Rust `Pipeline.from_default` — you stack
+middleware explicitly with `LlmService::builder`, or assemble the canonical
+onion with `LlmService::default_chain`.
 
 ```rust
-use std::sync::Arc;
-use tars_config::Config;
-use tars_pipeline::{Pipeline, TelemetryMiddleware, RetryMiddleware, LlmService};
+use futures::StreamExt;
+use tars_pipeline::{LlmService, RetryMiddleware, TelemetryMiddleware};
 use tars_provider::ProviderRegistry;
-use tars_types::{ChatRequest, ModelHint, ProviderId, RequestContext};
+use tars_types::{ChatRequest, ChatResponseBuilder, ProviderId, RequestContext};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load $TARS_HOME/config.toml (default ~/.tars) and build providers from it.
-    let cfg = Config::load_default()?;
-    let registry = ProviderRegistry::from_config(&cfg.providers, /* … */)?;
+    // Composition root: install the global config from $TARS_HOME/config.toml
+    // (default ~/.tars) and eagerly build the one provider registry.
+    tars_handle::init_from_home(None)?;
+    let registry = ProviderRegistry::global()?;
 
     let provider = registry.get(&ProviderId::new("anthropic")).unwrap();
 
-    // Wrap in the default middleware stack. Outermost layer is added first.
-    let pipeline = Arc::new(
-        Pipeline::builder(provider)
-            .layer(TelemetryMiddleware::new())
-            .layer(RetryMiddleware::default())
-            .build()
-    );
+    // LlmService = provider + one bound model + a middleware chain.
+    // Outermost layer is added first.
+    let svc = LlmService::builder(provider, "claude-sonnet-4-5")
+        .layer(TelemetryMiddleware::new())
+        .layer(RetryMiddleware::default())
+        .build();
 
-    let req = ChatRequest::user(
-        ModelHint::Explicit("claude-sonnet-4-5".into()),
-        "Find race conditions in this Rust function: ...",
-    );
-    let resp = pipeline.complete(req, RequestContext::test_default()).await?;
+    // The request is pure content — the model already lives on the service.
+    let req = ChatRequest::user("Find race conditions in this Rust function: ...");
+
+    // `LlmService::call` streams events; aggregate them into a ChatResponse.
+    let ctx = RequestContext::test_default();
+    let mut stream = svc.call(req, ctx.clone()).await?;
+    let mut acc = ChatResponseBuilder::new();
+    while let Some(ev) = stream.next().await {
+        acc.apply(ev?);
+    }
+    let resp = acc.finish();
 
     println!("{}", resp.text);
     println!("{:?}", resp.usage);
-    println!("{:?}", resp.telemetry);
+    // Per-call telemetry (cache_hit, retry_count, layer trace, latency)
+    // accumulates on `ctx.telemetry`.
     Ok(())
 }
 ```
@@ -292,9 +301,10 @@ constructs one carrying the real `tenant_id` / `principal_id` /
 ```python
 import tars
 
-session = tars.Session.from_default(
-    "anthropic",
+session = tars.Session(
+    tars.Pipeline.from_default("anthropic"),
     system="You are a code reviewer.",
+    model="claude-sonnet-4-5",
 )
 
 r1 = session.send("Look at foo.py")
@@ -311,18 +321,29 @@ budget, and rolls back atomically if any send fails mid-turn.
 **Rust**
 
 ```rust
-use tars_runtime::Session;
-use tars_types::{ModelHint, RequestContext};
+use tars_runtime::{Budget, Session, SessionOptions};
+use tars_types::ModelHint;
 
+// `svc` (the LlmService) and `provider` are from §1. A Session targets one
+// model for its whole life; the model lives on `SessionOptions`.
+let caps = provider.capabilities().clone();
 let mut session = Session::new(
-    pipeline.clone(),                          // from §1
-    ModelHint::Explicit("claude-sonnet-4-5".into()),
-    Some("You are a code reviewer.".into()),
+    svc.clone(),
+    caps,
+    SessionOptions {
+        system: "You are a code reviewer.".into(),
+        model: ModelHint::Explicit("claude-sonnet-4-5".into()),
+        budget: Budget::Chars(400_000),
+        tools: None,
+        tool_ctx: Default::default(),
+        default_max_output_tokens: None,
+    },
 );
 
-let r1 = session.send("Look at foo.py", RequestContext::test_default()).await?;
-let r2 = session.send("What's the worst issue?", RequestContext::test_default()).await?;
-let r3 = session.send("How would you fix it?", RequestContext::test_default()).await?;
+// `send` returns (ChatResponse, TelemetryAccumulator); ignore the telemetry here.
+let (r1, _tel) = session.send("Look at foo.py", None).await?;
+let (r2, _tel) = session.send("What's the worst issue?", None).await?;
+let (r3, _tel) = session.send("How would you fix it?", None).await?;
 
 println!("history_version = {}", session.history_version());
 ```
@@ -342,22 +363,26 @@ def fs_read_file(args):
     with open(args["path"]) as f:
         return f.read()
 
-session = tars.Session.from_default(
-    "anthropic",
+session = tars.Session(
+    tars.Pipeline.from_default("anthropic"),
     system="Use the read_file tool to fetch source before reviewing.",
-    tools=[
-        tars.Tool(name="read_file", description="...", schema={...},
-                  callable=fs_read_file),
-    ],
+    model="claude-sonnet-4-5",
+)
+session.register_tool(
+    "read_file",
+    "Read a file's contents.",
+    {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+    fs_read_file,
 )
 
 resp = session.send("Review main.py")
 # tars dispatches read_file → feeds result back to model → final reply
 ```
 
-Tool registration is by `(name, callable, schema)`. Parallel tool
-calls are batched into one `tool_result` message per protocol
-requirements.
+Tools are registered post-construction with
+`session.register_tool(name, description, parameters_schema, callback)`.
+Parallel tool calls are batched into one `tool_result` message per
+protocol requirements.
 
 **Rust**
 
@@ -367,12 +392,25 @@ Rust tools implement the `Tool` trait from `tars-tools`. The built-in
 
 ```rust
 use std::sync::Arc;
+use tars_runtime::{Budget, Session, SessionOptions};
 use tars_tools::builtins::ReadFileTool;
+use tars_types::ModelHint;
 
-let mut session = Session::new(pipeline.clone(), model_hint, Some(system.into()));
+let mut session = Session::new(
+    svc.clone(),                               // the LlmService from §1
+    provider.capabilities().clone(),
+    SessionOptions {
+        system: "Use the read_file tool to fetch source before reviewing.".into(),
+        model: ModelHint::Explicit("claude-sonnet-4-5".into()),
+        budget: Budget::Chars(400_000),
+        tools: None,
+        tool_ctx: Default::default(),
+        default_max_output_tokens: None,
+    },
+);
 session.register_tool(Arc::new(ReadFileTool::new(tempdir.path())));
 
-let resp = session.send("Review main.py", RequestContext::test_default()).await?;
+let (resp, _tel) = session.send("Review main.py", None).await?;
 ```
 
 For a complete worked example covering Worker / Critic / Orchestrator
@@ -849,9 +887,11 @@ for role, reqs in roles.items():
         print(f"{role!r} can't satisfy: {[x.kind for x in r.reasons]}")
 ```
 
-When routing has multiple candidates, incompatibility surfaces as
-`TarsRoutingExhaustedError` with the full list of skipped candidates +
-typed reasons, not a string-mashed error.
+When a caller composes several candidate services (its own fallback /
+ensemble) and every one fails its pre-flight, that exhaustion surfaces as
+`TarsRoutingExhaustedError` (mapped from `ProviderError::NoCompatibleCandidate`)
+with the full list of skipped candidates + typed reasons, not a
+string-mashed error.
 
 ## Typed errors
 
@@ -881,7 +921,7 @@ Error classes branch on `e.kind`:
 | `parse`               | Provider returned malformed response          |
 | `unknown_tool`        | Model called a tool that isn't registered     |
 | `validation_failed`   | Output validator rejected (Permanent)         |
-| `no_compatible_candidate` | All routing candidates failed pre-flight  |
+| `no_compatible_candidate` | All caller-composed candidates failed pre-flight |
 | `context_too_long`    | Prompt exceeds model's context window         |
 | ... (see Doc 01 for full list) ||
 

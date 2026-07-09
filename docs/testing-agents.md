@@ -21,17 +21,18 @@ this is the how-to. Pick the mode that matches what you're actually testing:
 
 ## 0. The one thing every test does: inject at the seam
 
-Every agent or DAG under test should take its model as an
-`Arc<dyn LlmService>` — never construct a provider internally. That seam is the
-whole game: in production you hand it a real `Pipeline`; in a test you hand it a
-scripted or golden provider and nothing else changes.
+Every agent or DAG under test should take its model as a concrete
+`LlmService` — built over a swappable `Arc<dyn LlmProvider>`, never a provider
+constructed internally. That seam is the whole game: in production you build the
+service over a real provider; in a test you build it over a scripted or golden
+provider and nothing else changes.
 
 ```rust
-// production
-let agent = ReviewAgent::new(pipeline.as_service());
+// production: wrap the resolved provider in the canonical middleware chain
+let agent = ReviewAgent::new(LlmService::default_chain(provider, model, opts));
 
-// test
-let agent = ReviewAgent::new(scripted.as_service());
+// test: a leaf service over a scripted/golden provider
+let agent = ReviewAgent::new(LlmService::of(scripted_provider, "mock-model"));
 ```
 
 If your agent doesn't have this seam yet, add it first — see the worked example
@@ -48,7 +49,7 @@ For a unit test of a single-call agent, `MockProvider` is enough:
 use tars_provider::{MockProvider, CannedResponse};
 
 let llm = MockProvider::new("mock", CannedResponse::text("found a bug"));
-let agent = ReviewAgent::new(llm.as_service());
+let agent = ReviewAgent::new(LlmService::of(llm, "mock-model"));
 let out = agent.run(input).await?;
 assert_eq!(out.verdict, Verdict::Bug);
 
@@ -89,7 +90,7 @@ let llm = ScriptedProvider::builder()
     .otherwise(CannedResponse::Error("unexpected LLM call".into()))  // fail LOUD
     .build();
 
-let outcome = run_task(&rt, llm.as_service(), task).await?;
+let outcome = run_task(&rt, LlmService::of(llm, "mock-model"), task).await?;
 assert!(matches!(outcome, TaskOutcome::Completed { .. }));
 ```
 
@@ -151,7 +152,7 @@ use tars_provider::{GoldenProvider, MissPolicy};
 
 let llm = GoldenProvider::from_dir("tests/golden/run_task.happy_path/")
     .miss(MissPolicy::FailClosed);          // a miss is a test failure, never a live call
-let outcome = run_task(&rt, llm.as_service(), task).await?;
+let outcome = run_task(&rt, LlmService::of(llm, "mock-model"), task).await?;
 assert_golden(&outcome, "tests/golden/run_task.happy_path/expected/");
 ```
 

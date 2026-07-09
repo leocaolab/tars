@@ -17,9 +17,9 @@
 | **共享单一实现** | rule_id 白名单 / JSON shape 校验 / 长度检查这种"输出契约"代码不该每个 consumer 各写一遍 |
 | **明确 Pass / Filter / Reject / Annotate 四种处置** | 每个 outcome 语义清晰，validator 写出来不用想"我这个该 transform 还是该抛错"|
 | **复用现有 retry 路径** | Reject 走 `ProviderError::ValidationFailed`，由现有 `RetryMiddleware` 决定是否重试；不引入第二条重试机制 |
-| **Plugin 式注册** | Caller `Pipeline::builder().layer(ValidationMiddleware::new(vec![...]))` 一行加；built-in 几条覆盖 80% 用例，custom 通过 trait 实现 |
+| **Plugin 式注册** | Caller `LlmService::builder(provider, model).layer(ValidationMiddleware::new(vec![...]))`（或给 `default_chain` 设 `ChainOpts::validators`）一行加；built-in 几条覆盖 80% 用例，custom 通过 trait 实现 |
 | **跨语言** | Python 通过 `tars.OutputValidator` base class 实现；未来 Node 同形（同 Stage 3 PyTool 模式）|
-| **Order 显式** | `add_validator` 注册顺序 = 执行顺序，左到右；Filter 链式（每个看到的是上一个 Filter 后的 Response）|
+| **Order 显式** | `.validators([...])` 注册顺序 = 执行顺序，左到右；Filter 链式（每个看到的是上一个 Filter 后的 Response）|
 | **流式不阻塞** | Validator 永远拿到完整 Response 工作（drain 流后调），但 token-by-token streaming UX 在 caller 那一侧仍可保持——validator 在 stream 结束时同步执行一遍即可 |
 
 **反目标**：
@@ -182,29 +182,41 @@ downstream consumer 那边 `except tars.TarsProviderError as e: if e.kind == "va
 ```rust
 // 位置: tars-pipeline::validation
 pub struct ValidationMiddleware {
-    validators: Vec<Box<dyn OutputValidator>>,
+    validators: Arc<[Arc<dyn OutputValidator>]>,
 }
 
 impl ValidationMiddleware {
-    pub fn new(validators: Vec<Box<dyn OutputValidator>>) -> Self {
-        Self { validators }
+    pub fn new(validators: Vec<Arc<dyn OutputValidator>>) -> Self {
+        Self { validators: validators.into() }
     }
 }
 
-impl LlmService for ValidationMiddleware {
-    async fn call(
-        self: Arc<Self>,
+// ValidationMiddleware 是 handler-chain 上的 `Middleware`，不是 service：
+// 它在 `next.run(...)`（chain 剩余部分，终点是 provider）前后做 pre/post，
+// 从不持有 `inner` service。
+#[async_trait]
+impl Middleware for ValidationMiddleware {
+    fn name(&self) -> &'static str { "validation" }
+
+    async fn handle(
+        &self,
         req: ChatRequest,
         ctx: RequestContext,
+        next: Next<'_>,
     ) -> Result<LlmEventStream, ProviderError> {
         // Telemetry: this layer was traversed.
         if let Ok(mut t) = ctx.telemetry.lock() {
             t.layers.push("validation".into());
         }
 
-        // Drain inner stream into a complete Response. We can't
+        // 空 validator 链 → 直接透传，不 drain。
+        if self.validators.is_empty() {
+            return next.run(req, ctx).await;
+        }
+
+        // Drain the rest of the chain into a complete Response. We can't
         // validate token-by-token; validators need the whole response.
-        let inner_stream = self.inner.clone().call(req.clone(), ctx.clone()).await?;
+        let inner_stream = next.run(req.clone(), ctx).await?;
         let mut builder = ChatResponseBuilder::new();
         let mut events_held = Vec::new();
         let mut s = inner_stream;
@@ -426,13 +438,20 @@ class RuleIdWhitelistValidator(tars.OutputValidator):
 ```python
 p = (
     tars.Pipeline.builder("qwen_coder_local")
-        .add_validator(RuleIdWhitelistValidator(KNOWN_IDS))
-        .add_validator(MaxLengthValidator(field="text", max=50_000))
+        .validators([
+            ("rule_id_whitelist", rule_id_whitelist(KNOWN_IDS)),
+            ("max_length",        max_length(field="text", max=50_000)),
+        ])
         .build()
 )
 ```
 
-需要 PyO3 暴露的 `Pipeline.builder()` —— 当前只有 `Pipeline.from_default(id)` 和 `from_str(toml, id)`，需要新增 builder API（B-6c 在 TODO 已记录，借这次一起做）。
+`Pipeline.builder(id)` 现已随 `Pipeline.from_default(id)` /
+`from_config(path, id)` / `from_str(toml, id)` 一起提供。builder 暴露
+`.validators([(name, callable), ...])`、`.retry(...)`、`.cache(enabled)`、
+`.event_store(dir)`，最后 `.build()`。validator 是 `(name, callable)` 对，
+callable 签名为 `(req, resp) -> tars.Pass | tars.Reject | tars.FilterText |
+tars.Annotate` —— 普通 callable，不是子类。
 
 ### 6.3 Sync 安全 / GIL
 
@@ -484,15 +503,16 @@ class ArcRuleIdWhitelistValidator(tars.OutputValidator):
 # app/core/critic_agent.py 调整
 self._pipeline = (
     tars.Pipeline.builder("qwen_coder_local")
-        .add_validator(ArcRuleIdWhitelistValidator(rubric_paths))
+        .validators([("consumer_rule_id_whitelist", rule_id_whitelist(rubric_paths))])
         .build()
 )
-# scan_file 不再做 post-filter — Validator 已经在 Pipeline 内部跑了
-parsed = self._pipeline.complete(...).text  # 已 Filter 过
+# scan_file 不再做 post-filter — Validator 已经在 pipeline 内部跑了。
+# `complete(model, ...)` 第一个参数是具体 model。
+parsed = self._pipeline.complete("qwen-coder", ...).text  # 已 Filter 过
 ```
 
 迁移收益：
-- 50 行 critic_agent 代码 → 0 行（搬到 validator 类、`add_validator` 一行）
+- 50 行 critic_agent 代码 → 0 行（搬到 validator callable、`.validators([...])` 一行）
 - 测试：Validator 单元测试 + downstream consumer 集成测试一起验
 - 复用：future tools 也想做这个时，import 同 validator 即可
 
@@ -508,7 +528,7 @@ parsed = self._pipeline.complete(...).text  # 已 Filter 过
 
 ### 8.1 执行顺序 = 注册顺序
 
-`add_validator(A)`, `add_validator(B)`, `add_validator(C)` → 执行顺序 A → B → C。
+`.validators([A, B, C])`（或 `ValidationMiddleware::new(vec![A, B, C])`）→ 执行顺序 A → B → C。
 
 ### 8.2 Filter 链式
 
@@ -664,8 +684,8 @@ class TruncateAllStringsValidator(tars.OutputValidator):
 
 ## 12. 跨文档引用
 
-- **Doc 02 Middleware Pipeline** — 本文档定义的 ValidationMiddleware 是其中第 4 层（位于 Retry 内、Provider 外）
-- **Doc 12 API Specification** — `Pipeline::builder().add_validator(...)` API 在那里规范化
+- **Doc 02 Middleware Pipeline** — 本文档定义的 ValidationMiddleware 是其中一层
+- **Doc 12 API Specification** — validator 注册 API（`LlmService::builder(provider, model).layer(ValidationMiddleware::new(...))` / `ChainOpts::validators`）在那里规范化
 - **Doc 16 Evaluation Framework** — 评估（多维度评分 / 时间序列 / 数据集）是另一回事，看那篇
 - **Doc 04 Agent Runtime** — Agent 怎么用 ValidationMiddleware 装配 Pipeline 在那里讲
 

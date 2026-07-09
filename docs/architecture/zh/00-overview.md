@@ -90,7 +90,7 @@ Rust trait 是真理之源,HTTP API / gRPC / Python / TypeScript 等是其投影
                        │  (Doc 02)                 │
                        │  Telemetry → Auth → IAM   │
                        │  → Budget → Cache → Guard │
-                       │  → Routing → Breaker      │
+                       │  → Retry → Breaker        │
                        └───────────┬───────────────┘
                                    │
               ┌────────────────────┼─────────────────┐
@@ -280,16 +280,16 @@ Day 7: 13 (Runbook) + Q&A
 | **L1/L2/L3 Cache** | 进程内 / Redis / Provider explicit 三级缓存 | Doc 03 §2 |
 | **MELT** | Metrics/Events/Logs/Traces 可观测四支柱 | Doc 08 |
 | **MCP** | Model Context Protocol,Anthropic 提出的 Tool 协议 | Doc 05 §5 |
-| **Middleware** | Tower-style 洋葱层,处理横切关注点 | Doc 02 |
-| **ModelHint** | 抽象模型选择 (Tier / Explicit / Ensemble) | Doc 01 §4.1 |
+| **Middleware** | handler-chain 洋葱层,处理横切关注点 | Doc 02 |
+| **ModelHint** | 抽象模型选择 (Tier / Explicit / Ensemble);用于 service 构造 / 角色解析,**不**挂在请求上 | Doc 01 §4.1 |
 | **Orchestrator** | 不做 reasoning,只拆 task DAG 的 Agent | Doc 04 §2.1 |
 | **PII** | Personally Identifiable Information | Doc 08 §11 + Doc 10 §8 |
-| **Pipeline** | Middleware 组成的请求处理链 | Doc 02 |
+| **Pipeline** | Middleware handler-chain,由具体的 `LlmService`（provider + 绑定 model + layers）实现 | Doc 02 |
 | **Principal** | 调用方身份 (user / service account / subprocess) | Doc 10 §4 |
 | **PromptBuilder** | 三段式 prompt 拼装器 | Doc 04 §11 |
 | **Provider** | LLM 后端抽象 (API / CLI / 嵌入式) | Doc 01 |
 | **RequestContext** | 请求级上下文,含 trace/tenant/principal/cancel/budget | Doc 02 §3.3 |
-| **Routing Policy** | Provider 选择策略 (Tier / Cost / Latency / Fallback) | Doc 01 §12 |
+| **Role resolution** | 把角色/tier 绑定到一个 provider+model（`[roles]` / `[routing.tiers]`）。Provider *选择* 是调用方的事,**不是** pipeline 层：ensemble/fallback = 组合 N 个 `LlmService` | Doc 01 §12 |
 | **SLI / SLO** | Service Level Indicator / Objective | Doc 11 §2 |
 | **SaaS / Self-Hosted / Local-First / Hybrid** | 4 种部署形态 | Doc 07 §2 |
 | **SecretRef** | Secret 引用 (vault path / env var name) | Doc 06 §5 |
@@ -363,9 +363,9 @@ Day 7: 13 (Runbook) + Q&A
 - tars-cache: L1 内存 + L2 SQLite
 - 端到端"Personal 模式"能跑通一次 LLM 调用
 
-**M2: Multi-Provider + Routing (3-4 周)**
+**M2: Multi-Provider + 角色/tier 解析 (3-4 周)**
 - 加 Anthropic / Gemini HTTP
-- 加 routing policy + circuit breaker
+- 加角色/tier 解析 + circuit breaker（pipeline 内路由策略后被移除——provider 选择是调用方的事）
 - 加完整 error 分类
 
 **M3: Agent Runtime Core (6-8 周)**

@@ -535,6 +535,11 @@ tars run --prompt "Write a haiku about Rust"
 
 **目标**：加 Anthropic / Gemini,完整 routing/fallback,production-grade error handling。
 
+> **更新 (v1.5.0)**:routing / fallback 后来**按决策移除**——provider 选择不是
+> pipeline 的职责。ensemble / fallback 是调用方对多个 `LlmService` 的组合(构建
+> N 个全调用合并,或按序 try)。下面的 `RoutingMiddleware` / `RoutingPolicy` /
+> `FallbackChain` 交付项是 M2 的历史计划;shipped 代码中并不存在。
+
 ### 8.1 Deliverables
 
 ```

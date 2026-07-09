@@ -113,6 +113,7 @@ impl CacheKeyFactory {
     pub fn compute(
         &self,
         req: &ChatRequest,
+        model: &str,          // 绑在 LlmService 上；通过 next.model() 读取
         ctx: &RequestContext,
     ) -> Result<CacheKey, CacheError> {
         let mut h = Sha256::new();
@@ -136,18 +137,11 @@ impl CacheKeyFactory {
         }
         
         // —— 模型身份 ——
+        // 模型作为显式参数传入（`model: &str`,在 service 构造时绑定,
+        // 通过 `next.model()` 读取）,到达 cache 层时永远是具体名字——
+        // 不存在待解析的 tier / ensemble 情况需要在这里防守。
         h.update(b"\0MODEL\0");
-        match &req.model {
-            ModelHint::Explicit(name) => h.update(name.as_bytes()),
-            ModelHint::Tier(tier) => {
-                // Tier 不能直接哈希,必须先经过 Routing 解析为 Explicit
-                return Err(CacheError::UnresolvedModel);
-            }
-            ModelHint::Ensemble(_) => {
-                // Ensemble 通常不该缓存
-                return Err(CacheError::UncacheableRequest);
-            }
-        }
+        h.update(model.as_bytes());
         
         // —— 决定输出的请求参数 ——
         h.update(b"\0PARAMS\0");
@@ -201,7 +195,7 @@ impl CacheKeyFactory {
             fingerprint,
             debug_label: format!(
                 "tenant={} model={} msg_count={}",
-                ctx.tenant_id, req.model.as_str(), req.messages.len()
+                ctx.tenant_id, model, req.messages.len()
             ),
         })
     }
@@ -213,7 +207,7 @@ impl CacheKeyFactory {
 2. **TENANT + SCOPES 必须前置**——逻辑上是命名空间，把它们前置放有助于 debug 时通过原始字节流定位问题
 3. **每个字段用 `\0` 分隔符 + 字段名 tag**——防止字段拼接歧义攻击（"abc" + "def" vs "ab" + "cdef"）
 4. **temperature ≠ 0 直接拒绝缓存**——非确定性输出缓存毫无意义
-5. **ModelHint 必须是 Explicit**——上游 Routing 层负责解析。这意味着 Cache Lookup 必须在 Routing 之后？不——前面 Doc 02 是 Cache 在 Routing 之前。**解决方案**：cache lookup 时只用 ModelHint::Tier 算"租户级 hint key"，命中要求是租户内任何 Explicit 模型都能服务该 Tier；二级精确匹配在 Routing 之后再做。详见 §4.2
+5. **模型永远是具体名字**——它绑在 `LlmService` 上（`provider + model`）,以显式 `model: &str` 到达 cache 层（通过 `next.model()` 读取）,而不是一个还需解析的 `ModelHint` tier。所以模型直接参与哈希,没有两阶段的把戏——provider *选择* 发生在 service 构造之前,而不是在 pipeline 内部。
 
 ### 3.3 Message 规范化
 
@@ -337,32 +331,30 @@ pub struct WriteMetadata {
 }
 ```
 
-### 4.2 解决 ModelHint 二阶段问题
+### 4.2 cache 时模型已是具体名字（不存在两阶段问题）
 
-Cache Lookup 在 Routing 之前发生（Doc 02 的层序），此时 `req.model` 还是 `ModelHint::Tier(...)`。两阶段查找：
+没有需要延迟的 tier 解析。一次 cache lookup 跑在一个已经绑定了单个具体
+`provider + model` 的 `LlmService` 里；模型以显式 `model: &str` 到达 cache 层
+（通过 `next.model()` 从链游标读取），永远不是一个待解析的
+`ModelHint::Tier(...)`。provider *选择*——决定请求跑在哪个模型上——发生在
+service 被构造**之前**,完全在 pipeline 之外。
+
+所以只有**单个 fingerprint**,覆盖 `(tenant, scopes, model, params, content)`,
+一次查找：
 
 ```rust
-async fn lookup(&self, key: &CacheKey, policy: &CachePolicy) 
-    -> Result<Option<CachedResponse>, CacheError> 
+async fn lookup(&self, key: &CacheKey, policy: &CachePolicy)
+    -> Result<Option<CachedResponse>, CacheError>
 {
-    // 阶段 1：按 Tier 查"该租户内任意模型的响应"
-    if let Some(cached) = self.l1.get_by_tier_key(&key.tier_fingerprint).await {
-        // 命中条件：缓存的响应来自当前 Tier 包含的某个 Explicit 模型
-        return Ok(Some(cached));
-    }
-    // ...
+    // 一个精确 key——里面的 model 已经是 service 绑定的具体名字。
+    self.l1.get(&key.fingerprint).await
 }
 ```
 
-**两个独立的 hash**：
-- `tier_fingerprint`：用 Tier 名计算（"reasoning" / "fast"），租户内 Tier 级共享
-- `explicit_fingerprint`：用 Explicit model 计算，精确匹配
-
-**两套都存**。Lookup 阶段先查 tier_fingerprint，命中即返回（接受 Tier 内任意模型的响应）；Write 阶段同时写两套 key。这样：
-- Routing 选哪个具体模型不影响命中率
-- 不同 Tier 的请求互不污染（reasoning 缓存不会被 fast 命中）
-
-代价：cache 体积翻倍。考虑到响应通常 1-10KB，可接受。
+早期设计曾在 *tier* 粒度缓存（一个 "reasoning" 响应可服务任意 reasoning-tier
+模型),靠第二个 `tier_fingerprint`；随着 pipeline 内路由的移除,那套双哈希也
+一并去掉了。不同具体模型的请求自然产生不同 key——这正确：两个模型是两个不同
+的函数,不该共享同一个缓存项。
 
 ### 4.3 多级查找流程
 

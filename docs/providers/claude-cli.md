@@ -226,32 +226,33 @@ semantics.
 
 ---
 
-## 5. Composing a Builder-built provider with the Pipeline
+## 5. Composing a Builder-built provider with an LlmService
 
 A common second question: **once I've built a custom provider, can I
-still use telemetry / retry / cache / validation?** Yes — the Pipeline
-operates on `Arc<dyn LlmProvider>` and doesn't care where the provider
-came from. Three patterns, depending on how many providers you have and
-how you load config.
+still use telemetry / retry / cache / validation?** Yes — an
+[`LlmService`] wraps any `Arc<dyn LlmProvider>` and doesn't care where the
+provider came from. Three patterns, depending on how many providers you
+have and how you load config.
 
-### Pattern A — direct: Builder → Pipeline, no Registry
+### Pattern A — direct: Builder → LlmService, no Registry
 
-The simplest case. You build one provider and wrap it in the standard
-middleware stack manually.
+The simplest case. You build one provider, bind it to a model, and wrap it
+in the standard middleware stack manually.
 
 ```rust
 use std::sync::Arc;
 use tars_provider::ClaudeCliProviderBuilder;
-use tars_pipeline::{Pipeline, TelemetryMiddleware, RetryMiddleware};
+use tars_pipeline::{LlmService, TelemetryMiddleware, RetryMiddleware};
 
 let provider = ClaudeCliProviderBuilder::new("claude")
     .tools(ClaudeCliTools::Disabled)
     .bare(true)
     .build();
 
-let pipeline = Pipeline::builder(provider)              // accepts Arc<dyn LlmProvider>
-    .layer(TelemetryMiddleware::new())                  // outermost
-    .layer(RetryMiddleware::default())                  // innermost
+// LlmService = provider + one bound model + an ordered middleware chain.
+let svc = LlmService::builder(provider, "claude-sonnet-4-5")  // Arc<dyn LlmProvider>
+    .layer(TelemetryMiddleware::new())                        // outermost
+    .layer(RetryMiddleware::default())                        // innermost
     .build();
 ```
 
@@ -262,8 +263,9 @@ outside Retry — you want failed retries logged, not silently swallowed.
 
 ### Pattern B — Registry: name a hand-built provider
 
-When you have multiple providers and want id-based lookup (routing,
-fallback chains, multi-tenant), wrap them in a Registry.
+When you have multiple providers and want id-based lookup (multi-tenant
+dispatch, or a caller-built fallback across several services), wrap them in
+a Registry.
 
 ```rust
 use std::collections::HashMap;
@@ -277,15 +279,17 @@ let custom: Arc<dyn LlmProvider> = ClaudeCliProviderBuilder::new("my-claude")
 
 let mut m = HashMap::new();
 m.insert(ProviderId::new("my-claude"), custom);
-let registry = ProviderRegistry::from_map(m);
+let registry = ProviderRegistry::from_providers(m);
 
 // Downstream:
 let p = registry.get(&ProviderId::new("my-claude")).unwrap();
-let pipeline = Pipeline::builder(p).layer(TelemetryMiddleware::new()).build();
+let svc = LlmService::builder(p, "claude-sonnet-4-5")
+    .layer(TelemetryMiddleware::new())
+    .build();
 ```
 
-**Important**: `ProviderRegistry::from_map` does **not** auto-wrap
-middleware. The Registry is a naming namespace; the Pipeline is the
+**Important**: `ProviderRegistry::from_providers` does **not** auto-wrap
+middleware. The Registry is a naming namespace; the `LlmService` is the
 middleware stack. They compose orthogonally. If you want middleware on
 every Registry entry, do it in a single `map_providers` pass
 (see Pattern C).
@@ -318,7 +322,7 @@ original is unchanged.
 ### Why this all works cleanly
 
 ```text
-Pipeline ─wraps→ Arc<dyn LlmProvider>
+LlmService ─wraps→ Arc<dyn LlmProvider>
                        ↑
         trait object — any concrete impl satisfies it
                        │

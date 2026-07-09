@@ -186,11 +186,11 @@ Template in §15.
    - If everyone else's tests also fail → provider outage
 
 **Mitigation**:
-- ✅ Circuit breaker auto-fails over to fallback provider (Doc 02 §4.7)
-- ✅ Routing policy should already have switched to backup provider (Doc 02 §4.6)
+- ✅ The circuit breaker fast-fails calls to the down provider (opens after N consecutive failures → `CircuitOpen`), so callers stop burning full retry loops against it
+- ✅ Provider fallover is a **caller composition**, not a pipeline layer: an app that wants it builds several `LlmService`s and, on a provider error, tries the next; operators can also repoint the affected role to a healthy provider via config reload
 - Watch whether the fallback provider's load is sustainable — if not, enable degradation (shorter replies / skip non-critical steps)
 
-**Manual intervention** (when auto-fallback isn't working):
+**Manual intervention** (when the caller-side fallover isn't keeping up):
 
 ```bash
 # 1. Force-disable the failing provider (TBD: actual command)
@@ -207,8 +207,8 @@ tars admin provider disable --id <provider_id> --reason "outage" --duration 1h
 - If there's a backlog, batch-process it to avoid re-overloading
 
 **Prevention**:
-- At least 2 providers configured as fallbacks (per tier)
-- Routing policy includes `LatencyPolicy`, not a static config
+- Configure at least 2 providers per role so the app has a healthy provider to fall over to
+- Implement provider fallover in the caller (try one `LlmService`, on error try the next) rather than relying on a pipeline routing policy
 
 ### 5.2 LLM Provider rate limited
 
@@ -224,7 +224,7 @@ tars admin provider disable --id <provider_id> --reason "outage" --duration 1h
 **Mitigation**:
 1. **Short-term**: retry middleware automatically backs off per retry_after
 2. **Mid-term**: request a provider quota increase
-3. **Long-term**: multi-account + Routing dispersion
+3. **Long-term**: multi-account fan-out at the caller — spread load across several provider accounts / `LlmService`s
 
 **Force-throttle a single tenant** (if a tenant is abusing):
 ```bash
@@ -249,7 +249,7 @@ tars admin tenant rate-limit --id <tenant> --tpm 1000 --duration 4h
 Soft limit (alert) → notify tenant admin (email/IM), don't block business
 
 Soft limit + abnormal growth rate (5x baseline) → auto-degrade
-  - Routing switches to cheaper model tier
+  - Caller switches to a cheaper model tier (a different LlmService)
   - Prompt tenant to investigate
 
 Hard limit imminent → proactively suspend non-critical tasks
@@ -670,7 +670,7 @@ tars admin provider add \
   --base-url "https://api.groq.com/openai/v1" \
   --auth-secret "secret/data/tars/groq"
 
-# Modify routing policy (carefully)
+# Adjust [resilience] retry / circuit-breaker or the [roles] map (carefully)
 # Via config reload (not direct admin API), to preserve git trail
 ```
 
@@ -936,7 +936,7 @@ If an LLM provider is down for more than 1h, we should:
 
 ```
 1. Immediately request a temporary quota increase from the provider (large accounts usually < 4h response)
-2. Enable routing bias toward other providers
+2. Shift load to other providers at the caller (compose against another LlmService)
 3. Evaluate whether a long-term quota increase is needed (talk with sales)
 ```
 
@@ -989,7 +989,7 @@ If SLA terms are triggered (e.g., 99.5% monthly availability):
 | Level | Examples | Approval |
 |---|---|---|
 | Standard | Docker image patch / log level adjustment | Self-service |
-| Normal | New provider go-live / new routing rule | Lead approve |
+| Normal | New provider go-live / new [roles] or [resilience] rule | Lead approve |
 | Emergency | Hot fix for a P0 | Director approve + post-fact review |
 | Significant | Major DB schema change / architectural change | CAB review |
 
