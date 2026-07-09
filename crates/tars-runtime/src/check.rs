@@ -244,7 +244,7 @@ mod tests {
     use tars_types::{ChatResponse, ModelHint, StopReason, Usage};
 
     fn req() -> ChatRequest {
-        ChatRequest::user(ModelHint::Explicit("m".into()), "x")
+        ChatRequest::user("x")
     }
 
     fn resp_text(text: &str) -> ChatResponse {

@@ -152,7 +152,7 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::{Value, json};
     use std::collections::HashSet;
-    use tars_types::{ChatRequest, Message, ModelHint, ProviderError, RequestContext};
+    use tars_types::{ChatRequest, Message, ProviderError, RequestContext};
 
     use crate::backends::cli::SubprocessInvocation;
     use crate::backends::cli::argv::{
@@ -197,8 +197,8 @@ mod tests {
         let (provider, runner) = make_provider(payload);
         let resp = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("opus".into()), "hi"),
-                RequestContext::test_default(),
+                ChatRequest::user("hi"),
+                "opus", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -231,8 +231,8 @@ mod tests {
         let err = match provider
             .clone()
             .complete(
-                ChatRequest::user(ModelHint::Explicit("opus".into()), "x"),
-                RequestContext::test_default(),
+                ChatRequest::user("x"),
+                "opus", RequestContext::test_default(),
             )
             .await
         {
@@ -248,8 +248,8 @@ mod tests {
         let (provider, _) = make_provider(payload);
         let resp = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("opus".into()), "hi"),
-                RequestContext::test_default(),
+                ChatRequest::user("hi"),
+                "opus", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -261,10 +261,10 @@ mod tests {
         let big = "x".repeat(1000);
         let payload = json!({"result": big, "is_error": false});
         let (provider, _) = make_provider(payload);
-        let mut req = ChatRequest::user(ModelHint::Explicit("opus".into()), "hi");
+        let mut req = ChatRequest::user("hi");
         req.max_output_tokens = Some(10); // ~40 chars at 4 chars/token
         let resp = provider
-            .complete(req, RequestContext::test_default())
+            .complete(req, "opus", RequestContext::test_default())
             .await
             .unwrap();
         assert_eq!(resp.text.len(), 40);
@@ -276,8 +276,8 @@ mod tests {
         let (provider, runner) = make_provider(payload);
         let _ = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("opus".into()), "x").with_system("be brief"),
-                RequestContext::test_default(),
+                ChatRequest::user("x").with_system("be brief"),
+                "opus", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -288,7 +288,6 @@ mod tests {
     #[test]
     fn message_serializer_preserves_role_tags() {
         let req = ChatRequest {
-            model: ModelHint::Explicit("x".into()),
             system: None,
             messages: vec![
                 Message::user_text("first user turn"),
@@ -352,8 +351,8 @@ mod tests {
         rt.block_on(async {
             let _ = provider
                 .complete(
-                    ChatRequest::user(ModelHint::Explicit("opus".into()), "hi"),
-                    RequestContext::test_default(),
+                    ChatRequest::user("hi"),
+                    "opus", RequestContext::test_default(),
                 )
                 .await;
         });
@@ -386,8 +385,8 @@ mod tests {
         rt.block_on(async {
             let _ = provider
                 .complete(
-                    ChatRequest::user(ModelHint::Explicit("opus".into()), "hi"),
-                    RequestContext::test_default().with_cwd(wt.clone()),
+                    ChatRequest::user("hi"),
+                    "opus", RequestContext::test_default().with_cwd(wt.clone()),
                 )
                 .await;
         });

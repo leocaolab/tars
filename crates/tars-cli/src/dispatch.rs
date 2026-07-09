@@ -32,8 +32,8 @@ use clap::{Args, ValueEnum};
 use tars_cache::{CacheRegistry, MemoryCacheRegistry, open_at_path};
 use tars_config::Config;
 use tars_pipeline::{
-    CircuitBreaker, CircuitBreakerConfig, CostPolicy, EnsembleService, LatencyPolicy,
-    LatencyStatsRegistry, LlmService, RoutingService, StaticPolicy,
+    CircuitBreaker, CircuitBreakerConfig, CostPolicy, LatencyPolicy, LatencyStatsRegistry,
+    LlmService, StaticPolicy,
 };
 use tars_provider::registry::ProviderRegistry;
 use tars_types::{ModelTier, ProviderId};
@@ -114,12 +114,12 @@ pub enum RouteBy {
 
 /// What every subcommand needs to drive the pipeline once per call.
 pub struct Dispatch {
-    /// Bottom-of-pipeline service. Subcommands wrap this with their
-    /// own middleware stack (Telemetry / CacheLookup / Retry / etc.).
-    pub inner: Arc<dyn LlmService>,
-    /// Model label to put on `req.model` (or `OrchestratorAgent`'s
-    /// model field). Resolved from `--model` or the chosen provider's
-    /// `default_model`.
+    /// Bottom-of-pipeline service, bound to `model_label`. Subcommands
+    /// wrap this with their own middleware stack (Telemetry /
+    /// CacheLookup / Retry / etc.).
+    pub inner: LlmService,
+    /// The concrete model the service is bound to. Resolved from
+    /// `--model` or the chosen provider's `default_model`.
     pub model_label: String,
     /// What to attribute cost against. For single-provider mode this
     /// is the provider; for tier mode it's the first candidate
@@ -171,7 +171,7 @@ fn build_single_provider_dispatch(
         );
     }
     let label = format!("provider `{provider_id}`");
-    let inner: Arc<dyn LlmService> = tars_pipeline::ProviderService::new(provider.clone());
+    let inner = LlmService::of(provider.clone(), model_label.clone());
     Ok(Dispatch {
         inner,
         model_label,
@@ -236,12 +236,17 @@ fn build_tier_dispatch(
     }
     // The base candidate order is `StaticPolicy`; `--route-by` wraps it
     // with a B-8 strategy (or swaps in the ensemble dispatch shape).
-    let inner: Arc<dyn LlmService> = match args.route_by {
-        RouteBy::Fallback => RoutingService::new(registry.clone(), base),
+    let inner: LlmService = match args.route_by {
+        RouteBy::Fallback => LlmService::routed(registry.clone(), base, model_label.clone()),
         RouteBy::Latency => {
             let stats = Arc::new(LatencyStatsRegistry::new(100));
             let policy = Arc::new(LatencyPolicy::new(base, stats.clone()));
-            RoutingService::with_latency_stats(registry.clone(), policy, stats)
+            LlmService::routed_with_latency_stats(
+                registry.clone(),
+                policy,
+                stats,
+                model_label.clone(),
+            )
         }
         RouteBy::Cost => {
             let mut pricing = HashMap::new();
@@ -251,9 +256,11 @@ fn build_tier_dispatch(
                 }
             }
             let policy = Arc::new(CostPolicy::new(base, pricing));
-            RoutingService::new(registry.clone(), policy)
+            LlmService::routed(registry.clone(), policy, model_label.clone())
         }
-        RouteBy::Ensemble => EnsembleService::new(registry.clone(), candidates.clone()),
+        RouteBy::Ensemble => {
+            LlmService::ensemble(registry.clone(), candidates.clone(), model_label.clone())
+        }
     };
     let label = format!(
         "tier `{tier:?}` via {:?} (candidates: {})",

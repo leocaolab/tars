@@ -20,7 +20,7 @@ use futures::StreamExt;
 
 use tars_provider::backends::codex_cli::CodexCliProviderBuilder;
 use tars_provider::provider::LlmProvider;
-use tars_types::{ChatEvent, ChatRequest, ModelHint, RequestContext};
+use tars_types::{ChatEvent, ChatRequest, RequestContext};
 
 #[tokio::test]
 #[ignore = "requires real codex CLI + ChatGPT subscription; run with --ignored --nocapture"]
@@ -41,14 +41,12 @@ async fn codex_cli_say_hi_against_real_binary() {
     // `gpt-5` / `gpt-5-codex` are gated to API accounts only and 400
     // with `model is not supported when using Codex with a ChatGPT
     // account`. gpt-5.5 works on the test account.
-    let req = ChatRequest::user(
-        ModelHint::Explicit("gpt-5.5".into()),
-        "Say exactly: hello from codex. Nothing else.",
+    let req = ChatRequest::user("Say exactly: hello from codex. Nothing else.",
     );
 
     println!("\n── codex_cli smoke: spawning real `codex exec` ──");
     let mut stream = Arc::clone(&provider)
-        .stream(req, RequestContext::test_default())
+        .stream(req, "test-model", RequestContext::test_default())
         .await
         .expect("provider stream() should succeed");
 

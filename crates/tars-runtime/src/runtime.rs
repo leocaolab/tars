@@ -295,7 +295,7 @@ impl Runtime for LocalRuntime {
 pub async fn execute_agent_step(
     runtime: &dyn Runtime,
     traj: &TrajectoryId,
-    llm: Arc<dyn LlmService>,
+    llm: LlmService,
     agent: Arc<dyn Agent>,
     input: ChatRequest,
     cancel: CancellationToken,
@@ -325,7 +325,7 @@ pub async fn execute_agent_step(
     let input_summary = format!(
         "agent={} model={} messages={}",
         agent.id(),
-        input.model.label(),
+        llm.model(),
         input.messages.len()
     );
     let idempotency_key = StepIdempotencyKey::compute(traj, step_seq, &input_summary);
@@ -360,7 +360,7 @@ pub async fn execute_agent_step(
     // `input.system` before its own LLM call would send a different
     // prompt than this hash; today's agents — SingleShot / Critic /
     // Worker — pass `input` through unchanged, so the two coincide.)
-    let provider_for_log = guess_provider_id(&input);
+    let provider_for_log = tars_types::ProviderId::new(llm.model());
     let system_prompt_hash = crate::event::hash_system_prompt(input.system.as_deref());
     let ctx = AgentContext {
         trajectory_id: traj.clone(),
@@ -431,16 +431,6 @@ pub async fn execute_agent_step(
             Err(AgentExecutionError::Agent(agent_err))
         }
     }
-}
-
-/// Best-effort: stamp the LlmCallCaptured event with which provider
-/// was targeted. Today every consumer passes `ModelHint::Explicit`,
-/// and the provider id ≈ "the model name" at this layer (the
-/// pipeline's RoutingService picks the actual provider). When
-/// Routing surfaces "which provider actually answered" through the
-/// stream, this becomes the real value; until then it's a label.
-fn guess_provider_id(req: &ChatRequest) -> tars_types::ProviderId {
-    tars_types::ProviderId::new(req.model.label())
 }
 
 /// Errors that escape from [`execute_agent_step`]. Splits Agent

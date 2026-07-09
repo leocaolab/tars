@@ -83,7 +83,7 @@ pub struct AgentContext {
     /// The pipeline-wrapped LLM. Agents call `llm.call(req, ctx)`
     /// rather than reaching for a raw provider; this keeps cache /
     /// retry / breaker / routing in the request path uniformly.
-    pub llm: Arc<dyn LlmService>,
+    pub llm: LlmService,
     /// Cooperative cancellation token. Agents that do anything
     /// expensive should `select!` against `cancel.cancelled()` so an
     /// upstream Drop / SIGINT propagates.
@@ -121,7 +121,7 @@ pub struct AgentContext {
 impl AgentContext {
     /// Minimal step context for a direct `Agent::execute` call outside the
     /// full runtime executor (tests, Concer's comment responder).
-    pub fn for_execute(llm: Arc<dyn LlmService>) -> Self {
+    pub fn for_execute(llm: LlmService) -> Self {
         Self {
             trajectory_id: TrajectoryId::new("direct"),
             step_seq: 1,

@@ -77,7 +77,7 @@ use tars_types::{
     Message, RUN_CONTEXT, RequestContext,
     chat::{ChatRequest, ContentBlock},
     ids::ProviderId,
-    model::{ModelHint, ThinkingMode},
+    model::ThinkingMode,
     response::ChatResponseBuilder,
     schema::JsonSchema,
 };
@@ -226,7 +226,7 @@ pub struct Pipeline {
     /// The assembled middleware-stack-wrapped LlmService. Holds an
     /// `Arc<dyn LlmService>` so calls don't move it — `complete()`
     /// can `Arc::clone` and drive on the tokio runtime.
-    inner: Arc<dyn LlmService>,
+    inner: LlmService,
     /// The explicit call context re-scoped onto `RUN_CONTEXT` at the binding
     /// boundary for each `complete()` (Doc 06 §9). The `from_*` factories set a
     /// fresh single-user default; the role path
@@ -248,7 +248,7 @@ impl Pipeline {
         let cfg = ConfigManager::load_from_file(&path)
             .map_err(|e| Error::from_reason(format!("load config {path:?}: {e}")))?;
         let provider = build_provider_from_cfg(&cfg, &provider_id)?;
-        Ok(Self::from_provider(provider_id, provider))
+        Ok(Self::from_provider(provider_id, provider.0, provider.1))
     }
 
     /// Construct from inline TOML — same shape as a `.arc/config.toml`
@@ -259,7 +259,7 @@ impl Pipeline {
         let cfg = ConfigManager::load_from_str(&toml_text)
             .map_err(|e| Error::from_reason(format!("parse inline TOML: {e}")))?;
         let provider = build_provider_from_cfg(&cfg, &provider_id)?;
-        Ok(Self::from_provider(provider_id, provider))
+        Ok(Self::from_provider(provider_id, provider.0, provider.1))
     }
 
     /// Provider id this pipeline wraps.
@@ -276,7 +276,7 @@ impl Pipeline {
     /// marshals this as a `Promise<CompleteResult>` to JS callers.
     #[napi]
     pub async fn complete(&self, opts: CompleteOptions) -> Result<CompleteResult> {
-        drive_complete(Arc::clone(&self.inner), self.ctx.clone(), opts).await
+        drive_complete(self.inner.clone(), self.ctx.clone(), opts).await
     }
 }
 
@@ -286,10 +286,9 @@ impl Pipeline {
     /// middleware onion (`Pipeline::default_chain`) so cache, retry,
     /// telemetry, and the rest are all active by construction. Uses a fresh
     /// single-user default context (the handle path threads its own).
-    fn from_provider(id: String, provider: Arc<dyn LlmProvider>) -> Self {
+    fn from_provider(id: String, provider: Arc<dyn LlmProvider>, model: String) -> Self {
         let opts = PipelineOpts::new(ProviderId::new(id.clone()));
-        let pipeline = RsPipeline::default_chain(provider, opts);
-        let inner: Arc<dyn LlmService> = Arc::new(pipeline);
+        let inner = RsPipeline::default_chain(provider, model, opts);
         Self {
             id,
             inner,
@@ -300,7 +299,7 @@ impl Pipeline {
     /// Wrap an already-assembled `LlmService` (the role path: the default
     /// chain for a role) with an explicit call context. Shared by
     /// [`handle::pipeline`].
-    pub(crate) fn from_service(id: String, inner: Arc<dyn LlmService>, ctx: RequestContext) -> Self {
+    pub(crate) fn from_service(id: String, inner: LlmService, ctx: RequestContext) -> Self {
         Self { id, inner, ctx }
     }
 }
@@ -310,7 +309,7 @@ impl Pipeline {
 /// the `task_local` never crosses the FFI hop, so we re-scope it per call).
 /// Shared by [`Pipeline::complete`] and [`handle::Provider::complete`].
 pub(crate) async fn drive_complete(
-    svc: Arc<dyn LlmService>,
+    svc: LlmService,
     mut ctx: RequestContext,
     opts: CompleteOptions,
 ) -> Result<CompleteResult> {
@@ -355,17 +354,25 @@ pub(crate) async fn drive_complete(
 fn build_provider_from_cfg(
     cfg: &tars_config::Config,
     provider_id: &str,
-) -> Result<Arc<dyn LlmProvider>> {
+) -> Result<(Arc<dyn LlmProvider>, String)> {
     let registry = ProviderRegistry::from_config_default(&cfg.providers)
         .map_err(|e| Error::from_reason(format!("build provider registry: {e}")))?;
     let pid = ProviderId::new(provider_id.to_string());
-    registry.get(&pid).ok_or_else(|| {
+    let provider = registry.get(&pid).ok_or_else(|| {
         let configured: Vec<String> = cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
         Error::from_reason(format!(
             "provider {provider_id:?} not in config. Configured: [{}]",
             configured.join(", "),
         ))
-    })
+    })?;
+    // The model is bound on the service now (the request is model-agnostic),
+    // so a provider without a `default_model` can't yield a callable pipeline.
+    let model = registry.default_model(&pid).map(str::to_string).ok_or_else(|| {
+        Error::from_reason(format!(
+            "provider {provider_id:?} has no `default_model` — set one in config"
+        ))
+    })?;
+    Ok((provider, model))
 }
 
 /// Map a snake_case stop reason out of `tars_types::StopReason`.
@@ -396,8 +403,11 @@ fn build_request(opts: CompleteOptions) -> Result<ChatRequest> {
             "pass either `user` (single-turn) or `messages` (multi-turn), not both",
         ));
     }
+    // NOTE: the model is bound on the `Pipeline`'s `LlmService` at
+    // construction (from the provider's `default_model`); the request is
+    // model-agnostic content. `opts.model` is not re-applied per call
+    // here — a per-call override would require rebinding the service.
     let mut req = ChatRequest {
-        model: ModelHint::Explicit(opts.model),
         system: opts.system,
         messages: Vec::new(),
         tools: Vec::new(),

@@ -12,7 +12,7 @@ use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::openai::OpenAiProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
-use tars_types::{BatchItemId, BatchJobId, BatchStatus, ChatRequest, ModelHint, ProviderError};
+use tars_types::{BatchItemId, BatchJobId, BatchStatus, ChatRequest, ProviderError};
 
 fn build_provider(server: &MockServer) -> Arc<dyn LlmProvider> {
     let http = HttpProviderBase::default_arc().unwrap();
@@ -64,13 +64,13 @@ async fn submit_uploads_jsonl_file_then_creates_batch() {
             vec![
                 (
                     BatchItemId::new("draft-1"),
-                    ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "draft one"),
+                    ChatRequest::user("draft one"),
                 ),
                 (
                     BatchItemId::new("draft-2"),
-                    ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "draft two"),
+                    ChatRequest::user("draft two"),
                 ),
-            ],
+            ], "test-model",
             &tars_types::RequestContext::test_default(),
         )
         .await
@@ -84,7 +84,7 @@ async fn submit_empty_items_is_invalid_request_before_http() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .submit(vec![], &tars_types::RequestContext::test_default())
+        .submit(vec![], "test-model", &tars_types::RequestContext::test_default())
         .await
         .expect_err("reject");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));

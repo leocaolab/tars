@@ -31,7 +31,7 @@
 //! use tars_pipeline::{Pipeline, RetryMiddleware, TelemetryMiddleware};
 //!
 //! let provider: Arc<dyn LlmProvider> = /* registry.get(&id).unwrap() */;
-//! let pipeline = Pipeline::builder(provider)
+//! let pipeline = Pipeline::builder(provider, "test-model")
 //!     .layer(TelemetryMiddleware::new())   // outermost
 //!     .layer(RetryMiddleware::default())   // closest to provider
 //!     .build();
@@ -40,6 +40,14 @@
 //! Layer order matches the call order: the first `.layer(...)` wraps
 //! everything else and runs first on the inbound, last on the outbound.
 
+// The public composition API (`Middleware`, `PipelineBuilder::layer`,
+// `FallbackBuilder`) is deliberately expressed over the crate-private
+// `Service` trait — the one public service concept is the concrete
+// `LlmService`. That intentional public-over-private asymmetry trips
+// `private_interfaces`; allow it crate-wide rather than scatter
+// per-impl `#[allow]`s.
+#![allow(private_interfaces)]
+
 mod middleware;
 mod service;
 
@@ -47,13 +55,7 @@ pub use middleware::budget::{BudgetConfigError, PerCallBudgetMiddleware};
 pub use middleware::cache::{CacheLookupMiddleware, set_cache_policy};
 pub use middleware::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use middleware::event_emitter::EventEmitterMiddleware;
-pub use middleware::fallback::{FallbackBuilder, FallbackMiddleware, FallbackTrigger};
-pub use middleware::latency_stats::{LatencyMetric, LatencyStats, LatencyStatsRegistry};
 pub use middleware::retry::{RetryConfig, RetryMiddleware};
-pub use middleware::routing::{
-    CostPolicy, EnsembleService, LatencyPolicy, RoutingPolicy, RoutingService, StaticPolicy,
-    TierPolicy,
-};
 pub use middleware::telemetry::TelemetryMiddleware;
 pub use middleware::tenant_budget::{
     BudgetStore, BudgetStoreError, InMemoryBudgetStore, TenantBudgetMiddleware,
@@ -63,7 +65,7 @@ pub use middleware::validation::{
     builtin::{JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, OnExceed, ResponseField},
 };
 pub use middleware::{EventStores, Middleware, Pipeline, PipelineBuilder, PipelineOpts};
-pub use service::{LlmService, ProviderService};
+pub use service::{LlmService, Next};
 
 // Re-export the few tars-types items that show up in middleware
 // signatures so callers don't need a separate `use tars_types::…`.

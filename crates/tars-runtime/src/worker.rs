@@ -339,7 +339,7 @@ impl WorkerAgent {
             .unwrap_or_default();
 
         let has_tools = !tool_specs.is_empty();
-        let mut pb = PromptBuilder::new(self.model.clone(), user_text)
+        let mut pb = PromptBuilder::new(user_text)
             .system(system_prompt)
             .tools(tool_specs)
             .deterministic();
@@ -719,7 +719,7 @@ async fn drain_one_call(
     )>,
 ) -> Result<tars_types::ChatResponse, StepError> {
     let req_ctx = build_llm_request_context(ctx);
-    let llm: Arc<dyn LlmService> = ctx.llm.clone();
+    let llm: LlmService = ctx.llm.clone();
 
     let stream_result = tokio::select! {
         biased;
@@ -1009,21 +1009,38 @@ mod tests {
         // call returns an error immediately — we assert on the captured ctx,
         // not the response.
         use crate::agent::AgentContext;
-        use tars_pipeline::LlmEventStream;
-        use tars_types::{ModelHint, ProviderError, TrajectoryId};
+        use tars_pipeline::{LlmEventStream, LlmService};
+        use tars_provider::LlmProvider;
+        use tars_types::{
+            Capabilities, Pricing, ProviderError, ProviderId, RequestContext, TrajectoryId,
+        };
 
         type Captured = Arc<std::sync::Mutex<Option<Option<std::path::PathBuf>>>>;
         let captured: Captured = Arc::new(std::sync::Mutex::new(None));
 
-        struct CapturingLlm(Captured);
+        // Provider-level double: the model is bound on the LlmService, so
+        // we capture at the provider `stream` boundary — where ctx (and
+        // its cwd) is threaded through.
+        struct CapturingLlm {
+            captured: Captured,
+            id: ProviderId,
+            caps: Capabilities,
+        }
         #[async_trait]
-        impl LlmService for CapturingLlm {
-            async fn call(
+        impl LlmProvider for CapturingLlm {
+            fn id(&self) -> &ProviderId {
+                &self.id
+            }
+            fn capabilities(&self) -> &Capabilities {
+                &self.caps
+            }
+            async fn stream(
                 self: Arc<Self>,
                 _req: ChatRequest,
+                _model: &str,
                 ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
-                *self.0.lock().unwrap() = Some(ctx.cwd.clone());
+                *self.captured.lock().unwrap() = Some(ctx.cwd.clone());
                 Err(ProviderError::InvalidRequest("capture-only".into()))
             }
         }
@@ -1032,7 +1049,14 @@ mod tests {
         let ctx = AgentContext {
             trajectory_id: TrajectoryId::new("t"),
             step_seq: 1,
-            llm: Arc::new(CapturingLlm(captured.clone())),
+            llm: LlmService::of(
+                Arc::new(CapturingLlm {
+                    captured: captured.clone(),
+                    id: ProviderId::new("capture"),
+                    caps: Capabilities::text_only_baseline(Pricing::default()),
+                }),
+                "gpt-4o",
+            ),
             cancel: Default::default(),
             cwd: Some(wt.clone()),
             permissions: tars_agent::Permissions::allow_all(),
@@ -1045,7 +1069,7 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+            let req = ChatRequest::user("hi");
             let mut observers = None;
             let _ = super::drain_one_call(&ctx, req, &mut observers).await;
         });

@@ -35,7 +35,6 @@
 //! (or the caller) can decide — agents should never sleep 30 minutes
 //! inside a single call. See `docs/roadmap.md §1`.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -44,7 +43,7 @@ use tars_provider::LlmEventStream;
 use tars_types::{ChatRequest, ErrorClass, ProviderError, RequestContext};
 
 use crate::middleware::Middleware;
-use crate::service::LlmService;
+use crate::service::Next;
 
 #[derive(Clone, Debug)]
 pub struct RetryConfig {
@@ -130,29 +129,17 @@ impl RetryMiddleware {
     }
 }
 
+#[async_trait]
 impl Middleware for RetryMiddleware {
     fn name(&self) -> &'static str {
         "retry"
     }
-    fn wrap(&self, inner: Arc<dyn LlmService>) -> Arc<dyn LlmService> {
-        Arc::new(RetryService {
-            inner,
-            config: self.config.clone(),
-        })
-    }
-}
 
-struct RetryService {
-    inner: Arc<dyn LlmService>,
-    config: RetryConfig,
-}
-
-#[async_trait]
-impl LlmService for RetryService {
-    async fn call(
-        self: Arc<Self>,
+    async fn handle(
+        &self,
         req: ChatRequest,
         ctx: RequestContext,
+        next: Next<'_>,
     ) -> Result<LlmEventStream, ProviderError> {
         let cfg = &self.config;
         // Clamp initial backoff to max so a misconfigured
@@ -179,7 +166,7 @@ impl LlmService for RetryService {
                 return Err(ProviderError::Internal("cancelled before retry".into()));
             }
 
-            let result = self.inner.clone().call(req.clone(), ctx.clone()).await;
+            let result = next.run(req.clone(), ctx.clone()).await;
             let err = match result {
                 Ok(stream) => return Ok(stream),
                 Err(e) => e,
@@ -344,6 +331,8 @@ fn next_backoff(current: Duration, multiplier: f64, max: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LlmService;
+    use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
 
@@ -356,16 +345,17 @@ mod tests {
     struct FailNTimes {
         remaining: AtomicU32,
         error_factory: Box<dyn Fn() -> ProviderError + Send + Sync>,
-        ok_inner: Arc<dyn LlmService>,
+        ok_inner: Arc<dyn Service>,
         observed: Arc<AtomicU32>,
     }
 
     #[async_trait]
-    impl LlmService for FailNTimes {
+    impl Service for FailNTimes {
         async fn call(
             self: Arc<Self>,
             req: ChatRequest,
-            ctx: RequestContext,
+                    model: &str,
+        ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             self.observed.fetch_add(1, Ordering::SeqCst);
             // Atomically decrement only while a failure budget remains —
@@ -380,7 +370,7 @@ mod tests {
             if decremented {
                 return Err((self.error_factory)());
             }
-            self.ok_inner.clone().call(req, ctx).await
+            self.ok_inner.clone().call(req, model, ctx).await
         }
     }
 
@@ -388,11 +378,11 @@ mod tests {
         fails: u32,
         err: impl Fn() -> ProviderError + Send + Sync + 'static,
         retry: RetryMiddleware,
-    ) -> (Arc<dyn LlmService>, Arc<AtomicU32>) {
+    ) -> (Arc<dyn Service>, Arc<AtomicU32>) {
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let inner: Arc<dyn LlmService> = crate::ProviderService::new(mock);
+        let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
         let observed = Arc::new(AtomicU32::new(0));
-        let failer: Arc<dyn LlmService> = Arc::new(FailNTimes {
+        let failer: Arc<dyn Service> = Arc::new(FailNTimes {
             remaining: AtomicU32::new(fails),
             error_factory: Box::new(err),
             ok_inner: inner,
@@ -410,7 +400,7 @@ mod tests {
         );
         let mut s = svc
             .call(
-                ChatRequest::user(ModelHint::Explicit("m".into()), "x"),
+                ChatRequest::user("x"), "m",
                 RequestContext::test_default(),
             )
             .await
@@ -448,7 +438,7 @@ mod tests {
         );
         let err = match svc
             .call(
-                ChatRequest::user(ModelHint::Explicit("m".into()), "x"),
+                ChatRequest::user("x"), "m",
                 RequestContext::test_default(),
             )
             .await
@@ -482,7 +472,7 @@ mod tests {
         );
         let result = svc
             .call(
-                ChatRequest::user(ModelHint::Explicit("m".into()), "x"),
+                ChatRequest::user("x"), "m",
                 RequestContext::test_default(),
             )
             .await;
@@ -514,7 +504,7 @@ mod tests {
 
         // Cancel after first failure but during backoff.
         let task = tokio::spawn(async move {
-            svc.call(ChatRequest::user(ModelHint::Explicit("m".into()), "x"), ctx)
+            svc.call(ChatRequest::user("x"), "m", ctx)
                 .await
         });
 
@@ -555,7 +545,7 @@ mod tests {
         );
         let err = svc
             .call(
-                ChatRequest::user(ModelHint::Explicit("m".into()), "x"),
+                ChatRequest::user("x"), "m",
                 RequestContext::test_default(),
             )
             .await
@@ -596,8 +586,8 @@ mod tests {
             RetryMiddleware::new(cfg),
         );
         let ctx = RequestContext::test_default();
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "x");
-        let task = tokio::spawn(svc.call(req, ctx));
+        let req = ChatRequest::user("x");
+        let task = tokio::spawn(svc.call(req, "m", ctx));
 
         tokio::time::advance(Duration::from_millis(100)).await;
         assert_eq!(observed.load(Ordering::SeqCst), 1);
@@ -624,8 +614,8 @@ mod tests {
             RetryMiddleware::new(cfg),
         );
         let ctx = RequestContext::test_default();
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "x");
-        let task = tokio::spawn(svc.call(req, ctx));
+        let req = ChatRequest::user("x");
+        let task = tokio::spawn(svc.call(req, "m", ctx));
 
         // Without advancing time the sleep would block forever in
         // start_paused mode. Advance past 2s and the retry should fire.

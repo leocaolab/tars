@@ -27,11 +27,11 @@ use crate::worker::{WorkerAgent, WorkerError};
 /// JSON response into the [`AgentMessage::PartialResult`] envelope.
 pub struct LlmWorker {
     agent: Arc<WorkerAgent>,
-    llm: Arc<dyn LlmService>,
+    llm: LlmService,
 }
 
 impl LlmWorker {
-    pub fn new(agent: Arc<WorkerAgent>, llm: Arc<dyn LlmService>) -> Arc<Self> {
+    pub fn new(agent: Arc<WorkerAgent>, llm: LlmService) -> Arc<Self> {
         Arc::new(Self { agent, llm })
     }
 }
@@ -98,11 +98,11 @@ impl Worker for LlmWorker {
 /// through [`execute_agent_step`], parses the verdict JSON.
 pub struct LlmCritic {
     agent: Arc<CriticAgent>,
-    llm: Arc<dyn LlmService>,
+    llm: LlmService,
 }
 
 impl LlmCritic {
-    pub fn new(agent: Arc<CriticAgent>, llm: Arc<dyn LlmService>) -> Arc<Self> {
+    pub fn new(agent: Arc<CriticAgent>, llm: LlmService) -> Arc<Self> {
         Arc::new(Self { agent, llm })
     }
 }

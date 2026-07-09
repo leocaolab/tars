@@ -16,7 +16,7 @@ use futures::StreamExt;
 
 use tars_provider::backends::claude_cli::ClaudeCliProviderBuilder;
 use tars_provider::provider::LlmProvider;
-use tars_types::{ChatEvent, ChatRequest, ModelHint, RequestContext};
+use tars_types::{ChatEvent, ChatRequest, RequestContext};
 
 #[tokio::test]
 #[ignore = "requires real claude CLI + Claude Code subscription; run with --ignored --nocapture"]
@@ -31,14 +31,12 @@ async fn claude_cli_say_hi_against_real_binary() {
 
     // `sonnet` is the alias to the latest Sonnet model; `opus` and
     // `haiku` work too. Subscription tier limits which is available.
-    let req = ChatRequest::user(
-        ModelHint::Explicit("sonnet".into()),
-        "Say exactly: hello from claude. Nothing else.",
+    let req = ChatRequest::user("Say exactly: hello from claude. Nothing else.",
     );
 
     println!("\n── claude_cli smoke: spawning real `claude -p` ──");
     let mut stream = Arc::clone(&provider)
-        .stream(req, RequestContext::test_default())
+        .stream(req, "test-model", RequestContext::test_default())
         .await
         .expect("provider stream() should succeed");
 

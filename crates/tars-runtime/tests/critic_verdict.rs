@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use tars_pipeline::{LlmService, Pipeline, ProviderService};
+use tars_pipeline::{LlmService, Pipeline};
 use tars_provider::backends::mock::{CannedResponse, MockProvider};
 use tars_runtime::{
     AgentContext, AgentMessage, CriticAgent, CriticError, PartialResultRef, Plan, PlanStep,
@@ -17,13 +17,13 @@ use tars_runtime::{
 use tars_types::{AgentId, TrajectoryId};
 use tokio_util::sync::CancellationToken;
 
-fn build_llm(canned_json: &str) -> Arc<dyn LlmService> {
+fn build_llm(canned_json: &str) -> LlmService {
     let mock = MockProvider::new("mock_critic", CannedResponse::text(canned_json.to_string()));
-    let inner: Arc<dyn LlmService> = ProviderService::new(mock);
-    Arc::new(Pipeline::builder_with_inner(inner).build())
+    let inner: LlmService = LlmService::of(mock, "gpt-4o");
+    Pipeline::builder_with_inner(inner).build()
 }
 
-fn ctx(llm: Arc<dyn LlmService>) -> AgentContext {
+fn ctx(llm: LlmService) -> AgentContext {
     AgentContext {
         trajectory_id: TrajectoryId::new("critic_test_traj"),
         step_seq: 1,
@@ -63,7 +63,7 @@ fn sample_partial_result() -> AgentMessage {
 async fn happy_path_approve_yields_typed_verdict() {
     let canned = r#"{"kind":"approve","reason":"","suggestions":[]}"#;
     let llm = build_llm(canned);
-    let critic = CriticAgent::new(AgentId::new("critic_a"), "gpt-4o");
+    let critic = CriticAgent::new(AgentId::new("critic_a"));
     let plan = sample_plan();
     let result_msg = sample_partial_result();
     let result_ref = PartialResultRef::from_message(&result_msg).unwrap();
@@ -91,7 +91,7 @@ async fn happy_path_approve_yields_typed_verdict() {
 async fn reject_path_carries_reason_into_verdict() {
     let canned = r#"{"kind":"reject","reason":"summary missed the security fix","suggestions":[]}"#;
     let llm = build_llm(canned);
-    let critic = CriticAgent::new(AgentId::new("critic_a"), "gpt-4o");
+    let critic = CriticAgent::new(AgentId::new("critic_a"));
     let plan = sample_plan();
     let result_msg = sample_partial_result();
     let result_ref = PartialResultRef::from_message(&result_msg).unwrap();
@@ -120,7 +120,7 @@ async fn refine_path_carries_suggestions_into_verdict() {
         "suggestions": ["mention the security fix", "shorten to 2 sentences"]
     }"#;
     let llm = build_llm(canned);
-    let critic = CriticAgent::new(AgentId::new("critic_a"), "gpt-4o");
+    let critic = CriticAgent::new(AgentId::new("critic_a"));
     let plan = sample_plan();
     let result_msg = sample_partial_result();
     let result_ref = PartialResultRef::from_message(&result_msg).unwrap();
@@ -145,7 +145,7 @@ async fn refine_path_carries_suggestions_into_verdict() {
 #[tokio::test]
 async fn malformed_json_surfaces_decode_error() {
     let llm = build_llm("definitely not JSON");
-    let critic = CriticAgent::new(AgentId::new("critic_a"), "gpt-4o");
+    let critic = CriticAgent::new(AgentId::new("critic_a"));
     let plan = sample_plan();
     let result_msg = sample_partial_result();
     let result_ref = PartialResultRef::from_message(&result_msg).unwrap();
@@ -165,7 +165,7 @@ async fn semantically_invalid_verdict_surfaces_invalid_verdict_error() {
     // kind=reject without a reason violates the Critic's contract.
     let canned = r#"{"kind":"reject","reason":"","suggestions":[]}"#;
     let llm = build_llm(canned);
-    let critic = CriticAgent::new(AgentId::new("critic_a"), "gpt-4o");
+    let critic = CriticAgent::new(AgentId::new("critic_a"));
     let plan = sample_plan();
     let result_msg = sample_partial_result();
     let result_ref = PartialResultRef::from_message(&result_msg).unwrap();
@@ -188,7 +188,7 @@ async fn target_step_id_falls_through_from_partial_result() {
     // step_id=None on the PartialResult → target_step_id=None on Verdict.
     let canned = r#"{"kind":"approve","reason":"","suggestions":[]}"#;
     let llm = build_llm(canned);
-    let critic = CriticAgent::new(AgentId::new("critic"), "gpt-4o");
+    let critic = CriticAgent::new(AgentId::new("critic"));
     let plan = sample_plan();
     let standalone = AgentMessage::PartialResult {
         from_agent: AgentId::new("worker"),

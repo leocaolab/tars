@@ -43,7 +43,7 @@ use clap::Args;
 use futures::StreamExt;
 
 use tars_provider::registry::ProviderRegistry;
-use tars_types::{ChatEvent, ChatRequest, ModelHint, ProviderId, RequestContext};
+use tars_types::{ChatEvent, ChatRequest, ProviderId, RequestContext};
 
 use crate::config_loader;
 
@@ -109,13 +109,13 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
         anyhow::anyhow!("config entry exists for `{provider_id}` but registry.get() returned None",)
     })?;
 
-    let mut req = ChatRequest::user(ModelHint::Explicit(model.clone()), prompt);
+    let mut req = ChatRequest::user(prompt);
     req.max_output_tokens = args.max_tokens;
 
     eprintln!("── tars probe {} (model={model}) ──", args.provider,);
 
     let mut stream = Arc::clone(&provider)
-        .stream(req, RequestContext::test_default())
+        .stream(req, &model, RequestContext::test_default())
         .await
         .with_context(|| format!("provider `{}` stream() failed", args.provider))?;
 

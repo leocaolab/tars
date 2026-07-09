@@ -388,6 +388,7 @@ impl LlmProvider for CircuitBreaker {
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let now = Instant::now();
@@ -411,7 +412,7 @@ impl LlmProvider for CircuitBreaker {
         });
 
         let inner = self.inner.clone();
-        let result = inner.stream(req, ctx).await;
+        let result = inner.stream(req, model, ctx).await;
         match &result {
             Ok(_) => self.record_success(),
             Err(_) => self.record_failure(Instant::now()),
@@ -426,6 +427,7 @@ impl LlmProvider for CircuitBreaker {
     async fn complete(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         ctx: RequestContext,
     ) -> Result<ChatResponse, ProviderError> {
         // Forward to the inner provider's complete() rather than going
@@ -446,7 +448,7 @@ impl LlmProvider for CircuitBreaker {
         });
 
         let inner = self.inner.clone();
-        let result = inner.complete(req, ctx).await;
+        let result = inner.complete(req, model, ctx).await;
         match &result {
             Ok(_) => self.record_success(),
             Err(_) => self.record_failure(Instant::now()),
@@ -465,6 +467,8 @@ impl LlmProvider for CircuitBreaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LlmService;
+    use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use futures::StreamExt;
@@ -495,13 +499,14 @@ mod tests {
         async fn stream(
             self: Arc<Self>,
             req: ChatRequest,
-            ctx: RequestContext,
+            _model: &str,
+        ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match &self.outcome {
                 ScriptedOutcome::Ok => {
                     let mock = MockProvider::new(self.id.clone(), CannedResponse::text("ok"));
-                    mock.stream(req, ctx).await
+                    mock.stream(req, "test-model", ctx).await
                 }
                 ScriptedOutcome::Err(f) => Err(f()),
             }
@@ -520,7 +525,7 @@ mod tests {
     }
 
     fn req() -> ChatRequest {
-        ChatRequest::user(ModelHint::Explicit("m".into()), "ping")
+        ChatRequest::user("ping")
     }
 
     fn ctx() -> RequestContext {
@@ -546,7 +551,7 @@ mod tests {
         let breaker = CircuitBreaker::wrap(inner, config_open_after(3));
 
         for _ in 0..3 {
-            let r = breaker.clone().stream(req(), ctx()).await;
+            let r = breaker.clone().stream(req(), "test-model", ctx()).await;
             assert!(matches!(r, Err(ProviderError::ModelOverloaded)));
         }
         assert_eq!(
@@ -556,7 +561,7 @@ mod tests {
         );
 
         // 4th call should reject without hitting inner.
-        let r = breaker.clone().stream(req(), ctx()).await;
+        let r = breaker.clone().stream(req(), "test-model", ctx()).await;
         assert!(matches!(r, Err(ProviderError::CircuitOpen { .. })));
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -587,12 +592,13 @@ mod tests {
             async fn stream(
                 self: Arc<Self>,
                 req: ChatRequest,
-                ctx: RequestContext,
+                _model: &str,
+        ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 let next = self.sequence.lock().unwrap().remove(0);
                 if next {
                     let mock = MockProvider::new(self.id.clone(), CannedResponse::text("ok"));
-                    mock.stream(req, ctx).await
+                    mock.stream(req, "test-model", ctx).await
                 } else {
                     Err(ProviderError::ModelOverloaded)
                 }
@@ -606,7 +612,7 @@ mod tests {
         let breaker = CircuitBreaker::wrap(flaky, config_open_after(3));
 
         for _ in 0..5 {
-            let _ = breaker.clone().stream(req(), ctx()).await;
+            let _ = breaker.clone().stream(req(), "test-model", ctx()).await;
         }
 
         // The inner sequence: F F S F F → counter went 1, 2, reset, 1, 2.
@@ -654,12 +660,13 @@ mod tests {
             async fn stream(
                 self: Arc<Self>,
                 req: ChatRequest,
-                ctx: RequestContext,
+                _model: &str,
+        ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 let next = self.sequence.lock().unwrap().remove(0);
                 if next {
                     let mock = MockProvider::new(self.id.clone(), CannedResponse::text("ok"));
-                    mock.stream(req, ctx).await
+                    mock.stream(req, "test-model", ctx).await
                 } else {
                     Err(ProviderError::ModelOverloaded)
                 }
@@ -679,7 +686,7 @@ mod tests {
             state: Mutex::new(BreakerState::closed()),
         });
         for _ in 0..5 {
-            let r = cb.clone().stream(req(), ctx()).await;
+            let r = cb.clone().stream(req(), "test-model", ctx()).await;
             // Drain whatever stream came back so the canned-response's
             // singleflight doesn't choke (no real requirement).
             if let Ok(s) = r {
@@ -716,18 +723,18 @@ mod tests {
         });
 
         // Trip the breaker.
-        let _ = cb.clone().stream(req(), ctx()).await;
+        let _ = cb.clone().stream(req(), "test-model", ctx()).await;
         assert_eq!(cb.current_kind(), BreakerStateKind::Open);
 
         // Within cooldown: still rejects.
-        let r = cb.clone().stream(req(), ctx()).await;
+        let r = cb.clone().stream(req(), "test-model", ctx()).await;
         assert!(matches!(r, Err(ProviderError::CircuitOpen { .. })));
         assert_eq!(cb.current_kind(), BreakerStateKind::Open);
 
         // After cooldown: next call probes (HalfOpen) — and since the
         // inner still errors, the probe fails and we go back to Open.
         tokio::time::sleep(Duration::from_millis(80)).await;
-        let r = cb.clone().stream(req(), ctx()).await;
+        let r = cb.clone().stream(req(), "test-model", ctx()).await;
         assert!(
             matches!(r, Err(ProviderError::ModelOverloaded)),
             "first call after cooldown is the probe; inner still errors",
@@ -756,12 +763,13 @@ mod tests {
             async fn stream(
                 self: Arc<Self>,
                 req: ChatRequest,
-                ctx: RequestContext,
+                _model: &str,
+        ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 let next = self.sequence.lock().unwrap().remove(0);
                 if next {
                     MockProvider::new(self.id.clone(), CannedResponse::text("ok"))
-                        .stream(req, ctx)
+                        .stream(req, "test-model", ctx)
                         .await
                 } else {
                     Err(ProviderError::ModelOverloaded)
@@ -785,14 +793,14 @@ mod tests {
         });
 
         // Trip
-        let _ = cb.clone().stream(req(), ctx()).await;
+        let _ = cb.clone().stream(req(), "test-model", ctx()).await;
         assert_eq!(cb.current_kind(), BreakerStateKind::Open);
 
         // Skip cooldown (real wall clock — see note on the previous test)
         tokio::time::sleep(Duration::from_millis(80)).await;
 
         // Probe (success → Closed)
-        let r = cb.clone().stream(req(), ctx()).await;
+        let r = cb.clone().stream(req(), "test-model", ctx()).await;
         assert!(r.is_ok());
         if let Ok(s) = r {
             drain(s).await;
@@ -800,7 +808,7 @@ mod tests {
         assert_eq!(cb.current_kind(), BreakerStateKind::Closed);
 
         // Subsequent calls flow normally.
-        let r = cb.clone().stream(req(), ctx()).await;
+        let r = cb.clone().stream(req(), "test-model", ctx()).await;
         assert!(r.is_ok());
     }
 
@@ -826,7 +834,7 @@ mod tests {
         });
 
         // Trip → Open.
-        let _ = cb.clone().stream(req(), ctx()).await;
+        let _ = cb.clone().stream(req(), "test-model", ctx()).await;
         assert_eq!(cb.current_kind(), BreakerStateKind::Open);
         tokio::time::sleep(Duration::from_millis(60)).await;
 

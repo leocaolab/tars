@@ -688,8 +688,8 @@ mod tests {
 
         async fn ask(p: Arc<dyn LlmProvider>, prompt: &str) -> String {
             p.stream(
-                ChatRequest::user(ModelHint::Explicit("m".into()), prompt),
-                RequestContext::test_default(),
+                ChatRequest::user(prompt),
+                "test-model", RequestContext::test_default(),
             )
             .await
             .unwrap()
@@ -811,8 +811,8 @@ mod tests {
         let provider = reg.get(&ProviderId::new("greeter")).unwrap();
         let resp = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("mock-1".into()), "ping"),
-                RequestContext::test_default(),
+                ChatRequest::user("ping"),
+                "test-model", RequestContext::test_default(),
             )
             .await
             .unwrap();

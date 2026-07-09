@@ -363,7 +363,7 @@ mod tests {
         // E2E-2: system + user turn + a tool with a JSON schema + a
         // Specific tool_choice must produce the right Converse shape,
         // with the tool schema carried as a Document (no silent drop).
-        let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "hello");
+        let mut req = ChatRequest::user("hello");
         req.system = Some("be terse".into());
         req.tools.push(
             ToolSpec::new(
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn build_converse_url_image_is_honest_error() {
         use tars_types::ContentBlock;
-        let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "look");
+        let mut req = ChatRequest::user("look");
         if let Message::User { content } = &mut req.messages[0] {
             content.push(ContentBlock::Image {
                 mime: "image/png".into(),

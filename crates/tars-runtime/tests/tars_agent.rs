@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures::stream;
 
 use tars_agent::{Agent, AgentContext, Permissions, Skill, SkillSet, Task, TaskId};
-use tars_pipeline::{LlmService, Pipeline, ProviderService};
+use tars_pipeline::{LlmService, Pipeline};
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::TarsAgent;
 use tars_tools::{ToolRegistry, builtins::WriteFileTool};
@@ -48,6 +48,7 @@ impl LlmProvider for EventQueueProvider {
     async fn stream(
         self: Arc<Self>,
         _req: ChatRequest,
+        model: &str,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let next = self
@@ -61,9 +62,9 @@ impl LlmProvider for EventQueueProvider {
     }
 }
 
-fn build_llm(provider: Arc<EventQueueProvider>) -> Arc<dyn LlmService> {
-    let inner: Arc<dyn LlmService> = ProviderService::new(provider);
-    Arc::new(Pipeline::builder_with_inner(inner).build())
+fn build_llm(provider: Arc<EventQueueProvider>) -> LlmService {
+    let inner: LlmService = LlmService::of(provider, "gpt-4o");
+    Pipeline::builder_with_inner(inner).build()
 }
 
 fn tool_call_events(call_id: &str, tool: &str, args: serde_json::Value) -> Vec<ChatEvent> {

@@ -226,11 +226,8 @@ impl OpenAiAdapter {
     pub(crate) fn build_request_default(
         &self,
         req: &ChatRequest,
+        model: &str,
     ) -> Result<Value, ProviderError> {
-        let model = req
-            .model
-            .explicit()
-            .ok_or_else(|| ProviderError::InvalidRequest("model must be explicit".into()))?;
 
         // Audit `tars-provider-src-backends-openai-11`: validate user
         // messages have non-empty content. OpenAI rejects
@@ -606,8 +603,8 @@ impl HttpAdapter for OpenAiAdapter {
         Ok(h)
     }
 
-    fn translate_request(&self, req: &ChatRequest) -> Result<Value, ProviderError> {
-        self.dialect.build_request(self, req)
+    fn translate_request(&self, req: &ChatRequest, model: &str) -> Result<Value, ProviderError> {
+        self.dialect.build_request(self, req, model)
     }
 
     fn parse_event(
@@ -736,7 +733,6 @@ mod tests {
             name: Some("Findings".into()),
         };
         let req = |s: Option<tars_types::JsonSchema>| ChatRequest {
-            model: tars_types::ModelHint::Explicit("deepseek-v4-flash".into()),
             system: None,
             messages: vec![Message::user_text("scan this; output json")],
             tools: vec![],
@@ -756,13 +752,13 @@ mod tests {
 
         // StrictSchema (OpenAI proper) → json_schema.
         let strict = mk(StructuredOutputMode::StrictSchema)
-            .translate_request(&req(Some(schema.clone())))
+            .translate_request(&req(Some(schema.clone())), "gpt-4o")
             .unwrap();
         assert_eq!(strict["response_format"]["type"], "json_schema");
 
         // JsonObjectMode (DeepSeek / openai_compat) → json_object, NOT json_schema.
         let jobj = mk(StructuredOutputMode::JsonObjectMode)
-            .translate_request(&req(Some(schema.clone())))
+            .translate_request(&req(Some(schema.clone())), "gpt-4o")
             .unwrap();
         assert_eq!(
             jobj["response_format"]["type"], "json_object",
@@ -771,7 +767,7 @@ mod tests {
 
         // None → no response_format at all.
         let none = mk(StructuredOutputMode::None)
-            .translate_request(&req(Some(schema.clone())))
+            .translate_request(&req(Some(schema.clone())), "gpt-4o")
             .unwrap();
         assert!(
             none.get("response_format").is_none(),
@@ -780,7 +776,7 @@ mod tests {
 
         // No structured_output requested → no response_format regardless of mode.
         let bare = mk(StructuredOutputMode::StrictSchema)
-            .translate_request(&req(None))
+            .translate_request(&req(None), "gpt-4o")
             .unwrap();
         assert!(bare.get("response_format").is_none());
     }
@@ -794,7 +790,6 @@ mod tests {
     fn shared_builder_never_emits_thinking_field() {
         use tars_types::ThinkingMode;
         let req = |t: ThinkingMode| ChatRequest {
-            model: tars_types::ModelHint::Explicit("deepseek-v4-flash".into()),
             system: None,
             messages: vec![Message::user_text("hi")],
             tools: vec![],
@@ -815,7 +810,7 @@ mod tests {
             (DEFAULT_BASE_URL, StructuredOutputMode::StrictSchema),
         ] {
             let body = OpenAiAdapter::new(base.into(), HttpProviderExtras::default(), mode)
-                .translate_request(&req(ThinkingMode::Auto))
+                .translate_request(&req(ThinkingMode::Auto), "gpt-4o")
                 .unwrap();
             assert!(
                 body.get("thinking").is_none(),
@@ -831,7 +826,6 @@ mod tests {
         // blocks were emitted. Now the inline System is skipped.
         let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let req = ChatRequest {
-            model: tars_types::ModelHint::Explicit("gpt-4o".into()),
             system: Some("explicit system".into()),
             messages: vec![
                 Message::System {
@@ -850,7 +844,7 @@ mod tests {
             thinking: Default::default(),
             enable_chat_template_thinking: None,
         };
-        let body = a.translate_request(&req).unwrap();
+        let body = a.translate_request(&req, "gpt-4o").unwrap();
         let messages = body["messages"].as_array().unwrap();
         let system_count = messages.iter().filter(|m| m["role"] == "system").count();
         assert_eq!(system_count, 1, "should dedupe to one system message");

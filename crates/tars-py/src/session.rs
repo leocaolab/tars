@@ -87,7 +87,9 @@ impl Session {
         budget_chars: usize,
         default_max_output_tokens: Option<u32>,
     ) -> PyResult<Self> {
-        let svc = pipeline.inner_arc();
+        // The Session targets one model for its whole life; bind the
+        // pipeline's service to it here (the request is model-agnostic).
+        let svc = pipeline.build_service(&model);
         let caps = pipeline.capabilities_owned();
         let budget = if budget_chars == 0 {
             // Encode "disabled" as a very-large char limit instead of

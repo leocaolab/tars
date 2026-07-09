@@ -149,8 +149,10 @@ fn try_new_with_valid_capabilities_round_trips_through_wrap() {
     });
     let mw = PerCallBudgetMiddleware::try_new(1.0, &caps).expect("valid caps must construct");
     let mock = MockProvider::new("p", CannedResponse::text("hi"));
-    let inner: Arc<dyn tars_pipeline::LlmService> = tars_pipeline::ProviderService::new(mock);
-    let _wrapped = mw.wrap(inner);
+    let inner: tars_pipeline::LlmService = tars_pipeline::LlmService::of(mock, "test-model");
+    let _wrapped = tars_pipeline::Pipeline::builder_with_inner(inner)
+        .layer(mw)
+        .build();
     // No panic = invariant holds: try_new returned a working middleware.
 }
 

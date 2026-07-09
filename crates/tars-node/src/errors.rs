@@ -41,6 +41,7 @@ pub(crate) type JsError = Error<String>;
 pub(crate) fn tars_to_js(err: TarsError) -> JsError {
     let code = match &err {
         TarsError::UnknownRole { .. } => "TarsUnknownRole",
+        TarsError::NoModelForRole { .. } => "TarsNoModelForRole",
     };
     Error::new(code.to_string(), err.to_string())
 }

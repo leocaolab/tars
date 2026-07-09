@@ -4,18 +4,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::CacheDirective;
 use crate::capabilities::{Capabilities, StructuredOutputMode};
-use crate::model::{ModelHint, ThinkingMode};
+use crate::model::ThinkingMode;
 use crate::schema::JsonSchema;
 use crate::tools::{ToolChoice, ToolSpec};
 
-/// A complete chat request. Provider-agnostic.
+/// A complete chat request. Provider-agnostic **and model-agnostic**:
+/// the concrete model is provider-specific, so it does NOT live on the
+/// request. The model is bound at service construction (the leaf
+/// `LlmService` carries `provider + model`) and passed to
+/// `LlmProvider::stream` as an explicit argument. A `ChatRequest` is
+/// pure content, reusable across providers/models.
 ///
-/// All fields except `model` and `messages` are optional / defaulted so
-/// callers pay only for what they use.
+/// All fields except `messages` are optional / defaulted so callers pay
+/// only for what they use.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatRequest {
-    pub model: ModelHint,
-
     /// Hardcoded model behavior. Goes into `system` for OpenAI/Anthropic,
     /// `system_instruction` for Gemini.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,9 +72,8 @@ pub struct ChatRequest {
 
 impl ChatRequest {
     /// Minimal builder for the common single-user-turn case.
-    pub fn user(model: ModelHint, prompt: impl Into<String>) -> Self {
+    pub fn user(prompt: impl Into<String>) -> Self {
         Self {
-            model,
             system: None,
             messages: vec![Message::User {
                 content: vec![ContentBlock::text(prompt)],
@@ -556,7 +558,7 @@ mod tests {
 
     #[test]
     fn user_builder_creates_minimal_request() {
-        let r = ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "hi");
+        let r = ChatRequest::user("hi");
         assert_eq!(r.messages.len(), 1);
         assert!(matches!(r.messages[0], Message::User { .. }));
     }
@@ -628,7 +630,7 @@ mod tests {
 
     #[test]
     fn compat_text_only_request_passes_minimal_provider() {
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+        let req = ChatRequest::user("hi");
         assert!(matches!(
             req.compatibility_check(&caps_minimal()),
             CompatibilityCheck::Compatible
@@ -638,7 +640,7 @@ mod tests {
     #[test]
     fn compat_tools_blocked_by_no_tool_support() {
         use crate::tools::ToolSpec;
-        let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+        let mut req = ChatRequest::user("hi");
         req.tools.push(ToolSpec {
             name: "x".into(),
             description: "x".into(),
@@ -660,7 +662,7 @@ mod tests {
     #[test]
     fn compat_tools_pass_when_provider_supports() {
         use crate::tools::ToolSpec;
-        let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+        let mut req = ChatRequest::user("hi");
         req.tools.push(ToolSpec {
             name: "x".into(),
             description: "x".into(),
@@ -674,7 +676,7 @@ mod tests {
 
     #[test]
     fn compat_thinking_auto_blocked_when_not_supported() {
-        let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+        let mut req = ChatRequest::user("hi");
         req.thinking = ThinkingMode::Auto;
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
@@ -691,7 +693,7 @@ mod tests {
 
     #[test]
     fn compat_thinking_off_passes_anywhere() {
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+        let req = ChatRequest::user("hi");
         assert!(matches!(req.thinking, ThinkingMode::Off));
         assert!(matches!(
             req.compatibility_check(&caps_minimal()),
@@ -701,7 +703,7 @@ mod tests {
 
     #[test]
     fn compat_structured_output_blocked_by_none_mode() {
-        let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+        let mut req = ChatRequest::user("hi");
         req.structured_output = Some(JsonSchema::loose(serde_json::json!({"type":"object"})));
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
@@ -718,7 +720,6 @@ mod tests {
     #[test]
     fn compat_image_content_blocked_by_no_vision() {
         let req = ChatRequest {
-            model: ModelHint::Explicit("m".into()),
             system: None,
             messages: vec![Message::User {
                 content: vec![ContentBlock::Image {
@@ -754,7 +755,6 @@ mod tests {
         // Tools + thinking + structured + vision all rejected at once.
         use crate::tools::ToolSpec;
         let mut req = ChatRequest {
-            model: ModelHint::Explicit("m".into()),
             system: None,
             messages: vec![Message::User {
                 content: vec![ContentBlock::Image {
@@ -806,7 +806,7 @@ mod tests {
         // Build a request whose prompt clearly exceeds 32k tokens
         // (chars/4 estimate). 32k tokens × 4 chars/tok ≈ 128k chars;
         // pad to 200k chars to be obviously over.
-        let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "x".repeat(200_000));
+        let mut req = ChatRequest::user("x".repeat(200_000));
         req.system = None;
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn compat_max_output_tokens_exceeded_flagged() {
-        let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+        let mut req = ChatRequest::user("hi");
         req.max_output_tokens = Some(8192); // caps_minimal has max=4096
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn compat_max_output_within_limit_passes() {
-        let mut req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+        let mut req = ChatRequest::user("hi");
         req.max_output_tokens = Some(4096); // exactly at the cap
         assert!(matches!(
             req.compatibility_check(&caps_minimal()),
@@ -879,7 +879,7 @@ mod tests {
         // `text_only_baseline()` provides 32k context + 4k output +
         // text-only modalities. A trivial text request should pass.
         let caps = Capabilities::text_only_baseline(Pricing::default());
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
+        let req = ChatRequest::user("hi");
         match req.compatibility_check(&caps) {
             CompatibilityCheck::Compatible => {}
             CompatibilityCheck::Incompatible { reasons } => {
@@ -896,7 +896,6 @@ mod tests {
         use crate::tools::ToolSpec;
         let zero_caps = caps_zero(); // everything off, max_*_tokens = 0
         let req = ChatRequest {
-            model: ModelHint::Explicit("m".into()),
             system: Some("x".repeat(200_000)), // overflow context window
             messages: vec![Message::User {
                 content: vec![ContentBlock::Image {

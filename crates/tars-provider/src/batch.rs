@@ -60,6 +60,7 @@ pub trait BatchSubmitter: Send + Sync + 'static {
     async fn submit(
         &self,
         items: Vec<(BatchItemId, ChatRequest)>,
+        model: &str,
         ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError>;
 
@@ -120,6 +121,9 @@ struct MockState {
 struct MockJob {
     /// Caller-supplied items, indexed by their `BatchItemId`.
     items: Vec<(BatchItemId, ChatRequest)>,
+    /// Concrete model the batch was submitted against (echoed in the
+    /// synthesized results — the request itself is model-agnostic).
+    model: String,
     status: BatchStatus,
     /// Override results set by `set_results`. If `None`, `results()`
     /// synthesizes text-only responses from input items.
@@ -163,6 +167,7 @@ impl BatchSubmitter for MockBatchSubmitter {
     async fn submit(
         &self,
         items: Vec<(BatchItemId, ChatRequest)>,
+        model: &str,
         _ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError> {
         let mut state = self.state.lock().await;
@@ -173,6 +178,7 @@ impl BatchSubmitter for MockBatchSubmitter {
             job_id.clone(),
             MockJob {
                 items,
+                model: model.to_string(),
                 status: BatchStatus::Completed,
                 custom_results: None,
             },
@@ -231,18 +237,18 @@ impl BatchSubmitter for MockBatchSubmitter {
         Ok(job
             .items
             .iter()
-            .map(|(item_id, req)| BatchResultItem {
+            .map(|(item_id, _req)| BatchResultItem {
                 item_id: item_id.clone(),
-                result: Ok(echo_response(req)),
+                result: Ok(echo_response(&job.model)),
             })
             .collect())
     }
 }
 
-fn echo_response(req: &ChatRequest) -> ChatResponse {
+fn echo_response(model: &str) -> ChatResponse {
     use tars_types::{ChatEvent, ChatResponseBuilder, StopReason, Usage};
     let mut acc = ChatResponseBuilder::new();
-    acc.apply(ChatEvent::started(req.model.label()));
+    acc.apply(ChatEvent::started(model));
     // Echo "ok" — keeps the response stream-shape valid for downstream
     // consumers that aggregate.
     acc.apply(ChatEvent::Delta { text: "ok".into() });
@@ -276,7 +282,7 @@ mod tests {
     use tars_types::{ChatRequest, ModelHint, RequestContext};
 
     fn req(text: &str) -> ChatRequest {
-        ChatRequest::user(ModelHint::Explicit("m".into()), text)
+        ChatRequest::user(text)
     }
 
     fn ctx() -> RequestContext {
@@ -287,11 +293,11 @@ mod tests {
     async fn submit_assigns_unique_job_ids() {
         let m = MockBatchSubmitter::new();
         let id1 = m
-            .submit(vec![(BatchItemId::new("a"), req("hello"))], &ctx())
+            .submit(vec![(BatchItemId::new("a"), req("hello"))], "test-model", &ctx())
             .await
             .unwrap();
         let id2 = m
-            .submit(vec![(BatchItemId::new("b"), req("world"))], &ctx())
+            .submit(vec![(BatchItemId::new("b"), req("world"))], "test-model", &ctx())
             .await
             .unwrap();
         assert_ne!(id1, id2);
@@ -301,7 +307,7 @@ mod tests {
     async fn status_after_submit_is_completed_by_default() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))], &ctx())
+            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
             .await
             .unwrap();
         assert_eq!(m.status(&id, &ctx()).await.unwrap(), BatchStatus::Completed);
@@ -325,7 +331,7 @@ mod tests {
             (BatchItemId::new("draft-2"), req("input 2")),
             (BatchItemId::new("draft-3"), req("input 3")),
         ];
-        let id = m.submit(items.clone(), &ctx()).await.unwrap();
+        let id = m.submit(items.clone(), "test-model", &ctx()).await.unwrap();
         let results = m.results(&id, &ctx()).await.unwrap();
         assert_eq!(results.len(), 3);
         for (input, output) in items.iter().zip(results.iter()) {
@@ -338,7 +344,7 @@ mod tests {
     async fn results_non_terminal_status_errors() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))], &ctx())
+            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
             .await
             .unwrap();
         m.set_status(
@@ -361,7 +367,7 @@ mod tests {
     async fn set_status_drives_polling_simulation() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))], &ctx())
+            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
             .await
             .unwrap();
         // Simulate progress polling.
@@ -385,7 +391,7 @@ mod tests {
     async fn cancel_default_returns_unsupported() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))], &ctx())
+            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
             .await
             .unwrap();
         let err = m

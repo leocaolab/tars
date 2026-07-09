@@ -218,7 +218,7 @@ impl RunTaskError {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_task(
     runtime: Arc<dyn Runtime>,
-    llm: Arc<dyn LlmService>,
+    llm: LlmService,
     orchestrator: Arc<OrchestratorAgent>,
     worker: Arc<WorkerAgent>,
     critic: Arc<CriticAgent>,
@@ -393,7 +393,7 @@ pub async fn run_task(
 /// of `run_task`.
 struct OrchestratorCallCtx {
     runtime: Arc<dyn Runtime>,
-    llm: Arc<dyn LlmService>,
+    llm: LlmService,
     orchestrator: Arc<OrchestratorAgent>,
     cancel: CancellationToken,
 }

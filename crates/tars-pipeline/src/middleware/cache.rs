@@ -43,7 +43,7 @@ use tars_types::{
 };
 
 use crate::middleware::Middleware;
-use crate::service::LlmService;
+use crate::service::Next;
 
 /// Builder-and-factory for [`CacheLookupService`]. The inner Arcs are
 /// the real moving parts; the middleware is just a thin layer holder.
@@ -72,34 +72,21 @@ impl CacheLookupMiddleware {
     }
 }
 
+#[async_trait]
 impl Middleware for CacheLookupMiddleware {
     fn name(&self) -> &'static str {
         "cache_lookup"
     }
-    fn wrap(&self, inner: Arc<dyn LlmService>) -> Arc<dyn LlmService> {
-        Arc::new(CacheLookupService {
-            inner,
-            registry: self.registry.clone(),
-            factory: self.factory.clone(),
-            origin_provider: self.origin_provider.clone(),
-        })
-    }
-}
 
-struct CacheLookupService {
-    inner: Arc<dyn LlmService>,
-    registry: Arc<dyn CacheRegistry>,
-    factory: CacheKeyFactory,
-    origin_provider: ProviderId,
-}
-
-#[async_trait]
-impl LlmService for CacheLookupService {
-    async fn call(
-        self: Arc<Self>,
+    async fn handle(
+        &self,
         req: ChatRequest,
         ctx: RequestContext,
+        next: Next<'_>,
     ) -> Result<LlmEventStream, ProviderError> {
+        // The cache key is per-model, so read the bound model off the
+        // chain cursor.
+        let model = next.model();
         // Telemetry: layer trace. A poisoned lock means a prior task
         // panicked while holding it — telemetry is best-effort so we
         // don't fail the call, but log it loud (consistent with the
@@ -115,23 +102,23 @@ impl LlmService for CacheLookupService {
         let policy = read_policy(&ctx);
         if !policy.any_enabled() {
             // Cache fully off — skip key compute too (it's not free).
-            return self.inner.clone().call(req, ctx).await;
+            return next.run(req, ctx).await;
         }
 
-        let key = match self.factory.compute(&req, &ctx) {
+        let key = match self.factory.compute(&req, model, &ctx) {
             Ok(k) => k,
             Err(e) if e.is_not_cacheable() => {
                 tracing::debug!(reason = %e, "cache: skipping non-cacheable request");
-                return self.inner.clone().call(req, ctx).await;
+                return next.run(req, ctx).await;
             }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    model = %req.model.label(),
+                    model = %model,
                     msg_count = req.messages.len(),
                     "cache: key computation failed, treating as miss",
                 );
-                return self.inner.clone().call(req, ctx).await;
+                return next.run(req, ctx).await;
             }
         };
 
@@ -179,7 +166,7 @@ impl LlmService for CacheLookupService {
         }
 
         // ── Miss → call inner, wrap stream to capture for write ────
-        let inner_stream = self.inner.clone().call(req, ctx.clone()).await?;
+        let inner_stream = next.run(req, ctx.clone()).await?;
         let captured = wrap_stream_for_write(
             inner_stream,
             self.registry.clone(),
@@ -414,6 +401,8 @@ pub fn set_cache_policy(ctx: &RequestContext, policy: &CachePolicy) {
 #[allow(clippy::needless_pass_by_value)]
 mod tests {
     use super::*;
+    use crate::LlmService;
+    use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use serde_json::json;
@@ -426,19 +415,20 @@ mod tests {
     /// A counting wrapper around MockProvider so we can assert the
     /// inner provider was (or wasn't) called.
     struct CountingService {
-        inner: Arc<dyn LlmService>,
+        inner: Arc<dyn Service>,
         calls: Arc<AtomicU32>,
     }
 
     #[async_trait]
-    impl LlmService for CountingService {
+    impl Service for CountingService {
         async fn call(
             self: Arc<Self>,
             req: ChatRequest,
-            ctx: RequestContext,
+                    model: &str,
+        ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.clone().call(req, ctx).await
+            self.inner.clone().call(req, model, ctx).await
         }
     }
 
@@ -447,7 +437,7 @@ mod tests {
     }
 
     fn deterministic_request(prompt: &str) -> ChatRequest {
-        let mut r = ChatRequest::user(ModelHint::Explicit("mock-1".into()), prompt);
+        let mut r = ChatRequest::user(prompt);
         r.temperature = Some(0.0);
         r
     }
@@ -455,17 +445,18 @@ mod tests {
     fn build_pipeline_with_cache(
         registry: Arc<dyn CacheRegistry>,
         provider: Arc<dyn tars_provider::LlmProvider>,
-    ) -> (Arc<Pipeline>, Arc<AtomicU32>) {
+    ) -> (LlmService, Arc<AtomicU32>) {
         let counter = Arc::new(AtomicU32::new(0));
-        let provider_service: Arc<dyn LlmService> = crate::ProviderService::new(provider);
-        let counting: Arc<dyn LlmService> = Arc::new(CountingService {
+        let provider_service: Arc<dyn Service> = LlmService::of(provider, "test-model").chain();
+        let counting: Arc<dyn Service> = Arc::new(CountingService {
             inner: provider_service,
             calls: counter.clone(),
         });
+        let counting = LlmService::from_parts(counting, "test-model", Arc::from([] as [&'static str; 0]));
         let factory = CacheKeyFactory::new(1);
         let mw = CacheLookupMiddleware::new(registry, factory, ProviderId::new("mock_origin"));
         let pipeline = Pipeline::builder_with_inner(counting).layer(mw).build();
-        (Arc::new(pipeline), counter)
+        (pipeline, counter)
     }
 
     async fn drain(stream: LlmEventStream) -> Vec<ChatEvent> {
@@ -554,7 +545,7 @@ mod tests {
         let (pipeline, counter) = build_pipeline_with_cache(registry, mock);
 
         // No temperature set → NonDeterministic → cache skipped.
-        let mut req = ChatRequest::user(ModelHint::Explicit("mock-1".into()), "p");
+        let mut req = ChatRequest::user("p");
         req.temperature = None;
 
         for _ in 0..3 {
@@ -759,7 +750,7 @@ mod tests {
         let factory = CacheKeyFactory::new(1);
         let req = deterministic_request("midstream");
         let ctx = ctx();
-        let key = factory.compute(&req, &ctx).expect("compute key");
+        let key = factory.compute(&req, "test-model", &ctx).expect("compute key");
 
         let events: Vec<Result<ChatEvent, ProviderError>> = vec![
             Ok(ChatEvent::started("m")),

@@ -194,8 +194,8 @@ mod tests {
         ]);
         let response = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("gpt-5".into()), "say hi"),
-                RequestContext::test_default(),
+                ChatRequest::user("say hi"),
+                "gpt-5", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -220,8 +220,8 @@ mod tests {
         ]);
         let response = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("gpt-5".into()), "x"),
-                RequestContext::test_default(),
+                ChatRequest::user("x"),
+                "gpt-5", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -240,8 +240,8 @@ mod tests {
         ]);
         let response = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("gpt-5".into()), "x"),
-                RequestContext::test_default(),
+                ChatRequest::user("x"),
+                "gpt-5", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -254,8 +254,8 @@ mod tests {
             make_provider(vec![r#"{"type":"turn.failed","error":{"message":"context too long"}}"#]);
         let result = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("gpt-5".into()), "x"),
-                RequestContext::test_default(),
+                ChatRequest::user("x"),
+                "gpt-5", RequestContext::test_default(),
             )
             .await;
         match result {

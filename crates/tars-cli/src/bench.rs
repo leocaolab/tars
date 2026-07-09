@@ -36,7 +36,7 @@ use clap::Args;
 use futures::StreamExt;
 
 use tars_provider::registry::ProviderRegistry;
-use tars_types::{ChatEvent, ChatRequest, ModelHint, ProviderId, RequestContext};
+use tars_types::{ChatEvent, ChatRequest, ProviderId, RequestContext};
 
 use crate::config_loader;
 
@@ -214,11 +214,11 @@ async fn run_one(
     prompt: &str,
     max_tokens: u32,
 ) -> Result<Sample> {
-    let mut req = ChatRequest::user(ModelHint::Explicit(model.into()), prompt);
+    let mut req = ChatRequest::user(prompt);
     req.max_output_tokens = Some(max_tokens);
     let started_at = Instant::now();
     let mut stream = Arc::clone(&provider)
-        .stream(req, RequestContext::test_default())
+        .stream(req, model, RequestContext::test_default())
         .await
         .context("stream() failed")?;
 

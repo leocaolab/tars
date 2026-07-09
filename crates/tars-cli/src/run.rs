@@ -31,7 +31,7 @@ use tars_pipeline::{
 };
 use tars_runtime::{AgentEvent, LocalRuntime, Runtime, StepIdempotencyKey};
 use tars_types::{
-    CacheHitInfo, ChatEvent, ChatRequest, CostUsd, ModelHint, RequestContext, TrajectoryId, Usage,
+    CacheHitInfo, ChatEvent, ChatRequest, CostUsd, RequestContext, TrajectoryId, Usage,
 };
 
 use crate::dispatch::{
@@ -74,7 +74,7 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     // Resolve the prompt once: `-` means read stdin. Reused below for
     // both the request body and the trajectory `input_summary` length.
     let prompt = resolve_prompt(&args)?;
-    let req = build_request(&args, &dispatch.model_label, &prompt);
+    let req = build_request(&args, &prompt);
 
     let cache_registry = build_cache(args.dispatch.cache_path.as_deref())?;
     let cache_factory = CacheKeyFactory::new(1);
@@ -103,7 +103,7 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
 
     let dispatch_label = dispatch.label.clone();
 
-    let stream_result = Arc::new(pipeline).call(req, ctx).await;
+    let stream_result = pipeline.call(req, ctx).await;
     let stream = match stream_result {
         Ok(s) => s,
         Err(e) => {
@@ -417,8 +417,8 @@ fn resolve_prompt(args: &RunArgs) -> Result<String> {
     }
 }
 
-fn build_request(args: &RunArgs, model: &str, prompt: &str) -> ChatRequest {
-    let mut req = ChatRequest::user(ModelHint::Explicit(model.to_string()), prompt);
+fn build_request(args: &RunArgs, prompt: &str) -> ChatRequest {
+    let mut req = ChatRequest::user(prompt);
     if let Some(s) = &args.system {
         req = req.with_system(s);
     }
@@ -607,11 +607,11 @@ mod tests {
             temperature: Some(0.3),
             no_summary: false,
         };
-        let req = build_request(&args, "gpt-4o", "hi");
+        let req = build_request(&args, "hi");
         assert_eq!(req.max_output_tokens, Some(64));
         assert_eq!(req.temperature, Some(0.3));
         assert_eq!(req.system.as_deref(), Some("be brief"));
-        assert!(matches!(req.model, ModelHint::Explicit(ref m) if m == "gpt-4o"));
+        // Model is bound on the pipeline/service now, not the request.
     }
 
     #[test]

@@ -12,7 +12,7 @@ use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::anthropic::AnthropicProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
-use tars_types::{ChatEvent, ChatRequest, ModelHint, RequestContext, StopReason};
+use tars_types::{ChatEvent, ChatRequest, RequestContext, StopReason};
 
 /// Build a named-event SSE body. Each item is `(event_name, json_data)`.
 fn sse_named(events: &[(&str, &str)]) -> String {
@@ -77,9 +77,9 @@ async fn streaming_text_response_decodes_to_events() {
         .base_url(server.uri())
         .build(http, basic());
 
-    let req = ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "say hi");
+    let req = ChatRequest::user("say hi");
     let mut stream = provider
-        .stream(req, RequestContext::test_default())
+        .stream(req, "test-model", RequestContext::test_default())
         .await
         .expect("stream open");
 
@@ -161,8 +161,8 @@ async fn streaming_tool_call_assembles_args_from_partial_json() {
 
     let resp = provider
         .complete(
-            ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "search rust"),
-            RequestContext::test_default(),
+            ChatRequest::user("search rust"),
+            "test-model", RequestContext::test_default(),
         )
         .await
         .expect("complete ok");
@@ -233,11 +233,9 @@ async fn thinking_blocks_decode_as_thinking_deltas() {
 
     let resp = provider
         .complete(
-            ChatRequest::user(
-                ModelHint::Explicit("claude-opus-4-7".into()),
-                "think then answer",
+            ChatRequest::user("think then answer",
             ),
-            RequestContext::test_default(),
+            "test-model", RequestContext::test_default(),
         )
         .await
         .expect("complete ok");
@@ -265,8 +263,8 @@ async fn http_401_maps_to_auth_error() {
 
     let err = match provider
         .stream(
-            ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "hi"),
-            RequestContext::test_default(),
+            ChatRequest::user("hi"),
+            "test-model", RequestContext::test_default(),
         )
         .await
     {

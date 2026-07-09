@@ -79,10 +79,18 @@ fn build_handle_exc(
     use tars_handle::TarsError as E;
     let exc = TarsHandleError::new_err(message);
     let value = exc.value(py);
-    value.setattr("kind", "unknown_role")?;
-    let E::UnknownRole { role, tried } = err;
-    value.setattr("role", role)?;
-    value.setattr("tried", tried.as_ref().map(|p| p.to_string()))?;
+    match err {
+        E::UnknownRole { role, tried } => {
+            value.setattr("kind", "unknown_role")?;
+            value.setattr("role", role)?;
+            value.setattr("tried", tried.as_ref().map(|p| p.to_string()))?;
+        }
+        E::NoModelForRole { role, provider } => {
+            value.setattr("kind", "no_model_for_role")?;
+            value.setattr("role", role)?;
+            value.setattr("provider", provider.to_string())?;
+        }
+    }
     Ok(exc)
 }
 

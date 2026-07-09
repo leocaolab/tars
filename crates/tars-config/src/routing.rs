@@ -1,9 +1,11 @@
 //! Routing config — Doc 01 §12 + Doc 02 §4.6 wired through TOML.
 //!
-//! M2 ships only `tiers` — the `ModelTier → Vec<ProviderId>` lookup
-//! [`tars_pipeline::TierPolicy`] consumes. Cost / Latency / Ensemble
-//! policies don't need config (Cost/Latency derive from runtime
-//! metrics; Ensemble is invoked per-request via `ModelHint::Ensemble`).
+//! Ships `tiers` — the `ModelTier → Vec<ProviderId>` lookup consumed at
+//! service-construction / role-resolution time (a role naming a tier
+//! resolves to that tier's first candidate + its `default_model`). The
+//! model is bound on the service, not carried per-request, so there is
+//! no request-time tier policy. Cost / Latency policies don't need
+//! config (they derive from runtime metrics).
 //!
 //! TOML shape:
 //!

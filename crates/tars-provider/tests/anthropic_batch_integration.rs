@@ -12,7 +12,7 @@ use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::anthropic::AnthropicProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
-use tars_types::{BatchItemId, BatchJobId, BatchStatus, ChatRequest, ModelHint, ProviderError};
+use tars_types::{BatchItemId, BatchJobId, BatchStatus, ChatRequest, ProviderError};
 
 fn build_provider(server: &MockServer) -> Arc<dyn LlmProvider> {
     let http = HttpProviderBase::default_arc().unwrap();
@@ -62,13 +62,13 @@ async fn submit_posts_requests_array_and_returns_job_id() {
             vec![
                 (
                     BatchItemId::new("draft-1"),
-                    ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "draft one"),
+                    ChatRequest::user("draft one"),
                 ),
                 (
                     BatchItemId::new("draft-2"),
-                    ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "draft two"),
+                    ChatRequest::user("draft two"),
                 ),
-            ],
+            ], "test-model",
             &tars_types::RequestContext::test_default(),
         )
         .await
@@ -84,7 +84,7 @@ async fn submit_empty_items_is_invalid_request() {
     let submitter = provider.as_batch_submitter().unwrap();
 
     let err = submitter
-        .submit(vec![], &tars_types::RequestContext::test_default())
+        .submit(vec![], "test-model", &tars_types::RequestContext::test_default())
         .await
         .expect_err("must reject");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));
@@ -322,8 +322,8 @@ async fn submit_propagates_http_error_via_classifier() {
         .submit(
             vec![(
                 BatchItemId::new("x"),
-                ChatRequest::user(ModelHint::Explicit("claude-opus-4-7".into()), "hi"),
-            )],
+                ChatRequest::user("hi"),
+            )], "test-model",
             &tars_types::RequestContext::test_default(),
         )
         .await

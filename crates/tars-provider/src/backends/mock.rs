@@ -152,6 +152,7 @@ impl LlmProvider for MockProvider {
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         // Atomic: append-history + read-canned-response under one lock
@@ -177,7 +178,6 @@ impl LlmProvider for MockProvider {
         match response {
             CannedResponse::Error(msg) => Err(ProviderError::Internal(msg)),
             CannedResponse::Text(text) => {
-                let model = req.model.label();
                 let events: Vec<Result<ChatEvent, ProviderError>> = vec![
                     Ok(ChatEvent::started(model)),
                     Ok(ChatEvent::Delta { text: text.clone() }),
@@ -204,7 +204,6 @@ impl LlmProvider for MockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_types::ModelHint;
 
     #[tokio::test]
     async fn text_response_yields_three_events() {
@@ -212,8 +211,8 @@ mod tests {
         let mut s = p
             .clone()
             .stream(
-                ChatRequest::user(ModelHint::Explicit("mock-1".into()), "ping"),
-                RequestContext::test_default(),
+                ChatRequest::user("ping"),
+                "test-model", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -238,8 +237,8 @@ mod tests {
         let r = p
             .clone()
             .complete(
-                ChatRequest::user(ModelHint::Explicit("mock-1".into()), "ping"),
-                RequestContext::test_default(),
+                ChatRequest::user("ping"),
+                "test-model", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -257,8 +256,8 @@ mod tests {
             let r = p
                 .clone()
                 .complete(
-                    ChatRequest::user(ModelHint::Explicit("mock-1".into()), "ping"),
-                    RequestContext::test_default(),
+                    ChatRequest::user("ping"),
+                    "test-model", RequestContext::test_default(),
                 )
                 .await;
             assert!(r.is_ok(), "complete() unexpectedly errored");
@@ -272,8 +271,8 @@ mod tests {
         let r = p
             .clone()
             .complete(
-                ChatRequest::user(ModelHint::Explicit("mock-1".into()), "ping"),
-                RequestContext::test_default(),
+                ChatRequest::user("ping"),
+                "test-model", RequestContext::test_default(),
             )
             .await;
         assert!(r.is_err());

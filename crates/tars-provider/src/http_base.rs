@@ -110,8 +110,10 @@ pub trait HttpAdapter: Send + Sync + 'static {
     fn build_headers(&self, auth: &ResolvedAuth) -> Result<HeaderMap, ProviderError>;
 
     /// Transform our normalized [`ChatRequest`] into the provider's
-    /// JSON body.
-    fn translate_request(&self, req: &ChatRequest) -> Result<Value, ProviderError>;
+    /// JSON body. `model` is the concrete model name to stamp into the
+    /// body — the request is model-agnostic content, so the model is
+    /// passed explicitly (bound at service construction).
+    fn translate_request(&self, req: &ChatRequest, model: &str) -> Result<Value, ProviderError>;
 
     /// Parse one decoded SSE event into zero or more [`ChatEvent`]s.
     /// Adapter has access to the [`ToolCallBuffer`] for stateful
@@ -167,28 +169,19 @@ pub async fn stream_via_adapter<A>(
     adapter: Arc<A>,
     auth: ResolvedAuth,
     req: ChatRequest,
+    model: &str,
     _ctx: RequestContext,
 ) -> Result<LlmEventStream, ProviderError>
 where
     A: HttpAdapter,
 {
-    let model = req
-        .model
-        .explicit()
-        .ok_or_else(|| {
-            ProviderError::InvalidRequest(
-                "ChatRequest.model must be ModelHint::Explicit before reaching the Provider".into(),
-            )
-        })?
-        .to_string();
-
-    let mut url = adapter.build_url(&model)?;
+    let mut url = adapter.build_url(model)?;
     adapter.extras().apply_query_params(&mut url);
 
     let mut headers = adapter.build_headers(&auth)?;
     adapter.extras().apply_headers(&mut headers);
 
-    let body = adapter.translate_request(&req)?;
+    let body = adapter.translate_request(&req, model)?;
 
     let response = base
         .client

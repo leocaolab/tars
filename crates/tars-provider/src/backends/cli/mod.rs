@@ -101,17 +101,18 @@ impl LlmProvider for AgentCliBackend {
     #[tracing::instrument(
         name = "agent_cli.stream",
         skip_all,
-        fields(provider = %self.id, model = %req.model.label()),
+        fields(provider = %self.id, model = %model),
         err(Display),
     )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         // 1. Per-CLI invocation (argv flags, serialized prompt, env-strip,
         //    cwd). The dialect owns everything CLI-specific.
-        let inv = self.dialect.invocation(&req, &ctx)?;
+        let inv = self.dialect.invocation(&req, model, &ctx)?;
         let model = inv.model.clone();
 
         // 2. Spawn + OS-sandbox + drain — the shared machinery. The runner
@@ -249,8 +250,8 @@ mod tests {
         use futures::StreamExt;
         let events: Vec<ChatEvent> = Arc::clone(&backend)
             .stream(
-                ChatRequest::user(ModelHint::Explicit("opus".into()), "hi"),
-                RequestContext::test_default(),
+                ChatRequest::user("hi"),
+                "opus", RequestContext::test_default(),
             )
             .await
             .unwrap()
@@ -286,11 +287,11 @@ mod tests {
         let big = "x".repeat(1000);
         let (backend, _) = claude_backend(json!({"result": big, "is_error": false}));
 
-        let mut req = ChatRequest::user(ModelHint::Explicit("opus".into()), "hi");
+        let mut req = ChatRequest::user("hi");
         req.max_output_tokens = Some(10); // → 40 chars
 
         let resp = backend
-            .complete(req, RequestContext::test_default())
+            .complete(req, "test-model", RequestContext::test_default())
             .await
             .unwrap();
         assert_eq!(resp.text.len(), 40);
@@ -326,8 +327,8 @@ mod tests {
         ));
         let err = backend
             .complete(
-                ChatRequest::user(ModelHint::Explicit("opus".into()), "x"),
-                RequestContext::test_default(),
+                ChatRequest::user("x"),
+                "test-model", RequestContext::test_default(),
             )
             .await
             .unwrap_err();
@@ -360,8 +361,8 @@ mod tests {
         use futures::StreamExt;
         let events: Vec<ChatEvent> = Arc::clone(&backend)
             .stream(
-                ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "hi"),
-                RequestContext::test_default(),
+                ChatRequest::user("hi"),
+                "gemini-2.5-pro", RequestContext::test_default(),
             )
             .await
             .unwrap()

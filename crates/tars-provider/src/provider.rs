@@ -33,10 +33,20 @@ pub trait LlmProvider: Send + Sync + 'static {
     /// Static capability descriptor — what this Provider can do.
     fn capabilities(&self) -> &Capabilities;
 
-    /// Open a streaming chat. Adapter clones `self` internally.
+    /// Open a streaming chat against the concrete `model`. Adapter
+    /// clones `self` internally.
+    ///
+    /// `model` is the concrete provider-side model name (e.g.
+    /// `"gpt-4o-2024-08-06"`). It is passed explicitly rather than read
+    /// off the request: the [`ChatRequest`] is model-agnostic content,
+    /// and the model is bound at service construction (`LlmService =
+    /// provider + model`). The `ModelHint → concrete` resolution has
+    /// already happened by the time a provider is called, so `model` is
+    /// always a concrete name.
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError>;
 
@@ -52,9 +62,10 @@ pub trait LlmProvider: Send + Sync + 'static {
     async fn complete(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         ctx: RequestContext,
     ) -> Result<ChatResponse, ProviderError> {
-        let mut s = self.stream(req, ctx).await?;
+        let mut s = self.stream(req, model, ctx).await?;
         let mut acc = ChatResponseBuilder::new();
         while let Some(event) = s.next().await {
             acc.apply(event?);

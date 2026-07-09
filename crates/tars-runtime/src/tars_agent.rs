@@ -52,7 +52,7 @@ pub struct TarsAgent {
     skills: SkillSet,
     /// The pure-inference provider, pipeline-wrapped. Swapping this is what
     /// makes a "gemini agent" vs a "claude_cli agent".
-    llm: Arc<dyn LlmService>,
+    llm: LlmService,
     /// The inner tool loop (tars-tools registry path).
     worker: Arc<WorkerAgent>,
 }
@@ -71,7 +71,7 @@ impl TarsAgent {
         domain: impl Into<String>,
         skills: SkillSet,
         model: impl Into<String>,
-        llm: Arc<dyn LlmService>,
+        llm: LlmService,
         tools: Arc<ToolRegistry>,
     ) -> Self {
         let id = id.into();
@@ -283,25 +283,49 @@ impl Worker for TarsAgent {
 mod tests {
     use super::*;
     use tars_agent::TaskId;
-    use tars_pipeline::LlmEventStream;
-    use tars_types::{ChatRequest, ProviderError, ProviderErrorKind, RequestContext};
+    use tars_pipeline::{LlmEventStream, LlmService};
+    use tars_provider::LlmProvider;
+    use tars_types::{
+        Capabilities, ChatRequest, Pricing, ProviderError, ProviderErrorKind, ProviderId,
+        RequestContext,
+    };
 
-    /// An `LlmService` that always fails the call with a TYPED
-    /// [`ProviderError`] (a rate-limit) — the shape a real provider raises
-    /// when it's throttled.
-    struct RateLimitedLlm;
+    /// A provider that always fails with a TYPED [`ProviderError`] (a
+    /// rate-limit) — the shape a real provider raises when throttled.
+    /// Bound into an [`LlmService`] at the call site.
+    struct RateLimitedLlm {
+        id: ProviderId,
+        caps: Capabilities,
+    }
 
     #[async_trait]
-    impl LlmService for RateLimitedLlm {
-        async fn call(
+    impl LlmProvider for RateLimitedLlm {
+        fn id(&self) -> &ProviderId {
+            &self.id
+        }
+        fn capabilities(&self) -> &Capabilities {
+            &self.caps
+        }
+        async fn stream(
             self: Arc<Self>,
             _req: ChatRequest,
+            _model: &str,
             _ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             Err(ProviderError::RateLimited {
                 retry_after: Some(std::time::Duration::from_secs(30)),
             })
         }
+    }
+
+    fn rate_limited_service() -> LlmService {
+        LlmService::of(
+            Arc::new(RateLimitedLlm {
+                id: ProviderId::new("rate_limited"),
+                caps: Capabilities::text_only_baseline(Pricing::default()),
+            }),
+            "test-model",
+        )
     }
 
     /// The load-bearing guarantee: a provider failure inside the inner
@@ -317,7 +341,7 @@ mod tests {
             "test",
             SkillSet::new(),
             "test-model",
-            Arc::new(RateLimitedLlm),
+            rate_limited_service(),
             Arc::new(ToolRegistry::new()),
         );
 

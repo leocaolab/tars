@@ -130,12 +130,13 @@ impl LlmProvider for GeminiProvider {
     #[tracing::instrument(
         name = "gemini.stream",
         skip_all,
-        fields(provider = %self.id, model = %req.model.label()),
+        fields(provider = %self.id, model = %model),
         err(Display),
     )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
@@ -175,6 +176,7 @@ impl LlmProvider for GeminiProvider {
             adapter_with_key,
             ResolvedAuth::None,
             req,
+            model,
             ctx,
         )
         .await
@@ -224,6 +226,7 @@ impl BatchSubmitter for GeminiProvider {
     async fn submit(
         &self,
         _items: Vec<(BatchItemId, ChatRequest)>,
+        _model: &str,
         _ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError> {
         Err(ProviderError::InvalidRequest(

@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::stream;
 
-use tars_pipeline::{LlmService, Pipeline, ProviderService};
+use tars_pipeline::{LlmService, Pipeline};
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{
     AgentEvent, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, Runtime, WorkerAgent,
@@ -77,6 +77,7 @@ impl LlmProvider for ScriptedProvider {
     async fn stream(
         self: Arc<Self>,
         _req: ChatRequest,
+        _model: &str,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let next = self.queue.lock().unwrap().pop_front().ok_or_else(|| {
@@ -260,22 +261,22 @@ async fn main() -> anyhow::Result<()> {
     ]);
 
     // 4. Pipeline + Runtime (SQLite event store on tempdir).
-    let provider_svc: Arc<dyn LlmService> = ProviderService::new(provider);
-    let llm: Arc<dyn LlmService> = Arc::new(Pipeline::builder_with_inner(provider_svc).build());
+    let provider_svc: LlmService = LlmService::of(provider, "demo-model");
+    let llm: LlmService = Pipeline::builder_with_inner(provider_svc).build();
     let events_path = dir.path().join("events.sqlite");
     let store: Arc<dyn AgentEventLog> =
         SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(&events_path))?;
     let runtime = LocalRuntime::new(store);
 
     // 5. Agent triad. Worker uses tools; Orchestrator + Critic don't.
-    let orch = OrchestratorAgent::new(AgentId::new("orch"), "scripted-model");
+    let orch = OrchestratorAgent::new(AgentId::new("orch"));
     let worker = WorkerAgent::with_tools(
         AgentId::new("worker"),
         "scripted-model",
         "multi_role",
         registry,
     );
-    let critic = CriticAgent::new(AgentId::new("critic"), "scripted-model");
+    let critic = CriticAgent::new(AgentId::new("critic"));
 
     // 6. Drive the loop.
     let outcome = run_task(

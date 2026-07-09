@@ -97,17 +97,10 @@ impl CliDialect for OpenCodeDialect {
     fn invocation(
         &self,
         req: &ChatRequest,
+        model: &str,
         ctx: &RequestContext,
     ) -> Result<CliInvocation, ProviderError> {
-        let model = req
-            .model
-            .explicit()
-            .ok_or_else(|| {
-                ProviderError::InvalidRequest(
-                    "model must be explicit before reaching CLI provider".into(),
-                )
-            })?
-            .to_string();
+        let model = model.to_string();
 
         let prompt = render_prompt_for_cli(req);
         if prompt.len() > MAX_PROMPT_BYTES {
@@ -319,8 +312,8 @@ mod tests {
         let d = dialect();
         let inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("anthropic/claude-sonnet-4-5".into()), "say hi"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("say hi"),
+                "anthropic/claude-sonnet-4-5", &RequestContext::test_default(),
             )
             .unwrap();
         let argv = d.argv(&inv);
@@ -340,18 +333,7 @@ mod tests {
         assert_eq!(d.output_mode(), OutputMode::JsonEvents);
     }
 
-    #[test]
-    fn invocation_requires_explicit_model() {
-        let d = dialect();
-        let err = d
-            .invocation(
-                &ChatRequest::user(ModelHint::Tier(ModelTier::Default), "hi"),
-                &RequestContext::test_default(),
-            )
-            .unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidRequest(_)));
-    }
-
+    
     /// parse_line over a JSONL array (the runner's reconstructed shape).
     fn parse_line(lines: &[&str]) -> Result<Vec<ChatEvent>, ProviderError> {
         let arr = Value::Array(lines.iter().map(|l| Value::String(l.to_string())).collect());
@@ -460,8 +442,8 @@ mod tests {
     fn invocation_embeds_system_as_prefix_block() {
         let inv = dialect()
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("p/m".into()), "x").with_system("be precise"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("x").with_system("be precise"),
+                "anthropic/claude-sonnet-4-5", &RequestContext::test_default(),
             )
             .unwrap();
         assert!(inv.prompt.starts_with("[system]\nbe precise"));

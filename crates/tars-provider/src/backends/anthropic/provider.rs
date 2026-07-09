@@ -121,16 +121,17 @@ impl LlmProvider for AnthropicProvider {
     #[tracing::instrument(
         name = "anthropic.stream",
         skip_all,
-        fields(provider = %self.id, model = %req.model.label()),
+        fields(provider = %self.id, model = %model),
         err(Display),
     )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
-        stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, ctx).await
+        stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, model, ctx).await
     }
 
     fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn BatchSubmitter>> {
@@ -152,6 +153,7 @@ impl BatchSubmitter for AnthropicProvider {
     async fn submit(
         &self,
         items: Vec<(BatchItemId, ChatRequest)>,
+        model: &str,
         ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError> {
         if items.is_empty() {
@@ -165,7 +167,7 @@ impl BatchSubmitter for AnthropicProvider {
         // would have accepted.
         let mut requests = Vec::with_capacity(items.len());
         for (item_id, req) in items {
-            let params = self.adapter.translate_request(&req)?;
+            let params = self.adapter.translate_request(&req, model)?;
             requests.push(json!({
                 "custom_id": item_id.as_str(),
                 "params": params,

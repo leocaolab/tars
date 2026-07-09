@@ -7,7 +7,7 @@
 //! + Worker tool-using) had hand-rolled the same six lines:
 //!
 //! ```ignore
-//! let mut req = ChatRequest::user(ModelHint::Explicit(model.clone()), user_text);
+//! let mut req = ChatRequest::user(user_text);
 //! req.system = Some(SYSTEM_PROMPT.to_string());
 //! req.structured_output = Some(JsonSchema::strict(NAME, schema()));
 //! req.temperature = Some(0.0);  // deterministic for cache + replay
@@ -32,7 +32,7 @@
 
 use serde_json::Value;
 
-use tars_types::{ChatRequest, JsonSchema, ModelHint, ToolSpec};
+use tars_types::{ChatRequest, JsonSchema, ToolSpec};
 
 /// Fluent builder for the agent-facing [`ChatRequest`]. See module
 /// docs for the consumer + scope rationale.
@@ -42,7 +42,6 @@ use tars_types::{ChatRequest, JsonSchema, ModelHint, ToolSpec};
 /// unchanged.
 #[derive(Clone, Debug)]
 pub struct PromptBuilder {
-    model: String,
     user_text: String,
     system: Option<String>,
     structured_output: Option<JsonSchema>,
@@ -51,12 +50,12 @@ pub struct PromptBuilder {
 }
 
 impl PromptBuilder {
-    /// Start a new request for `model` with `user_text` as the single
-    /// user-turn message. `model` becomes a `ModelHint::Explicit`
-    /// (every TARS agent today picks its model concretely).
-    pub fn new(model: impl Into<String>, user_text: impl Into<String>) -> Self {
+    /// Start a new request with `user_text` as the single user-turn
+    /// message. The request is model-agnostic content — the model is
+    /// bound on the [`tars_pipeline::LlmService`] that serves it, not
+    /// carried here.
+    pub fn new(user_text: impl Into<String>) -> Self {
         Self {
-            model: model.into(),
             user_text: user_text.into(),
             system: None,
             structured_output: None,
@@ -117,7 +116,7 @@ impl PromptBuilder {
 
     /// Construct the final [`ChatRequest`].
     pub fn build(self) -> ChatRequest {
-        let mut req = ChatRequest::user(ModelHint::Explicit(self.model), self.user_text);
+        let mut req = ChatRequest::user(self.user_text);
         req.system = self.system;
         req.structured_output = self.structured_output;
         req.temperature = self.temperature;
@@ -132,12 +131,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn minimal_build_sets_model_and_user_text_only() {
-        let req = PromptBuilder::new("gpt-4o", "hello").build();
-        match &req.model {
-            ModelHint::Explicit(m) => assert_eq!(m, "gpt-4o"),
-            other => panic!("expected Explicit model, got {other:?}"),
-        }
+    fn minimal_build_sets_user_text_only() {
+        let req = PromptBuilder::new("hello").build();
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.messages[0].content()[0].as_text(), Some("hello"));
         assert!(req.system.is_none());
@@ -148,7 +143,7 @@ mod tests {
 
     #[test]
     fn fluent_chain_threads_every_field() {
-        let req = PromptBuilder::new("gpt-4o", "hello")
+        let req = PromptBuilder::new("hello")
             .system("you are a helper")
             .structured_output("Reply", json!({"type": "object"}))
             .deterministic()
@@ -162,13 +157,13 @@ mod tests {
 
     #[test]
     fn deterministic_pins_temperature_to_zero() {
-        let req = PromptBuilder::new("m", "u").deterministic().build();
+        let req = PromptBuilder::new("u").deterministic().build();
         assert_eq!(req.temperature, Some(0.0));
     }
 
     #[test]
     fn temperature_override_supersedes_deterministic_when_called_last() {
-        let req = PromptBuilder::new("m", "u")
+        let req = PromptBuilder::new("u")
             .deterministic()
             .temperature(0.7)
             .build();
@@ -177,7 +172,7 @@ mod tests {
 
     #[test]
     fn empty_tools_vec_is_a_no_op() {
-        let req = PromptBuilder::new("m", "u").tools(Vec::new()).build();
+        let req = PromptBuilder::new("u").tools(Vec::new()).build();
         assert!(req.tools.is_empty());
     }
 
@@ -188,7 +183,7 @@ mod tests {
             description: "read a file".into(),
             input_schema: JsonSchema::strict("Args", json!({"type": "object"})),
         };
-        let req = PromptBuilder::new("m", "u").tools(vec![spec]).build();
+        let req = PromptBuilder::new("u").tools(vec![spec]).build();
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.tools[0].name, "fs.read_file");
     }

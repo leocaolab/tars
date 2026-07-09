@@ -35,7 +35,6 @@
 //! detects this, emits one `tracing::warn` (per-service-instance) so
 //! the misconfiguration is observable, and passes through.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
@@ -44,14 +43,22 @@ use tars_provider::LlmEventStream;
 use tars_types::{Capabilities, ChatRequest, Pricing, ProviderError, RequestContext};
 
 use crate::middleware::Middleware;
-use crate::service::LlmService;
+use crate::service::Next;
 
 /// Refuses any call whose estimated USD cost exceeds `cap_usd`.
-#[derive(Clone, Debug)]
+///
+/// Holds the per-instance `zero_pricing_warned` latch: the middleware is
+/// constructed once and lives for the life of the pipeline, so the
+/// "warn once on a zero-priced provider" state belongs here (it used to
+/// live on the per-call wrapper struct, which was likewise built once).
+#[derive(Debug)]
 pub struct PerCallBudgetMiddleware {
     cap_usd: f64,
     pricing: Pricing,
     default_max_output_tokens: u32,
+    /// First call on a zero-pricing provider warns; subsequent calls
+    /// don't, so a busy subscription-backed pipeline doesn't spam.
+    zero_pricing_warned: AtomicBool,
 }
 
 /// Construction error for the budget middleware. Returned by
@@ -89,6 +96,7 @@ impl PerCallBudgetMiddleware {
             cap_usd,
             pricing: capabilities.pricing,
             default_max_output_tokens: capabilities.max_output_tokens,
+            zero_pricing_warned: AtomicBool::new(false),
         })
     }
 
@@ -115,7 +123,19 @@ impl PerCallBudgetMiddleware {
             cap_usd,
             pricing,
             default_max_output_tokens,
+            zero_pricing_warned: AtomicBool::new(false),
         })
+    }
+
+    fn is_zero_pricing(&self) -> bool {
+        self.pricing.is_zero()
+    }
+
+    /// Strict upper-bound USD estimate for `req`. Delegated to
+    /// [`Pricing::estimate_chat_cost`] — see that for the formula.
+    fn estimate_cost_usd(&self, req: &ChatRequest) -> f64 {
+        self.pricing
+            .estimate_chat_cost(req, self.default_max_output_tokens)
     }
 }
 
@@ -157,51 +177,17 @@ fn validate_pricing(pricing: &Pricing) -> Result<(), BudgetConfigError> {
     Ok(())
 }
 
+#[async_trait]
 impl Middleware for PerCallBudgetMiddleware {
     fn name(&self) -> &'static str {
         "per_call_budget"
     }
 
-    fn wrap(&self, inner: Arc<dyn LlmService>) -> Arc<dyn LlmService> {
-        Arc::new(PerCallBudgetService {
-            inner,
-            cap_usd: self.cap_usd,
-            pricing: self.pricing,
-            default_max_output_tokens: self.default_max_output_tokens,
-            zero_pricing_warned: AtomicBool::new(false),
-        })
-    }
-}
-
-struct PerCallBudgetService {
-    inner: Arc<dyn LlmService>,
-    cap_usd: f64,
-    pricing: Pricing,
-    default_max_output_tokens: u32,
-    /// First call on a zero-pricing provider warns; subsequent calls
-    /// don't, so a busy subscription-backed pipeline doesn't spam.
-    zero_pricing_warned: AtomicBool,
-}
-
-impl PerCallBudgetService {
-    fn is_zero_pricing(&self) -> bool {
-        self.pricing.is_zero()
-    }
-
-    /// Strict upper-bound USD estimate for `req`. Delegated to
-    /// [`Pricing::estimate_chat_cost`] — see that for the formula.
-    fn estimate_cost_usd(&self, req: &ChatRequest) -> f64 {
-        self.pricing
-            .estimate_chat_cost(req, self.default_max_output_tokens)
-    }
-}
-
-#[async_trait]
-impl LlmService for PerCallBudgetService {
-    async fn call(
-        self: Arc<Self>,
+    async fn handle(
+        &self,
         req: ChatRequest,
         ctx: RequestContext,
+        next: Next<'_>,
     ) -> Result<LlmEventStream, ProviderError> {
         match ctx.telemetry.lock() {
             Ok(mut t) => t.layers.push("per_call_budget".into()),
@@ -229,7 +215,7 @@ impl LlmService for PerCallBudgetService {
                      subscription-billed CLI backends)",
                 );
             }
-            return self.inner.clone().call(req, ctx).await;
+            return next.run(req, ctx).await;
         }
 
         let estimate = self.estimate_cost_usd(&req);
@@ -255,13 +241,15 @@ impl LlmService for PerCallBudgetService {
             cap_usd = self.cap_usd,
             trace_id = %ctx.trace_id,
         );
-        self.inner.clone().call(req, ctx).await
+        next.run(req, ctx).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LlmService;
+    use async_trait::async_trait;
     use std::sync::atomic::AtomicU32;
 
     use futures::StreamExt;
@@ -278,36 +266,37 @@ mod tests {
         }
     }
 
-    fn ok_service() -> (Arc<dyn LlmService>, Arc<AtomicU32>) {
+    fn ok_service() -> (Arc<dyn Service>, Arc<AtomicU32>) {
         let observed = Arc::new(AtomicU32::new(0));
         struct Count {
-            inner: Arc<dyn LlmService>,
+            inner: Arc<dyn Service>,
             observed: Arc<AtomicU32>,
         }
         #[async_trait]
-        impl LlmService for Count {
+        impl Service for Count {
             async fn call(
                 self: Arc<Self>,
                 req: ChatRequest,
-                ctx: RequestContext,
+                        model: &str,
+        ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 self.observed.fetch_add(1, Ordering::SeqCst);
-                self.inner.clone().call(req, ctx).await
+                self.inner.clone().call(req, model, ctx).await
             }
         }
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let inner: Arc<dyn LlmService> = crate::ProviderService::new(mock);
+        let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
         (
             Arc::new(Count {
                 inner,
                 observed: observed.clone(),
-            }) as Arc<dyn LlmService>,
+            }) as Arc<dyn Service>,
             observed,
         )
     }
 
     fn req_with_text(text: &str, max_out: Option<u32>) -> ChatRequest {
-        let mut r = ChatRequest::user(ModelHint::Explicit("m".into()), text);
+        let mut r = ChatRequest::user(text);
         r.max_output_tokens = max_out;
         r
     }
@@ -332,7 +321,7 @@ mod tests {
 
         let stream = svc
             .call(
-                req_with_text(&"x".repeat(100), Some(1000)),
+                req_with_text(&"x".repeat(100), Some(1000)), "m",
                 RequestContext::test_default(),
             )
             .await
@@ -351,7 +340,7 @@ mod tests {
 
         let err = svc
             .call(
-                req_with_text(&"x".repeat(1_000_000), Some(1000)),
+                req_with_text(&"x".repeat(1_000_000), Some(1000)), "m",
                 RequestContext::test_default(),
             )
             .await
@@ -373,7 +362,7 @@ mod tests {
             let stream = svc
                 .clone()
                 .call(
-                    req_with_text(&"x".repeat(10_000_000), Some(1_000_000)),
+                    req_with_text(&"x".repeat(10_000_000), Some(1_000_000)), "m",
                     RequestContext::test_default(),
                 )
                 .await
@@ -391,7 +380,7 @@ mod tests {
         let svc = PerCallBudgetService {
             inner: {
                 let mock = MockProvider::new("p", CannedResponse::text("hi"));
-                crate::ProviderService::new(mock) as Arc<dyn LlmService>
+                LlmService::of(mock, "test-model").chain()
             },
             cap_usd: 0.01,
             pricing: Pricing::default(),
@@ -413,7 +402,7 @@ mod tests {
         let svc = mw.wrap(inner);
 
         let err = svc
-            .call(req_with_text("hi", None), RequestContext::test_default())
+            .call(req_with_text("hi", None), "m", RequestContext::test_default())
             .await
             .err()
             .expect("over cap due to default_max_output_tokens");
@@ -428,7 +417,7 @@ mod tests {
         let svc = PerCallBudgetService {
             inner: {
                 let mock = MockProvider::new("p", CannedResponse::text("hi"));
-                crate::ProviderService::new(mock) as Arc<dyn LlmService>
+                LlmService::of(mock, "test-model").chain()
             },
             cap_usd: 1.0,
             pricing: priced(3.0, 15.0),

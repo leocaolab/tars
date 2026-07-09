@@ -30,7 +30,7 @@ use tars_types::{
 };
 
 use crate::middleware::Middleware;
-use crate::service::LlmService;
+use crate::service::Next;
 
 /// Middleware that emits one `LlmCallFinished` per `Pipeline.call`
 /// to the configured stores.
@@ -46,32 +46,21 @@ impl EventEmitterMiddleware {
     }
 }
 
+#[async_trait]
 impl Middleware for EventEmitterMiddleware {
     fn name(&self) -> &'static str {
         "event_emitter"
     }
-    fn wrap(&self, inner: Arc<dyn LlmService>) -> Arc<dyn LlmService> {
-        Arc::new(EventEmitterService {
-            inner,
-            events: self.events.clone(),
-            records: self.records.clone(),
-        })
-    }
-}
 
-struct EventEmitterService {
-    inner: Arc<dyn LlmService>,
-    events: Arc<dyn PipelineEventLog>,
-    records: Arc<dyn LlmRecordStore>,
-}
-
-#[async_trait]
-impl LlmService for EventEmitterService {
-    async fn call(
-        self: Arc<Self>,
+    async fn handle(
+        &self,
         req: ChatRequest,
         ctx: RequestContext,
+        next: Next<'_>,
     ) -> Result<LlmEventStream, ProviderError> {
+        // The event records the model this service is bound to; read it
+        // off the chain cursor.
+        let model = next.model();
         // Layer trace.
         if let Ok(mut t) = ctx.telemetry.lock() {
             t.layers.push("event_emitter".into());
@@ -94,7 +83,7 @@ impl LlmService for EventEmitterService {
         // event will carry `provider_id: None` rather than the legacy
         // "unresolved" sentinel string (ARC-L5-SW-10).
         let provider_id: Option<tars_types::ProviderId> = None;
-        let actual_model = req.model.label().to_string();
+        let actual_model = model.to_string();
         let has_tools = !req.tools.is_empty();
         let has_thinking = !req.thinking.is_off();
         let has_structured_output = req.structured_output.is_some();
@@ -115,7 +104,7 @@ impl LlmService for EventEmitterService {
                     error = %e,
                     "event_emitter: request serialize failed; skipping event emission for this call",
                 );
-                return self.inner.clone().call(req, ctx).await;
+                return next.run(req, ctx).await;
             }
         };
         let request_fingerprint: [u8; 32] = {
@@ -125,7 +114,7 @@ impl LlmService for EventEmitterService {
         };
         let request_ref = ContentRef::from_content(tenant_id.clone(), &req_body_bytes);
 
-        let result = self.inner.clone().call(req, ctx).await;
+        let result = next.run(req, ctx).await;
 
         // Build the failure-path event immediately; success path needs
         // to wait until the stream drains so we capture the response.
@@ -500,6 +489,8 @@ fn wrap_stream_for_emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LlmService;
+    use async_trait::async_trait;
     use std::time::Duration;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
     use tars_melt::event::{LlmRecordStore, PipelineEventLog, PipelineEventQuery, SqliteLlmRecordStore, SqlitePipelineEventLog};
@@ -522,11 +513,11 @@ mod tests {
         let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().unwrap();
 
         let provider = MockProvider::new("p1", CannedResponse::text("hello"));
-        let inner: Arc<dyn LlmService> = ProviderService::new(provider);
+        let inner: Arc<dyn Service> = LlmService::of(provider, "test-model").chain();
         let svc = EventEmitterMiddleware::new(events.clone(), records.clone()).wrap(inner);
 
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
-        let _ = drain(svc.call(req, RequestContext::test_default()).await.unwrap()).await;
+        let req = ChatRequest::user("hi");
+        let _ = drain(svc.call(req, "m", RequestContext::test_default()).await.unwrap()).await;
 
         // Allow the spawned write task to run.
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -558,7 +549,7 @@ mod tests {
         let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().unwrap();
 
         let provider = MockProvider::new("p1", CannedResponse::text("hello world"));
-        let inner: Arc<dyn LlmService> = ProviderService::new(provider);
+        let inner: Arc<dyn Service> = LlmService::of(provider, "test-model").chain();
         // Onion: EventEmitter (outer) → Validation (inner) → Provider.
         let validated = ValidationMiddleware::new(vec![
             Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>,
@@ -566,8 +557,8 @@ mod tests {
         .wrap(inner);
         let svc = EventEmitterMiddleware::new(events.clone(), records.clone()).wrap(validated);
 
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
-        let _ = drain(svc.call(req, RequestContext::test_default()).await.unwrap()).await;
+        let req = ChatRequest::user("hi");
+        let _ = drain(svc.call(req, "m", RequestContext::test_default()).await.unwrap()).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let stored = events.query(&PipelineEventQuery::default()).await.unwrap();
@@ -598,15 +589,15 @@ mod tests {
 
         // Empty text → NotEmpty rejects.
         let provider = MockProvider::new("p1", CannedResponse::text(""));
-        let inner: Arc<dyn LlmService> = ProviderService::new(provider);
+        let inner: Arc<dyn Service> = LlmService::of(provider, "test-model").chain();
         let validated = ValidationMiddleware::new(vec![
             Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
         ])
         .wrap(inner);
         let svc = EventEmitterMiddleware::new(events.clone(), records.clone()).wrap(validated);
 
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
-        let result = svc.call(req, RequestContext::test_default()).await;
+        let req = ChatRequest::user("hi");
+        let result = svc.call(req, "m", RequestContext::test_default()).await;
         assert!(
             matches!(result, Err(ProviderError::ValidationFailed { .. })),
             "expected the reject to surface as Err at the outer boundary"

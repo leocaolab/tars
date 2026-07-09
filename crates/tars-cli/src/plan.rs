@@ -89,7 +89,7 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
         ))
         .layer(RetryMiddleware::default())
         .build();
-    let llm: Arc<dyn LlmService> = Arc::new(pipeline);
+    let llm: LlmService = pipeline;
 
     // Trajectory wiring. Mirrors `tars run`'s pattern: we open a
     // trajectory ourselves, write the StepStarted/Captured/Completed
@@ -98,7 +98,7 @@ pub async fn execute(args: PlanArgs, config_path: Option<PathBuf>) -> Result<()>
     // block the LLM call.
     let trajectory_logger = build_trajectory_logger(&args, &dispatch).await;
 
-    let agent = OrchestratorAgent::new(AgentId::new("orchestrator"), dispatch.model_label.clone());
+    let agent = OrchestratorAgent::new(AgentId::new("orchestrator"));
 
     // The planner builds its OWN ChatRequest (system prompt + Plan
     // schema) via `OrchestratorAgent::build_planner_request`. The

@@ -27,18 +27,27 @@ use axum::routing::{get, post};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
+use tars_cache::{CacheRegistry, MemoryCacheRegistry};
 use tars_pipeline::{LlmService, Pipeline, PipelineOpts};
+use tars_provider::LlmProvider;
 use tars_provider::registry::ProviderRegistry;
 use tars_types::{
-    ChatEvent, ChatRequest, ChatResponseBuilder, ContentBlock, Message, ModelHint, ProviderError,
-    ProviderId, RequestContext, StopReason, TraceId, Usage,
+    ChatEvent, ChatRequest, ChatResponseBuilder, ContentBlock, Message, ProviderError, ProviderId,
+    RequestContext, StopReason, TraceId, Usage,
 };
 
-/// One configured provider, wrapped in the canonical pipeline.
+/// One configured provider. The model is chosen per request (the client
+/// may override `model`), so the canonical pipeline is (re)built per call
+/// bound to the resolved model — cheap, and the shared `cache_registry`
+/// keeps the cache warm across requests to this provider.
 struct ProviderEntry {
-    pipeline: Arc<dyn LlmService>,
+    provider: Arc<dyn LlmProvider>,
+    pid: ProviderId,
     /// `default_model` from config — used when a request omits `model`.
     default_model: Option<String>,
+    /// Shared across every request to this provider so the cache layer
+    /// isn't reset per call.
+    cache_registry: Arc<dyn CacheRegistry>,
 }
 
 /// Shared server state: one pipeline per configured provider.
@@ -72,12 +81,13 @@ impl AppState {
                 .get(&pid)
                 .ok_or_else(|| anyhow::anyhow!("provider {id:?} vanished from registry"))?;
             let default_model = registry.default_model(&pid).map(str::to_string);
-            let pipeline = Pipeline::default_chain(provider, PipelineOpts::new(pid));
             providers.insert(
                 id,
                 ProviderEntry {
-                    pipeline: Arc::new(pipeline),
+                    provider,
+                    pid,
                     default_model,
+                    cache_registry: MemoryCacheRegistry::default_arc(),
                 },
             );
         }
@@ -102,7 +112,7 @@ impl AppState {
         &self,
         provider: Option<&str>,
         model: Option<&str>,
-    ) -> Result<(Arc<dyn LlmService>, String), AppError> {
+    ) -> Result<(LlmService, String), AppError> {
         let pid = match provider.or(self.default_provider.as_deref()) {
             Some(p) => p,
             None => {
@@ -126,7 +136,12 @@ impl AppState {
                     "no model: pass `model`, or set `default_model` on provider {pid:?}"
                 ))
             })?;
-        Ok((entry.pipeline.clone(), model))
+        // Build the canonical chain bound to the resolved model, reusing
+        // the shared cache registry so cross-request cache survives.
+        let mut opts = PipelineOpts::new(entry.pid.clone());
+        opts.cache_registry = Some(entry.cache_registry.clone());
+        let pipeline = Pipeline::default_chain(entry.provider.clone(), model.clone(), opts);
+        Ok((pipeline, model))
     }
 
     // ── Public reuse seam (Doc 22: tars-desktop drives this in-process) ──
@@ -139,7 +154,7 @@ impl AppState {
         &self,
         provider: Option<&str>,
         model: Option<&str>,
-    ) -> anyhow::Result<(Arc<dyn LlmService>, String)> {
+    ) -> anyhow::Result<(LlmService, String)> {
         self.resolve(provider, model)
             .map_err(|e| anyhow::anyhow!("{}", e.message))
     }
@@ -207,9 +222,9 @@ struct CompleteResponse {
 }
 
 impl CompleteBody {
-    /// Build a `ChatRequest`, resolving the model string into a hint.
-    fn into_chat_request(self, model: String) -> Result<ChatRequest, AppError> {
-        let hint = ModelHint::Explicit(model);
+    /// Build a model-agnostic `ChatRequest` (the model is bound on the
+    /// resolved [`LlmService`], not carried on the request).
+    fn into_chat_request(self) -> Result<ChatRequest, AppError> {
         let mut req = if let Some(messages) = self.messages {
             if messages.is_empty() {
                 return Err(AppError::bad_request("`messages` must be non-empty"));
@@ -234,10 +249,10 @@ impl CompleteBody {
                 .collect::<Result<Vec<_>, _>>()?;
             ChatRequest {
                 messages: msgs,
-                ..ChatRequest::user(hint, "")
+                ..ChatRequest::user("")
             }
         } else if let Some(user) = self.user {
-            ChatRequest::user(hint, user)
+            ChatRequest::user(user)
         } else {
             return Err(AppError::bad_request("provide `user` or `messages`"));
         };
@@ -267,8 +282,8 @@ async fn complete(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CompleteBody>,
 ) -> Result<Json<CompleteResponse>, AppError> {
-    let (pipeline, model) = state.resolve(body.provider.as_deref(), body.model.as_deref())?;
-    let req = body.into_chat_request(model)?;
+    let (pipeline, _model) = state.resolve(body.provider.as_deref(), body.model.as_deref())?;
+    let req = body.into_chat_request()?;
     let ctx = RequestContext::personal(TraceId::new(uuid::Uuid::new_v4().to_string()));
 
     let mut stream = pipeline.call(req, ctx).await?;
@@ -289,8 +304,8 @@ async fn complete_stream(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CompleteBody>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>, AppError> {
-    let (pipeline, model) = state.resolve(body.provider.as_deref(), body.model.as_deref())?;
-    let req = body.into_chat_request(model)?;
+    let (pipeline, _model) = state.resolve(body.provider.as_deref(), body.model.as_deref())?;
+    let req = body.into_chat_request()?;
     let ctx = RequestContext::personal(TraceId::new(uuid::Uuid::new_v4().to_string()));
 
     // `call()` resolving to Err is a pre-stream failure → real HTTP error.

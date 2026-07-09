@@ -49,12 +49,12 @@ use tars_config::{Config, ConfigManager, default_config_path};
 
 use crate::errors::{config_to_py, provider_to_py, runtime_to_py};
 use tars_pipeline::{
-    CostPolicy, EnsembleService, LatencyMetric, LatencyPolicy, LatencyStatsRegistry, LlmService,
-    Pipeline as RsPipeline, ProviderService, RoutingService, StaticPolicy,
+    CostPolicy, LatencyMetric, LatencyPolicy, LatencyStatsRegistry, LlmService,
+    Pipeline as RsPipeline, StaticPolicy,
 };
 use tars_provider::{LlmProvider, registry::ProviderRegistry};
 use tars_types::{
-    ChatRequest, ChatResponseBuilder, ContentBlock, Message, ModelHint, ProviderId, RUN_CONTEXT,
+    ChatRequest, ChatResponseBuilder, ContentBlock, Message, ProviderId, RUN_CONTEXT,
     RequestContext, StopReason,
 };
 
@@ -349,7 +349,10 @@ pub(crate) fn truncate_for_repr(s: &str, max: usize) -> String {
 #[pyclass(frozen)]
 struct Provider {
     id: String,
-    inner: Arc<dyn LlmService>,
+    /// The raw backend. The model is bound per call (Python passes it to
+    /// `complete(model, ...)`), so we keep the provider and construct a
+    /// model-bound [`LlmService`] at call time.
+    provider: Arc<dyn LlmProvider>,
     capabilities_summary: CapabilitiesSummary,
 }
 
@@ -396,10 +399,9 @@ impl Provider {
     /// object. Shared between `from_config` and `from_str`.
     fn from_provider(id: String, provider: Arc<dyn LlmProvider>) -> Self {
         let capabilities_summary = CapabilitiesSummary::from(provider.capabilities());
-        let inner: Arc<dyn LlmService> = ProviderService::new(provider);
         Self {
             id,
-            inner,
+            provider,
             capabilities_summary,
         }
     }
@@ -480,7 +482,6 @@ impl Provider {
         tags: Option<Vec<String>>,
     ) -> PyResult<Response> {
         let req = build_request(
-            model,
             user,
             system,
             messages,
@@ -490,7 +491,8 @@ impl Provider {
             response_schema,
             response_schema_strict,
         )?;
-        run_complete_tagged(py, self.inner.clone(), req, tags.unwrap_or_default())
+        let svc = LlmService::of(self.provider.clone(), model);
+        run_complete_tagged(py, svc, req, tags.unwrap_or_default())
     }
 }
 
@@ -503,7 +505,10 @@ impl Provider {
 #[pyclass(frozen)]
 pub(crate) struct Pipeline {
     id: String,
-    inner: Arc<dyn LlmService>,
+    /// Builds the model-bound middleware chain for a concrete model.
+    /// The model is chosen per call (`complete(model, ...)`), so the
+    /// chain is (re)assembled per call — the leaf binds the model.
+    factory: Arc<dyn Fn(&str) -> LlmService + Send + Sync>,
     capabilities_summary: CapabilitiesSummary,
     capabilities_full: tars_types::Capabilities,
     layer_names: Vec<String>,
@@ -517,8 +522,10 @@ pub(crate) struct Pipeline {
 }
 
 impl Pipeline {
-    pub(crate) fn inner_arc(&self) -> Arc<dyn LlmService> {
-        self.inner.clone()
+    /// Assemble the model-bound service for `model` (per-call — the
+    /// model is provided by the caller, not baked at construction).
+    pub(crate) fn build_service(&self, model: &str) -> LlmService {
+        (self.factory)(model)
     }
     pub(crate) fn capabilities_owned(&self) -> tars_types::Capabilities {
         self.capabilities_full.clone()
@@ -560,24 +567,35 @@ impl Pipeline {
         // — same shape as before (EventEmitter? → Telemetry →
         // Validation? → Cache? → Retry → Provider), now expressed once
         // in tars-pipeline so non-Python callers (arc, tars-cli, etc.)
-        // pick up the same canonical stack.
-        let mut opts = tars_pipeline::PipelineOpts::new(ProviderId::new(id.clone()));
-        opts.validators = validators;
-        opts.events = event_stores
+        // pick up the same canonical stack. The chain is rebuilt per
+        // call bound to the caller-supplied model.
+        let cache_origin = ProviderId::new(id.clone());
+        let events = event_stores
             .map(|EventStorePair { events, records }| tars_pipeline::EventStores { events, records });
-        opts.retry = retry;
-        opts.cache = cache;
-        let pipeline = RsPipeline::default_chain(provider, opts);
+        let factory: Arc<dyn Fn(&str) -> LlmService + Send + Sync> = {
+            // `EventStores` isn't Clone, but its inner Arcs are — snapshot
+            // the handles so each rebuild shares the same stores.
+            let event_handles = events.map(|es| (es.events, es.records));
+            Arc::new(move |model: &str| {
+                let mut opts = tars_pipeline::PipelineOpts::new(cache_origin.clone());
+                opts.validators = validators.clone();
+                opts.events = event_handles
+                    .clone()
+                    .map(|(events, records)| tars_pipeline::EventStores { events, records });
+                opts.retry = retry.clone();
+                opts.cache = cache;
+                RsPipeline::default_chain(provider.clone(), model, opts)
+            })
+        };
 
-        let layer_names: Vec<String> = pipeline
+        let layer_names: Vec<String> = factory("")
             .layer_names()
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let inner: Arc<dyn LlmService> = Arc::new(pipeline);
         Self {
             id: id.clone(),
-            inner,
+            factory,
             capabilities_summary,
             capabilities_full,
             layer_names,
@@ -1013,69 +1031,103 @@ impl Pipeline {
         let capabilities_full = first.capabilities().clone();
         let capabilities_summary = CapabilitiesSummary::from(&capabilities_full);
 
-        let base = Arc::new(StaticPolicy::new(pids.clone()).map_err(provider_to_py)?);
-        let (routing, latency_stats): (Arc<dyn LlmService>, Option<Arc<LatencyStatsRegistry>>) =
-            match policy {
-                "static" => (RoutingService::new(registry, base), None),
-                "ensemble" => {
-                    // Hedged fan-out: dispatch all candidates in
-                    // parallel, first response wins. Not a RoutingPolicy
-                    // (it's a different dispatch shape), so `base` is
-                    // unused on this arm.
-                    (EnsembleService::new(registry, pids.clone()), None)
-                }
-                "cost" => {
-                    // Snapshot each candidate's static pricing from the
-                    // registry; CostPolicy sorts cheapest-first from it.
-                    let mut prices = std::collections::HashMap::new();
-                    for pid in &pids {
-                        if let Some(p) = registry.get(pid) {
-                            prices.insert(pid.clone(), p.capabilities().pricing);
-                        }
+        let base: Arc<dyn tars_pipeline::RoutingPolicy> =
+            Arc::new(StaticPolicy::new(pids.clone()).map_err(provider_to_py)?);
+
+        // A per-policy builder for the routed bottom service, bound to a
+        // concrete model per call (the request is model-agnostic).
+        type BottomFactory = Arc<dyn Fn(&str) -> LlmService + Send + Sync>;
+        let (bottom, latency_stats): (BottomFactory, Option<Arc<LatencyStatsRegistry>>) = match policy
+        {
+            "static" => {
+                let reg = registry.clone();
+                (
+                    Arc::new(move |m: &str| LlmService::routed(reg.clone(), base.clone(), m)),
+                    None,
+                )
+            }
+            "ensemble" => {
+                // Hedged fan-out: dispatch all candidates in parallel,
+                // first response wins.
+                let reg = registry.clone();
+                let cands = pids.clone();
+                (
+                    Arc::new(move |m: &str| LlmService::ensemble(reg.clone(), cands.clone(), m)),
+                    None,
+                )
+            }
+            "cost" => {
+                // Snapshot each candidate's static pricing from the
+                // registry; CostPolicy sorts cheapest-first from it.
+                let mut prices = std::collections::HashMap::new();
+                for pid in &pids {
+                    if let Some(p) = registry.get(pid) {
+                        prices.insert(pid.clone(), p.capabilities().pricing);
                     }
-                    let pol = Arc::new(CostPolicy::new(base, prices));
-                    (RoutingService::new(registry, pol), None)
                 }
-                "latency" => {
-                    let metric = match latency_metric {
-                        "p50" => LatencyMetric::P50,
-                        "p95" => LatencyMetric::P95,
-                        "mean" => LatencyMetric::Mean,
-                        other => {
-                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "unknown latency_metric {other:?}; use p50 / p95 / mean"
-                            )));
-                        }
-                    };
-                    let stats = Arc::new(LatencyStatsRegistry::new(100));
-                    let pol = Arc::new(LatencyPolicy::new(base, stats.clone()).with_metric(metric));
-                    (
-                        RoutingService::with_latency_stats(registry, pol, stats.clone()),
-                        Some(stats),
-                    )
-                }
-                other => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "unknown policy {other:?}; use \"latency\", \"cost\", \"ensemble\", or \"static\""
-                    )));
-                }
-            };
+                let pol: Arc<dyn tars_pipeline::RoutingPolicy> =
+                    Arc::new(CostPolicy::new(base, prices));
+                let reg = registry.clone();
+                (
+                    Arc::new(move |m: &str| LlmService::routed(reg.clone(), pol.clone(), m)),
+                    None,
+                )
+            }
+            "latency" => {
+                let metric = match latency_metric {
+                    "p50" => LatencyMetric::P50,
+                    "p95" => LatencyMetric::P95,
+                    "mean" => LatencyMetric::Mean,
+                    other => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                            "unknown latency_metric {other:?}; use p50 / p95 / mean"
+                        )));
+                    }
+                };
+                let stats = Arc::new(LatencyStatsRegistry::new(100));
+                let pol: Arc<dyn tars_pipeline::RoutingPolicy> =
+                    Arc::new(LatencyPolicy::new(base, stats.clone()).with_metric(metric));
+                let reg = registry.clone();
+                let stats_for_factory = stats.clone();
+                (
+                    Arc::new(move |m: &str| {
+                        LlmService::routed_with_latency_stats(
+                            reg.clone(),
+                            pol.clone(),
+                            stats_for_factory.clone(),
+                            m,
+                        )
+                    }),
+                    Some(stats),
+                )
+            }
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown policy {other:?}; use \"latency\", \"cost\", \"ensemble\", or \"static\""
+                )));
+            }
+        };
 
         let validators = validation::build_validator_list(validators)?;
         let stores = event_store_dir
             .as_deref()
             .map(EventStorePair::open_in_dir)
             .transpose()?;
+        let event_handles = stores.map(|EventStorePair { events, records }| (events, records));
 
         // `cache_origin` is the cache namespace — a synthetic id for the
         // routed set (cache defaults off here anyway; see the doc above).
-        let mut opts = tars_pipeline::PipelineOpts::new(ProviderId::new("routed"));
-        opts.validators = validators;
-        opts.events = stores
-            .map(|EventStorePair { events, records }| tars_pipeline::EventStores { events, records });
-        opts.cache = cache;
-        let pipeline = RsPipeline::chain_over(routing, opts);
-        let layer_names: Vec<String> = pipeline
+        let cache_origin = ProviderId::new("routed");
+        let factory: Arc<dyn Fn(&str) -> LlmService + Send + Sync> = Arc::new(move |model: &str| {
+            let mut opts = tars_pipeline::PipelineOpts::new(cache_origin.clone());
+            opts.validators = validators.clone();
+            opts.events = event_handles
+                .clone()
+                .map(|(events, records)| tars_pipeline::EventStores { events, records });
+            opts.cache = cache;
+            RsPipeline::chain_over(bottom(model), opts)
+        });
+        let layer_names: Vec<String> = factory("")
             .layer_names()
             .iter()
             .map(|s| s.to_string())
@@ -1083,7 +1135,7 @@ impl Pipeline {
 
         Ok(Self {
             id: format!("routed[{}]", provider_ids.join(",")),
-            inner: Arc::new(pipeline),
+            factory,
             capabilities_summary,
             capabilities_full,
             layer_names,
@@ -1164,7 +1216,6 @@ impl Pipeline {
         tags: Option<Vec<String>>,
     ) -> PyResult<Response> {
         let req = build_request(
-            model,
             user,
             system,
             messages,
@@ -1174,7 +1225,8 @@ impl Pipeline {
             response_schema,
             response_schema_strict,
         )?;
-        run_complete_tagged(py, self.inner.clone(), req, tags.unwrap_or_default())
+        let svc = self.build_service(&model);
+        run_complete_tagged(py, svc, req, tags.unwrap_or_default())
     }
 
     /// Pre-flight check: would this Pipeline's underlying provider
@@ -1220,8 +1272,11 @@ impl Pipeline {
         response_schema: Option<Bound<'_, PyDict>>,
         response_schema_strict: bool,
     ) -> PyResult<CompatibilityResult> {
+        // The compatibility check is over request content + static caps;
+        // the model (still accepted for API symmetry with `complete`)
+        // doesn't affect it.
+        let _ = model;
         let req = build_request(
-            model,
             user,
             system,
             messages,
@@ -1724,7 +1779,6 @@ fn build_provider_from_str(toml_text: &str, provider_id: &str) -> PyResult<Arc<d
 ///   intended shape. Has no effect when `response_schema` is `None`.
 #[allow(clippy::too_many_arguments)]
 fn build_request(
-    model: String,
     user: Option<String>,
     system: Option<String>,
     messages: Option<Bound<'_, PyList>>,
@@ -1772,7 +1826,6 @@ fn build_request(
     };
 
     Ok(ChatRequest {
-        model: ModelHint::Explicit(model),
         system,
         messages: msgs,
         tools: Vec::new(),
@@ -1828,7 +1881,7 @@ fn message_from_py(item: &Bound<'_, PyAny>) -> PyResult<Message> {
 /// async runtime so other Python threads keep working.
 fn run_complete_tagged(
     py: Python<'_>,
-    svc: Arc<dyn LlmService>,
+    svc: LlmService,
     req: ChatRequest,
     tags: Vec<String>,
 ) -> PyResult<Response> {

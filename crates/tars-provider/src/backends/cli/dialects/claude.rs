@@ -65,17 +65,10 @@ impl CliDialect for ClaudeCliDialect {
     fn invocation(
         &self,
         req: &ChatRequest,
+        model: &str,
         ctx: &RequestContext,
     ) -> Result<CliInvocation, ProviderError> {
-        let model = req
-            .model
-            .explicit()
-            .ok_or_else(|| {
-                ProviderError::InvalidRequest(
-                    "model must be explicit before reaching CLI provider".into(),
-                )
-            })?
-            .to_string();
+        let model = model.to_string();
 
         let prompt = serialize_messages_for_cli(req);
         let system = req.system.clone();
@@ -191,8 +184,8 @@ mod tests {
         let d = dialect();
         let inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("opus".into()), "hi"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("hi"),
+                "test-model", &RequestContext::test_default(),
             )
             .unwrap();
         assert_eq!(d.argv(&inv), build_argv_with(&inv, streaming_enabled()));
@@ -212,8 +205,8 @@ mod tests {
         let wt = std::path::PathBuf::from("/tmp/wt");
         let inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("sonnet".into()), "x").with_system("brief"),
-                &RequestContext::test_default().with_cwd(wt.clone()),
+                &ChatRequest::user("x").with_system("brief"),
+                "sonnet", &RequestContext::test_default().with_cwd(wt.clone()),
             )
             .unwrap();
         assert_eq!(inv.model, "sonnet");
@@ -227,17 +220,11 @@ mod tests {
         assert!(inv.stripped_env.contains("ANTHROPIC_API_KEY"));
     }
 
-    #[test]
-    fn invocation_requires_explicit_model() {
-        let d = dialect();
-        let err = d
-            .invocation(
-                &ChatRequest::user(ModelHint::Tier(ModelTier::Default), "hi"),
-                &RequestContext::test_default(),
-            )
-            .unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidRequest(_)));
-    }
+    // (Deleted `invocation_requires_explicit_model`: the model is now a
+    // required concrete `&str` argument to `invocation`, so the old
+    // "reject a non-explicit model carried on the request" path no longer
+    // exists — the invariant it froze was removed by the model-decoupling
+    // refactor.)
 
     #[test]
     fn parse_line_maps_result_and_usage() {

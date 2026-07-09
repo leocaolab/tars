@@ -9,7 +9,7 @@
 //!   deterministic rule, human-in-the-loop, etc.).
 //!
 //! - [`LlmJudge`] — reference impl backed by any
-//!   `Arc<dyn LlmService>`. Wraps the canonical pipeline (with
+//!   `LlmService`. Wraps the canonical pipeline (with
 //!   cache / retry / telemetry) and parses the response into TP / FP
 //!   / Unsure via a prompt template.
 //!
@@ -27,14 +27,13 @@
 //! the agent itself made. `ensure_anti_incest(judge_id, &critic_provider_ids)`
 //! refuses to run when the prefix matches.
 
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use thiserror::Error;
 
 use tars_pipeline::LlmService;
-use tars_types::{ChatRequest, ChatResponseBuilder, ModelHint, ProviderError, RequestContext};
+use tars_types::{ChatRequest, ChatResponseBuilder, ProviderError, RequestContext};
 
 use crate::judge_stats::{JudgeItem, JudgeReport, JudgeVerdict, JudgedItem};
 
@@ -158,12 +157,11 @@ If UNSURE, put a one-line reason on the same line after `UNSURE: `.
 Do not add any other content before the verdict line.
 ";
 
-/// LLM-backed judge. Thin wrapper around an `Arc<dyn LlmService>`
+/// LLM-backed judge. Thin wrapper around an `LlmService`
 /// (the canonical pipeline you'd use anywhere else in tars).
 pub struct LlmJudge {
-    service: Arc<dyn LlmService>,
+    service: LlmService,
     id: String,
-    model: ModelHint,
     prompt_template: String,
     /// Request context threaded into every `service.call`. The
     /// `Judge::judge` trait method takes no context (it's
@@ -177,11 +175,10 @@ pub struct LlmJudge {
 impl LlmJudge {
     /// `id` is the judge identifier (typically `"provider:model"`).
     /// `service` is a pipeline-wrapped service for the judge model.
-    pub fn new(service: Arc<dyn LlmService>, id: impl Into<String>, model: ModelHint) -> Self {
+    pub fn new(service: LlmService, id: impl Into<String>) -> Self {
         Self {
             service,
             id: id.into(),
-            model,
             prompt_template: DEFAULT_JUDGE_PROMPT.to_string(),
             ctx: RequestContext::test_default(),
         }
@@ -215,7 +212,7 @@ impl Judge for LlmJudge {
             .replace("{expected}", item.expected.as_deref().unwrap_or(""))
             .replace("{context}", item.context.as_deref().unwrap_or(""));
 
-        let req = ChatRequest::user(self.model.clone(), prompt);
+        let req = ChatRequest::user(prompt);
         let stream = self.service.clone().call(req, self.ctx.clone()).await?;
         let mut s = stream;
         let mut acc = ChatResponseBuilder::new();

@@ -23,10 +23,10 @@ use napi_derive::napi;
 
 use tars_config::{Config, resolve_home};
 use tars_handle::{
-    WorkspaceResolution, resolve_role, resolve_workspace_root as rs_resolve_root,
+    WorkspaceResolution, resolve_workspace_root as rs_resolve_root,
     workspace_store_dir as rs_store_dir,
 };
-use tars_pipeline::{LlmService, Pipeline as RsPipeline, PipelineOpts, ProviderService};
+use tars_pipeline::{LlmService, Pipeline as RsPipeline, PipelineOpts};
 use tars_provider::{LlmProvider, ProviderRegistry};
 use tars_types::{ProviderId, RequestContext};
 
@@ -63,8 +63,8 @@ pub fn tars_home(home: Option<String>) -> Option<String> {
 /// config + registry. Optional `ctx` binds an explicit call context.
 #[napi]
 pub fn provider(role: String, ctx: Option<JsContext>) -> napi::Result<Provider, String> {
-    let (_id, prov) = resolve_global(&role)?;
-    let inner: Arc<dyn LlmService> = ProviderService::new(prov);
+    let (_id, prov, model) = resolve_global(&role)?;
+    let inner = LlmService::of(prov, model);
     Ok(Provider {
         role,
         inner,
@@ -77,20 +77,22 @@ pub fn provider(role: String, ctx: Option<JsContext>) -> napi::Result<Provider, 
 /// an explicit call context.
 #[napi]
 pub fn pipeline(role: String, ctx: Option<JsContext>) -> napi::Result<Pipeline, String> {
-    let (id, prov) = resolve_global(&role)?;
+    let (id, prov, model) = resolve_global(&role)?;
     let opts = PipelineOpts::new(ProviderId::new(id.clone()));
-    let rs = RsPipeline::default_chain(prov, opts);
-    let inner: Arc<dyn LlmService> = Arc::new(rs);
+    let inner = RsPipeline::default_chain(prov, model, opts);
     let ctx = ctx.map(build_context).unwrap_or_else(default_context);
     Ok(Pipeline::from_service(id, inner, ctx))
 }
 
-fn resolve_global(role: &str) -> std::result::Result<(String, Arc<dyn LlmProvider>), JsError> {
+fn resolve_global(
+    role: &str,
+) -> std::result::Result<(String, Arc<dyn LlmProvider>, String), JsError> {
     let registry = ProviderRegistry::global().map_err(registry_to_js)?;
     let cfg = Config::get();
-    let (id, prov) =
-        resolve_role(&cfg.roles, &cfg.routing, &registry, role).map_err(tars_to_js)?;
-    Ok((id.to_string(), prov))
+    let (id, prov, model) =
+        tars_handle::resolve_role_bound(&cfg.roles, &cfg.routing, &registry, role)
+            .map_err(tars_to_js)?;
+    Ok((id.to_string(), prov, model))
 }
 
 /// Resolve `path` to a canonical workspace root for `tool` (walk-up; `.<tool>/`
@@ -118,7 +120,7 @@ pub fn workspace_store_dir(tool: String, root: String) -> String {
 #[napi]
 pub struct Provider {
     role: String,
-    inner: Arc<dyn LlmService>,
+    inner: LlmService,
     ctx: RequestContext,
 }
 
@@ -134,6 +136,6 @@ impl Provider {
     /// `RUN_CONTEXT` with this handle's ctx at the boundary (Doc 06 §9).
     #[napi]
     pub async fn complete(&self, opts: CompleteOptions) -> napi::Result<CompleteResult> {
-        drive_complete(Arc::clone(&self.inner), self.ctx.clone(), opts).await
+        drive_complete(self.inner.clone(), self.ctx.clone(), opts).await
     }
 }

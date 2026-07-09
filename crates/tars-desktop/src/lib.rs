@@ -195,11 +195,13 @@ impl Backend {
         user_text: &str,
         mut on_delta: F,
     ) -> anyhow::Result<ChatTurn> {
-        let (llm, model) = self.state.llm_for(provider, model)?;
+        // The model is bound into `llm` by `llm_for`; the request is
+        // model-agnostic content.
+        let (llm, _model) = self.state.llm_for(provider, model)?;
         let req = ChatRequest {
             system: params.system.clone(),
             max_output_tokens: params.max_output_tokens,
-            ..ChatRequest::user(ModelHint::Explicit(model), user_text)
+            ..ChatRequest::user(user_text)
         };
         let telemetry: SharedTelemetry = new_shared_telemetry();
         let mut ctx = RequestContext::personal(TraceId::new(uuid::Uuid::new_v4().to_string()));
@@ -298,12 +300,12 @@ impl Backend {
         };
 
         // Stream with no lock held.
-        let (llm, resolved) = self.state.llm_for(provider.as_deref(), model.as_deref())?;
+        let (llm, _resolved) = self.state.llm_for(provider.as_deref(), model.as_deref())?;
         let req = ChatRequest {
             system,
             max_output_tokens: max_tok,
             messages: history,
-            ..ChatRequest::user(ModelHint::Explicit(resolved), "")
+            ..ChatRequest::user("")
         };
         let telemetry: SharedTelemetry = new_shared_telemetry();
         let mut ctx = RequestContext::personal(TraceId::new(uuid::Uuid::new_v4().to_string()));

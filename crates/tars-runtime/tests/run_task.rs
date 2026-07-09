@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use futures::stream;
 
-use tars_pipeline::{LlmService, Pipeline, ProviderService};
+use tars_pipeline::{LlmService, Pipeline};
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{
     AgentEvent, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, RunTaskError, Runtime,
@@ -100,6 +100,7 @@ impl LlmProvider for QueuedProvider {
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         self.history.lock().unwrap().push(req.clone());
@@ -108,7 +109,6 @@ impl LlmProvider for QueuedProvider {
                 "QueuedProvider: response queue empty (test fed too few responses)".into(),
             )
         })?;
-        let model = req.model.label();
         let events: Vec<Result<ChatEvent, ProviderError>> = vec![
             Ok(ChatEvent::started(model)),
             Ok(ChatEvent::Delta { text: next.clone() }),
@@ -125,9 +125,9 @@ impl LlmProvider for QueuedProvider {
     }
 }
 
-fn build_llm(provider: Arc<QueuedProvider>) -> Arc<dyn LlmService> {
-    let inner: Arc<dyn LlmService> = ProviderService::new(provider);
-    Arc::new(Pipeline::builder_with_inner(inner).build())
+fn build_llm(provider: Arc<QueuedProvider>) -> LlmService {
+    let inner: LlmService = LlmService::of(provider, "gpt-4o");
+    Pipeline::builder_with_inner(inner).build()
 }
 
 async fn fresh_runtime() -> (Arc<LocalRuntime>, tempfile::TempDir) {
@@ -141,9 +141,9 @@ async fn fresh_runtime() -> (Arc<LocalRuntime>, tempfile::TempDir) {
 
 fn agents() -> (Arc<OrchestratorAgent>, Arc<WorkerAgent>, Arc<CriticAgent>) {
     (
-        OrchestratorAgent::new(AgentId::new("orch"), "gpt-4o"),
+        OrchestratorAgent::new(AgentId::new("orch")),
         WorkerAgent::new(AgentId::new("worker"), "gpt-4o", "summarise"),
-        CriticAgent::new(AgentId::new("critic"), "gpt-4o"),
+        CriticAgent::new(AgentId::new("critic")),
     )
 }
 
@@ -533,6 +533,7 @@ impl LlmProvider for SchemaDispatchProvider {
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let schema_name = req
@@ -551,7 +552,7 @@ impl LlmProvider for SchemaDispatchProvider {
             ))
         })?;
         let events: Vec<Result<ChatEvent, ProviderError>> = vec![
-            Ok(ChatEvent::started(req.model.label())),
+            Ok(ChatEvent::started(model)),
             Ok(ChatEvent::Delta { text: next.clone() }),
             Ok(ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
@@ -597,8 +598,8 @@ async fn dag_fanout_plan_threads_dep_results_into_merge_step() {
     );
     by_schema.insert("Verdict".into(), vec![approve(), approve(), approve()]);
     let provider = SchemaDispatchProvider::new(by_schema);
-    let inner: Arc<dyn LlmService> = ProviderService::new(provider);
-    let llm: Arc<dyn LlmService> = Arc::new(Pipeline::builder_with_inner(inner).build());
+    let inner: LlmService = LlmService::of(provider, "gpt-4o");
+    let llm: LlmService = Pipeline::builder_with_inner(inner).build();
     let (rt, _dir) = fresh_runtime().await;
     let (orch, worker, critic) = agents();
 
@@ -755,8 +756,8 @@ async fn replan_on_reject_recovers_with_second_plan() {
         ],
     );
     let provider = SchemaDispatchProvider::new(by_schema);
-    let inner: Arc<dyn LlmService> = ProviderService::new(provider);
-    let llm: Arc<dyn LlmService> = Arc::new(Pipeline::builder_with_inner(inner).build());
+    let inner: LlmService = LlmService::of(provider, "gpt-4o");
+    let llm: LlmService = Pipeline::builder_with_inner(inner).build();
     let (rt, _dir) = fresh_runtime().await;
     let (orch, worker, critic) = agents();
 
@@ -834,8 +835,8 @@ async fn replan_exhausted_after_max_replans_consecutive_rejects() {
         ],
     );
     let provider = SchemaDispatchProvider::new(by_schema);
-    let inner: Arc<dyn LlmService> = ProviderService::new(provider);
-    let llm: Arc<dyn LlmService> = Arc::new(Pipeline::builder_with_inner(inner).build());
+    let inner: LlmService = LlmService::of(provider, "gpt-4o");
+    let llm: LlmService = Pipeline::builder_with_inner(inner).build();
     let (rt, _dir) = fresh_runtime().await;
     let (orch, worker, critic) = agents();
 
@@ -961,7 +962,8 @@ async fn cancel_on_reject_terminates_in_flight_sibling_workers() {
         async fn stream(
             self: Arc<Self>,
             req: ChatRequest,
-            _ctx: RequestContext,
+            model: &str,
+        _ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             let schema_name = req
                 .structured_output
@@ -999,7 +1001,7 @@ async fn cancel_on_reject_terminates_in_flight_sibling_workers() {
                 }
             };
             let events: Vec<Result<ChatEvent, ProviderError>> = vec![
-                Ok(ChatEvent::started(req.model.label())),
+                Ok(ChatEvent::started(model)),
                 Ok(ChatEvent::Delta { text: text.clone() }),
                 Ok(ChatEvent::Finished {
                     stop_reason: StopReason::EndTurn,
@@ -1020,8 +1022,8 @@ async fn cancel_on_reject_terminates_in_flight_sibling_workers() {
         reject("no good"),
     );
     let entered_gate_handle = provider.entered_gate_count.clone();
-    let inner: Arc<dyn LlmService> = ProviderService::new(provider);
-    let llm: Arc<dyn LlmService> = Arc::new(Pipeline::builder_with_inner(inner).build());
+    let inner: LlmService = LlmService::of(provider, "gpt-4o");
+    let llm: LlmService = Pipeline::builder_with_inner(inner).build();
     let (rt, _dir) = fresh_runtime().await;
     let (orch, worker, critic) = agents();
 

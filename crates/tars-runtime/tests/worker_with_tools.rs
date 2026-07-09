@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::stream;
 
-use tars_pipeline::{LlmService, Pipeline, ProviderService};
+use tars_pipeline::{LlmService, Pipeline};
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{AgentContext, AgentMessage, WorkerAgent};
 use tars_tools::{ToolRegistry, builtins::ReadFileTool};
@@ -61,6 +61,7 @@ impl LlmProvider for EventQueueProvider {
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         self.history.lock().unwrap().push(req);
@@ -76,12 +77,12 @@ impl LlmProvider for EventQueueProvider {
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-fn build_llm(provider: Arc<EventQueueProvider>) -> Arc<dyn LlmService> {
-    let inner: Arc<dyn LlmService> = ProviderService::new(provider);
-    Arc::new(Pipeline::builder_with_inner(inner).build())
+fn build_llm(provider: Arc<EventQueueProvider>) -> LlmService {
+    let inner: LlmService = LlmService::of(provider, "gpt-4o");
+    Pipeline::builder_with_inner(inner).build()
 }
 
-fn ctx(llm: Arc<dyn LlmService>) -> AgentContext {
+fn ctx(llm: LlmService) -> AgentContext {
     AgentContext {
         trajectory_id: TrajectoryId::new("worker_tools_traj"),
         step_seq: 1,

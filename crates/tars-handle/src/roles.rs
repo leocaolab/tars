@@ -65,6 +65,43 @@ pub fn resolve_role(
     })
 }
 
+/// Resolve `role` → `(provider id, provider, concrete model)`. This is
+/// the model-binding step: the provider's configured `default_model`
+/// becomes the concrete model the resulting service is bound to (the
+/// request is model-agnostic content). Errors with
+/// [`TarsError::NoModelForRole`] when the resolved provider has no
+/// `default_model`.
+pub fn resolve_role_bound(
+    roles: &HashMap<String, ProviderId>,
+    routing: &RoutingConfig,
+    registry: &ProviderRegistry,
+    role: &str,
+) -> Result<(ProviderId, Arc<dyn LlmProvider>, String), TarsError> {
+    let (id, provider) = resolve_role(roles, routing, registry, role)?;
+    let model = registry
+        .default_model(&id)
+        .ok_or_else(|| TarsError::NoModelForRole {
+            role: role.to_string(),
+            provider: id.clone(),
+        })?
+        .to_string();
+    Ok((id, provider, model))
+}
+
+/// Business-facing resolver: `role` → a model-bound [`LlmService`]
+/// (provider + its `default_model`). This is the ONLY thing business
+/// code should hold — never a raw `LlmProvider`. Wraps the leaf; add a
+/// middleware chain via [`tars_pipeline::Pipeline`] if you need one.
+pub fn resolve_service(
+    roles: &HashMap<String, ProviderId>,
+    routing: &RoutingConfig,
+    registry: &ProviderRegistry,
+    role: &str,
+) -> Result<tars_pipeline::LlmService, TarsError> {
+    let (_id, provider, model) = resolve_role_bound(roles, routing, registry, role)?;
+    Ok(tars_pipeline::LlmService::of(provider, model))
+}
+
 /// Like [`resolve_role`] but returns only the resolved provider id (no
 /// registry lookup for the live provider).
 pub fn resolve_provider_id(
@@ -187,6 +224,7 @@ mod tests {
         let (r, rt, reg) = (HashMap::new(), routing(None), registry(&["mock1", "mock2"]));
         match resolve_role(&r, &rt, &reg, "nonexistent_role") {
             Err(TarsError::UnknownRole { role, .. }) => assert_eq!(role, "nonexistent_role"),
+            Err(other) => panic!("expected UnknownRole, got {other:?}"),
             Ok(_) => panic!("unmapped role must not resolve"),
         }
     }

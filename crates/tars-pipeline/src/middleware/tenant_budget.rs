@@ -20,7 +20,7 @@
 //! let store = Arc::new(InMemoryBudgetStore::new());
 //! store.set(&TenantId::new("acme"), 10.00).await?;   // $10 cap for acme
 //!
-//! let pipeline = Pipeline::builder(provider)
+//! let pipeline = Pipeline::builder(provider, "test-model")
 //!     .layer(TelemetryMiddleware::new())
 //!     .layer(CacheLookupMiddleware::new(cache))
 //!     .layer(PerCallBudgetMiddleware::new(0.05, &caps))   // per-call hard cap
@@ -48,7 +48,7 @@ use tars_types::{
 };
 
 use crate::middleware::Middleware;
-use crate::service::LlmService;
+use crate::service::Next;
 
 // ─── BudgetStore trait + reference impl ────────────────────────────────
 
@@ -176,11 +176,14 @@ impl BudgetStore for InMemoryBudgetStore {
 /// Tenant-aggregate USD budget cap. Pre-call checks `remaining >=
 /// upper-bound estimate`; post-call debits the real cost from the
 /// stream's `Finished` event.
-#[derive(Clone)]
 pub struct TenantBudgetMiddleware {
     store: Arc<dyn BudgetStore>,
     pricing: Pricing,
     default_max_output_tokens: u32,
+    /// Warn-once latch for a zero-priced provider. Lives on the
+    /// middleware (built once, lives for the pipeline's life) — same
+    /// per-instance semantics the old per-call wrapper had.
+    zero_pricing_warned: AtomicBool,
 }
 
 impl TenantBudgetMiddleware {
@@ -190,6 +193,7 @@ impl TenantBudgetMiddleware {
             store,
             pricing: capabilities.pricing,
             default_max_output_tokens: capabilities.max_output_tokens,
+            zero_pricing_warned: AtomicBool::new(false),
         }
     }
 
@@ -203,35 +207,10 @@ impl TenantBudgetMiddleware {
             store,
             pricing,
             default_max_output_tokens,
+            zero_pricing_warned: AtomicBool::new(false),
         }
     }
-}
 
-impl Middleware for TenantBudgetMiddleware {
-    fn name(&self) -> &'static str {
-        "tenant_budget"
-    }
-
-    fn wrap(&self, inner: Arc<dyn LlmService>) -> Arc<dyn LlmService> {
-        Arc::new(TenantBudgetService {
-            inner,
-            store: self.store.clone(),
-            pricing: self.pricing,
-            default_max_output_tokens: self.default_max_output_tokens,
-            zero_pricing_warned: AtomicBool::new(false),
-        })
-    }
-}
-
-struct TenantBudgetService {
-    inner: Arc<dyn LlmService>,
-    store: Arc<dyn BudgetStore>,
-    pricing: Pricing,
-    default_max_output_tokens: u32,
-    zero_pricing_warned: AtomicBool,
-}
-
-impl TenantBudgetService {
     fn is_zero_pricing(&self) -> bool {
         self.pricing.is_zero()
     }
@@ -249,11 +228,16 @@ impl TenantBudgetService {
 }
 
 #[async_trait]
-impl LlmService for TenantBudgetService {
-    async fn call(
-        self: Arc<Self>,
+impl Middleware for TenantBudgetMiddleware {
+    fn name(&self) -> &'static str {
+        "tenant_budget"
+    }
+
+    async fn handle(
+        &self,
         req: ChatRequest,
         ctx: RequestContext,
+        next: Next<'_>,
     ) -> Result<LlmEventStream, ProviderError> {
         match ctx.telemetry.lock() {
             Ok(mut t) => t.layers.push("tenant_budget".into()),
@@ -276,7 +260,7 @@ impl LlmService for TenantBudgetService {
                      subscription-billed CLI backends)",
                 );
             }
-            return self.inner.clone().call(req, ctx).await;
+            return next.run(req, ctx).await;
         }
 
         // Pre-check.
@@ -338,7 +322,7 @@ impl LlmService for TenantBudgetService {
                     event = "tenant_budget.unconfigured",
                     tenant_id = %ctx.tenant_id,
                 );
-                return self.inner.clone().call(req, ctx).await;
+                return next.run(req, ctx).await;
             }
             Err(e) => {
                 // Store backend down. Fail-closed (refuse the call) so
@@ -357,7 +341,7 @@ impl LlmService for TenantBudgetService {
         // Run inner. Wrap the returned stream so we can debit on the
         // terminal `Finished` event (real usage). Mid-stream errors and
         // immediate-open errors don't debit — no real usage was reported.
-        let stream = self.inner.clone().call(req, ctx.clone()).await?;
+        let stream = next.run(req, ctx.clone()).await?;
         let store = self.store.clone();
         let pricing = self.pricing;
         let tenant = ctx.tenant_id.clone();
@@ -428,6 +412,8 @@ impl LlmService for TenantBudgetService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LlmService;
+    use async_trait::async_trait;
     use std::sync::atomic::AtomicU32;
 
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
@@ -443,21 +429,22 @@ mod tests {
         }
     }
 
-    fn ok_service(usage: Usage) -> (Arc<dyn LlmService>, Arc<AtomicU32>) {
+    fn ok_service(usage: Usage) -> (Arc<dyn Service>, Arc<AtomicU32>) {
         let observed = Arc::new(AtomicU32::new(0));
         struct Count {
-            inner: Arc<dyn LlmService>,
+            inner: Arc<dyn Service>,
             observed: Arc<AtomicU32>,
         }
         #[async_trait]
-        impl LlmService for Count {
+        impl Service for Count {
             async fn call(
                 self: Arc<Self>,
                 req: ChatRequest,
-                ctx: RequestContext,
+                        model: &str,
+        ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 self.observed.fetch_add(1, Ordering::SeqCst);
-                self.inner.clone().call(req, ctx).await
+                self.inner.clone().call(req, model, ctx).await
             }
         }
         // Use Sequence (not Text) so we control the exact Usage emitted —
@@ -471,18 +458,18 @@ mod tests {
             },
         ]);
         let mock = MockProvider::new("p", canned);
-        let inner: Arc<dyn LlmService> = crate::ProviderService::new(mock);
+        let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
         (
             Arc::new(Count {
                 inner,
                 observed: observed.clone(),
-            }) as Arc<dyn LlmService>,
+            }) as Arc<dyn Service>,
             observed,
         )
     }
 
     fn req(text: &str, max_out: Option<u32>) -> ChatRequest {
-        let mut r = ChatRequest::user(ModelHint::Explicit("m".into()), text);
+        let mut r = ChatRequest::user(text);
         r.max_output_tokens = max_out;
         r
     }
@@ -517,7 +504,7 @@ mod tests {
         // Massive request that would blow any reasonable budget.
         let stream = svc
             .call(
-                req(&"x".repeat(10_000_000), Some(100_000)),
+                req(&"x".repeat(10_000_000), Some(100_000)), "m",
                 ctx_for("ghost"),
             )
             .await
@@ -543,7 +530,7 @@ mod tests {
 
         // 1M chars input × $3/M ≈ $0.75 — way over $0.01 cap.
         let err = svc
-            .call(req(&"x".repeat(1_000_000), Some(1000)), ctx_for("acme"))
+            .call(req(&"x".repeat(1_000_000), Some(1000)), "m", ctx_for("acme"))
             .await
             .err()
             .expect("must reject");
@@ -571,7 +558,7 @@ mod tests {
         let svc = mw.wrap(inner);
 
         let stream = svc
-            .call(req("hi", Some(1000)), ctx_for("acme"))
+            .call(req("hi", Some(1000)), "m", ctx_for("acme"))
             .await
             .unwrap();
         drain(stream).await;
@@ -592,21 +579,22 @@ mod tests {
         // Inner service that returns immediate error.
         struct ImmediateError;
         #[async_trait]
-        impl LlmService for ImmediateError {
+        impl Service for ImmediateError {
             async fn call(
                 self: Arc<Self>,
                 _req: ChatRequest,
-                _ctx: RequestContext,
+                        model: &str,
+        _ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 Err(ProviderError::ModelOverloaded)
             }
         }
 
         let mw = TenantBudgetMiddleware::from_parts(store.clone(), priced(3.0, 15.0), 1000);
-        let svc = mw.wrap(Arc::new(ImmediateError) as Arc<dyn LlmService>);
+        let svc = mw.wrap(Arc::new(ImmediateError) as Arc<dyn Service>);
 
         let err = svc
-            .call(req("hi", Some(100)), ctx_for("acme"))
+            .call(req("hi", Some(100)), "m", ctx_for("acme"))
             .await
             .err()
             .expect("inner failed");
@@ -631,7 +619,7 @@ mod tests {
 
         // Should pass despite the huge usage — zero pricing means no check.
         let stream = svc
-            .call(req(&"x".repeat(1_000_000), Some(100_000)), ctx_for("acme"))
+            .call(req(&"x".repeat(1_000_000), Some(100_000)), "m", ctx_for("acme"))
             .await
             .unwrap();
         drain(stream).await;
@@ -665,7 +653,7 @@ mod tests {
         let svc = mw.wrap(inner);
 
         let err = svc
-            .call(req("hi", Some(100)), ctx_for("acme"))
+            .call(req("hi", Some(100)), "m", ctx_for("acme"))
             .await
             .err()
             .expect("must fail-closed on store error");

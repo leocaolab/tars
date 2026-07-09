@@ -16,7 +16,6 @@
 //! plumbing from each consumer and ensures the side-channel handling
 //! stays correct as `ValidationMiddleware` evolves.
 
-use std::sync::Arc;
 use std::sync::LazyLock;
 
 use futures::StreamExt;
@@ -61,7 +60,7 @@ pub fn shared_runtime() -> &'static Runtime {
 /// Returns the same `ProviderError` shape as a direct async call,
 /// including `ValidationFailed` (always `ErrorClass::Permanent`).
 pub async fn complete_async(
-    svc: Arc<dyn LlmService>,
+    svc: LlmService,
     req: ChatRequest,
     ctx: RequestContext,
 ) -> Result<ChatResponse, ProviderError> {
@@ -95,7 +94,7 @@ pub async fn complete_async(
 /// completion on the shared runtime. Callers already on a runtime should await
 /// [`complete_async`] directly instead — no nested runtime, no block_on.
 pub fn complete_sync(
-    svc: Arc<dyn LlmService>,
+    svc: LlmService,
     req: ChatRequest,
     ctx: RequestContext,
 ) -> Result<ChatResponse, ProviderError> {
@@ -105,9 +104,10 @@ pub fn complete_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tars_pipeline::{Pipeline, PipelineOpts};
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{ModelHint, ProviderId};
+    use tars_types::ProviderId;
 
     #[test]
     fn shared_runtime_is_stable_across_calls() {
@@ -119,10 +119,10 @@ mod tests {
     #[test]
     fn complete_sync_drains_stream_into_response() {
         let provider = MockProvider::new("p", CannedResponse::text("hello"));
-        let pipeline = Pipeline::default_chain(provider, PipelineOpts::new(ProviderId::new("p")));
-        let svc: Arc<dyn LlmService> = Arc::new(pipeline);
+        let pipeline = Pipeline::default_chain(provider, "p", PipelineOpts::new(ProviderId::new("p")));
+        let svc: LlmService = pipeline;
 
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "ping");
+        let req = ChatRequest::user("ping");
         let ctx = RequestContext::test_default();
         let resp = complete_sync(svc, req, ctx).expect("call succeeds");
 
@@ -137,10 +137,10 @@ mod tests {
         let mut opts = PipelineOpts::new(ProviderId::new("p"));
         opts.validators =
             vec![Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>];
-        let pipeline = Pipeline::default_chain(provider, opts);
-        let svc: Arc<dyn LlmService> = Arc::new(pipeline);
+        let pipeline = Pipeline::default_chain(provider, "p", opts);
+        let svc: LlmService = pipeline;
 
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "ping");
+        let req = ChatRequest::user("ping");
         let ctx = RequestContext::test_default();
         let resp = complete_sync(svc, req, ctx).expect("call succeeds");
 

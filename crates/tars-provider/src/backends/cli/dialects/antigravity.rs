@@ -80,17 +80,10 @@ impl CliDialect for AntigravityDialect {
     fn invocation(
         &self,
         req: &ChatRequest,
+        model: &str,
         ctx: &RequestContext,
     ) -> Result<CliInvocation, ProviderError> {
-        let model = req
-            .model
-            .explicit()
-            .ok_or_else(|| {
-                ProviderError::InvalidRequest(
-                    "model must be explicit before reaching CLI provider".into(),
-                )
-            })?
-            .to_string();
+        let model = model.to_string();
 
         let prompt = render_prompt_for_cli(req);
         if prompt.len() > MAX_PROMPT_BYTES {
@@ -189,7 +182,6 @@ fn flatten_blocks(blocks: &[ContentBlock]) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use tars_types::{ModelHint, ModelTier};
 
     fn dialect() -> AntigravityDialect {
         AntigravityDialect::new("agy".into(), Duration::from_secs(300))
@@ -200,8 +192,8 @@ mod tests {
         let d = dialect();
         let inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "say hi"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("say hi"),
+                "gemini-2.5-pro", &RequestContext::test_default(),
             )
             .unwrap();
         let argv = d.argv(&inv);
@@ -218,8 +210,8 @@ mod tests {
         let d = dialect();
         let mut inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("m".into()), "hi"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("hi"),
+                "gemini-2.5-pro", &RequestContext::test_default(),
             )
             .unwrap();
         inv.cwd = Some(PathBuf::from("/tmp/worktree"));
@@ -233,8 +225,8 @@ mod tests {
         let d = dialect();
         let mut inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("m".into()), "hi"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("hi"),
+                "gemini-2.5-pro", &RequestContext::test_default(),
             )
             .unwrap();
         inv.cwd = None;
@@ -249,25 +241,14 @@ mod tests {
         assert_eq!(d.output_mode(), OutputMode::Text);
     }
 
-    #[test]
-    fn invocation_requires_explicit_model() {
-        let d = dialect();
-        let err = d
-            .invocation(
-                &ChatRequest::user(ModelHint::Tier(ModelTier::Default), "hi"),
-                &RequestContext::test_default(),
-            )
-            .unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidRequest(_)));
-    }
-
+    
     #[test]
     fn invocation_does_not_strip_auth_env() {
         let d = dialect();
         let inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("m".into()), "x"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("x"),
+                "gemini-2.5-pro", &RequestContext::test_default(),
             )
             .unwrap();
         // agy authenticates via these — they must NOT be stripped.
@@ -287,8 +268,8 @@ mod tests {
         let big = "x".repeat(MAX_PROMPT_BYTES + 1);
         let err = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("m".into()), big),
-                &RequestContext::test_default(),
+                &ChatRequest::user(big),
+                "gemini-2.5-pro", &RequestContext::test_default(),
             )
             .unwrap_err();
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
@@ -311,8 +292,8 @@ mod tests {
         let d = dialect();
         let inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("m".into()), "x").with_system("be precise"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("x").with_system("be precise"),
+                "gemini-2.5-pro", &RequestContext::test_default(),
             )
             .unwrap();
         assert!(inv.prompt.starts_with("[system]\nbe precise"));

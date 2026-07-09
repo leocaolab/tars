@@ -26,4 +26,18 @@ pub enum TarsError {
         role: String,
         tried: Option<ProviderId>,
     },
+
+    /// A `role` resolved to a provider, but that provider has no
+    /// `default_model` configured. The model is bound at service
+    /// construction now (the request is model-agnostic), so a provider
+    /// with no default model can't produce a callable service — set
+    /// `default_model` on the provider in config.
+    #[error(
+        "role `{role}` resolved to provider `{provider}`, but it has no \
+         `default_model` — set `default_model` on that provider in config"
+    )]
+    NoModelForRole {
+        role: String,
+        provider: ProviderId,
+    },
 }

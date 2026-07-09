@@ -17,13 +17,13 @@
 //! must not be the same provider that produced the trajectory under test.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use futures::StreamExt;
 use serde_json::Value;
 
 use tars_pipeline::LlmService;
-use tars_types::{ChatRequest, ChatResponseBuilder, ModelHint, RequestContext};
+use tars_types::{ChatRequest, ChatResponseBuilder, RequestContext};
 
 use crate::judge::JudgeError;
 use crate::trajectory_match::ToolStep;
@@ -39,9 +39,8 @@ equivalent). You may add a brief reason on later lines.";
 
 /// An LLM that decides whether two tool-argument sets are semantically equal.
 pub struct ArgEquivalenceJudge {
-    service: Arc<dyn LlmService>,
+    service: LlmService,
     id: String,
-    model: ModelHint,
     ctx: RequestContext,
     /// `(tool, lo, hi) -> equivalent?`, where `lo`/`hi` are the canonical-JSON
     /// strings of the two arg sets, ordered so `(a,b)` and `(b,a)` share a slot.
@@ -52,11 +51,10 @@ impl ArgEquivalenceJudge {
     /// `id` is the judge identifier (typically `"provider:model"`), checked by
     /// [`crate::judge::ensure_anti_incest`]. `service` is a pipeline-wrapped
     /// service for the judge model.
-    pub fn new(service: Arc<dyn LlmService>, id: impl Into<String>, model: ModelHint) -> Self {
+    pub fn new(service: LlmService, id: impl Into<String>) -> Self {
         Self {
             service,
             id: id.into(),
-            model,
             ctx: RequestContext::test_default(),
             cache: Mutex::new(HashMap::new()),
         }
@@ -101,7 +99,7 @@ impl ArgEquivalenceJudge {
             .replace("{tool}", tool)
             .replace("{a}", &ca)
             .replace("{b}", &cb);
-        let req = ChatRequest::user(self.model.clone(), prompt);
+        let req = ChatRequest::user(prompt);
         let mut stream = self.service.clone().call(req, self.ctx.clone()).await?;
         let mut acc = ChatResponseBuilder::new();
         // Bound the stream so a runaway model can't OOM the judge (mirrors
@@ -181,15 +179,16 @@ fn parse_yes_no(text: &str) -> Result<bool, JudgeError> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tars_pipeline::{Pipeline, ProviderService};
+    use std::sync::Arc;
+    use tars_pipeline::{LlmService, Pipeline};
     use tars_provider::{CannedResponse, MockProvider};
 
     fn judge_with(reply: &str) -> (ArgEquivalenceJudge, Arc<MockProvider>) {
         let mock = MockProvider::new("judge_mock", CannedResponse::text(reply));
-        let inner: Arc<dyn LlmService> = ProviderService::new(mock.clone());
-        let svc = Arc::new(Pipeline::builder_with_inner(inner).build());
+        let inner = LlmService::of(mock.clone(), "gpt-4o");
+        let svc = Pipeline::builder_with_inner(inner).build();
         (
-            ArgEquivalenceJudge::new(svc, "judge_mock:m", ModelHint::Explicit("m".into())),
+            ArgEquivalenceJudge::new(svc, "judge_mock:m"),
             mock,
         )
     }

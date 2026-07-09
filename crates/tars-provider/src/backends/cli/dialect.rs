@@ -91,6 +91,7 @@ pub trait CliDialect: Send + Sync {
     fn invocation(
         &self,
         req: &ChatRequest,
+        model: &str,
         ctx: &RequestContext,
     ) -> Result<CliInvocation, ProviderError>;
 

@@ -16,7 +16,7 @@ use futures::StreamExt;
 
 use tars_provider::backends::gemini_cli::GeminiCliProviderBuilder;
 use tars_provider::provider::LlmProvider;
-use tars_types::{ChatEvent, ChatRequest, ModelHint, RequestContext};
+use tars_types::{ChatEvent, ChatRequest, RequestContext};
 
 #[tokio::test]
 #[ignore = "requires real gemini CLI + Google account; run with --ignored --nocapture"]
@@ -29,14 +29,12 @@ async fn gemini_cli_say_hi_against_real_binary() {
         .timeout(std::time::Duration::from_secs(120))
         .build();
 
-    let req = ChatRequest::user(
-        ModelHint::Explicit("gemini-2.5-pro".into()),
-        "Say exactly: hello from gemini. Nothing else.",
+    let req = ChatRequest::user("Say exactly: hello from gemini. Nothing else.",
     );
 
     println!("\n── gemini_cli smoke: spawning real `gemini` ──");
     let mut stream = Arc::clone(&provider)
-        .stream(req, RequestContext::test_default())
+        .stream(req, "test-model", RequestContext::test_default())
         .await
         .expect("provider stream() should succeed");
 

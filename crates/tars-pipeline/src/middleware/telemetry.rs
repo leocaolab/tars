@@ -14,7 +14,6 @@
 //! - `llm.call.finished` — elapsed-to-finish, stop_reason, usage tokens
 //! - `llm.call.stream_error` — mid-stream provider error
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -24,7 +23,7 @@ use tars_provider::LlmEventStream;
 use tars_types::{ChatEvent, ChatRequest, ProviderError, RequestContext};
 
 use crate::middleware::Middleware;
-use crate::service::LlmService;
+use crate::service::Next;
 
 #[derive(Clone, Debug, Default)]
 pub struct TelemetryMiddleware;
@@ -35,29 +34,22 @@ impl TelemetryMiddleware {
     }
 }
 
+#[async_trait]
 impl Middleware for TelemetryMiddleware {
     fn name(&self) -> &'static str {
         "telemetry"
     }
-    fn wrap(&self, inner: Arc<dyn LlmService>) -> Arc<dyn LlmService> {
-        Arc::new(TelemetryService { inner })
-    }
-}
 
-struct TelemetryService {
-    inner: Arc<dyn LlmService>,
-}
-
-#[async_trait]
-impl LlmService for TelemetryService {
-    async fn call(
-        self: Arc<Self>,
+    async fn handle(
+        &self,
         req: ChatRequest,
         ctx: RequestContext,
+        next: Next<'_>,
     ) -> Result<LlmEventStream, ProviderError> {
         // Capture diagnostic fields BEFORE we move req into the inner
-        // call — these are cheap clones / references on small data.
-        let model = req.model.label().to_string();
+        // call — these are cheap clones / references on small data. The
+        // model rides on the chain cursor (bound on the LlmService).
+        let model = next.model().to_string();
         let messages = req.messages.len();
         let tools = req.tools.len();
         let trace_id = ctx.trace_id.clone();
@@ -88,7 +80,7 @@ impl LlmService for TelemetryService {
             tools,
         );
 
-        let result = self.inner.clone().call(req, ctx).await;
+        let result = next.run(req, ctx).await;
         let opened_at = started.elapsed();
 
         match result {
@@ -214,6 +206,8 @@ fn wrap_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LlmService;
+    use async_trait::async_trait;
     use futures::StreamExt;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -225,7 +219,7 @@ mod tests {
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
     use crate::Pipeline;
-    use crate::service::LlmService;
+    use crate::service::Service;
 
     /// Captured fields for one tracing event.
     type EventFields = BTreeMap<String, String>;
@@ -307,12 +301,12 @@ mod tests {
     #[tokio::test]
     async fn telemetry_passes_events_through_unchanged() {
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let pipeline = Pipeline::builder(mock)
+        let pipeline = Pipeline::builder(mock, "test-model")
             .layer(TelemetryMiddleware::new())
             .build();
         let mut s = Arc::new(pipeline)
             .call(
-                ChatRequest::user(ModelHint::Explicit("m".into()), "x"),
+                ChatRequest::user("x"),
                 RequestContext::test_default(),
             )
             .await
@@ -334,12 +328,12 @@ mod tests {
         // Mock returns an Error from stream() — telemetry should
         // surface it and not swallow.
         let mock = MockProvider::new("p", CannedResponse::Error("boom".into()));
-        let pipeline = Pipeline::builder(mock)
+        let pipeline = Pipeline::builder(mock, "test-model")
             .layer(TelemetryMiddleware::new())
             .build();
         let err = match Arc::new(pipeline)
             .call(
-                ChatRequest::user(ModelHint::Explicit("m".into()), "x"),
+                ChatRequest::user("x"),
                 RequestContext::test_default(),
             )
             .await
@@ -359,14 +353,14 @@ mod tests {
     #[tokio::test]
     async fn telemetry_emits_lifecycle_events_on_happy_path() {
         let mock = MockProvider::new("p", CannedResponse::text("hello"));
-        let pipeline = Pipeline::builder(mock)
+        let pipeline = Pipeline::builder(mock, "m-happy")
             .layer(TelemetryMiddleware::new())
             .build();
 
         let ((), captured) = with_capture(|_| async {
             let mut s = Arc::new(pipeline)
                 .call(
-                    ChatRequest::user(ModelHint::Explicit("m-happy".into()), "x"),
+                    ChatRequest::user("x"),
                     RequestContext::test_default(),
                 )
                 .await
@@ -409,14 +403,14 @@ mod tests {
     #[tokio::test]
     async fn telemetry_emits_failed_event_on_open_error() {
         let mock = MockProvider::new("p", CannedResponse::Error("boom".into()));
-        let pipeline = Pipeline::builder(mock)
+        let pipeline = Pipeline::builder(mock, "m-fail")
             .layer(TelemetryMiddleware::new())
             .build();
 
         let (_err, captured) = with_capture(|_| async {
             Arc::new(pipeline)
                 .call(
-                    ChatRequest::user(ModelHint::Explicit("m-fail".into()), "x"),
+                    ChatRequest::user("x"),
                     RequestContext::test_default(),
                 )
                 .await
@@ -449,11 +443,12 @@ mod tests {
     }
 
     #[async_trait]
-    impl LlmService for ScriptedService {
+    impl Service for ScriptedService {
         async fn call(
             self: Arc<Self>,
             _req: ChatRequest,
-            _ctx: RequestContext,
+                    model: &str,
+        _ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             let events = self
                 .events
@@ -467,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn telemetry_logs_and_propagates_mid_stream_error() {
-        let scripted: Arc<dyn LlmService> = Arc::new(ScriptedService {
+        let scripted: Arc<dyn Service> = Arc::new(ScriptedService {
             events: Mutex::new(Some(vec![
                 Ok(ChatEvent::started("m-mid")),
                 Ok(ChatEvent::Delta {
@@ -476,14 +471,14 @@ mod tests {
                 Err(ProviderError::Internal("midstream-boom".into())),
             ])),
         });
-        let pipeline = Pipeline::builder_with_inner(scripted)
+        let pipeline = Pipeline::builder_with_inner(LlmService::from_parts(scripted, "m-mid", std::sync::Arc::from([] as [&'static str; 0])))
             .layer(TelemetryMiddleware::new())
             .build();
 
         let (collected, captured) = with_capture(|_| async {
             let mut s = Arc::new(pipeline)
                 .call(
-                    ChatRequest::user(ModelHint::Explicit("m-mid".into()), "x"),
+                    ChatRequest::user("x"),
                     RequestContext::test_default(),
                 )
                 .await
@@ -533,7 +528,7 @@ mod tests {
     /// against regressions where the visitor or the field set drifts.
     #[tokio::test]
     async fn telemetry_finished_event_carries_usage_tokens() {
-        let scripted: Arc<dyn LlmService> = Arc::new(ScriptedService {
+        let scripted: Arc<dyn Service> = Arc::new(ScriptedService {
             events: Mutex::new(Some(vec![
                 Ok(ChatEvent::started("m-usage")),
                 Ok(ChatEvent::Delta { text: "ok".into() }),
@@ -547,14 +542,14 @@ mod tests {
                 }),
             ])),
         });
-        let pipeline = Pipeline::builder_with_inner(scripted)
+        let pipeline = Pipeline::builder_with_inner(LlmService::from_parts(scripted, "test-model", std::sync::Arc::from([] as [&'static str; 0])))
             .layer(TelemetryMiddleware::new())
             .build();
 
         let ((), captured) = with_capture(|_| async {
             let mut s = Arc::new(pipeline)
                 .call(
-                    ChatRequest::user(ModelHint::Explicit("m-usage".into()), "x"),
+                    ChatRequest::user("x"),
                     RequestContext::test_default(),
                 )
                 .await

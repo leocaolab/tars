@@ -449,15 +449,11 @@ impl Plan {
 /// `plan(goal)` call produces a typed [`Plan`].
 pub struct OrchestratorAgent {
     id: AgentId,
-    model: String,
 }
 
 impl OrchestratorAgent {
-    pub fn new(id: impl Into<AgentId>, model: impl Into<String>) -> Arc<Self> {
-        Arc::new(Self {
-            id: id.into(),
-            model: model.into(),
-        })
+    pub fn new(id: impl Into<AgentId>) -> Arc<Self> {
+        Arc::new(Self { id: id.into() })
     }
 
     /// Typed convenience: build the planner [`ChatRequest`] for `goal`,
@@ -504,7 +500,7 @@ impl OrchestratorAgent {
     /// inspect what we'd send without invoking an LLM.
     pub fn build_planner_request(&self, goal: &str) -> ChatRequest {
         // Determinism rationale lives on `PromptBuilder::deterministic`.
-        PromptBuilder::new(self.model.clone(), goal)
+        PromptBuilder::new(goal)
             .system(PLANNER_SYSTEM_PROMPT)
             .structured_output("Plan", plan_json_schema())
             .deterministic()
@@ -571,7 +567,7 @@ impl OrchestratorAgent {
         });
         let user_text = serde_json::to_string_pretty(&payload)
             .expect("JSON encoding of replan context is infallible");
-        PromptBuilder::new(self.model.clone(), user_text)
+        PromptBuilder::new(user_text)
             .system(PLANNER_SYSTEM_PROMPT)
             .structured_output("Plan", plan_json_schema())
             .deterministic()
@@ -1062,7 +1058,7 @@ mod tests {
 
     #[test]
     fn build_planner_request_sets_strict_schema_and_temperature() {
-        let agent = OrchestratorAgent::new(AgentId::new("orch"), "gpt-4o");
+        let agent = OrchestratorAgent::new(AgentId::new("orch"));
         let req = agent.build_planner_request("summarise PR #42");
         assert_eq!(req.temperature, Some(0.0));
         assert!(req.system.is_some());
@@ -1097,7 +1093,7 @@ mod tests {
 
     #[test]
     fn orchestrator_role_is_orchestrator() {
-        let agent = OrchestratorAgent::new(AgentId::new("orch"), "gpt-4o");
+        let agent = OrchestratorAgent::new(AgentId::new("orch"));
         assert!(matches!(agent.role(), AgentRole::Orchestrator));
         assert_eq!(agent.id().as_ref(), "orch");
     }

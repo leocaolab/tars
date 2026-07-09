@@ -15,7 +15,7 @@
 //!     in the time one real call would spend on the handshake.
 //!
 //! The seam that makes it work: an agent that holds an
-//! `Arc<dyn LlmService>` (not a concrete provider) can have a
+//! `LlmService` (not a concrete provider) can have a
 //! `MockProvider` dropped in for tests and a real pipeline in prod.
 //!
 //! Run:
@@ -27,20 +27,20 @@
 
 use std::sync::Arc;
 
-use tars_pipeline::{LlmService, ProviderService};
+use tars_pipeline::LlmService;
 use tars_provider::{CannedResponse, MockProvider};
 use tars_runtime::complete_sync;
-use tars_types::{ChatRequest, ModelHint, ProviderError, RequestContext};
+use tars_types::{ChatRequest, ProviderError, RequestContext};
 
 // ── The agent under test ────────────────────────────────────────────
 //
 // A tiny reviewer: classify a code snippet in one word. It depends only
-// on an injected `Arc<dyn LlmService>` — that injection is the whole
+// on an injected `LlmService` — that injection is the whole
 // reason it's testable. Real agents add prompt templates, tool loops,
 // retries; the testing pattern is identical.
 
 struct ReviewAgent {
-    llm: Arc<dyn LlmService>,
+    llm: LlmService,
 }
 
 impl ReviewAgent {
@@ -49,18 +49,18 @@ impl ReviewAgent {
     /// can react to them.
     fn classify(&self, code: &str) -> Result<String, ProviderError> {
         let prompt = format!("Reply with exactly one word — ok, bug, or unsure:\n{code}");
-        let req = ChatRequest::user(ModelHint::Explicit("test-model".into()), prompt);
+        let req = ChatRequest::user(prompt);
         let resp = complete_sync(self.llm.clone(), req, RequestContext::test_default())?;
         Ok(resp.text.trim().to_string())
     }
 }
 
-/// Wrap a `MockProvider` as the `Arc<dyn LlmService>` an agent expects.
+/// Wrap a `MockProvider` as the `LlmService` an agent expects.
 /// (In prod this is a full `Pipeline`; for tests the bare provider
 /// service is enough — no retry/cache/telemetry layers needed.)
 fn agent_with(mock: &Arc<MockProvider>) -> ReviewAgent {
     ReviewAgent {
-        llm: ProviderService::new(mock.clone()),
+        llm: LlmService::of(mock.clone(), "demo-model"),
     }
 }
 
@@ -132,7 +132,7 @@ fn main() {
 
     println!(
         "\nAll mock-LLM agent tests passed — no network, no API key, instant + repeatable.\n\
-         Pattern: give your agent an `Arc<dyn LlmService>` seam; inject `MockProvider`\n\
+         Pattern: give your agent an `LlmService` seam; inject `MockProvider`\n\
          in tests, a real `Pipeline` in prod. For a per-call scripted sequence (a\n\
          different reply each turn inside one agent loop, plus tool calls), see the\n\
          `ScriptedProvider` in examples/multi_step_with_tools.rs."

@@ -6,7 +6,7 @@
 //! ```text
 //! tars-runtime::execute_agent_step
 //!  ├── Agent::execute (via SingleShotAgent)
-//!  │    └── ctx.llm: Arc<dyn LlmService>  ← from tars-pipeline
+//!  │    └── ctx.llm: LlmService  ← from tars-pipeline
 //!  │          └── ProviderService → MockProvider (tars-provider)
 //!  └── runtime.append → SqliteAgentEventLog (tars-storage on disk)
 //! ```
@@ -16,14 +16,14 @@
 
 use std::sync::Arc;
 
-use tars_pipeline::{LlmService, Pipeline, ProviderService};
+use tars_pipeline::{LlmService, Pipeline};
 use tars_provider::backends::mock::{CannedResponse, MockProvider};
 use tars_runtime::{
     AgentEvent, AgentExecutionError, AgentOutput, LocalRuntime, Runtime, SingleShotAgent,
     execute_agent_step,
 };
 use tars_storage::{AgentEventLog, open_agent_event_log_at_path};
-use tars_types::{AgentId, ChatRequest, ModelHint};
+use tars_types::{AgentId, ChatRequest};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -38,9 +38,9 @@ async fn full_stack_agent_step_lands_in_trajectory_log() {
     // pipeline minimal so any failure points at the agent code, not
     // a middleware quirk.
     let mock_provider = MockProvider::new("mock_for_agent", CannedResponse::text("hello"));
-    let inner: Arc<dyn LlmService> = ProviderService::new(mock_provider);
+    let inner: LlmService = LlmService::of(mock_provider, "gpt-4o");
     let pipeline = Pipeline::builder_with_inner(inner).build();
-    let llm: Arc<dyn LlmService> = Arc::new(pipeline);
+    let llm: LlmService = pipeline;
 
     let agent = SingleShotAgent::new(AgentId::new("test_agent"));
 
@@ -49,7 +49,7 @@ async fn full_stack_agent_step_lands_in_trajectory_log() {
         .create_trajectory(None, "agent-step-test")
         .await
         .unwrap();
-    let req = ChatRequest::user(ModelHint::Explicit("mock".into()), "say hi");
+    let req = ChatRequest::user("say hi");
 
     let result = execute_agent_step(
         runtime.as_ref(),
@@ -116,9 +116,9 @@ async fn agent_failure_writes_step_failed_and_propagates() {
         "always_fails",
         CannedResponse::Error("upstream is broken".into()),
     );
-    let inner: Arc<dyn LlmService> = ProviderService::new(mock_provider);
+    let inner: LlmService = LlmService::of(mock_provider, "gpt-4o");
     let pipeline = Pipeline::builder_with_inner(inner).build();
-    let llm: Arc<dyn LlmService> = Arc::new(pipeline);
+    let llm: LlmService = pipeline;
 
     let agent = SingleShotAgent::new(AgentId::new("doomed_agent"));
     let traj = runtime
@@ -131,7 +131,7 @@ async fn agent_failure_writes_step_failed_and_propagates() {
         &traj,
         llm,
         agent,
-        ChatRequest::user(ModelHint::Explicit("mock".into()), "x"),
+        ChatRequest::user("x"),
         CancellationToken::new(),
         Default::default(),
     )
@@ -175,16 +175,16 @@ async fn step_seq_increments_across_multiple_agent_calls() {
 
     for i in 1..=3 {
         let mock_provider = MockProvider::new("p", CannedResponse::text(format!("turn {i}")));
-        let inner: Arc<dyn LlmService> = ProviderService::new(mock_provider);
+        let inner: LlmService = LlmService::of(mock_provider, "gpt-4o");
         let pipeline = Pipeline::builder_with_inner(inner).build();
-        let llm: Arc<dyn LlmService> = Arc::new(pipeline);
+        let llm: LlmService = pipeline;
 
         execute_agent_step(
             runtime.as_ref(),
             &traj,
             llm,
             agent.clone(),
-            ChatRequest::user(ModelHint::Explicit("m".into()), format!("turn {i}")),
+            ChatRequest::user(format!("turn {i}")),
             CancellationToken::new(),
             Default::default(),
         )

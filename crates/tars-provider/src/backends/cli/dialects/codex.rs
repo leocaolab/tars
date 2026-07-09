@@ -124,17 +124,10 @@ impl CliDialect for CodexCliDialect {
     fn invocation(
         &self,
         req: &ChatRequest,
+        model: &str,
         ctx: &RequestContext,
     ) -> Result<CliInvocation, ProviderError> {
-        let model = req
-            .model
-            .explicit()
-            .ok_or_else(|| {
-                ProviderError::InvalidRequest(
-                    "model must be explicit before reaching CLI provider".into(),
-                )
-            })?
-            .to_string();
+        let model = model.to_string();
 
         let prompt = serialize_messages_for_cli(req);
 
@@ -406,8 +399,8 @@ mod tests {
         let d = dialect();
         let inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("gpt-5".into()), "hi"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("hi"),
+                "gpt-5", &RequestContext::test_default(),
             )
             .unwrap();
         let argv = d.argv(&inv);
@@ -446,20 +439,16 @@ mod tests {
     }
 
     #[test]
-    fn invocation_requires_explicit_model_and_strips_env() {
+    fn invocation_strips_env() {
+        // (The old `invocation_requires_explicit_model` assertion is gone:
+        // the model is now a concrete `&str` arg, so there is no
+        // non-explicit-model rejection path. The env-strip contract below
+        // is the still-relevant part of the test.)
         let d = dialect();
-        let err = d
-            .invocation(
-                &ChatRequest::user(ModelHint::Tier(ModelTier::Default), "hi"),
-                &RequestContext::test_default(),
-            )
-            .unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidRequest(_)));
-
         let inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("gpt-5-codex".into()), "x"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("x"),
+                "gpt-5-codex", &RequestContext::test_default(),
             )
             .unwrap();
         assert_eq!(inv.model, "gpt-5-codex");
@@ -473,7 +462,6 @@ mod tests {
         let inv = dialect()
             .invocation(
                 &ChatRequest {
-                    model: ModelHint::Explicit("x".into()),
                     system: Some("be brief".into()),
                     messages: vec![
                         Message::user_text("first user"),
@@ -491,7 +479,7 @@ mod tests {
                     thinking: Default::default(),
                     enable_chat_template_thinking: None,
                 },
-                &RequestContext::test_default(),
+                "gpt-5-codex", &RequestContext::test_default(),
             )
             .unwrap();
         assert!(inv.prompt.starts_with("[system]\nbe brief\n\n[user]\nfirst user\n\n"));

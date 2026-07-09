@@ -13,7 +13,7 @@ use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::gemini::GeminiProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
-use tars_types::{BatchItemId, BatchJobId, ChatRequest, ModelHint, ProviderError};
+use tars_types::{BatchItemId, BatchJobId, ChatRequest, ProviderError};
 
 fn build_provider() -> Arc<dyn LlmProvider> {
     let http = HttpProviderBase::default_arc().unwrap();
@@ -49,8 +49,8 @@ async fn submit_returns_not_implemented_invalid_request() {
         .submit(
             vec![(
                 BatchItemId::new("x"),
-                ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "hi"),
-            )],
+                ChatRequest::user("hi"),
+            )], "test-model",
             &tars_types::RequestContext::test_default(),
         )
         .await

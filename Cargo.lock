@@ -6327,6 +6327,7 @@ dependencies = [
  "http-body-util",
  "serde",
  "serde_json",
+ "tars-cache",
  "tars-config",
  "tars-melt",
  "tars-pipeline",

@@ -92,13 +92,13 @@ async fn happy_path_pipeline_parses_real_sse_into_usage() {
         .get(&ProviderId::new("openai_test"))
         .expect("provider registered");
 
-    let pipeline = Pipeline::builder(provider)
+    let pipeline = Pipeline::builder(provider, "test-model")
         .layer(TelemetryMiddleware::new())
         .layer(RetryMiddleware::no_backoff(3))
         .build();
     assert_eq!(pipeline.layer_names(), &["telemetry", "retry"]);
 
-    let req = ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "say hi");
+    let req = ChatRequest::user("say hi");
     let mut stream = Arc::new(pipeline)
         .call(req, RequestContext::test_default())
         .await
@@ -173,14 +173,14 @@ async fn retry_middleware_actually_replays_http_call_on_5xx() {
     let provider = registry.get(&ProviderId::new("openai_test")).unwrap();
 
     // no_backoff so the test doesn't depend on real wall-clock sleeps.
-    let pipeline = Pipeline::builder(provider)
+    let pipeline = Pipeline::builder(provider, "test-model")
         .layer(TelemetryMiddleware::new())
         .layer(RetryMiddleware::no_backoff(3))
         .build();
 
     let mut stream = Arc::new(pipeline)
         .call(
-            ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "x"),
+            ChatRequest::user("x"),
             RequestContext::test_default(),
         )
         .await
@@ -259,7 +259,7 @@ async fn registry_built_from_toml_can_drive_pipeline_call() {
         .get(&ProviderId::new("openai_under_test"))
         .expect("the OpenAI-compat provider is the one we wired");
 
-    let pipeline = Pipeline::builder(provider)
+    let pipeline = Pipeline::builder(provider, "test-model")
         .layer(TelemetryMiddleware::new())
         .layer(RetryMiddleware::no_backoff(2))
         .build();
@@ -267,7 +267,7 @@ async fn registry_built_from_toml_can_drive_pipeline_call() {
     // Round-trip a single request — proves the whole Arc/dyn chain holds.
     let mut stream = Arc::new(pipeline)
         .call(
-            ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "ping"),
+            ChatRequest::user("ping"),
             RequestContext::test_default(),
         )
         .await

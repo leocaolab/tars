@@ -189,16 +189,17 @@ impl LlmProvider for ClaudeSdkProvider {
         skip_all,
         fields(
             provider = %self.id,
-            model = %req.model.label(),
+            model = %model,
         ),
         err(Display),
     )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        let resp = self.call(&req).await?;
+        let resp = self.call(&req, model).await?;
         // Daemon returns a single JSON; project as canonical streaming
         // triple so callers' aggregation paths work unchanged.
         let usage = normalize_usage(&resp.usage);
@@ -225,18 +226,13 @@ impl ClaudeSdkProvider {
     /// Issue one chat request. Acquires (or spawns) the session,
     /// registers a pending oneshot, writes the request line, awaits
     /// the matching reply with the configured timeout.
-    async fn call(&self, req: &ChatRequest) -> Result<DaemonChatReply, ProviderError> {
+    async fn call(&self, req: &ChatRequest, model: &str) -> Result<DaemonChatReply, ProviderError> {
         let prompt = serialize_messages(req);
         if prompt.is_empty() {
             return Err(ProviderError::InvalidRequest(
                 "claude_sdk: request has no user-visible content".into(),
             ));
         }
-        let model = req
-            .model
-            .explicit()
-            .map(str::to_owned)
-            .or_else(|| self.default_model.clone());
 
         let session = self.ensure_session().await?;
         // Monotonic per-session request id. `fetch_add` wraps on
@@ -254,7 +250,7 @@ impl ClaudeSdkProvider {
             id,
             prompt: &prompt,
             system: req.system.as_deref(),
-            model: model.as_deref(),
+            model: Some(model),
             // History: 1 → 3 → 7. The 1→3 bump fit sonnet-4-5
             // extended thinking (`thinking_block → text_block` is
             // counted as 2 turns). 3→7 covers heavier
@@ -698,7 +694,7 @@ mod tests {
 
     #[test]
     fn serialize_single_user_message() {
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), "ping");
+        let req = ChatRequest::user("ping");
         assert_eq!(serialize_messages(&req), "[user]\nping");
     }
 
@@ -776,13 +772,11 @@ mod tests {
         let p = ClaudeSdkProviderBuilder::new("claude_sdk_smoke")
             .default_model("claude-sonnet-4-5")
             .build();
-        let req = ChatRequest::user(
-            ModelHint::Explicit("claude-sonnet-4-5".into()),
-            "Reply with only the literal word: pong",
+        let req = ChatRequest::user("Reply with only the literal word: pong",
         );
         let resp = p
             .clone()
-            .complete(req, tars_types::RequestContext::test_default())
+            .complete(req, "test-model", tars_types::RequestContext::test_default())
             .await
             .expect("daemon round-trip");
         let text = resp.text.to_lowercase();
@@ -804,19 +798,15 @@ mod tests {
         let p = ClaudeSdkProviderBuilder::new("claude_sdk_smoke_concurrent")
             .default_model("claude-sonnet-4-5")
             .build();
-        let req_a = ChatRequest::user(
-            ModelHint::Explicit("claude-sonnet-4-5".into()),
-            "Reply with only: alpha",
+        let req_a = ChatRequest::user("Reply with only: alpha",
         );
-        let req_b = ChatRequest::user(
-            ModelHint::Explicit("claude-sonnet-4-5".into()),
-            "Reply with only: beta",
+        let req_b = ChatRequest::user("Reply with only: beta",
         );
         let p2 = p.clone();
         let p3 = p.clone();
         let (a, b) = tokio::join!(
-            p2.complete(req_a, tars_types::RequestContext::test_default()),
-            p3.complete(req_b, tars_types::RequestContext::test_default()),
+            p2.complete(req_a, "test-model", tars_types::RequestContext::test_default()),
+            p3.complete(req_b, "test-model", tars_types::RequestContext::test_default()),
         );
         let a = a.expect("alpha");
         let b = b.expect("beta");
@@ -859,10 +849,10 @@ mod tests {
         // Comfortably past the 64 KB pipe buffer so `write_all` blocks against
         // the non-draining child.
         let big_prompt = "x".repeat(256 * 1024);
-        let req = ChatRequest::user(ModelHint::Explicit("m".into()), big_prompt);
+        let req = ChatRequest::user(big_prompt);
         let t0 = std::time::Instant::now();
         let r = p
-            .complete(req, tars_types::RequestContext::test_default())
+            .complete(req, "test-model", tars_types::RequestContext::test_default())
             .await;
         let elapsed = t0.elapsed();
         let _ = std::fs::remove_file(&script);

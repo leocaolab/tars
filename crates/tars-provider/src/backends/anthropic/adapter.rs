@@ -227,12 +227,7 @@ impl HttpAdapter for AnthropicAdapter {
         Ok(h)
     }
 
-    fn translate_request(&self, req: &ChatRequest) -> Result<Value, ProviderError> {
-        let model = req
-            .model
-            .explicit()
-            .ok_or_else(|| ProviderError::InvalidRequest("model must be explicit".into()))?;
-
+    fn translate_request(&self, req: &ChatRequest, model: &str) -> Result<Value, ProviderError> {
         if req.messages.is_empty() {
             return Err(ProviderError::InvalidRequest(
                 "anthropic: messages array must contain at least one message".into(),
@@ -679,12 +674,10 @@ mod tests {
     #[test]
     fn translate_request_promotes_system_to_top_level() {
         let a = adapter();
-        let req = ChatRequest::user(
-            tars_types::ModelHint::Explicit("claude-opus-4-7".into()),
-            "hello",
+        let req = ChatRequest::user("hello",
         )
         .with_system("you are concise");
-        let body = a.translate_request(&req).unwrap();
+        let body = a.translate_request(&req, "claude-opus-4-7").unwrap();
         assert!(body["system"].is_array());
         assert_eq!(body["system"][0]["type"], "text");
         assert_eq!(body["system"][0]["text"], "you are concise");
@@ -695,15 +688,13 @@ mod tests {
     #[test]
     fn cache_marker_attaches_to_last_message_block() {
         let a = adapter();
-        let mut req = ChatRequest::user(
-            tars_types::ModelHint::Explicit("claude-opus-4-7".into()),
-            "context",
+        let mut req = ChatRequest::user("context",
         )
         .with_system("sys");
         req.cache_directives.push(CacheDirective::MarkBoundary {
             ttl: std::time::Duration::from_secs(300),
         });
-        let body = a.translate_request(&req).unwrap();
+        let body = a.translate_request(&req, "claude-opus-4-7").unwrap();
         // Last user content block carries cache_control.
         let last_block = &body["messages"][0]["content"][0];
         assert_eq!(last_block["cache_control"]["type"], "ephemeral");
@@ -714,15 +705,13 @@ mod tests {
     #[test]
     fn structured_output_injects_forced_tool() {
         let a = adapter();
-        let mut req = ChatRequest::user(
-            tars_types::ModelHint::Explicit("claude-opus-4-7".into()),
-            "give json",
+        let mut req = ChatRequest::user("give json",
         );
         req.structured_output = Some(tars_types::JsonSchema::strict(
             "Resp",
             serde_json::json!({"type":"object"}),
         ));
-        let body = a.translate_request(&req).unwrap();
+        let body = a.translate_request(&req, "claude-opus-4-7").unwrap();
         assert_eq!(body["tool_choice"]["type"], "tool");
         assert_eq!(body["tool_choice"]["name"], STRUCTURED_OUTPUT_TOOL);
         let tools = body["tools"].as_array().unwrap();

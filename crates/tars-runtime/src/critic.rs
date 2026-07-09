@@ -52,15 +52,11 @@ use crate::prompt::PromptBuilder;
 /// `critique()` call emits a typed [`AgentMessage::Verdict`].
 pub struct CriticAgent {
     id: AgentId,
-    model: String,
 }
 
 impl CriticAgent {
-    pub fn new(id: impl Into<AgentId>, model: impl Into<String>) -> Arc<Self> {
-        Arc::new(Self {
-            id: id.into(),
-            model: model.into(),
-        })
+    pub fn new(id: impl Into<AgentId>) -> Arc<Self> {
+        Arc::new(Self { id: id.into() })
     }
 
     /// Typed convenience: build the critique [`ChatRequest`] for the
@@ -129,7 +125,7 @@ impl CriticAgent {
         let user_text = serde_json::to_string_pretty(&user_payload)
             .expect("JSON encoding of plan/result is infallible for valid types");
 
-        PromptBuilder::new(self.model.clone(), user_text)
+        PromptBuilder::new(user_text)
             .system(CRITIC_SYSTEM_PROMPT)
             .structured_output("Verdict", verdict_json_schema())
             .deterministic()
@@ -462,7 +458,7 @@ mod tests {
 
     #[test]
     fn build_critique_request_sets_strict_schema_and_temperature() {
-        let critic = CriticAgent::new(AgentId::new("critic"), "gpt-4o");
+        let critic = CriticAgent::new(AgentId::new("critic"));
         let plan = sample_plan();
         let msg = sample_partial_result_msg();
         let result = PartialResultRef::from_message(&msg).unwrap();
@@ -487,7 +483,7 @@ mod tests {
 
     #[test]
     fn build_critique_request_payload_includes_plan_and_result() {
-        let critic = CriticAgent::new(AgentId::new("critic"), "gpt-4o");
+        let critic = CriticAgent::new(AgentId::new("critic"));
         let plan = sample_plan();
         let msg = sample_partial_result_msg();
         let result = PartialResultRef::from_message(&msg).unwrap();
@@ -507,7 +503,7 @@ mod tests {
 
     #[test]
     fn critic_role_and_id() {
-        let c = CriticAgent::new(AgentId::new("critic_a"), "gpt-4o");
+        let c = CriticAgent::new(AgentId::new("critic_a"));
         assert_eq!(c.id().as_ref(), "critic_a");
         assert!(matches!(c.role(), AgentRole::Critic));
     }

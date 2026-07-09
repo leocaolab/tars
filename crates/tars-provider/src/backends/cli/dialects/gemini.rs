@@ -79,17 +79,10 @@ impl CliDialect for GeminiCliDialect {
     fn invocation(
         &self,
         req: &ChatRequest,
+        model: &str,
         ctx: &RequestContext,
     ) -> Result<CliInvocation, ProviderError> {
-        let model = req
-            .model
-            .explicit()
-            .ok_or_else(|| {
-                ProviderError::InvalidRequest(
-                    "model must be explicit before reaching CLI provider".into(),
-                )
-            })?
-            .to_string();
+        let model = model.to_string();
 
         let prompt = render_prompt_for_cli(req);
         if prompt.len() > MAX_PROMPT_BYTES {
@@ -248,8 +241,8 @@ mod tests {
         let d = dialect();
         let inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "say hi"),
-                &RequestContext::test_default(),
+                &ChatRequest::user("say hi"),
+                "gemini-2.5-flash", &RequestContext::test_default(),
             )
             .unwrap();
         let argv = d.argv(&inv);
@@ -269,26 +262,15 @@ mod tests {
         assert_eq!(d.output_mode(), OutputMode::JsonEvents);
     }
 
-    #[test]
-    fn invocation_requires_explicit_model() {
-        let d = dialect();
-        let err = d
-            .invocation(
-                &ChatRequest::user(ModelHint::Tier(ModelTier::Default), "hi"),
-                &RequestContext::test_default(),
-            )
-            .unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidRequest(_)));
-    }
-
+    
     #[test]
     fn oversized_prompt_rejected_with_invalid_request() {
         let d = dialect();
         let big = "x".repeat(MAX_PROMPT_BYTES + 1);
         let err = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), big),
-                &RequestContext::test_default(),
+                &ChatRequest::user(big),
+                "gemini-2.5-flash", &RequestContext::test_default(),
             )
             .unwrap_err();
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
@@ -299,9 +281,9 @@ mod tests {
         let d = dialect();
         let inv = d
             .invocation(
-                &ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "x")
+                &ChatRequest::user("x")
                     .with_system("be precise"),
-                &RequestContext::test_default(),
+                "gemini-2.5-flash", &RequestContext::test_default(),
             )
             .unwrap();
         assert!(inv.stripped_env.contains("GEMINI_API_KEY"));

@@ -39,7 +39,9 @@ pub mod startup;
 
 pub use error::TarsError;
 pub use resilience::resilience_configs;
-pub use roles::{parse_tier, resolve_provider_id, resolve_role};
+pub use roles::{
+    parse_tier, resolve_provider_id, resolve_role, resolve_role_bound, resolve_service,
+};
 pub use startup::{InitError, init, init_from_home, is_initialized};
 pub use paths::{
     StoreScope, WorkspaceResolution, resolve_workspace_root, standalone_store_dir,

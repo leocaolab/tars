@@ -114,7 +114,7 @@ use tars_runtime::{
 use tars_tools::builtins::{GlobTool, GrepTool, ListDirTool, ReadFileTool};
 use tars_tools::{Tool, ToolRegistry};
 use tars_types::{
-    ChatRequest, ChatResponse, ChatResponseBuilder, ModelHint, ProviderId, RequestContext,
+    ChatRequest, ChatResponse, ChatResponseBuilder, ProviderId, RequestContext,
     TrajectoryId, Usage,
 };
 use tokio_util::sync::CancellationToken;
@@ -784,7 +784,7 @@ fn run_bless(args: EvalBlessArgs) -> Result<()> {
 
 async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<()> {
     use tars_runtime::{JudgeItem, LlmJudge, ensure_anti_incest, run_judge_pass};
-    use tars_types::{ModelHint, ProviderId};
+    use tars_types::{ProviderId};
 
     let manifest = load_manifest(&args.run)?;
 
@@ -804,21 +804,18 @@ async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<
     let judge_provider = registry
         .get(&judge_pid)
         .ok_or_else(|| anyhow::anyhow!("judge provider `{}` not in config", args.judge))?;
-    let judge_pipeline =
-        Pipeline::default_chain(judge_provider, PipelineOpts::new(judge_pid.clone()));
-    let judge_model = args
-        .judge_model
-        .clone()
-        .map(ModelHint::Explicit)
-        .unwrap_or_else(|| ModelHint::Explicit("".into()));
+    let judge_pipeline = Pipeline::default_chain(
+        judge_provider,
+        args.judge_model.clone().unwrap_or_default(),
+        PipelineOpts::new(judge_pid.clone()),
+    );
     let judge = LlmJudge::new(
-        Arc::new(judge_pipeline),
+        judge_pipeline,
         format!(
             "{}:{}",
             args.judge,
             args.judge_model.as_deref().unwrap_or("default")
         ),
-        judge_model,
     );
 
     // Build JudgeItems from each successful case: input (from corpus),
@@ -1336,8 +1333,11 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
     //    namespace is unique-per-run so cases don't unexpectedly hit
     //    each other across runs (and we still get intra-run cache
     //    benefits if cases share prompts — rare but free).
-    let pipeline = Pipeline::default_chain(provider, PipelineOpts::new(provider_id.clone()));
-    let pipeline = Arc::new(pipeline);
+    let pipeline = Pipeline::default_chain(
+        provider,
+        args.model.clone().unwrap_or_default(),
+        PipelineOpts::new(provider_id.clone()),
+    );
 
     // 2b. Build checks from --check specs. trajectory-match:* specs are
     //     case-parameterized (need per-case expected_tools), so they're split
@@ -1384,15 +1384,13 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         let jprov = registry
             .get(&jpid)
             .ok_or_else(|| anyhow::anyhow!("judge provider `{jp}` not in config"))?;
-        let jpipeline = Pipeline::default_chain(jprov, PipelineOpts::new(jpid.clone()));
-        let jmodel = args
-            .judge_model
-            .clone()
-            .map(ModelHint::Explicit)
-            .unwrap_or_else(|| ModelHint::Explicit("".into()));
+        let jpipeline = Pipeline::default_chain(
+            jprov,
+            args.judge_model.clone().unwrap_or_default(),
+            PipelineOpts::new(jpid.clone()),
+        );
         let jid = format!("{}:{}", jp, args.judge_model.as_deref().unwrap_or("default"));
-        let svc: Arc<dyn LlmService> = Arc::new(jpipeline);
-        Some(ArgEquivalenceJudge::new(svc, jid, jmodel))
+        Some(ArgEquivalenceJudge::new(jpipeline, jid))
     } else {
         if args.judge_provider.is_some() || args.judge_model.is_some() {
             anyhow::bail!(
@@ -1615,19 +1613,10 @@ struct CaseOutcome {
     output_text: String,
 }
 
-/// Resolve the model hint for a case request (explicit, or provider default).
-fn case_model_hint(model: Option<&str>) -> ModelHint {
-    match model {
-        Some(m) => ModelHint::Explicit(m.into()),
-        // Empty forces the provider's capability default; fine for most
-        // backends and avoids the CLI providers' "model required" path.
-        None => ModelHint::Explicit("".into()),
-    }
-}
-
 /// Build the base request for a case (shared by both execution modes).
-fn build_case_request(case: &Case, model: Option<&str>, max_output_tokens: Option<u32>) -> ChatRequest {
-    let mut req = ChatRequest::user(case_model_hint(model), case.input.clone());
+/// Model-agnostic content — the model is bound on the pipeline.
+fn build_case_request(case: &Case, max_output_tokens: Option<u32>) -> ChatRequest {
+    let mut req = ChatRequest::user(case.input.clone());
     if let Some(sys) = &case.system {
         req = req.with_system(sys.clone());
     }
@@ -1640,7 +1629,7 @@ fn build_case_request(case: &Case, model: Option<&str>, max_output_tokens: Optio
 /// Single-completion execution (the default mode). Returns the response, the
 /// tool steps the model requested (full args), and any error.
 async fn run_completion_case(
-    pipeline: Arc<Pipeline>,
+    pipeline: LlmService,
     req: ChatRequest,
 ) -> (ChatResponse, Vec<ToolStep>, Option<String>) {
     let ctx = RequestContext::test_default();
@@ -1718,7 +1707,7 @@ fn synth_response(text: String, usage: Usage) -> ChatResponse {
 /// over a read-only sandbox; returns a synthesized response (final text), the
 /// cross-call tool steps (names only — M2), and any error.
 async fn run_worker_case(
-    pipeline: Arc<Pipeline>,
+    pipeline: LlmService,
     mut req: ChatRequest,
     model: Option<&str>,
     sandbox: &Path,
@@ -1742,7 +1731,7 @@ async fn run_worker_case(
     let ctx = AgentContext {
         trajectory_id: TrajectoryId::new("eval-agent"),
         step_seq: 1,
-        llm: pipeline as Arc<dyn LlmService>,
+        llm: pipeline,
         cancel: CancellationToken::new(),
         cwd: Some(sandbox.to_path_buf()),
         permissions: Default::default(),
@@ -1787,7 +1776,7 @@ async fn run_worker_case(
 #[allow(clippy::too_many_arguments)] // each arg is a distinct per-case input; a
 // struct would just move the same fields elsewhere without clarifying anything.
 async fn run_one_case(
-    pipeline: Arc<Pipeline>,
+    pipeline: LlmService,
     case: &Case,
     case_dir: &Path,
     model: Option<&str>,
@@ -1798,7 +1787,7 @@ async fn run_one_case(
     arg_judge: Option<&ArgEquivalenceJudge>,
 ) -> CaseOutcome {
     let started = Instant::now();
-    let req = build_case_request(case, model, max_output_tokens);
+    let req = build_case_request(case, max_output_tokens);
     // Keep a copy for the invariants (execution consumes the original).
     let req_for_checks = req.clone();
 

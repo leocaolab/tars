@@ -12,7 +12,7 @@ use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::openai::OpenAiProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
-use tars_types::{ChatEvent, ChatRequest, ModelHint, RequestContext, StopReason};
+use tars_types::{ChatEvent, ChatRequest, RequestContext, StopReason};
 
 /// Standard OpenAI SSE shape: zero or more `data:` chunks ending with `data: [DONE]`.
 fn sse_body(events: &[&str]) -> String {
@@ -58,9 +58,9 @@ async fn streaming_text_response_decodes_to_events() {
         .base_url(server.uri())
         .build(http, basic());
 
-    let req = ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "say hi");
+    let req = ChatRequest::user("say hi");
     let mut stream = provider
-        .stream(req, RequestContext::test_default())
+        .stream(req, "test-model", RequestContext::test_default())
         .await
         .expect("stream open");
 
@@ -121,12 +121,10 @@ async fn deepseek_reasoning_content_surfaces_as_thinking_delta() {
         .base_url(server.uri())
         .build(http, basic());
 
-    let req = ChatRequest::user(
-        ModelHint::Explicit("deepseek-v4-pro".into()),
-        "what is 2+2?",
+    let req = ChatRequest::user("what is 2+2?",
     );
     let mut stream = provider
-        .stream(req, RequestContext::test_default())
+        .stream(req, "test-model", RequestContext::test_default())
         .await
         .expect("stream open");
 
@@ -170,8 +168,8 @@ async fn complete_aggregates_streaming_response() {
 
     let resp = provider
         .complete(
-            ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "hi"),
-            RequestContext::test_default(),
+            ChatRequest::user("hi"),
+            "test-model", RequestContext::test_default(),
         )
         .await
         .expect("complete ok");
@@ -200,8 +198,8 @@ async fn http_401_maps_to_auth_error() {
 
     let err = match provider
         .stream(
-            ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "hi"),
-            RequestContext::test_default(),
+            ChatRequest::user("hi"),
+            "test-model", RequestContext::test_default(),
         )
         .await
     {
@@ -229,8 +227,8 @@ async fn http_429_maps_to_rate_limited() {
 
     let err = match provider
         .stream(
-            ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "hi"),
-            RequestContext::test_default(),
+            ChatRequest::user("hi"),
+            "test-model", RequestContext::test_default(),
         )
         .await
     {
@@ -271,8 +269,8 @@ async fn streaming_tool_call_emits_start_delta_end() {
 
     let resp = provider
         .complete(
-            ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), "search rust"),
-            RequestContext::test_default(),
+            ChatRequest::user("search rust"),
+            "test-model", RequestContext::test_default(),
         )
         .await
         .expect("complete ok");
@@ -297,8 +295,8 @@ async fn mock_provider_satisfies_trait() {
     let r = p
         .clone()
         .complete(
-            ChatRequest::user(ModelHint::Explicit("m".into()), "ping"),
-            RequestContext::test_default(),
+            ChatRequest::user("ping"),
+            "test-model", RequestContext::test_default(),
         )
         .await
         .unwrap();

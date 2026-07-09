@@ -342,15 +342,15 @@ fn reject_internal(validator: &str, reason: &str) -> ValidationOutcome {
     }
 }
 
-/// Build a Python dict view of `ChatRequest`. Keys: model (str),
-/// system (str | None), messages (list[dict{role, text}]), tools
-/// (list[dict{name, description}]). Sufficient for the common
-/// validator use cases (read prompt content, count tools); richer
-/// fields (tool_calls in messages, structured_output schema) added
-/// on demand.
+/// Build a Python dict view of `ChatRequest`. Keys: system (str |
+/// None), messages (list[dict{role, text}]), tools (list[dict{name,
+/// description}]). Sufficient for the common validator use cases (read
+/// prompt content, count tools); richer fields (tool_calls in messages,
+/// structured_output schema) added on demand. The request is
+/// model-agnostic content, so there is no `model` key — the model is
+/// bound on the serving `LlmService`, not the request.
 fn build_req_dict<'py>(py: Python<'py>, req: &ChatRequest) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("model", req.model.label().as_ref())?;
     if let Some(s) = &req.system {
         d.set_item("system", s)?;
     } else {

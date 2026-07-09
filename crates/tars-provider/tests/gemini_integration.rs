@@ -8,7 +8,7 @@ use tars_provider::auth::{Auth, basic};
 use tars_provider::backends::gemini::GeminiProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
-use tars_types::{ChatEvent, ChatRequest, ModelHint, RequestContext, StopReason};
+use tars_types::{ChatEvent, ChatRequest, RequestContext, StopReason};
 
 /// Gemini SSE chunks are unnamed `data:` JSON objects, similar to OpenAI
 /// shape, but no `[DONE]` terminator — server just closes the stream.
@@ -48,9 +48,9 @@ async fn streaming_text_response_decodes_to_events() {
         .base_url(server.uri())
         .build(http, basic());
 
-    let req = ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "say hi");
+    let req = ChatRequest::user("say hi");
     let mut stream = provider
-        .stream(req, RequestContext::test_default())
+        .stream(req, "test-model", RequestContext::test_default())
         .await
         .expect("stream open");
 
@@ -104,8 +104,8 @@ async fn function_call_decodes_to_tool_call_events() {
 
     let resp = provider
         .complete(
-            ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "search"),
-            RequestContext::test_default(),
+            ChatRequest::user("search"),
+            "test-model", RequestContext::test_default(),
         )
         .await
         .expect("complete ok");
@@ -144,8 +144,8 @@ async fn safety_filter_block_returns_content_filtered_error() {
     // contains the blocked-prompt notice.
     let mut stream = provider
         .stream(
-            ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "blocked"),
-            RequestContext::test_default(),
+            ChatRequest::user("blocked"),
+            "test-model", RequestContext::test_default(),
         )
         .await
         .expect("stream open");
@@ -180,8 +180,8 @@ async fn http_403_maps_to_auth_error() {
 
     let err = match provider
         .stream(
-            ChatRequest::user(ModelHint::Explicit("gemini-2.5-pro".into()), "hi"),
-            RequestContext::test_default(),
+            ChatRequest::user("hi"),
+            "test-model", RequestContext::test_default(),
         )
         .await
     {

@@ -102,12 +102,13 @@ impl BedrockClient {
     pub async fn complete_response(
         &self,
         req: &ChatRequest,
+        model: &str,
     ) -> Result<ChatResponse, ProviderError> {
         let parts = build_converse(req)?;
         let client = self.client().await;
         let out = client
             .converse()
-            .model_id(self.model.clone())
+            .model_id(model.to_string())
             .set_system(parts.system)
             .set_messages(Some(parts.messages))
             .set_tool_config(parts.tool_config)
@@ -115,7 +116,7 @@ impl BedrockClient {
             .send()
             .await
             .map_err(classify_sdk_error)?;
-        converse_output_to_response(&out, &self.model)
+        converse_output_to_response(&out, model)
     }
 
     /// Streaming completion (Doc 31 §6 C2 / M1): map → sign →
@@ -131,12 +132,13 @@ impl BedrockClient {
     pub async fn stream_response(
         &self,
         req: &ChatRequest,
+        model: &str,
     ) -> Result<BedrockEventStream, ProviderError> {
         let parts = build_converse(req)?;
         let client = self.client().await;
         let out = client
             .converse_stream()
-            .model_id(self.model.clone())
+            .model_id(model.to_string())
             .set_system(parts.system)
             .set_messages(Some(parts.messages))
             .set_tool_config(parts.tool_config)
@@ -148,7 +150,7 @@ impl BedrockClient {
         // Move the owned event receiver into the generator so the stream
         // borrows nothing from `self` (stays `'static`).
         let mut receiver = out.stream;
-        let model = self.model.clone();
+        let model = model.to_string();
         let events = async_stream::try_stream! {
             yield ChatEvent::started(model);
             let mut translator = StreamTranslator::new();

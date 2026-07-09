@@ -85,8 +85,12 @@ fn normalize_volatile(canon: &str) -> String {
 /// Stable fingerprint of a request's deterministic content. Record and replay
 /// MUST compute it identically — both call this on the live `ChatRequest`, after
 /// the same volatile-path normalization.
-pub fn request_fingerprint(req: &ChatRequest) -> String {
-    let canon = serde_json::to_string(req).unwrap_or_else(|_| format!("{:?}", req.model.label()));
+pub fn request_fingerprint(req: &ChatRequest, model: &str) -> String {
+    // The request itself is model-agnostic content; the concrete model
+    // is passed alongside (bound at service construction) and MUST
+    // participate so recordings for different models don't collide.
+    let body = serde_json::to_string(req).unwrap_or_else(|_| format!("{req:?}"));
+    let canon = format!("model={model}\0{body}");
     let canon = normalize_volatile(&canon);
     let mut h = std::collections::hash_map::DefaultHasher::new();
     canon.hash(&mut h);
@@ -249,9 +253,10 @@ impl LlmProvider for CassetteProvider {
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        let key = request_fingerprint(&req);
+        let key = request_fingerprint(&req, model);
         match &self.mode {
             Mode::Replay { cassette } => match cassette.get(&key) {
                 Some(events) => {
@@ -274,7 +279,7 @@ impl LlmProvider for CassetteProvider {
                 // latency-sensitive). Only a clean stream (no transport error)
                 // is cached — a failed call must not be frozen as a "response".
                 let events: Vec<Result<ChatEvent, ProviderError>> =
-                    inner.clone().stream(req, ctx).await?.collect().await;
+                    inner.clone().stream(req, model, ctx).await?.collect().await;
                 if events.iter().all(|e| e.is_ok()) {
                     let recording: Recording =
                         events.iter().map(|e| e.as_ref().unwrap().clone()).collect();
@@ -317,14 +322,13 @@ impl Drop for CassetteProvider {
 mod tests {
     use super::*;
     use crate::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::ModelHint;
 
     fn req(prompt: &str) -> ChatRequest {
-        ChatRequest::user(ModelHint::Explicit("m".into()), prompt)
+        ChatRequest::user(prompt)
     }
 
     async fn collect_text(p: Arc<dyn LlmProvider>, r: ChatRequest) -> String {
-        p.stream(r, RequestContext::test_default())
+        p.stream(r, "test-model", RequestContext::test_default())
             .await
             .unwrap()
             .filter_map(|e| async move {
@@ -339,7 +343,7 @@ mod tests {
     }
 
     async fn collect_tool_names(p: Arc<dyn LlmProvider>, r: ChatRequest) -> Vec<String> {
-        p.stream(r, RequestContext::test_default())
+        p.stream(r, "test-model", RequestContext::test_default())
             .await
             .unwrap()
             .filter_map(|e| async move {
@@ -401,7 +405,7 @@ mod tests {
     async fn replay_miss_is_a_signal() {
         let play = CassetteProvider::replay("cass", HashMap::new());
         let err = play
-            .stream(req("uncovered"), RequestContext::test_default())
+            .stream(req("uncovered"), "test-model", RequestContext::test_default())
             .await;
         assert!(err.is_err(), "a cassette miss must surface as an error, not a silent wrong answer");
     }

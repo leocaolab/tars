@@ -291,7 +291,7 @@ pub struct SessionOptions {
 /// each method call.
 pub struct Session {
     id: String,
-    pipeline: Arc<dyn LlmService>,
+    pipeline: LlmService,
     capabilities: Capabilities,
     system: String,
     model: ModelHint,
@@ -328,7 +328,7 @@ pub struct Session {
 
 impl Session {
     pub fn new(
-        pipeline: Arc<dyn LlmService>,
+        pipeline: LlmService,
         capabilities: Capabilities,
         opts: SessionOptions,
     ) -> Self {
@@ -486,7 +486,6 @@ impl Session {
         // `guard` alive across awaits so any error path (including
         // `?`) drops the guard → truncate(boundary).
         let pipeline = self.pipeline.clone();
-        let model = self.model.clone();
         let max_out = max_output_tokens.or(self.default_max_output_tokens);
         let system = self.system.clone();
         let tools_specs = self
@@ -505,7 +504,6 @@ impl Session {
         let final_response = loop_until_text(
             guard.turns,
             pipeline,
-            model,
             system,
             tools_specs,
             self.tools.as_ref(),
@@ -609,8 +607,7 @@ fn trim_to_budget(
 #[allow(clippy::too_many_arguments)]
 async fn loop_until_text(
     turns: &mut [Turn],
-    pipeline: Arc<dyn LlmService>,
-    model: ModelHint,
+    pipeline: LlmService,
     system: String,
     tool_specs: Vec<ToolSpec>,
     tools: Option<&ToolRegistry>,
@@ -633,7 +630,6 @@ async fn loop_until_text(
         let messages = flatten_for_request(turns);
 
         let req = ChatRequest {
-            model: model.clone(),
             system: Some(system.clone()),
             messages,
             tools: tool_specs.clone(),

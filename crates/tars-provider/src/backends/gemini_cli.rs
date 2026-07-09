@@ -151,8 +151,8 @@ mod tests {
         let (provider, runner) = make_provider(payload);
         let resp = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "say hi"),
-                RequestContext::test_default(),
+                ChatRequest::user("say hi"),
+                "gemini-2.5-flash", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -174,8 +174,8 @@ mod tests {
         let (provider, _) = make_provider(json!({"session_id": "x", "stats": {}}));
         let resp = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "hi"),
-                RequestContext::test_default(),
+                ChatRequest::user("hi"),
+                "gemini-2.5-flash", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -188,8 +188,8 @@ mod tests {
         let big = "x".repeat(super::super::cli::dialects::gemini::MAX_PROMPT_BYTES + 1);
         let err = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), big),
-                RequestContext::test_default(),
+                ChatRequest::user(big),
+                "gemini-2.5-flash", RequestContext::test_default(),
             )
             .await
             .unwrap_err();
@@ -200,10 +200,10 @@ mod tests {
     async fn truncates_when_max_output_tokens_exceeded() {
         let big = "x".repeat(1000);
         let (provider, _) = make_provider(json!({"response": big}));
-        let mut req = ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "hi");
+        let mut req = ChatRequest::user("hi");
         req.max_output_tokens = Some(10); // → 40 chars
         let resp = provider
-            .complete(req, RequestContext::test_default())
+            .complete(req, "gemini-2.5-flash", RequestContext::test_default())
             .await
             .unwrap();
         assert_eq!(resp.text.len(), 40);
@@ -217,9 +217,9 @@ mod tests {
         let (provider, runner) = make_provider(json!({"response": "ok"}));
         let _ = provider
             .complete(
-                ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "x")
+                ChatRequest::user("x")
                     .with_system("be precise"),
-                RequestContext::test_default(),
+                "gemini-2.5-flash", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -234,8 +234,8 @@ mod tests {
         use futures::StreamExt;
         let events: Vec<ChatEvent> = Arc::clone(&provider)
             .stream(
-                ChatRequest::user(ModelHint::Explicit("gemini-2.5-flash".into()), "hi"),
-                RequestContext::test_default(),
+                ChatRequest::user("hi"),
+                "gemini-2.5-flash", RequestContext::test_default(),
             )
             .await
             .unwrap()

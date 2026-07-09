@@ -70,7 +70,7 @@ use tars_types::{
 };
 
 use crate::middleware::Middleware;
-use crate::service::LlmService;
+use crate::service::Next;
 
 pub mod builtin;
 
@@ -125,30 +125,17 @@ impl ValidationMiddleware {
     }
 }
 
+#[async_trait]
 impl Middleware for ValidationMiddleware {
     fn name(&self) -> &'static str {
         "validation"
     }
 
-    fn wrap(&self, inner: Arc<dyn LlmService>) -> Arc<dyn LlmService> {
-        Arc::new(ValidationService {
-            inner,
-            validators: self.validators.clone(),
-        })
-    }
-}
-
-struct ValidationService {
-    inner: Arc<dyn LlmService>,
-    validators: Arc<[Arc<dyn OutputValidator>]>,
-}
-
-#[async_trait]
-impl LlmService for ValidationService {
-    async fn call(
-        self: Arc<Self>,
+    async fn handle(
+        &self,
         req: ChatRequest,
         ctx: RequestContext,
+        next: Next<'_>,
     ) -> Result<LlmEventStream, ProviderError> {
         // Telemetry: layer trace. Best-effort, but don't silently drop
         // it on a poisoned mutex — recover the guard (the poisoned data
@@ -170,7 +157,7 @@ impl LlmService for ValidationService {
         // streaming-UX cost when ValidationMiddleware was added but no
         // validators were registered.
         if self.validators.is_empty() {
-            return self.inner.clone().call(req, ctx).await;
+            return next.run(req, ctx).await;
         }
 
         let started = Instant::now();
@@ -184,7 +171,7 @@ impl LlmService for ValidationService {
         // replay from CacheLookupMiddleware (which sits OUTSIDE retry
         // and therefore outside us). Validators run on raw cached
         // payload exactly the same as on a fresh response.
-        let inner_stream = self.inner.clone().call(req.clone(), ctx).await?;
+        let inner_stream = next.run(req.clone(), ctx).await?;
         let mut builder = ChatResponseBuilder::new();
         let mut events_held = Vec::new();
         let mut s = inner_stream;

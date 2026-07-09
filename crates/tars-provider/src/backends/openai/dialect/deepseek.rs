@@ -33,9 +33,10 @@ impl OpenAiDialect for DeepSeekDialect {
         &self,
         adapter: &OpenAiAdapter,
         req: &ChatRequest,
+        model: &str,
     ) -> Result<Value, ProviderError> {
         // Standard body first — no logic duplicated from the adapter.
-        let mut body = adapter.build_request_default(req)?;
+        let mut body = adapter.build_request_default(req, model)?;
 
         // Then DeepSeek's own thinking toggle.
         let mode = match req.thinking {
@@ -57,7 +58,6 @@ mod tests {
 
     fn req(t: ThinkingMode) -> ChatRequest {
         ChatRequest {
-            model: ModelHint::Explicit("deepseek-v4-flash".into()),
             system: None,
             messages: vec![Message::user_text("hi")],
             tools: vec![],
@@ -87,17 +87,17 @@ mod tests {
         );
 
         let enabled = DeepSeekDialect
-            .build_request(&adapter, &req(ThinkingMode::Auto))
+            .build_request(&adapter, &req(ThinkingMode::Auto), "deepseek-v4-flash")
             .unwrap();
         assert_eq!(enabled["thinking"]["type"], "enabled");
 
         let budget = DeepSeekDialect
-            .build_request(&adapter, &req(ThinkingMode::Budget(1024)))
+            .build_request(&adapter, &req(ThinkingMode::Budget(1024)), "deepseek-v4-flash")
             .unwrap();
         assert_eq!(budget["thinking"]["type"], "enabled");
 
         let disabled = DeepSeekDialect
-            .build_request(&adapter, &req(ThinkingMode::Off))
+            .build_request(&adapter, &req(ThinkingMode::Off), "deepseek-v4-flash")
             .unwrap();
         assert_eq!(disabled["thinking"]["type"], "disabled");
 

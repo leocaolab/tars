@@ -21,7 +21,7 @@ use serde::Deserialize;
 
 use tars_provider::backends::cassette::CassetteProvider;
 use tars_provider::provider::LlmProvider;
-use tars_types::{ChatEvent, ChatRequest, ModelHint, RequestContext, StructuredOutputMode};
+use tars_types::{ChatEvent, ChatRequest, RequestContext, StructuredOutputMode};
 
 const SYSTEM: &str = "You output ONLY a JSON object. No prose, no code fence.";
 const USER: &str = "Rate the severity (0-10 integer) of this bug and summarize it \
@@ -37,7 +37,7 @@ fn cassette_path() -> PathBuf {
 /// matches the cassette entry.
 fn pinned_request() -> ChatRequest {
     let mut req =
-        ChatRequest::user(ModelHint::Explicit("qwen/qwen3-coder-30b".into()), USER).with_system(SYSTEM);
+        ChatRequest::user(USER).with_system(SYSTEM);
     req.max_output_tokens = Some(200);
     req
 }
@@ -47,7 +47,7 @@ async fn replay_text() -> String {
         .expect("cassette file should exist (committed) — run the py example with \
                  TARS_CASSETTE_RECORD=1 to record it");
     let stream = Arc::clone(&provider)
-        .stream(pinned_request(), RequestContext::test_default())
+        .stream(pinned_request(), "test-model", RequestContext::test_default())
         .await
         .expect("replay should not error");
     stream

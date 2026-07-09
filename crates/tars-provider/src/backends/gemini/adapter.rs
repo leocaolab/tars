@@ -87,8 +87,8 @@ impl HttpAdapter for GeminiAdapterWithKey {
         Ok(h)
     }
 
-    fn translate_request(&self, req: &ChatRequest) -> Result<Value, ProviderError> {
-        self.inner.translate_request(req)
+    fn translate_request(&self, req: &ChatRequest, model: &str) -> Result<Value, ProviderError> {
+        self.inner.translate_request(req, model)
     }
 
     fn parse_event(
@@ -272,11 +272,7 @@ impl HttpAdapter for GeminiAdapter {
         Ok(h)
     }
 
-    fn translate_request(&self, req: &ChatRequest) -> Result<Value, ProviderError> {
-        let model = req.model.explicit().ok_or_else(|| {
-            ProviderError::InvalidRequest(format!("model must be explicit, got: {:?}", req.model))
-        })?;
-
+    fn translate_request(&self, req: &ChatRequest, model: &str) -> Result<Value, ProviderError> {
         if req.messages.is_empty() {
             return Err(ProviderError::InvalidRequest(
                 "messages cannot be empty".into(),
@@ -719,20 +715,16 @@ mod tests {
 
     #[test]
     fn empty_messages_rejected_early() {
-        let mut req = ChatRequest::user(
-            tars_types::ModelHint::Explicit("gemini-2.5-pro".into()),
-            "hi",
+        let mut req = ChatRequest::user("hi",
         );
         req.messages.clear();
-        let err = adapter().translate_request(&req).unwrap_err();
+        let err = adapter().translate_request(&req, "gemini-2.5-flash").unwrap_err();
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
     }
 
     #[test]
     fn tool_choice_specific_unknown_name_rejected() {
-        let mut req = ChatRequest::user(
-            tars_types::ModelHint::Explicit("gemini-2.5-pro".into()),
-            "hi",
+        let mut req = ChatRequest::user("hi",
         );
         req.tools = vec![tars_types::ToolSpec {
             name: "real_tool".into(),
@@ -740,18 +732,16 @@ mod tests {
             input_schema: tars_types::JsonSchema::strict("X", serde_json::json!({"type":"object"})),
         }];
         req.tool_choice = tars_types::ToolChoice::Specific("ghost".into());
-        let err = adapter().translate_request(&req).unwrap_err();
+        let err = adapter().translate_request(&req, "gemini-2.5-flash").unwrap_err();
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
     }
 
     #[test]
     fn system_instruction_has_no_role_field() {
-        let req = ChatRequest::user(
-            tars_types::ModelHint::Explicit("gemini-2.5-pro".into()),
-            "hi",
+        let req = ChatRequest::user("hi",
         )
         .with_system("be brief");
-        let body = adapter().translate_request(&req).unwrap();
+        let body = adapter().translate_request(&req, "gemini-2.5-flash").unwrap();
         assert!(body["systemInstruction"].get("role").is_none());
     }
 
@@ -808,27 +798,23 @@ mod tests {
 
     #[test]
     fn system_promotes_to_system_instruction() {
-        let req = ChatRequest::user(
-            tars_types::ModelHint::Explicit("gemini-2.5-pro".into()),
-            "hi",
+        let req = ChatRequest::user("hi",
         )
         .with_system("be brief");
-        let body = adapter().translate_request(&req).unwrap();
+        let body = adapter().translate_request(&req, "gemini-2.5-flash").unwrap();
         assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be brief");
         assert!(body["contents"].is_array());
     }
 
     #[test]
     fn structured_output_sets_response_schema() {
-        let mut req = ChatRequest::user(
-            tars_types::ModelHint::Explicit("gemini-2.5-pro".into()),
-            "json please",
+        let mut req = ChatRequest::user("json please",
         );
         req.structured_output = Some(tars_types::JsonSchema::strict(
             "Resp",
             serde_json::json!({"type":"object"}),
         ));
-        let body = adapter().translate_request(&req).unwrap();
+        let body = adapter().translate_request(&req, "gemini-2.5-flash").unwrap();
         assert_eq!(
             body["generationConfig"]["responseMimeType"],
             "application/json"
@@ -841,11 +827,9 @@ mod tests {
     // request must OMIT `thinkingConfig` rather than force a zero budget.
     #[test]
     fn thinking_off_omits_config_for_thinking_only_model() {
-        let req = ChatRequest::user(
-            tars_types::ModelHint::Explicit("gemini-2.5-pro".into()),
-            "hi",
+        let req = ChatRequest::user("hi",
         );
-        let body = adapter().translate_request(&req).unwrap();
+        let body = adapter().translate_request(&req, "gemini-2.5-pro").unwrap();
         assert!(
             body["generationConfig"]["thinkingConfig"].is_null(),
             "gemini-2.5-pro is thinking-only; thinkingConfig must be omitted, got: {body}"
@@ -855,11 +839,9 @@ mod tests {
     // Flash models can honor Off, so a zero budget is sent to disable thinking.
     #[test]
     fn thinking_off_sets_zero_budget_for_flash() {
-        let req = ChatRequest::user(
-            tars_types::ModelHint::Explicit("gemini-2.5-flash".into()),
-            "hi",
+        let req = ChatRequest::user("hi",
         );
-        let body = adapter().translate_request(&req).unwrap();
+        let body = adapter().translate_request(&req, "gemini-2.5-flash").unwrap();
         assert_eq!(
             body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
             0

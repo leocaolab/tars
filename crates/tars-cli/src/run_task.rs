@@ -128,7 +128,7 @@ pub async fn execute(
         ))
         .layer(RetryMiddleware::default())
         .build();
-    let llm: Arc<dyn LlmService> = Arc::new(pipeline);
+    let llm: LlmService = pipeline;
 
     // Runtime: persistent SQLite by default; in-memory for `--no-trajectory`.
     // run_task needs a real Runtime regardless — even in --no-trajectory mode
@@ -140,9 +140,9 @@ pub async fn execute(
     // every agent currently calls through the same Pipeline so the
     // tier flag already gives some leverage.
     let model = dispatch.model_label.clone();
-    let orchestrator = OrchestratorAgent::new(AgentId::new("orchestrator"), model.clone());
+    let orchestrator = OrchestratorAgent::new(AgentId::new("orchestrator"));
     let worker = build_worker(&args, model.clone())?;
-    let critic = CriticAgent::new(AgentId::new("critic"), model);
+    let critic = CriticAgent::new(AgentId::new("critic"));
 
     let config = RunTaskConfig {
         max_refinements_per_step: args.max_refinements,

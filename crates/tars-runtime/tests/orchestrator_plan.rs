@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use tars_pipeline::{LlmService, Pipeline, ProviderService};
+use tars_pipeline::{LlmService, Pipeline};
 use tars_provider::backends::mock::{CannedResponse, MockProvider};
 use tars_runtime::{
     AgentContext, AgentEvent, AgentOutput, LocalRuntime, OrchestratorAgent, OrchestratorError,
@@ -18,16 +18,16 @@ use tars_storage::{AgentEventLog, SqliteAgentEventLog};
 use tars_types::AgentId;
 use tokio_util::sync::CancellationToken;
 
-fn build_llm(canned_json: &str) -> Arc<dyn LlmService> {
+fn build_llm(canned_json: &str) -> LlmService {
     let mock = MockProvider::new(
         "mock_planner",
         CannedResponse::text(canned_json.to_string()),
     );
-    let inner: Arc<dyn LlmService> = ProviderService::new(mock);
-    Arc::new(Pipeline::builder_with_inner(inner).build())
+    let inner: LlmService = LlmService::of(mock, "gpt-4o");
+    Pipeline::builder_with_inner(inner).build()
 }
 
-fn ctx(llm: Arc<dyn LlmService>) -> AgentContext {
+fn ctx(llm: LlmService) -> AgentContext {
     AgentContext {
         trajectory_id: tars_types::TrajectoryId::new("orch_test_traj"),
         step_seq: 1,
@@ -62,7 +62,7 @@ async fn happy_path_parses_canned_plan() {
         ]
     }"#;
     let llm = build_llm(canned);
-    let agent = OrchestratorAgent::new(AgentId::new("orch"), "gpt-4o");
+    let agent = OrchestratorAgent::new(AgentId::new("orch"));
 
     let plan = agent
         .plan(ctx(llm), "summarise PR #42 for a non-engineer")
@@ -79,7 +79,7 @@ async fn happy_path_parses_canned_plan() {
 #[tokio::test]
 async fn malformed_json_surfaces_decode_error() {
     let llm = build_llm("this is definitely not JSON");
-    let agent = OrchestratorAgent::new(AgentId::new("orch"), "gpt-4o");
+    let agent = OrchestratorAgent::new(AgentId::new("orch"));
 
     let err = agent
         .plan(ctx(llm), "do anything")
@@ -104,7 +104,7 @@ async fn invalid_dependency_graph_surfaces_invalid_plan() {
         ]
     }"#;
     let llm = build_llm(canned);
-    let agent = OrchestratorAgent::new(AgentId::new("orch"), "gpt-4o");
+    let agent = OrchestratorAgent::new(AgentId::new("orch"));
 
     let err = agent.plan(ctx(llm), "x").await.expect_err("should reject");
     match err {
@@ -130,14 +130,14 @@ async fn orchestrator_step_logs_in_trajectory_via_execute_agent_step() {
     let canned = r#"{"plan_id":"p","goal":"x","steps":[]}"#;
     let llm = build_llm(canned);
     let agent: Arc<dyn tars_runtime::Agent> =
-        OrchestratorAgent::new(AgentId::new("orch"), "gpt-4o");
+        OrchestratorAgent::new(AgentId::new("orch"));
 
     let traj = runtime.create_trajectory(None, "orch-test").await.unwrap();
     // Build a planner request manually; we're testing the
     // execute_agent_step ↔ Agent integration, not the typed
     // plan() helper here.
     let req =
-        tars_types::ChatRequest::user(tars_types::ModelHint::Explicit("gpt-4o".into()), "any goal");
+        tars_types::ChatRequest::user("any goal");
 
     let result = execute_agent_step(
         runtime.as_ref(),

@@ -92,15 +92,16 @@ impl LlmProvider for BedrockProvider {
     #[tracing::instrument(
         name = "bedrock.complete",
         skip_all,
-        fields(provider = %self.id, model = %req.model.label()),
+        fields(provider = %self.id, model = %model),
         err(Display),
     )]
     async fn complete(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         _ctx: RequestContext,
     ) -> Result<ChatResponse, ProviderError> {
-        self.client.complete_response(&req).await
+        self.client.complete_response(&req, model).await
     }
 
     /// M1 streaming (Doc 31 §6 C2): real token-by-token `ConverseStream`.
@@ -111,14 +112,15 @@ impl LlmProvider for BedrockProvider {
     #[tracing::instrument(
         name = "bedrock.stream",
         skip_all,
-        fields(provider = %self.id, model = %req.model.label()),
+        fields(provider = %self.id, model = %model),
         err(Display),
     )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        self.client.stream_response(&req).await
+        self.client.stream_response(&req, model).await
     }
 }

@@ -169,16 +169,17 @@ impl LlmProvider for OpenAiProvider {
     #[tracing::instrument(
         name = "openai.stream",
         skip_all,
-        fields(provider = %self.id, model = %req.model.label()),
+        fields(provider = %self.id, model = %model),
         err(Display),
     )]
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
+        model: &str,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
-        stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, ctx).await
+        stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, model, ctx).await
     }
 
     fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn BatchSubmitter>> {
@@ -211,6 +212,7 @@ impl BatchSubmitter for OpenAiProvider {
     async fn submit(
         &self,
         items: Vec<(BatchItemId, ChatRequest)>,
+        model: &str,
         ctx: &RequestContext,
     ) -> Result<BatchJobId, ProviderError> {
         if items.is_empty() {
@@ -222,7 +224,7 @@ impl BatchSubmitter for OpenAiProvider {
         // 1) Build the JSONL input file content.
         let mut jsonl = String::with_capacity(items.len() * 256);
         for (item_id, req) in &items {
-            let body = self.adapter.translate_request(req)?;
+            let body = self.adapter.translate_request(req, model)?;
             let line = serde_json::to_string(&json!({
                 "custom_id": item_id.as_str(),
                 "method": "POST",
@@ -447,7 +449,6 @@ mod dialect_seam_tests {
             .build(http, crate::auth::basic());
 
         let req = ChatRequest {
-            model: ModelHint::Explicit("gpt-4o".into()),
             system: None,
             messages: vec![Message::user_text("hi")],
             tools: vec![],
@@ -462,8 +463,8 @@ mod dialect_seam_tests {
             enable_chat_template_thinking: None,
         };
 
-        let via_dialect = provider.adapter.translate_request(&req).unwrap();
-        let direct = provider.adapter.build_request_default(&req).unwrap();
+        let via_dialect = provider.adapter.translate_request(&req, "gpt-4o").unwrap();
+        let direct = provider.adapter.build_request_default(&req, "gpt-4o").unwrap();
         assert_eq!(
             via_dialect, direct,
             "default dialect must produce the standard body byte-for-byte",
@@ -474,7 +475,6 @@ mod dialect_seam_tests {
 
     fn thinking_req(t: tars_types::ThinkingMode) -> ChatRequest {
         ChatRequest {
-            model: ModelHint::Explicit("deepseek-v4-flash".into()),
             system: None,
             messages: vec![Message::user_text("hi")],
             tools: vec![],
@@ -504,13 +504,13 @@ mod dialect_seam_tests {
 
         let auto = provider
             .adapter
-            .translate_request(&thinking_req(ThinkingMode::Auto))
+            .translate_request(&thinking_req(ThinkingMode::Auto), "gpt-4o")
             .unwrap();
         assert_eq!(auto["thinking"]["type"], "enabled");
 
         let off = provider
             .adapter
-            .translate_request(&thinking_req(ThinkingMode::Off))
+            .translate_request(&thinking_req(ThinkingMode::Off), "gpt-4o")
             .unwrap();
         assert_eq!(off["thinking"]["type"], "disabled");
     }
@@ -526,7 +526,7 @@ mod dialect_seam_tests {
 
         let body = provider
             .adapter
-            .translate_request(&thinking_req(ThinkingMode::Auto))
+            .translate_request(&thinking_req(ThinkingMode::Auto), "gpt-4o")
             .unwrap();
         assert!(body.get("thinking").is_none());
     }

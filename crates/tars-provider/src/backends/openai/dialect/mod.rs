@@ -40,8 +40,9 @@ pub trait OpenAiDialect: Send + Sync {
         &self,
         adapter: &OpenAiAdapter,
         req: &ChatRequest,
+        model: &str,
     ) -> Result<Value, ProviderError> {
-        adapter.build_request_default(req)
+        adapter.build_request_default(req, model)
     }
 
     /// One streaming SSE `data:` line → 0..N canonical [`ChatEvent`]s.

@@ -47,7 +47,7 @@ use tars_provider::backends::gemini::GeminiProviderBuilder;
 use tars_provider::backends::openai::OpenAiProviderBuilder;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
-use tars_types::{ChatRequest, ErrorClass, ModelHint, ProviderError, RequestContext, StopReason};
+use tars_types::{ChatRequest, ErrorClass, ProviderError, RequestContext, StopReason};
 
 // ──────────────────────────────────────────────────────────────────────
 // Per-backend Scenarios — each is a unit struct used as a namespace.
@@ -282,7 +282,7 @@ macro_rules! conformance_suite {
             use super::*;
 
             fn req(model: &str) -> ChatRequest {
-                ChatRequest::user(ModelHint::Explicit(model.into()), "x")
+                ChatRequest::user("x")
             }
 
             // ── 1. Streaming text path ─────────────────────────────────
@@ -292,7 +292,7 @@ macro_rules! conformance_suite {
                 <$scenarios>::mount_streaming_text(&server, "hello world").await;
 
                 let resp = provider
-                    .complete(req(&model), RequestContext::test_default())
+                    .complete(req(&model), "test-model", RequestContext::test_default())
                     .await
                     .expect("complete should succeed");
 
@@ -316,7 +316,7 @@ macro_rules! conformance_suite {
                 <$scenarios>::mount_tool_call(&server, "search", expected_args.clone()).await;
 
                 let resp = provider
-                    .complete(req(&model), RequestContext::test_default())
+                    .complete(req(&model), "test-model", RequestContext::test_default())
                     .await
                     .expect("complete should succeed");
 
@@ -351,7 +351,7 @@ macro_rules! conformance_suite {
                 .await;
 
                 let err = match provider
-                    .stream(req(&model), RequestContext::test_default())
+                    .stream(req(&model), "test-model", RequestContext::test_default())
                     .await
                 {
                     Ok(_) => panic!("expected Auth error"),
@@ -371,7 +371,7 @@ macro_rules! conformance_suite {
                 <$scenarios>::mount_status(&server, 429, "rate limited").await;
 
                 let err = match provider
-                    .stream(req(&model), RequestContext::test_default())
+                    .stream(req(&model), "test-model", RequestContext::test_default())
                     .await
                 {
                     Ok(_) => panic!("expected RateLimited error"),
@@ -391,7 +391,7 @@ macro_rules! conformance_suite {
                 <$scenarios>::mount_status(&server, 503, "service unavailable").await;
 
                 let err = match provider
-                    .stream(req(&model), RequestContext::test_default())
+                    .stream(req(&model), "test-model", RequestContext::test_default())
                     .await
                 {
                     Ok(_) => panic!("expected ModelOverloaded error"),

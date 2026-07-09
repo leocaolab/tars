@@ -10,7 +10,7 @@ use std::fmt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use tars_types::{ChatRequest, ContentBlock, ImageData, Message, ModelHint, RequestContext};
+use tars_types::{ChatRequest, ContentBlock, ImageData, Message, RequestContext};
 
 use crate::error::CacheError;
 
@@ -62,21 +62,24 @@ impl CacheKeyFactory {
 
     /// Build the key. Returns:
     /// - `Ok(key)` — request is cacheable
-    /// - `Err(CacheError::NonDeterministic | UnresolvedTier | UncacheableEnsemble)`
-    ///   — request shouldn't be cached (middleware skips lookup/write)
+    /// - `Err(CacheError::NonDeterministic)` — request shouldn't be
+    ///   cached (middleware skips lookup/write)
     /// - `Err(CacheError::Serialize)` — JSON serialisation failure
     ///   (tools, structured-output schema, tool-call args)
-    pub fn compute(&self, req: &ChatRequest, ctx: &RequestContext) -> Result<CacheKey, CacheError> {
-        // Reject early: stochastic outputs and unresolved routing aren't cacheable.
+    pub fn compute(
+        &self,
+        req: &ChatRequest,
+        model: &str,
+        ctx: &RequestContext,
+    ) -> Result<CacheKey, CacheError> {
+        // Reject early: stochastic outputs aren't cacheable. The model is
+        // passed explicitly (bound at service construction) and is always
+        // a concrete name by the time a request is served, so there is no
+        // unresolved-tier / ensemble case to guard here anymore.
         match req.temperature {
             None => return Err(CacheError::NonDeterministic),
             Some(t) if t != 0.0 => return Err(CacheError::NonDeterministic),
             Some(_) => {}
-        }
-        match &req.model {
-            ModelHint::Tier(_) => return Err(CacheError::UnresolvedTier),
-            ModelHint::Ensemble(_) => return Err(CacheError::UncacheableEnsemble),
-            ModelHint::Explicit(_) => {}
         }
 
         let mut h = Sha256::new();
@@ -98,9 +101,7 @@ impl CacheKeyFactory {
 
         // ── Model identity ─────────────────────────────────────────
         h.update(b"\0MODEL\0");
-        if let ModelHint::Explicit(name) = &req.model {
-            h.update(name.as_bytes());
-        }
+        h.update(model.as_bytes());
 
         // ── Output-determining parameters ──────────────────────────
         h.update(b"\0PARAMS\0");
@@ -155,7 +156,7 @@ impl CacheKeyFactory {
         let debug_label = format!(
             "tenant={} model={} msgs={} scopes={}",
             ctx.tenant_id.as_ref(),
-            req.model.label(),
+            model,
             req.messages.len(),
             scopes.len(),
         );
@@ -312,10 +313,10 @@ fn canonical_json<T: Serialize>(v: &T) -> Result<Vec<u8>, CacheError> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tars_types::{ChatRequest, ModelHint, ModelTier, ThinkingMode};
+    use tars_types::{ChatRequest, ThinkingMode};
 
     fn det_req(prompt: &str) -> ChatRequest {
-        let mut r = ChatRequest::user(ModelHint::Explicit("gpt-4o".into()), prompt);
+        let mut r = ChatRequest::user(prompt);
         r.temperature = Some(0.0);
         r
     }
@@ -344,10 +345,10 @@ mod tests {
     fn identical_requests_produce_identical_keys() {
         let f = CacheKeyFactory::new(1);
         let a = f
-            .compute(&det_req("hi"), &ctx_with_scopes("t1", &["read"]))
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["read"]))
             .unwrap();
         let b = f
-            .compute(&det_req("hi"), &ctx_with_scopes("t1", &["read"]))
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["read"]))
             .unwrap();
         assert_eq!(a.fingerprint, b.fingerprint);
     }
@@ -356,10 +357,10 @@ mod tests {
     fn different_tenants_never_collide_even_with_same_prompt() {
         let f = CacheKeyFactory::new(1);
         let a = f
-            .compute(&det_req("hi"), &ctx_with_scopes("tenantA", &["read"]))
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("tenantA", &["read"]))
             .unwrap();
         let b = f
-            .compute(&det_req("hi"), &ctx_with_scopes("tenantB", &["read"]))
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("tenantB", &["read"]))
             .unwrap();
         assert_ne!(a.fingerprint, b.fingerprint, "tenant must be in the hash");
     }
@@ -371,10 +372,10 @@ mod tests {
         // share a cache slot.
         let f = CacheKeyFactory::new(1);
         let a = f
-            .compute(&det_req("hi"), &ctx_with_scopes("t1", &["scope:a"]))
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["scope:a"]))
             .unwrap();
         let b = f
-            .compute(&det_req("hi"), &ctx_with_scopes("t1", &["scope:b"]))
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["scope:b"]))
             .unwrap();
         assert_ne!(a.fingerprint, b.fingerprint);
     }
@@ -384,10 +385,10 @@ mod tests {
         // Sorted before hashing → ["a","b"] and ["b","a"] should collide.
         let f = CacheKeyFactory::new(1);
         let a = f
-            .compute(&det_req("hi"), &ctx_with_scopes("t1", &["a", "b"]))
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["a", "b"]))
             .unwrap();
         let b = f
-            .compute(&det_req("hi"), &ctx_with_scopes("t1", &["b", "a"]))
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["b", "a"]))
             .unwrap();
         assert_eq!(a.fingerprint, b.fingerprint);
     }
@@ -397,28 +398,15 @@ mod tests {
         let f = CacheKeyFactory::new(1);
         let mut r = det_req("hi");
         r.temperature = Some(0.7);
-        let err = f.compute(&r, &ctx_with_scopes("t", &[])).unwrap_err();
+        let err = f.compute(&r, "gpt-4o", &ctx_with_scopes("t", &[])).unwrap_err();
         assert!(matches!(err, CacheError::NonDeterministic));
 
         // Default (None) is also non-cacheable — the provider's default
         // temperature is unknown.
         let mut r = det_req("hi");
         r.temperature = None;
-        let err = f.compute(&r, &ctx_with_scopes("t", &[])).unwrap_err();
+        let err = f.compute(&r, "gpt-4o", &ctx_with_scopes("t", &[])).unwrap_err();
         assert!(matches!(err, CacheError::NonDeterministic));
-    }
-
-    #[test]
-    fn tier_and_ensemble_are_rejected_with_distinct_errors() {
-        let f = CacheKeyFactory::new(1);
-        let mut r = det_req("hi");
-        r.model = ModelHint::Tier(ModelTier::Fast);
-        let err = f.compute(&r, &ctx_with_scopes("t", &[])).unwrap_err();
-        assert!(matches!(err, CacheError::UnresolvedTier));
-
-        r.model = ModelHint::Ensemble(vec![ModelHint::Explicit("a".into())]);
-        let err = f.compute(&r, &ctx_with_scopes("t", &[])).unwrap_err();
-        assert!(matches!(err, CacheError::UncacheableEnsemble));
     }
 
     #[test]
@@ -427,8 +415,8 @@ mod tests {
         let f2 = CacheKeyFactory::new(2);
         let ctx = ctx_with_scopes("t", &[]);
         assert_ne!(
-            f1.compute(&det_req("hi"), &ctx).unwrap().fingerprint,
-            f2.compute(&det_req("hi"), &ctx).unwrap().fingerprint,
+            f1.compute(&det_req("hi"), "gpt-4o", &ctx).unwrap().fingerprint,
+            f2.compute(&det_req("hi"), "gpt-4o", &ctx).unwrap().fingerprint,
         );
     }
 
@@ -437,8 +425,8 @@ mod tests {
         let f = CacheKeyFactory::new(1);
         let ctx = ctx_with_scopes("t", &[]);
         assert_ne!(
-            f.compute(&det_req("hi"), &ctx).unwrap().fingerprint,
-            f.compute(&det_req("ho"), &ctx).unwrap().fingerprint,
+            f.compute(&det_req("hi"), "gpt-4o", &ctx).unwrap().fingerprint,
+            f.compute(&det_req("ho"), "gpt-4o", &ctx).unwrap().fingerprint,
         );
     }
 
@@ -451,8 +439,8 @@ mod tests {
         let mut r2 = det_req("hi");
         r2.thinking = ThinkingMode::Auto;
         assert_ne!(
-            f.compute(&r1, &ctx).unwrap().fingerprint,
-            f.compute(&r2, &ctx).unwrap().fingerprint,
+            f.compute(&r1, "gpt-4o", &ctx).unwrap().fingerprint,
+            f.compute(&r2, "gpt-4o", &ctx).unwrap().fingerprint,
         );
     }
 
@@ -468,8 +456,8 @@ mod tests {
         let mut r2 = det_req("hi");
         r2.structured_output = Some(tars_types::JsonSchema::strict("R", json!({"type":"array"})));
         assert_ne!(
-            f.compute(&r1, &ctx).unwrap().fingerprint,
-            f.compute(&r2, &ctx).unwrap().fingerprint,
+            f.compute(&r1, "gpt-4o", &ctx).unwrap().fingerprint,
+            f.compute(&r2, "gpt-4o", &ctx).unwrap().fingerprint,
         );
     }
 
@@ -477,7 +465,7 @@ mod tests {
     fn hex_label_is_64_lowercase_chars() {
         let f = CacheKeyFactory::new(1);
         let key = f
-            .compute(&det_req("hi"), &ctx_with_scopes("t", &[]))
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t", &[]))
             .unwrap();
         let h = key.hex();
         assert_eq!(h.len(), 64);
