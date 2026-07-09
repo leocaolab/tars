@@ -1,22 +1,20 @@
-//! M1 — [`DurableScheduler`]: a DB-driven, memoized re-run driver.
+//! [`DurableScheduler`]: a DB-driven, memoized re-run driver.
 //!
 //! Replaces `run_plan`'s in-memory `'schedule` loop
-//! (`tars-runtime/src/executor.rs:768-963`) — the `completed_shared`
-//! map, the `pending`/`tasks` frontier — with a driver whose entire
-//! state is DERIVED from the durable [`AnswerStore`](crate::AnswerStore)
-//! on every pass:
+//! (`tars-runtime/src/executor.rs`) — the `completed_shared` map, the
+//! `pending`/`tasks` frontier — with a driver whose entire state is DERIVED
+//! from the durable [`AnswerStore`] on every pass:
 //!
 //! - **readiness** = a step's `depends_on` all have answers present;
 //! - **skip** = a completed answer is present ⇒ the step is not re-run
 //!   (memoized re-run — the LLM is never re-called);
 //! - **execute** = a ready step runs via the existing
-//!   `Worker::run(plan, step, prior_results, ctx)` seam
-//!   (`executor.rs:153`), and its answer is persisted (M0
-//!   [`DurableStore::commit_step`]) — which unlocks its dependents on
-//!   the next pass.
+//!   `Worker::run(plan, step, prior_results, ctx)` seam, and its answer is
+//!   persisted ([`AnswerStore::commit_step`]) — which unlocks its
+//!   dependents on the next pass.
 //!
-//! `run_plan` stays intact for ephemeral callers; this is the durable
-//! path alongside it, not a replacement.
+//! `run_plan` stays intact for ephemeral callers; this is the durable path
+//! alongside it, not a replacement.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -25,20 +23,23 @@ use std::sync::Arc;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use tars_runtime::{
-    AgentMessage, Plan, PlanStep, Runtime, SandboxPolicy, Worker, WorkerContext, WorkerRegistry,
-};
+use tars_storage::{JOB_STATUS_DONE, ResultEventKind};
 use tars_types::TrajectoryId;
 
-use crate::error::DurableError;
-use crate::store::{DurableStore, ResultEventKind, StepAnswer, JOB_STATUS_DONE};
+use crate::durable::error::DurableError;
+use crate::durable::store::{AnswerStore, StepAnswer};
+use crate::message::AgentMessage;
+use crate::orchestrator::{Plan, PlanStep};
+use crate::executor::{Worker, WorkerContext, WorkerRegistry};
+use crate::runtime::Runtime;
+use tars_tools::SandboxPolicy;
 
-/// Drives durable jobs to completion. Holds the always-on
-/// [`DurableStore`] (the truth), the [`WorkerRegistry`] (the work seam),
-/// and the observability [`Runtime`] (which MAY be events-off — it is
-/// never a correctness dependency).
+/// Drives durable jobs to completion. Holds the always-on [`AnswerStore`]
+/// (the truth), the [`WorkerRegistry`] (the work seam), and the
+/// observability [`Runtime`] (which MAY be events-off — it is never a
+/// correctness dependency).
 pub struct DurableScheduler {
-    store: DurableStore,
+    store: AnswerStore,
     workers: WorkerRegistry,
     /// Observability runtime handed to each `WorkerContext`. Workers emit
     /// their own `StepStarted`/`StepCompleted` here; if events are OFF
@@ -49,7 +50,7 @@ pub struct DurableScheduler {
 }
 
 impl DurableScheduler {
-    pub fn new(store: DurableStore, workers: WorkerRegistry, runtime: Arc<dyn Runtime>) -> Self {
+    pub fn new(store: AnswerStore, workers: WorkerRegistry, runtime: Arc<dyn Runtime>) -> Self {
         Self { store, workers, runtime, sandbox: SandboxPolicy::default(), shared: None }
     }
 
@@ -74,9 +75,9 @@ impl DurableScheduler {
     }
 
     /// (Re-)drive `job_id`'s DAG from the durable store. Idempotent and
-    /// crash-safe: completed steps are skipped (their answers are
-    /// present), only un-done steps execute. Safe to call repeatedly —
-    /// a fully-resolved job is a no-op that marks the job terminal.
+    /// crash-safe: completed steps are skipped (their answers are present),
+    /// only un-done steps execute. Safe to call repeatedly — a
+    /// fully-resolved job is a no-op that marks the job terminal.
     pub async fn run_job(&self, job_id: &str) -> Result<(), DurableError> {
         let plan = self.store.load_plan(job_id)?;
         plan.validate().map_err(|e| DurableError::InvalidPlan(e.to_string()))?;
@@ -197,8 +198,8 @@ impl DurableScheduler {
             .expect("pre-flight ensured every worker_role resolves");
         let ctx = WorkerContext {
             runtime: self.runtime.clone(),
-            // One trajectory per job for the worker's own (off-able)
-            // event emission; the durable checkpoint is separate.
+            // One trajectory per job for the worker's own (off-able) event
+            // emission; the durable checkpoint is separate.
             trajectory_id: TrajectoryId::new(job_id.to_string()),
             cancel: CancellationToken::new(),
             refinements: Vec::new(),

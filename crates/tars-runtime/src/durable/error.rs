@@ -1,29 +1,25 @@
-//! Typed errors for the durable runtime.
+//! Typed errors for the durable runtime driver.
 //!
-//! Errors are carried typed (`#[from]` / `#[source]`) so callers branch
-//! on the variant, never `.to_string().contains(..)`. The blackboard's
-//! own `BbError` (which itself boxes a consumer storage error
-//! downcastably) bubbles up transparently.
+//! Errors are carried typed (`#[from]` / `#[source]`) so callers branch on
+//! the variant, never `.to_string().contains(..)`. The storage layer's own
+//! [`DurableStoreError`] (which itself carries a typed `BbError` /
+//! `rusqlite::Error`) bubbles up transparently.
 
-use tars_runtime::WorkerError;
-use tars_storage::BbError;
+use tars_storage::DurableStoreError;
+
+use crate::worker::WorkerError;
 
 /// Everything that can go wrong submitting or driving a durable job.
 #[derive(Debug, thiserror::Error)]
 pub enum DurableError {
-    /// A write through the always-on blackboard failed (answer + event
-    /// + job-state transaction). Carries the typed [`BbError`].
+    /// A read/write on the always-on durable store failed. Carries the
+    /// typed [`DurableStoreError`].
     #[error("durable store: {0}")]
-    Store(#[from] BbError),
+    Store(#[from] DurableStoreError),
 
-    /// A direct SQLite read/write on the durable store's own tables
-    /// (outside the blackboard `commit` path — e.g. reading the answer
-    /// set, loading a plan).
-    #[error("durable sqlite: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-
-    /// (De)serialising a persisted value (`AgentMessage`, `Usage`,
-    /// `Plan`) to/from its JSON column.
+    /// (De)serialising a persisted value (`AgentMessage`, `Usage`, `Plan`)
+    /// to/from its JSON column — the result-side decode of the store's
+    /// opaque payload. Carries the typed serde error.
     #[error("durable encode/decode: {0}")]
     Serde(#[from] serde_json::Error),
 
@@ -38,8 +34,8 @@ pub enum DurableError {
         source: Box<WorkerError>,
     },
 
-    /// A worker returned a non-`PartialResult` envelope — the answer
-    /// store only checkpoints `AgentMessage::PartialResult`.
+    /// A worker returned a non-`PartialResult` envelope — the answer store
+    /// only checkpoints `AgentMessage::PartialResult`.
     #[error("worker (step `{step_id}`) returned a non-PartialResult message: {got}")]
     UnexpectedOutput { step_id: String, got: String },
 
@@ -57,10 +53,10 @@ pub enum DurableError {
     #[error("job `{0}` not found")]
     JobNotFound(String),
 
-    /// The DAG driver made a full pass with nothing ready to run and
-    /// not every step resolved — steps whose deps never became present.
-    /// `Plan::validate` rules out the cycle that would normally cause
-    /// this, so it is a defensive guard, not an expected state.
+    /// The DAG driver made a full pass with nothing ready to run and not
+    /// every step resolved — steps whose deps never became present.
+    /// `Plan::validate` rules out the cycle that would normally cause this,
+    /// so it is a defensive guard, not an expected state.
     #[error("plan stalled: steps {0:?} never became ready")]
     Stalled(Vec<String>),
 }

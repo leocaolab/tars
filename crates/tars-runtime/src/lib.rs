@@ -37,6 +37,7 @@ mod agent;
 mod bind;
 pub mod check;
 mod critic;
+pub mod durable;
 mod ensemble_agent;
 mod error;
 mod event;
@@ -67,6 +68,10 @@ pub use agent::{
 pub use bind::{BindError, bind};
 pub use check::{CheckResult, CheckRunner, Invariant, MembershipInvariant, ValidatorInvariant};
 pub use critic::{CriticAgent, CriticError, PartialResultRef};
+pub use durable::{
+    AnswerStore, DurableError, DurableScheduler, JOB_STATUS_DONE, JOB_STATUS_RUNNING,
+    ResultEventKind, ResultEventRecord, StepAnswer,
+};
 pub use error::RuntimeError;
 pub use event::{AgentEvent, StepIdempotencyKey, tool_sequence, tool_step_sequence};
 pub use executor::{
