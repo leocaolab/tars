@@ -467,13 +467,11 @@ impl LlmProvider for CircuitBreaker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LlmService;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use futures::StreamExt;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::ModelHint;
 
     /// Fake provider with deterministic outcome. Same shape as the
     /// `routing.rs` test helper but local — keeps the breaker tests

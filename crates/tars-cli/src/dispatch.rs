@@ -25,18 +25,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use std::collections::HashMap;
-
 use anyhow::{Context, Result};
-use clap::{Args, ValueEnum};
+use clap::Args;
 use tars_cache::{CacheRegistry, MemoryCacheRegistry, open_at_path};
 use tars_config::Config;
-use tars_pipeline::{
-    CircuitBreaker, CircuitBreakerConfig, CostPolicy, LatencyPolicy, LatencyStatsRegistry,
-    LlmService, StaticPolicy,
-};
+use tars_pipeline::{CircuitBreaker, CircuitBreakerConfig, LlmService};
 use tars_provider::registry::ProviderRegistry;
-use tars_types::{ModelTier, ProviderId};
+use tars_types::ProviderId;
 
 /// Flags every LLM-calling subcommand shares. Flatten with
 /// `#[command(flatten)] pub dispatch: DispatchArgs` on each
@@ -44,26 +39,9 @@ use tars_types::{ModelTier, ProviderId};
 #[derive(Args, Debug, Clone)]
 pub struct DispatchArgs {
     /// Provider id to route through. Required iff config has > 1
-    /// provider AND `--tier` is not set. Mutually exclusive with
-    /// `--tier`.
-    #[arg(short = 'P', long, conflicts_with = "tier")]
+    /// provider.
+    #[arg(short = 'P', long)]
     pub provider: Option<String>,
-
-    /// Route by model tier instead of picking a single provider.
-    /// Reads the `[routing.tiers]` section from config; tries each
-    /// candidate in order with retriable-error fallback.
-    /// Valid values: `reasoning`, `default`, `fast`, `local`.
-    #[arg(short, long, conflicts_with = "provider", value_parser = parse_tier)]
-    pub tier: Option<ModelTier>,
-
-    /// How to choose among a tier's candidates (B-8). Only meaningful
-    /// with `--tier`. `fallback` (default) tries them in configured
-    /// order; `latency` prefers the fastest observed (learns across
-    /// calls within a process); `cost` prefers the cheapest by static
-    /// pricing; `ensemble` fans out to all in parallel and takes the
-    /// first response.
-    #[arg(long, value_enum, default_value_t = RouteBy::Fallback, requires = "tier")]
-    pub route_by: RouteBy,
 
     /// Override the provider's `default_model`.
     #[arg(short, long)]
@@ -94,24 +72,6 @@ pub struct DispatchArgs {
     pub events_path: Option<PathBuf>,
 }
 
-/// Strategy for choosing among a tier's candidate providers (B-8).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
-pub enum RouteBy {
-    /// Try candidates in configured order; fall back on retriable error.
-    #[default]
-    Fallback,
-    /// Prefer the fastest provider by observed dispatch latency. Learns
-    /// across calls within one process — a single `tars run` has no
-    /// prior data, so it behaves like `fallback` on the first call.
-    Latency,
-    /// Prefer the cheapest provider by static per-request cost estimate.
-    /// Works on the first call (pricing is config, not learned).
-    Cost,
-    /// Hedged fan-out: dispatch to all candidates in parallel, take the
-    /// first to respond. Trades extra calls for lower tail latency.
-    Ensemble,
-}
-
 /// What every subcommand needs to drive the pipeline once per call.
 pub struct Dispatch {
     /// Bottom-of-pipeline service, bound to `model_label`. Subcommands
@@ -121,10 +81,7 @@ pub struct Dispatch {
     /// The concrete model the service is bound to. Resolved from
     /// `--model` or the chosen provider's `default_model`.
     pub model_label: String,
-    /// What to attribute cost against. For single-provider mode this
-    /// is the provider; for tier mode it's the first candidate
-    /// (best-effort approximation until routing surfaces "which
-    /// provider actually answered").
+    /// What to attribute cost against — the single dispatched provider.
     pub cost_provider: Arc<dyn tars_provider::LlmProvider>,
     /// `ProviderId` stamped on cached responses' `origin_provider`.
     pub cache_origin_id: ProviderId,
@@ -132,15 +89,14 @@ pub struct Dispatch {
     pub label: String,
 }
 
-/// Decide the dispatch shape from config + flags.
+/// Decide the dispatch shape from config + flags. Single-provider only:
+/// provider selection (routing / tier / ensemble) is not a pipeline
+/// concern — a caller who wants it composes several `LlmService`s.
 pub fn build_dispatch(
     cfg: &Config,
     registry: &Arc<ProviderRegistry>,
     args: &DispatchArgs,
 ) -> Result<Dispatch> {
-    if let Some(tier) = args.tier {
-        return build_tier_dispatch(cfg, registry, tier, args);
-    }
     build_single_provider_dispatch(cfg, registry, args)
 }
 
@@ -177,105 +133,6 @@ fn build_single_provider_dispatch(
         model_label,
         cost_provider: provider,
         cache_origin_id: provider_id,
-        label,
-    })
-}
-
-fn build_tier_dispatch(
-    cfg: &Config,
-    registry: &Arc<ProviderRegistry>,
-    tier: ModelTier,
-    args: &DispatchArgs,
-) -> Result<Dispatch> {
-    let candidates = cfg.routing.tiers.get(&tier).cloned().unwrap_or_default();
-    if candidates.is_empty() {
-        anyhow::bail!(
-            "routing: tier `{tier:?}` has no candidates configured. \
-             Add `[routing.tiers]\\n{} = [\\\"...\\\"]` to your config.",
-            format!("{tier:?}").to_lowercase(),
-        );
-    }
-    let first = candidates.first().expect("non-empty checked above");
-    // Validate EVERY candidate up front (symmetric), before building
-    // any state. Previously the first candidate was special-cased
-    // (it set `cost_provider`) while the rest went through a separate
-    // loop — same check, two code paths. Validate all here so a
-    // mis-configured later candidate fails identically to a bad first
-    // one, then fetch the cost provider knowing it's present.
-    for c in &candidates {
-        if registry.get(c).is_none() {
-            anyhow::bail!("routing: tier `{tier:?}` candidate `{c}` not in registry");
-        }
-    }
-    // Build the StaticPolicy here, right after candidate validation and
-    // BEFORE the cost-provider/model resolution below. It can fail
-    // (e.g. duplicate/empty candidates), and failing early keeps the
-    // fallible-construction steps grouped — no point resolving a model
-    // label or fetching the cost provider for a policy that can't exist.
-    // Tier→candidates resolution happens at startup; the runtime policy
-    // is StaticPolicy (CLI's req.model is always Explicit, so
-    // TierPolicy's Tier-keyed lookup wouldn't fire).
-    let base = Arc::new(StaticPolicy::new(candidates.clone())?);
-    let cost_provider = registry.get(first).ok_or_else(|| {
-        anyhow::anyhow!("routing: tier `{tier:?}` first candidate `{first}` not in registry")
-    })?;
-    let model_label = args
-        .model
-        .clone()
-        .or_else(|| pick_default_model(cfg, first))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no model: pass --model, or set `default_model` on provider `{first}` (tier `{tier:?}` first candidate)"
-            )
-        })?;
-    if model_label.trim().is_empty() {
-        anyhow::bail!(
-            "model name is empty (from --model or provider `{first}`'s `default_model`); \
-             pass a non-empty --model"
-        );
-    }
-    // The base candidate order is `StaticPolicy`; `--route-by` wraps it
-    // with a B-8 strategy (or swaps in the ensemble dispatch shape).
-    let inner: LlmService = match args.route_by {
-        RouteBy::Fallback => LlmService::routed(registry.clone(), base, model_label.clone()),
-        RouteBy::Latency => {
-            let stats = Arc::new(LatencyStatsRegistry::new(100));
-            let policy = Arc::new(LatencyPolicy::new(base, stats.clone()));
-            LlmService::routed_with_latency_stats(
-                registry.clone(),
-                policy,
-                stats,
-                model_label.clone(),
-            )
-        }
-        RouteBy::Cost => {
-            let mut pricing = HashMap::new();
-            for c in &candidates {
-                if let Some(p) = registry.get(c) {
-                    pricing.insert(c.clone(), p.capabilities().pricing);
-                }
-            }
-            let policy = Arc::new(CostPolicy::new(base, pricing));
-            LlmService::routed(registry.clone(), policy, model_label.clone())
-        }
-        RouteBy::Ensemble => {
-            LlmService::ensemble(registry.clone(), candidates.clone(), model_label.clone())
-        }
-    };
-    let label = format!(
-        "tier `{tier:?}` via {:?} (candidates: {})",
-        args.route_by,
-        candidates
-            .iter()
-            .map(|p| p.as_ref())
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    Ok(Dispatch {
-        inner,
-        model_label,
-        cost_provider,
-        cache_origin_id: first.clone(),
         label,
     })
 }
@@ -372,19 +229,6 @@ pub fn build_cache(explicit: Option<&Path>) -> Result<Arc<dyn CacheRegistry>> {
     }
 }
 
-/// Clap value parser for `--tier` — explicit set of accepted values.
-pub fn parse_tier(s: &str) -> Result<ModelTier, String> {
-    match s.to_ascii_lowercase().as_str() {
-        "reasoning" => Ok(ModelTier::Reasoning),
-        "default" => Ok(ModelTier::Default),
-        "fast" => Ok(ModelTier::Fast),
-        "local" => Ok(ModelTier::Local),
-        _ => Err(format!(
-            "unknown tier `{s}` (valid: reasoning, default, fast, local)"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,67 +277,4 @@ mod tests {
         assert!(err.to_string().contains("multiple"));
     }
 
-    fn tier_args(tier: ModelTier, route_by: RouteBy) -> DispatchArgs {
-        DispatchArgs {
-            provider: None,
-            tier: Some(tier),
-            route_by,
-            model: Some("m".to_string()),
-            no_cache: false,
-            cache_path: None,
-            breaker: false,
-            no_trajectory: false,
-            events_path: None,
-        }
-    }
-
-    #[test]
-    fn build_tier_dispatch_supports_every_route_by_mode() {
-        let c = cfg(r#"
-            [providers.a]
-            type = "mock"
-            canned_response = "x"
-
-            [providers.b]
-            type = "mock"
-            canned_response = "y"
-
-            [routing.tiers]
-            local = ["a", "b"]
-        "#);
-        let reg = build_registry_with_breaker(&c, false).unwrap();
-        for rb in [
-            RouteBy::Fallback,
-            RouteBy::Latency,
-            RouteBy::Cost,
-            RouteBy::Ensemble,
-        ] {
-            let d = build_dispatch(&c, &reg, &tier_args(ModelTier::Local, rb))
-                .unwrap_or_else(|e| panic!("dispatch should build for {rb:?}: {e}"));
-            // Label surfaces both the tier and the chosen strategy.
-            assert!(d.label.contains("Local"), "label: {}", d.label);
-            assert!(d.label.contains(&format!("{rb:?}")), "label: {}", d.label);
-            // cost_provider is the first candidate regardless of strategy.
-            assert_eq!(d.cache_origin_id.as_ref(), "a");
-        }
-    }
-
-    #[test]
-    fn route_by_defaults_to_fallback() {
-        assert_eq!(RouteBy::default(), RouteBy::Fallback);
-    }
-
-    #[test]
-    fn parse_tier_accepts_known_values() {
-        assert_eq!(parse_tier("fast").unwrap(), ModelTier::Fast);
-        assert_eq!(parse_tier("Fast").unwrap(), ModelTier::Fast);
-        assert_eq!(parse_tier("default").unwrap(), ModelTier::Default);
-        assert_eq!(parse_tier("DEFAULT").unwrap(), ModelTier::Default);
-        assert_eq!(parse_tier("reasoning").unwrap(), ModelTier::Reasoning);
-        assert_eq!(parse_tier("REASONING").unwrap(), ModelTier::Reasoning);
-        assert_eq!(parse_tier("local").unwrap(), ModelTier::Local);
-        assert_eq!(parse_tier("Local").unwrap(), ModelTier::Local);
-        assert!(parse_tier("nonsense").is_err());
-        assert!(parse_tier("").is_err());
-    }
 }

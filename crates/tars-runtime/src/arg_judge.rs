@@ -180,13 +180,13 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
-    use tars_pipeline::{LlmService, Pipeline};
+    use tars_pipeline::LlmService;
     use tars_provider::{CannedResponse, MockProvider};
 
     fn judge_with(reply: &str) -> (ArgEquivalenceJudge, Arc<MockProvider>) {
         let mock = MockProvider::new("judge_mock", CannedResponse::text(reply));
         let inner = LlmService::of(mock.clone(), "gpt-4o");
-        let svc = Pipeline::builder_with_inner(inner).build();
+        let svc = LlmService::builder_with_inner(inner).build();
         (
             ArgEquivalenceJudge::new(svc, "judge_mock:m"),
             mock,

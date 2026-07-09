@@ -407,28 +407,35 @@ mod tests {
 
     use serde_json::json;
     use tars_cache::MemoryCacheRegistry;
+    use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{ModelHint, Usage};
+    use tars_types::{Capabilities, Pricing, Usage};
 
-    use crate::Pipeline;
-
-    /// A counting wrapper around MockProvider so we can assert the
+    /// A counting wrapper around a MockProvider so we can assert the
     /// inner provider was (or wasn't) called.
-    struct CountingService {
-        inner: Arc<dyn Service>,
+    struct CountingProvider {
+        id: ProviderId,
+        caps: Capabilities,
+        inner: Arc<dyn LlmProvider>,
         calls: Arc<AtomicU32>,
     }
 
     #[async_trait]
-    impl Service for CountingService {
-        async fn call(
+    impl LlmProvider for CountingProvider {
+        fn id(&self) -> &ProviderId {
+            &self.id
+        }
+        fn capabilities(&self) -> &Capabilities {
+            &self.caps
+        }
+        async fn stream(
             self: Arc<Self>,
             req: ChatRequest,
-                    model: &str,
-        ctx: RequestContext,
+            model: &str,
+            ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.clone().call(req, model, ctx).await
+            self.inner.clone().stream(req, model, ctx).await
         }
     }
 
@@ -447,15 +454,15 @@ mod tests {
         provider: Arc<dyn tars_provider::LlmProvider>,
     ) -> (LlmService, Arc<AtomicU32>) {
         let counter = Arc::new(AtomicU32::new(0));
-        let provider_service: Arc<dyn Service> = LlmService::of(provider, "test-model").chain();
-        let counting: Arc<dyn Service> = Arc::new(CountingService {
-            inner: provider_service,
+        let counting: Arc<dyn LlmProvider> = Arc::new(CountingProvider {
+            id: ProviderId::new("counting"),
+            caps: Capabilities::text_only_baseline(Pricing::default()),
+            inner: provider,
             calls: counter.clone(),
         });
-        let counting = LlmService::from_parts(counting, "test-model", Arc::from([] as [&'static str; 0]));
         let factory = CacheKeyFactory::new(1);
         let mw = CacheLookupMiddleware::new(registry, factory, ProviderId::new("mock_origin"));
-        let pipeline = Pipeline::builder_with_inner(counting).layer(mw).build();
+        let pipeline = LlmService::builder(counting, "test-model").layer(mw).build();
         (pipeline, counter)
     }
 

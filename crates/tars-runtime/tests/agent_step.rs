@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use tars_pipeline::{LlmService, Pipeline};
+use tars_pipeline::LlmService;
 use tars_provider::backends::mock::{CannedResponse, MockProvider};
 use tars_runtime::{
     AgentEvent, AgentExecutionError, AgentOutput, LocalRuntime, Runtime, SingleShotAgent,
@@ -39,7 +39,7 @@ async fn full_stack_agent_step_lands_in_trajectory_log() {
     // a middleware quirk.
     let mock_provider = MockProvider::new("mock_for_agent", CannedResponse::text("hello"));
     let inner: LlmService = LlmService::of(mock_provider, "gpt-4o");
-    let pipeline = Pipeline::builder_with_inner(inner).build();
+    let pipeline = LlmService::builder_with_inner(inner).build();
     let llm: LlmService = pipeline;
 
     let agent = SingleShotAgent::new(AgentId::new("test_agent"));
@@ -117,7 +117,7 @@ async fn agent_failure_writes_step_failed_and_propagates() {
         CannedResponse::Error("upstream is broken".into()),
     );
     let inner: LlmService = LlmService::of(mock_provider, "gpt-4o");
-    let pipeline = Pipeline::builder_with_inner(inner).build();
+    let pipeline = LlmService::builder_with_inner(inner).build();
     let llm: LlmService = pipeline;
 
     let agent = SingleShotAgent::new(AgentId::new("doomed_agent"));
@@ -176,7 +176,7 @@ async fn step_seq_increments_across_multiple_agent_calls() {
     for i in 1..=3 {
         let mock_provider = MockProvider::new("p", CannedResponse::text(format!("turn {i}")));
         let inner: LlmService = LlmService::of(mock_provider, "gpt-4o");
-        let pipeline = Pipeline::builder_with_inner(inner).build();
+        let pipeline = LlmService::builder_with_inner(inner).build();
         let llm: LlmService = pipeline;
 
         execute_agent_step(

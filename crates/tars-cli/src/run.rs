@@ -27,7 +27,7 @@ use clap::Args;
 use futures::StreamExt;
 use tars_cache::{CacheKeyFactory, CachePolicy};
 use tars_pipeline::{
-    CacheLookupMiddleware, Pipeline, RetryMiddleware, TelemetryMiddleware, set_cache_policy,
+    CacheLookupMiddleware, LlmService, RetryMiddleware, TelemetryMiddleware, set_cache_policy,
 };
 use tars_runtime::{AgentEvent, LocalRuntime, Runtime, StepIdempotencyKey};
 use tars_types::{
@@ -79,7 +79,7 @@ pub async fn execute(args: RunArgs, config_path: Option<PathBuf>) -> Result<()> 
     let cache_registry = build_cache(args.dispatch.cache_path.as_deref())?;
     let cache_factory = CacheKeyFactory::new(1);
 
-    let pipeline = Pipeline::builder_with_inner(dispatch.inner.clone())
+    let pipeline = LlmService::builder_with_inner(dispatch.inner.clone())
         .layer(TelemetryMiddleware::new())
         .layer(CacheLookupMiddleware::new(
             cache_registry,
@@ -586,8 +586,6 @@ mod tests {
     fn dispatch_args_default() -> DispatchArgs {
         DispatchArgs {
             provider: None,
-            tier: None,
-            route_by: crate::dispatch::RouteBy::Fallback,
             model: None,
             no_cache: false,
             cache_path: None,

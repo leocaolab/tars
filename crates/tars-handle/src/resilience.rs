@@ -4,7 +4,7 @@
 //! [`tars_pipeline::CircuitBreakerConfig`]).
 //!
 //! This lives in `tars-handle`, the composition layer that already maps
-//! config → [`tars_pipeline::PipelineOpts`], rather than in either leaf crate:
+//! config → [`tars_pipeline::ChainOpts`], rather than in either leaf crate:
 //! `tars-config` is schema-only and must not know the pipeline types, and
 //! `tars-pipeline` is the low-level middleware framework that must not depend
 //! on the config crate (the dependency runs config → pipeline, never the
@@ -24,7 +24,7 @@ use std::time::Duration;
 use tars_config::{BreakerTuning, ResilienceConfig, RetryTuning};
 use tars_pipeline::{CircuitBreakerConfig, RetryConfig};
 
-/// Map a `[resilience]` section onto the two [`tars_pipeline::PipelineOpts`]
+/// Map a `[resilience]` section onto the two [`tars_pipeline::ChainOpts`]
 /// knobs `retry` / `circuit_breaker`.
 ///
 /// - `retry: None` ⇒ `None` ⇒ `default_chain` uses [`RetryConfig::default`].
@@ -32,7 +32,7 @@ use tars_pipeline::{CircuitBreakerConfig, RetryConfig};
 ///
 /// So an empty (or absent) `[resilience]` leaves the pipeline exactly as it is
 /// today; a populated one flows straight into
-/// [`tars_pipeline::Pipeline::default_chain`].
+/// [`tars_pipeline::LlmService::default_chain`].
 pub fn resilience_configs(
     cfg: &ResilienceConfig,
 ) -> (Option<RetryConfig>, Option<CircuitBreakerConfig>) {

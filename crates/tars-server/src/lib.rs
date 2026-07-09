@@ -28,7 +28,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use tars_cache::{CacheRegistry, MemoryCacheRegistry};
-use tars_pipeline::{LlmService, Pipeline, PipelineOpts};
+use tars_pipeline::{ChainOpts, LlmService};
 use tars_provider::LlmProvider;
 use tars_provider::registry::ProviderRegistry;
 use tars_types::{
@@ -138,9 +138,9 @@ impl AppState {
             })?;
         // Build the canonical chain bound to the resolved model, reusing
         // the shared cache registry so cross-request cache survives.
-        let mut opts = PipelineOpts::new(entry.pid.clone());
+        let mut opts = ChainOpts::new(entry.pid.clone());
         opts.cache_registry = Some(entry.cache_registry.clone());
-        let pipeline = Pipeline::default_chain(entry.provider.clone(), model.clone(), opts);
+        let pipeline = LlmService::default_chain(entry.provider.clone(), model.clone(), opts);
         Ok((pipeline, model))
     }
 

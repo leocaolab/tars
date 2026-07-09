@@ -1,4 +1,4 @@
-//! [`Middleware`] trait + [`Pipeline`] / [`PipelineBuilder`].
+//! [`Middleware`] trait + [`Pipeline`] / [`LlmServiceBuilder`].
 //!
 //! See module-level docs on [`crate`] for the design rationale.
 
@@ -27,7 +27,7 @@ pub(crate) mod validation;
 /// a stored `inner` handle.
 ///
 /// The concrete public service is [`LlmService`]; users implement this
-/// trait and add instances via [`PipelineBuilder::layer`]. The **model**
+/// trait and add instances via [`LlmServiceBuilder::layer`]. The **model**
 /// is NOT a call argument: it belongs to the `LlmService`
 /// (`provider + model`), and the layers that need it query it off the
 /// chain cursor via [`Next::model`]. The ones that don't never see it.
@@ -50,18 +50,16 @@ pub trait Middleware: Send + Sync + 'static {
     ) -> Result<LlmEventStream, ProviderError>;
 }
 
-/// Builder-factory namespace for composing an [`LlmService`] middleware
-/// chain. All constructors return the one concrete public service type,
-/// [`LlmService`]; `Pipeline` itself is never a value users hold.
-pub struct Pipeline;
-
-impl Pipeline {
+/// Builder-factory constructors for composing an [`LlmService`]
+/// middleware chain. All constructors return the one concrete public
+/// service type, [`LlmService`].
+impl LlmService {
     /// Start a new builder around a Provider bound to a concrete
     /// `model`. The leaf becomes the innermost service; layers added via
-    /// [`PipelineBuilder::layer`] wrap it from inside out, with the
+    /// [`LlmServiceBuilder::layer`] wrap it from inside out, with the
     /// **first** added layer ending up outermost.
-    pub fn builder(provider: Arc<dyn LlmProvider>, model: impl Into<String>) -> PipelineBuilder {
-        PipelineBuilder {
+    pub fn builder(provider: Arc<dyn LlmProvider>, model: impl Into<String>) -> LlmServiceBuilder {
+        LlmServiceBuilder {
             provider,
             model: model.into(),
             outer_layers: Vec::new(),
@@ -72,10 +70,10 @@ impl Pipeline {
     /// Start a builder from an already-bound [`LlmService`] as the
     /// bottom. The inner service's provider + bound model carry through,
     /// and its existing layers stay innermost; layers added via
-    /// [`PipelineBuilder::layer`] wrap OUTSIDE them.
-    pub fn builder_with_inner(inner: LlmService) -> PipelineBuilder {
+    /// [`LlmServiceBuilder::layer`] wrap OUTSIDE them.
+    pub fn builder_with_inner(inner: LlmService) -> LlmServiceBuilder {
         let (provider, model, inner_layers) = inner.into_parts();
-        PipelineBuilder {
+        LlmServiceBuilder {
             provider,
             model,
             outer_layers: Vec::new(),
@@ -101,7 +99,7 @@ impl Pipeline {
     pub fn default_chain(
         provider: Arc<dyn LlmProvider>,
         model: impl Into<String>,
-        opts: PipelineOpts,
+        opts: ChainOpts,
     ) -> LlmService {
         // CircuitBreaker is a per-provider wrapper (innermost, below
         // Retry): wrap the single provider here so an open breaker
@@ -122,8 +120,8 @@ impl Pipeline {
     /// `LlmService` as `inner` so the same Telemetry / Validation /
     /// Cache / Retry stack sits on top of provider *selection*. Keeps the
     /// layer order in exactly one place.
-    pub fn chain_over(inner: LlmService, opts: PipelineOpts) -> LlmService {
-        let PipelineOpts {
+    pub fn chain_over(inner: LlmService, opts: ChainOpts) -> LlmService {
+        let ChainOpts {
             cache_origin,
             validators,
             events,
@@ -168,19 +166,19 @@ impl Pipeline {
     }
 }
 
-/// Event store pair for [`PipelineOpts::events`].
+/// Event store pair for [`ChainOpts::events`].
 pub struct EventStores {
     pub events: Arc<dyn tars_melt::event::PipelineEventLog>,
     pub records: Arc<dyn tars_melt::event::LlmRecordStore>,
 }
 
-/// Options for [`Pipeline::default_chain`]. Constructed with
-/// [`PipelineOpts::new`] (just a cache origin); each field overridable
+/// Options for [`LlmService::default_chain`]. Constructed with
+/// [`ChainOpts::new`] (just a cache origin); each field overridable
 /// before passing to `default_chain`.
 ///
 /// Marked `non_exhaustive` so adding fields is a non-breaking change.
 #[non_exhaustive]
-pub struct PipelineOpts {
+pub struct ChainOpts {
     /// Cache namespace id. Distinguishes cache buckets across providers
     /// / tenants / config versions. Required: `dyn LlmProvider` doesn't
     /// expose its id, and the cache layer needs one.
@@ -211,7 +209,7 @@ pub struct PipelineOpts {
     pub retry: Option<crate::middleware::retry::RetryConfig>,
 
     /// Per-provider circuit breaker. `None` (default) = no breaker.
-    /// When set, [`Pipeline::default_chain`] wraps the provider with
+    /// When set, [`LlmService::default_chain`] wraps the provider with
     /// [`crate::CircuitBreaker`] (innermost, below Retry): after
     /// `failure_threshold` consecutive open-time failures it opens and
     /// rejects calls for `cooldown` with
@@ -221,7 +219,7 @@ pub struct PipelineOpts {
     /// concurrent callers fast-fail the moment any of them trips it,
     /// which is the point for fan-out workloads (hundreds of concurrent
     /// calls against one provider shouldn't each burn a full retry loop
-    /// when it's down). Ignored by [`Pipeline::chain_over`] — a routed
+    /// when it's down). Ignored by [`LlmService::chain_over`] — a routed
     /// inner has no single provider to wrap; routed callers wrap each
     /// candidate provider individually before building the inner.
     pub circuit_breaker: Option<crate::middleware::circuit_breaker::CircuitBreakerConfig>,
@@ -234,7 +232,7 @@ pub struct PipelineOpts {
     pub cache: bool,
 }
 
-impl PipelineOpts {
+impl ChainOpts {
     /// Minimal opts: only the cache origin specified, everything else
     /// at defaults (no validators, no event store, in-mem cache,
     /// default retry).
@@ -256,8 +254,8 @@ impl PipelineOpts {
 /// add order; `build()` produces an [`LlmService`] whose chain runs the
 /// first-added layer outermost (the order users read top-to-bottom in
 /// code), with any pre-seeded `inner_layers` (from
-/// [`Pipeline::builder_with_inner`]) kept innermost.
-pub struct PipelineBuilder {
+/// [`LlmService::builder_with_inner`]) kept innermost.
+pub struct LlmServiceBuilder {
     provider: Arc<dyn LlmProvider>,
     model: String,
     /// Added via `.layer`, outer→inner in add order.
@@ -266,7 +264,7 @@ pub struct PipelineBuilder {
     inner_layers: Vec<Arc<dyn Middleware>>,
 }
 
-impl PipelineBuilder {
+impl LlmServiceBuilder {
     /// Add a layer. The first call adds the **outermost** layer; the
     /// last call adds the layer closest to the provider.
     pub fn layer<M: Middleware>(mut self, mw: M) -> Self {
@@ -299,30 +297,16 @@ mod tests {
         tag: &'static str,
     }
 
+    #[async_trait]
     impl Middleware for TagLayer {
         fn name(&self) -> &'static str {
             self.tag
         }
-        fn wrap(&self, inner: Arc<dyn Service>) -> Arc<dyn Service> {
-            Arc::new(TagService {
-                inner,
-                tag: self.tag,
-            })
-        }
-    }
-
-    struct TagService {
-        inner: Arc<dyn Service>,
-        tag: &'static str,
-    }
-
-    #[async_trait]
-    impl Service for TagService {
-        async fn call(
-            self: Arc<Self>,
+        async fn handle(
+            &self,
             req: ChatRequest,
-                    model: &str,
-        ctx: RequestContext,
+            ctx: RequestContext,
+            next: Next<'_>,
         ) -> Result<LlmEventStream, ProviderError> {
             // Append our tag to the attributes so tests can read order.
             {
@@ -337,14 +321,14 @@ mod tests {
                     s.push_str(self.tag);
                 }
             }
-            self.inner.clone().call(req, model, ctx).await
+            next.run(req, ctx).await
         }
     }
 
     #[tokio::test]
     async fn first_added_layer_is_outermost() {
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let pipeline = Pipeline::builder(mock, "test-model")
+        let pipeline = LlmService::builder(mock, "test-model")
             .layer(TagLayer { tag: "outer" })
             .layer(TagLayer { tag: "middle" })
             .layer(TagLayer { tag: "inner" })
@@ -393,10 +377,10 @@ mod tests {
             SqliteLlmRecordStore::open(SqliteLlmRecordStoreConfig::new(dir.path().join("bd.db"))).unwrap();
 
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let mut opts = PipelineOpts::new(ProviderId::new("p"));
+        let mut opts = ChainOpts::new(ProviderId::new("p"));
         opts.validators = vec![Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>];
         opts.events = Some(EventStores { events, records });
-        let pipeline = Pipeline::default_chain(mock, "test-model", opts);
+        let pipeline = LlmService::default_chain(mock, "test-model", opts);
 
         // Outermost → innermost.
         assert_eq!(
@@ -415,8 +399,8 @@ mod tests {
     async fn default_chain_skips_validation_and_event_emitter_when_unset() {
         use tars_types::ProviderId;
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let opts = PipelineOpts::new(ProviderId::new("p"));
-        let pipeline = Pipeline::default_chain(mock, "test-model", opts);
+        let opts = ChainOpts::new(ProviderId::new("p"));
+        let pipeline = LlmService::default_chain(mock, "test-model", opts);
         assert_eq!(
             pipeline.layer_names(),
             &["telemetry", "cache_lookup", "retry"]
@@ -427,9 +411,9 @@ mod tests {
     async fn default_chain_omits_cache_when_disabled() {
         use tars_types::ProviderId;
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let mut opts = PipelineOpts::new(ProviderId::new("p"));
+        let mut opts = ChainOpts::new(ProviderId::new("p"));
         opts.cache = false;
-        let pipeline = Pipeline::default_chain(mock, "test-model", opts);
+        let pipeline = LlmService::default_chain(mock, "test-model", opts);
         // cache_lookup dropped; the rest of the canonical order stands.
         assert_eq!(pipeline.layer_names(), &["telemetry", "retry"]);
     }
@@ -477,7 +461,7 @@ mod tests {
             hits: hits.clone(),
         });
 
-        let mut opts = PipelineOpts::new(ProviderId::new("p"));
+        let mut opts = ChainOpts::new(ProviderId::new("p"));
         opts.cache = false;
         opts.retry = Some(crate::middleware::retry::RetryConfig {
             max_attempts: 1,
@@ -493,7 +477,7 @@ mod tests {
             failure_threshold: 2,
             cooldown: Duration::from_secs(30),
         });
-        let pipeline = Arc::new(Pipeline::default_chain(provider, "test-model", opts));
+        let pipeline = Arc::new(LlmService::default_chain(provider, "test-model", opts));
 
         let req = || ChatRequest::user("x");
         // Two failures trip the breaker (both reach the provider).
@@ -514,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn empty_pipeline_passes_through_to_provider() {
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let pipeline = Pipeline::builder(mock, "test-model").build();
+        let pipeline = LlmService::builder(mock, "test-model").build();
         assert!(pipeline.layer_names().is_empty());
 
         let mut s = Arc::new(pipeline)

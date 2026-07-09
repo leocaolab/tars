@@ -26,7 +26,7 @@ use tars_handle::{
     WorkspaceResolution, resolve_workspace_root as rs_resolve_root,
     workspace_store_dir as rs_store_dir,
 };
-use tars_pipeline::{LlmService, Pipeline as RsPipeline, PipelineOpts};
+use tars_pipeline::{ChainOpts, LlmService};
 use tars_provider::{LlmProvider, ProviderRegistry};
 use tars_types::{ProviderId, RequestContext};
 
@@ -78,8 +78,8 @@ pub fn provider(role: String, ctx: Option<JsContext>) -> napi::Result<Provider, 
 #[napi]
 pub fn pipeline(role: String, ctx: Option<JsContext>) -> napi::Result<Pipeline, String> {
     let (id, prov, model) = resolve_global(&role)?;
-    let opts = PipelineOpts::new(ProviderId::new(id.clone()));
-    let inner = RsPipeline::default_chain(prov, model, opts);
+    let opts = ChainOpts::new(ProviderId::new(id.clone()));
+    let inner = LlmService::default_chain(prov, model, opts);
     let ctx = ctx.map(build_context).unwrap_or_else(default_context);
     Ok(Pipeline::from_service(id, inner, ctx))
 }

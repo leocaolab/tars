@@ -24,8 +24,8 @@ const STARTER_TEMPLATE: &str = r#"# tars provider registry — user-level.
 #
 # Default config path resolved by tars_config::default_config_path().
 # Any tars consumer (CLI, downstream Python, scripts, future tools) that calls
-# Pipeline::from_default(...) reads this file. Per-project override is
-# always available via Pipeline::from_config(explicit_path, provider_id).
+# LlmService::from_default(...) reads this file. Per-project override is
+# always available via LlmService::from_config(explicit_path, provider_id).
 #
 # Schema reference: see crates/tars-config/src/providers.rs.
 # Auth shape:

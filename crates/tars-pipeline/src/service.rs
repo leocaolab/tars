@@ -91,13 +91,13 @@ impl LlmService {
 
     /// Split into `(provider, model, layers)`. Crate-internal: lets the
     /// builder re-seat an already-built service as the inner stack under
-    /// additional outer layers ([`crate::Pipeline::builder_with_inner`]).
+    /// additional outer layers ([`crate::LlmService::builder_with_inner`]).
     pub(crate) fn into_parts(self) -> (Arc<dyn LlmProvider>, String, Vec<Arc<dyn Middleware>>) {
         (self.provider, self.model, self.layers)
     }
 
     /// Assemble from a provider + bound model + an outer→inner layer
-    /// stack. Crate-internal: the [`crate::PipelineBuilder`] produces the
+    /// stack. Crate-internal: the [`crate::LlmServiceBuilder`] produces the
     /// layer stack and hands it here.
     pub(crate) fn compose(
         provider: Arc<dyn LlmProvider>,

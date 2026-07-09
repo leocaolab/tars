@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::stream;
 
-use tars_pipeline::{LlmService, Pipeline};
+use tars_pipeline::LlmService;
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{
     AgentEvent, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, Runtime, WorkerAgent,
@@ -262,7 +262,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 4. Pipeline + Runtime (SQLite event store on tempdir).
     let provider_svc: LlmService = LlmService::of(provider, "demo-model");
-    let llm: LlmService = Pipeline::builder_with_inner(provider_svc).build();
+    let llm: LlmService = LlmService::builder_with_inner(provider_svc).build();
     let events_path = dir.path().join("events.sqlite");
     let store: Arc<dyn AgentEventLog> =
         SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(&events_path))?;

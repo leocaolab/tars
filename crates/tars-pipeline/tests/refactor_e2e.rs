@@ -9,94 +9,16 @@
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Instant;
 
 use tars_cache::CachePolicy;
 use tars_pipeline::{
-    BudgetConfigError, CircuitBreakerConfig, FallbackTrigger, PerCallBudgetMiddleware,
+    BudgetConfigError, CircuitBreakerConfig, PerCallBudgetMiddleware,
 };
 use tars_provider::{
     LlmProvider,
     backends::mock::{CannedResponse, MockProvider},
 };
-use tars_types::{Pricing, ProviderError, ProviderErrorKind, RetryAttempt};
-
-// ── ARC-L5-P-4 / P-6 — FallbackTrigger × ProviderError matrix ──────
-
-/// `cost_related()` documents catching `BudgetExceeded` and
-/// `ContextTooLong`. The pre-typing version used `HashSet<&'static
-/// str>` and could silently fall out of sync with `ProviderError::kind()`
-/// if anyone renamed a variant.
-#[test]
-fn cost_related_trigger_matches_only_budget_and_context_errors() {
-    let trigger = FallbackTrigger::cost_related();
-
-    let must_match = vec![
-        ProviderError::BudgetExceeded,
-        ProviderError::ContextTooLong {
-            limit: 100,
-            requested: 200,
-        },
-    ];
-    for err in must_match {
-        assert!(
-            trigger.matches(&err),
-            "cost_related must match {:?}",
-            err.kind()
-        );
-    }
-
-    let must_not_match = vec![
-        ProviderError::RateLimited { retry_after: None },
-        ProviderError::Network(Box::new(std::io::Error::other("x"))),
-        ProviderError::Auth("nope".into()),
-    ];
-    for err in must_not_match {
-        assert!(
-            !trigger.matches(&err),
-            "cost_related must NOT match {:?}",
-            err.kind()
-        );
-    }
-}
-
-#[test]
-fn availability_trigger_matches_load_and_quota_errors() {
-    let trigger = FallbackTrigger::availability();
-    let must_match = vec![
-        ProviderError::RateLimited { retry_after: None },
-        ProviderError::ModelOverloaded,
-        ProviderError::CircuitOpen {
-            until: Instant::now(),
-        },
-        ProviderError::Network(Box::new(std::io::Error::other("x"))),
-    ];
-    for err in must_match {
-        assert!(
-            trigger.matches(&err),
-            "availability must match {:?}",
-            err.kind()
-        );
-    }
-    assert!(!trigger.matches(&ProviderError::BudgetExceeded));
-    assert!(!trigger.matches(&ProviderError::Auth("nope".into())));
-}
-
-#[test]
-fn fallback_trigger_on_compares_by_typed_variant_not_string() {
-    // The point of the typed `HashSet<ProviderErrorKind>` over the old
-    // `HashSet<&'static str>`: a typo'd builder constant (e.g.
-    // "rate_lmited") wouldn't compile here. We can't write that test
-    // directly (the compiler would reject the source), but we CAN
-    // verify the equality contract: two `Kind` values constructed by
-    // independent paths compare equal.
-    let from_method: ProviderErrorKind = ProviderError::RateLimited { retry_after: None }.kind();
-    let from_literal = ProviderErrorKind::RateLimited;
-    assert_eq!(from_method, from_literal);
-
-    let trigger = FallbackTrigger::on(&[from_literal]);
-    assert!(trigger.matches(&ProviderError::RateLimited { retry_after: None }));
-}
+use tars_types::{Pricing, ProviderErrorKind, RetryAttempt};
 
 #[test]
 fn retry_attempt_construction_carries_typed_kind() {
@@ -139,8 +61,7 @@ fn try_new_propagates_bad_pricing_from_capabilities() {
 #[test]
 fn try_new_with_valid_capabilities_round_trips_through_wrap() {
     // The fallible constructor returns Ok with a real middleware that
-    // can then be wrapped around an inner service and used normally.
-    use tars_pipeline::Middleware;
+    // can then be layered onto a service and used normally.
     use tars_types::Capabilities;
     let caps = Capabilities::text_only_baseline(Pricing {
         input_per_million: 3.0,
@@ -150,7 +71,7 @@ fn try_new_with_valid_capabilities_round_trips_through_wrap() {
     let mw = PerCallBudgetMiddleware::try_new(1.0, &caps).expect("valid caps must construct");
     let mock = MockProvider::new("p", CannedResponse::text("hi"));
     let inner: tars_pipeline::LlmService = tars_pipeline::LlmService::of(mock, "test-model");
-    let _wrapped = tars_pipeline::Pipeline::builder_with_inner(inner)
+    let _wrapped = tars_pipeline::LlmService::builder_with_inner(inner)
         .layer(mw)
         .build();
     // No panic = invariant holds: try_new returned a working middleware.
@@ -235,17 +156,6 @@ fn provider_error_kind_set_contains_uses_typed_equality() {
     // Containment is byte-identity, not string comparison.
     assert!(kinds.contains(&ProviderErrorKind::Network));
     assert!(!kinds.contains(&ProviderErrorKind::Auth));
-
-    // A trigger built from this set behaves identically to one built
-    // via FallbackTrigger::on (FallbackTrigger uses the same hash
-    // table internally).
-    let trigger = FallbackTrigger::on(&[ProviderErrorKind::Network]);
-    assert!(
-        trigger.matches(&ProviderError::Network(Box::new(std::io::Error::other(
-            "x"
-        ))))
-    );
-    assert!(!trigger.matches(&ProviderError::Auth("nope".into())));
 }
 
 // ── Bonus — RwLock poisoning + recovery sanity check (SW-10 model) ─

@@ -104,7 +104,7 @@ fn list_dir(path: &Path) -> Result<fs::ReadDir> {
 }
 
 use tars_pipeline::{
-    JsonShapeValidator, LlmService, MaxLengthValidator, NotEmptyValidator, Pipeline, PipelineOpts,
+    ChainOpts, JsonShapeValidator, LlmService, MaxLengthValidator, NotEmptyValidator,
 };
 use tars_runtime::trajectory_match::{self, MatchMode, ToolStep};
 use tars_runtime::{
@@ -804,10 +804,10 @@ async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<
     let judge_provider = registry
         .get(&judge_pid)
         .ok_or_else(|| anyhow::anyhow!("judge provider `{}` not in config", args.judge))?;
-    let judge_pipeline = Pipeline::default_chain(
+    let judge_pipeline = LlmService::default_chain(
         judge_provider,
         args.judge_model.clone().unwrap_or_default(),
-        PipelineOpts::new(judge_pid.clone()),
+        ChainOpts::new(judge_pid.clone()),
     );
     let judge = LlmJudge::new(
         judge_pipeline,
@@ -1333,10 +1333,10 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
     //    namespace is unique-per-run so cases don't unexpectedly hit
     //    each other across runs (and we still get intra-run cache
     //    benefits if cases share prompts — rare but free).
-    let pipeline = Pipeline::default_chain(
+    let pipeline = LlmService::default_chain(
         provider,
         args.model.clone().unwrap_or_default(),
-        PipelineOpts::new(provider_id.clone()),
+        ChainOpts::new(provider_id.clone()),
     );
 
     // 2b. Build checks from --check specs. trajectory-match:* specs are
@@ -1384,10 +1384,10 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         let jprov = registry
             .get(&jpid)
             .ok_or_else(|| anyhow::anyhow!("judge provider `{jp}` not in config"))?;
-        let jpipeline = Pipeline::default_chain(
+        let jpipeline = LlmService::default_chain(
             jprov,
             args.judge_model.clone().unwrap_or_default(),
-            PipelineOpts::new(jpid.clone()),
+            ChainOpts::new(jpid.clone()),
         );
         let jid = format!("{}:{}", jp, args.judge_model.as_deref().unwrap_or("default"));
         Some(ArgEquivalenceJudge::new(jpipeline, jid))

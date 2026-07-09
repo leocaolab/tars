@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use tars_pipeline::{LlmService, Pipeline};
+use tars_pipeline::LlmService;
 use tars_provider::backends::mock::{CannedResponse, MockProvider};
 use tars_runtime::{
     AgentContext, AgentMessage, CriticAgent, CriticError, PartialResultRef, Plan, PlanStep,
@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 fn build_llm(canned_json: &str) -> LlmService {
     let mock = MockProvider::new("mock_critic", CannedResponse::text(canned_json.to_string()));
     let inner: LlmService = LlmService::of(mock, "gpt-4o");
-    Pipeline::builder_with_inner(inner).build()
+    LlmService::builder_with_inner(inner).build()
 }
 
 fn ctx(llm: LlmService) -> AgentContext {
@@ -33,6 +33,8 @@ fn ctx(llm: LlmService) -> AgentContext {
         permissions: Default::default(),
         readable_roots: Vec::new(),
         sandbox: Default::default(),
+        llm_request_ctx: None,
+        stream_hooks: None,
     }
 }
 

@@ -32,7 +32,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use tars_cache::CacheKeyFactory;
 use tars_pipeline::{
-    CacheLookupMiddleware, LlmService, Pipeline, RetryMiddleware, TelemetryMiddleware,
+    CacheLookupMiddleware, LlmService, RetryMiddleware, TelemetryMiddleware,
 };
 use tars_runtime::{
     AgentMessage, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, RunTaskError,
@@ -119,7 +119,7 @@ pub async fn execute(
     // agents means deterministic re-runs hit the cache cleanly).
     let cache_registry = build_cache(args.dispatch.cache_path.as_deref())?;
     let cache_factory = CacheKeyFactory::new(1);
-    let pipeline = Pipeline::builder_with_inner(dispatch.inner.clone())
+    let pipeline = LlmService::builder_with_inner(dispatch.inner.clone())
         .layer(TelemetryMiddleware::new())
         .layer(CacheLookupMiddleware::new(
             cache_registry,

@@ -16,7 +16,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream;
 
-use tars_pipeline::{LlmService, Pipeline};
+use tars_pipeline::LlmService;
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{AgentContext, Budget, Session, SessionOptions, WorkerAgent};
 use tars_tools::{
@@ -74,7 +74,7 @@ impl LlmProvider for EventQueueProvider {
 
 fn build_llm(provider: Arc<EventQueueProvider>) -> LlmService {
     let inner: LlmService = LlmService::of(provider, "gpt-4o");
-    Pipeline::builder_with_inner(inner).build()
+    LlmService::builder_with_inner(inner).build()
 }
 
 fn write_call_events(path: &str, content: &str) -> Vec<ChatEvent> {
@@ -177,6 +177,8 @@ async fn same_tool_runs_identically_via_session_and_worker() {
         permissions: Default::default(),
         readable_roots: Vec::new(),
         sandbox: Default::default(),
+        llm_request_ctx: None,
+        stream_hooks: None,
     };
     worker
         .execute_step(ctx, &plan, &plan.steps[0], &[])

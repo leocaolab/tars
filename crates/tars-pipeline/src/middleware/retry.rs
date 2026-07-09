@@ -333,29 +333,39 @@ mod tests {
     use super::*;
     use crate::LlmService;
     use async_trait::async_trait;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
 
     use futures::StreamExt;
+    use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{ChatEvent, ModelHint};
+    use tars_types::{Capabilities, ChatEvent, Pricing, ProviderId};
 
-    /// A fake `LlmService` whose first N calls return an error of the
+    /// A fake `LlmProvider` whose first N calls return an error of the
     /// caller's choosing; subsequent calls delegate to a Mock provider.
     struct FailNTimes {
+        id: ProviderId,
+        caps: Capabilities,
         remaining: AtomicU32,
         error_factory: Box<dyn Fn() -> ProviderError + Send + Sync>,
-        ok_inner: Arc<dyn Service>,
+        ok_inner: Arc<dyn LlmProvider>,
         observed: Arc<AtomicU32>,
     }
 
     #[async_trait]
-    impl Service for FailNTimes {
-        async fn call(
+    impl LlmProvider for FailNTimes {
+        fn id(&self) -> &ProviderId {
+            &self.id
+        }
+        fn capabilities(&self) -> &Capabilities {
+            &self.caps
+        }
+        async fn stream(
             self: Arc<Self>,
             req: ChatRequest,
-                    model: &str,
-        ctx: RequestContext,
+            model: &str,
+            ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             self.observed.fetch_add(1, Ordering::SeqCst);
             // Atomically decrement only while a failure budget remains —
@@ -370,7 +380,7 @@ mod tests {
             if decremented {
                 return Err((self.error_factory)());
             }
-            self.ok_inner.clone().call(req, model, ctx).await
+            self.ok_inner.clone().stream(req, model, ctx).await
         }
     }
 
@@ -378,17 +388,19 @@ mod tests {
         fails: u32,
         err: impl Fn() -> ProviderError + Send + Sync + 'static,
         retry: RetryMiddleware,
-    ) -> (Arc<dyn Service>, Arc<AtomicU32>) {
+    ) -> (LlmService, Arc<AtomicU32>) {
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
         let observed = Arc::new(AtomicU32::new(0));
-        let failer: Arc<dyn Service> = Arc::new(FailNTimes {
+        let failer: Arc<dyn LlmProvider> = Arc::new(FailNTimes {
+            id: ProviderId::new("failer"),
+            caps: Capabilities::text_only_baseline(Pricing::default()),
             remaining: AtomicU32::new(fails),
             error_factory: Box::new(err),
-            ok_inner: inner,
+            ok_inner: mock,
             observed: observed.clone(),
         });
-        (retry.wrap(failer), observed)
+        let svc = LlmService::builder(failer, "test-model").layer(retry).build();
+        (svc, observed)
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -400,7 +412,7 @@ mod tests {
         );
         let mut s = svc
             .call(
-                ChatRequest::user("x"), "m",
+                ChatRequest::user("x"),
                 RequestContext::test_default(),
             )
             .await
@@ -438,7 +450,7 @@ mod tests {
         );
         let err = match svc
             .call(
-                ChatRequest::user("x"), "m",
+                ChatRequest::user("x"),
                 RequestContext::test_default(),
             )
             .await
@@ -472,7 +484,7 @@ mod tests {
         );
         let result = svc
             .call(
-                ChatRequest::user("x"), "m",
+                ChatRequest::user("x"),
                 RequestContext::test_default(),
             )
             .await;
@@ -504,7 +516,7 @@ mod tests {
 
         // Cancel after first failure but during backoff.
         let task = tokio::spawn(async move {
-            svc.call(ChatRequest::user("x"), "m", ctx)
+            svc.call(ChatRequest::user("x"), ctx)
                 .await
         });
 
@@ -545,7 +557,7 @@ mod tests {
         );
         let err = svc
             .call(
-                ChatRequest::user("x"), "m",
+                ChatRequest::user("x"),
                 RequestContext::test_default(),
             )
             .await
@@ -587,7 +599,7 @@ mod tests {
         );
         let ctx = RequestContext::test_default();
         let req = ChatRequest::user("x");
-        let task = tokio::spawn(svc.call(req, "m", ctx));
+        let task = tokio::spawn(async move { svc.call(req, ctx).await });
 
         tokio::time::advance(Duration::from_millis(100)).await;
         assert_eq!(observed.load(Ordering::SeqCst), 1);
@@ -615,7 +627,7 @@ mod tests {
         );
         let ctx = RequestContext::test_default();
         let req = ChatRequest::user("x");
-        let task = tokio::spawn(svc.call(req, "m", ctx));
+        let task = tokio::spawn(async move { svc.call(req, ctx).await });
 
         // Without advancing time the sleep would block forever in
         // start_paused mode. Advance past 2s and the retry should fire.

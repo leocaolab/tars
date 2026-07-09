@@ -15,15 +15,13 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tars_provider::backends::mock::{CannedResponse, MockProvider};
 use tars_types::{
-    ChatRequest, ChatResponse, ModelHint, OutcomeSummary, ProviderError, RequestContext,
-    ValidationOutcome, ValidationReason,
+    ChatRequest, ChatResponse, OutcomeSummary, ProviderError, RequestContext, ValidationOutcome,
+    ValidationReason,
 };
 
 use super::builtin::{JsonShapeValidator, MaxLengthValidator, NotEmptyValidator};
 use super::{OutputValidator, ValidationMiddleware};
-use crate::middleware::Middleware;
 use crate::service::LlmService;
-use crate::service::{Service};
 
 // ── Built-in validator unit tests ────────────────────────────────────
 
@@ -179,15 +177,14 @@ async fn drain(s: tars_provider::LlmEventStream) -> Vec<tars_types::ChatEvent> {
 #[tokio::test]
 async fn validation_passes_through_when_validators_pass() {
     let mock = MockProvider::new("mock", CannedResponse::text("hello world"));
-    let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
     let mw = ValidationMiddleware::new(vec![
         Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
     ]);
-    let svc = mw.wrap(inner);
+    let svc = LlmService::builder(mock, "test-model").layer(mw).build();
     let ctx = RequestContext::test_default();
     let outcome_handle = ctx.validation_outcome.clone();
 
-    let stream = svc.call(fake_req(), "m", ctx).await.expect("stream should open");
+    let stream = svc.call(fake_req(), ctx).await.expect("stream should open");
     let events = drain(stream).await;
     assert!(!events.is_empty());
 
@@ -204,12 +201,11 @@ async fn validation_passes_through_when_validators_pass() {
 async fn validation_reject_surfaces_validation_failed_error() {
     // Mock with empty text — NotEmpty will reject.
     let mock = MockProvider::new("mock", CannedResponse::text(""));
-    let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
     let mw = ValidationMiddleware::new(vec![
         Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
     ]);
-    let svc = mw.wrap(inner);
-    let result = svc.call(fake_req(), "m", RequestContext::test_default()).await;
+    let svc = LlmService::builder(mock, "test-model").layer(mw).build();
+    let result = svc.call(fake_req(), RequestContext::test_default()).await;
     match result {
         Ok(_) => panic!("expected Err, got Ok stream"),
         Err(ProviderError::ValidationFailed { validator, .. }) => {
@@ -243,13 +239,12 @@ async fn validation_chain_runs_in_order_and_short_circuits_on_reject() {
         }
     }
     let mock = MockProvider::new("mock", CannedResponse::text("definitely not JSON"));
-    let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
     let mw = ValidationMiddleware::new(vec![
         Arc::new(JsonShapeValidator::new()) as Arc<dyn OutputValidator>,
         Arc::new(Trap),
     ]);
-    let svc = mw.wrap(inner);
-    let result = svc.call(fake_req(), "m", RequestContext::test_default()).await;
+    let svc = LlmService::builder(mock, "test-model").layer(mw).build();
+    let result = svc.call(fake_req(), RequestContext::test_default()).await;
     match result {
         Err(ProviderError::ValidationFailed { validator, .. }) => {
             assert_eq!(validator, "json_shape");
@@ -264,16 +259,15 @@ async fn validation_chain_runs_in_order_and_short_circuits_on_reject() {
 async fn validation_filter_modifies_response_subsequent_validators_see_filtered() {
     // Truncate to 5 chars then check NotEmpty (should still pass).
     let mock = MockProvider::new("mock", CannedResponse::text("hello world"));
-    let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
     let mw = ValidationMiddleware::new(vec![
         Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>,
         Arc::new(NotEmptyValidator::new()),
     ]);
-    let svc = mw.wrap(inner);
+    let svc = LlmService::builder(mock, "test-model").layer(mw).build();
     let ctx = RequestContext::test_default();
     let outcome_handle = ctx.validation_outcome.clone();
     let collected: Vec<_> = svc
-        .call(fake_req(), "m", ctx)
+        .call(fake_req(), ctx)
         .await
         .expect("should succeed")
         .collect()
@@ -303,15 +297,14 @@ async fn validation_filter_modifies_response_subsequent_validators_see_filtered(
 #[tokio::test]
 async fn validation_annotate_stores_metrics_in_summary() {
     let mock = MockProvider::new("mock", CannedResponse::text("anything"));
-    let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
     let mw = ValidationMiddleware::new(vec![Arc::new(AnnotatingValidator {
         name_: "annot".into(),
         metric_value: 42,
     }) as Arc<dyn OutputValidator>]);
-    let svc = mw.wrap(inner);
+    let svc = LlmService::builder(mock, "test-model").layer(mw).build();
     let ctx = RequestContext::test_default();
     let outcome_handle = ctx.validation_outcome.clone();
-    let stream = match svc.call(fake_req(), "m", ctx).await {
+    let stream = match svc.call(fake_req(), ctx).await {
         Ok(s) => s,
         Err(e) => panic!("expected Ok stream, got Err: {e:?}"),
     };
@@ -332,13 +325,12 @@ async fn validation_annotate_stores_metrics_in_summary() {
 #[tokio::test]
 async fn validation_empty_chain_passes_through_without_drain() {
     let mock = MockProvider::new("mock", CannedResponse::text("hi"));
-    let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
     let mw = ValidationMiddleware::new(Vec::<Arc<dyn OutputValidator>>::new()); // no validators
-    let svc = mw.wrap(inner);
+    let svc = LlmService::builder(mock, "test-model").layer(mw).build();
     let ctx = RequestContext::test_default();
     let outcome_handle = ctx.validation_outcome.clone();
 
-    let stream = match svc.call(fake_req(), "m", ctx).await {
+    let stream = match svc.call(fake_req(), ctx).await {
         Ok(s) => s,
         Err(e) => panic!("expected Ok stream, got Err: {e:?}"),
     };
@@ -379,23 +371,21 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
     // cache-invalidating change (also a SemVer-break risk).
     let registry: Arc<dyn CacheRegistry> = MemoryCacheRegistry::default_arc();
     let mock = MockProvider::new("mock_origin", CannedResponse::text("hello world"));
-    let provider_service: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
 
     // Production onion (W4): Validation OUTSIDE Cache. Cache wraps the
     // provider; Validation wraps Cache. Cache sees raw provider events,
     // not the post-Filter version Validation re-emits to its caller.
     let factory = CacheKeyFactory::new(1);
-    let cache_wrapped = CacheLookupMiddleware::new(
-        registry.clone(),
-        factory.clone(),
-        ProviderId::new("mock_origin"),
-    )
-    .wrap(provider_service);
-
-    let pipeline_svc = ValidationMiddleware::new(vec![
-        Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>,
-    ])
-    .wrap(cache_wrapped);
+    let pipeline_svc = LlmService::builder(mock, "test-model")
+        .layer(ValidationMiddleware::new(vec![
+            Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>,
+        ]))
+        .layer(CacheLookupMiddleware::new(
+            registry.clone(),
+            factory.clone(),
+            ProviderId::new("mock_origin"),
+        ))
+        .build();
 
     // Cacheable request: explicit model + temperature=0.
     let mut req = ChatRequest::user("say hi");
@@ -404,8 +394,7 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
     // Drive the call — caller-visible response is "hello" (filtered).
     let ctx = RequestContext::test_default();
     let stream = pipeline_svc
-        .clone()
-        .call(req.clone(), "m", ctx.clone())
+        .call(req.clone(), ctx.clone())
         .await
         .expect("ok");
     let events = drain(stream).await;
@@ -455,17 +444,18 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
     // wrapping it.
     let registry: Arc<dyn tars_cache::CacheRegistry> = MemoryCacheRegistry::default_arc();
     let mock = MockProvider::new("mock_origin", CannedResponse::text("hi"));
-    let provider_service: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
 
     let factory = CacheKeyFactory::new(1);
-    let cache_wrapped =
-        CacheLookupMiddleware::new(registry, factory, ProviderId::new("mock_origin"))
-            .wrap(provider_service);
-
-    let svc = ValidationMiddleware::new(vec![
-        Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
-    ])
-    .wrap(cache_wrapped);
+    let svc = LlmService::builder(mock, "test-model")
+        .layer(ValidationMiddleware::new(vec![
+            Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>,
+        ]))
+        .layer(CacheLookupMiddleware::new(
+            registry,
+            factory,
+            ProviderId::new("mock_origin"),
+        ))
+        .build();
 
     let mut req = ChatRequest::user("p");
     req.temperature = Some(0.0);
@@ -474,7 +464,7 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
     let ctx1 = RequestContext::test_default();
     let _ = drain(
         svc.clone()
-            .call(req.clone(), "m", ctx1.clone())
+            .call(req.clone(), ctx1.clone())
             .await
             .expect("ok"),
     )
@@ -491,7 +481,7 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
 
     // Second call — cache hit. Per contract, validation must still run.
     let ctx2 = RequestContext::test_default();
-    let _ = drain(svc.clone().call(req, "m", ctx2.clone()).await.expect("ok")).await;
+    let _ = drain(svc.clone().call(req, ctx2.clone()).await.expect("ok")).await;
     assert!(
         ctx2.telemetry
             .lock()
@@ -510,14 +500,13 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
 #[tokio::test]
 async fn validation_appends_to_layer_trace() {
     let mock = MockProvider::new("mock", CannedResponse::text("hi"));
-    let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
     let mw = ValidationMiddleware::new(vec![
         Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
     ]);
-    let svc = mw.wrap(inner);
+    let svc = LlmService::builder(mock, "test-model").layer(mw).build();
     let ctx = RequestContext::test_default();
     let telemetry_handle = ctx.telemetry.clone();
-    let stream = match svc.call(fake_req(), "m", ctx).await {
+    let stream = match svc.call(fake_req(), ctx).await {
         Ok(s) => s,
         Err(e) => panic!("expected Ok stream, got Err: {e:?}"),
     };

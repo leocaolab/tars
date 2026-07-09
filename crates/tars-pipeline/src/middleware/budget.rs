@@ -250,11 +250,13 @@ mod tests {
     use super::*;
     use crate::LlmService;
     use async_trait::async_trait;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicU32;
 
     use futures::StreamExt;
+    use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{ChatEvent, ModelHint};
+    use tars_types::{ChatEvent, ProviderId};
 
     fn priced(input: f64, output: f64) -> Pricing {
         Pricing {
@@ -266,31 +268,43 @@ mod tests {
         }
     }
 
-    fn ok_service() -> (Arc<dyn Service>, Arc<AtomicU32>) {
+    /// A counting `LlmProvider`: bumps `observed` on each call, then
+    /// delegates to a Mock provider. Lets tests assert whether the budget
+    /// layer above it reached the provider or short-circuited.
+    fn ok_service() -> (Arc<dyn LlmProvider>, Arc<AtomicU32>) {
         let observed = Arc::new(AtomicU32::new(0));
         struct Count {
-            inner: Arc<dyn Service>,
+            id: ProviderId,
+            caps: Capabilities,
+            inner: Arc<dyn LlmProvider>,
             observed: Arc<AtomicU32>,
         }
         #[async_trait]
-        impl Service for Count {
-            async fn call(
+        impl LlmProvider for Count {
+            fn id(&self) -> &ProviderId {
+                &self.id
+            }
+            fn capabilities(&self) -> &Capabilities {
+                &self.caps
+            }
+            async fn stream(
                 self: Arc<Self>,
                 req: ChatRequest,
-                        model: &str,
-        ctx: RequestContext,
+                model: &str,
+                ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 self.observed.fetch_add(1, Ordering::SeqCst);
-                self.inner.clone().call(req, model, ctx).await
+                self.inner.clone().stream(req, model, ctx).await
             }
         }
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let inner: Arc<dyn Service> = LlmService::of(mock, "test-model").chain();
         (
             Arc::new(Count {
-                inner,
+                id: ProviderId::new("count"),
+                caps: Capabilities::text_only_baseline(Pricing::default()),
+                inner: mock,
                 observed: observed.clone(),
-            }) as Arc<dyn Service>,
+            }) as Arc<dyn LlmProvider>,
             observed,
         )
     }
@@ -317,11 +331,11 @@ mod tests {
         // 25 × 3/1M + 1000 × 15/1M = $0.000075 + $0.015 = $0.015075
         let mw = PerCallBudgetMiddleware::from_parts(0.05, priced(3.0, 15.0), 1000);
         let (inner, observed) = ok_service();
-        let svc = mw.wrap(inner);
+        let svc = LlmService::builder(inner, "test-model").layer(mw).build();
 
         let stream = svc
             .call(
-                req_with_text(&"x".repeat(100), Some(1000)), "m",
+                req_with_text(&"x".repeat(100), Some(1000)),
                 RequestContext::test_default(),
             )
             .await
@@ -336,11 +350,11 @@ mod tests {
         // — way over the $0.05 cap.
         let mw = PerCallBudgetMiddleware::from_parts(0.05, priced(3.0, 15.0), 1000);
         let (inner, observed) = ok_service();
-        let svc = mw.wrap(inner);
+        let svc = LlmService::builder(inner, "test-model").layer(mw).build();
 
         let err = svc
             .call(
-                req_with_text(&"x".repeat(1_000_000), Some(1000)), "m",
+                req_with_text(&"x".repeat(1_000_000), Some(1000)),
                 RequestContext::test_default(),
             )
             .await
@@ -355,14 +369,14 @@ mod tests {
     async fn zero_pricing_passes_through_and_warns_once() {
         let mw = PerCallBudgetMiddleware::from_parts(0.05, Pricing::default(), 1000);
         let (inner, observed) = ok_service();
-        let svc = mw.wrap(inner);
+        let svc = LlmService::builder(inner, "test-model").layer(mw).build();
 
         // Two calls with massive input — both must pass since pricing is 0.
         for _ in 0..2 {
             let stream = svc
                 .clone()
                 .call(
-                    req_with_text(&"x".repeat(10_000_000), Some(1_000_000)), "m",
+                    req_with_text(&"x".repeat(10_000_000), Some(1_000_000)),
                     RequestContext::test_default(),
                 )
                 .await
@@ -377,16 +391,7 @@ mod tests {
 
     #[test]
     fn zero_pricing_warn_flag_flips_exactly_once() {
-        let svc = PerCallBudgetService {
-            inner: {
-                let mock = MockProvider::new("p", CannedResponse::text("hi"));
-                LlmService::of(mock, "test-model").chain()
-            },
-            cap_usd: 0.01,
-            pricing: Pricing::default(),
-            default_max_output_tokens: 1000,
-            zero_pricing_warned: AtomicBool::new(false),
-        };
+        let svc = PerCallBudgetMiddleware::from_parts(0.01, Pricing::default(), 1000);
         // First call should observe `false → true`.
         assert!(!svc.zero_pricing_warned.swap(true, Ordering::Relaxed));
         // Subsequent observe `true → true`.
@@ -399,10 +404,10 @@ mod tests {
         // 8000 × $15/M = $0.12 — over the $0.05 cap, so this must reject.
         let mw = PerCallBudgetMiddleware::from_parts(0.05, priced(3.0, 15.0), 8000);
         let (inner, observed) = ok_service();
-        let svc = mw.wrap(inner);
+        let svc = LlmService::builder(inner, "test-model").layer(mw).build();
 
         let err = svc
-            .call(req_with_text("hi", None), "m", RequestContext::test_default())
+            .call(req_with_text("hi", None), RequestContext::test_default())
             .await
             .err()
             .expect("over cap due to default_max_output_tokens");
@@ -414,16 +419,7 @@ mod tests {
     fn estimator_matches_documented_formula() {
         // Pin the formula: estimate = (chars/4) × in_rate + max_out × out_rate
         // Both divided by 1M.
-        let svc = PerCallBudgetService {
-            inner: {
-                let mock = MockProvider::new("p", CannedResponse::text("hi"));
-                LlmService::of(mock, "test-model").chain()
-            },
-            cap_usd: 1.0,
-            pricing: priced(3.0, 15.0),
-            default_max_output_tokens: 0,
-            zero_pricing_warned: AtomicBool::new(false),
-        };
+        let svc = PerCallBudgetMiddleware::from_parts(1.0, priced(3.0, 15.0), 0);
         // 400 chars total → 100 tokens at chars/4
         // 100 × 3 / 1e6 = 0.0003
         // 2000 × 15 / 1e6 = 0.03

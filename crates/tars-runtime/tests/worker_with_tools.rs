@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::stream;
 
-use tars_pipeline::{LlmService, Pipeline};
+use tars_pipeline::LlmService;
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{AgentContext, AgentMessage, WorkerAgent};
 use tars_tools::{ToolRegistry, builtins::ReadFileTool};
@@ -79,7 +79,7 @@ impl LlmProvider for EventQueueProvider {
 
 fn build_llm(provider: Arc<EventQueueProvider>) -> LlmService {
     let inner: LlmService = LlmService::of(provider, "gpt-4o");
-    Pipeline::builder_with_inner(inner).build()
+    LlmService::builder_with_inner(inner).build()
 }
 
 fn ctx(llm: LlmService) -> AgentContext {
@@ -92,6 +92,8 @@ fn ctx(llm: LlmService) -> AgentContext {
         permissions: Default::default(),
         readable_roots: Vec::new(),
         sandbox: Default::default(),
+        llm_request_ctx: None,
+        stream_hooks: None,
     }
 }
 

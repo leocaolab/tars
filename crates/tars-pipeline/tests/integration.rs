@@ -20,11 +20,11 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use tars_config::ConfigManager;
-use tars_pipeline::{Pipeline, RetryMiddleware, TelemetryMiddleware};
+use tars_pipeline::{LlmService, RetryMiddleware, TelemetryMiddleware};
 use tars_provider::auth::basic;
 use tars_provider::http_base::HttpProviderBase;
 use tars_provider::registry::ProviderRegistry;
-use tars_types::{ChatEvent, ChatRequest, ModelHint, ProviderId, RequestContext, StopReason};
+use tars_types::{ChatEvent, ChatRequest, ProviderId, RequestContext, StopReason};
 
 /// OpenAI SSE shape: `data: <json>\n\n` per chunk, terminator `data: [DONE]\n\n`.
 fn sse_body(events: &[&str]) -> String {
@@ -92,7 +92,7 @@ async fn happy_path_pipeline_parses_real_sse_into_usage() {
         .get(&ProviderId::new("openai_test"))
         .expect("provider registered");
 
-    let pipeline = Pipeline::builder(provider, "test-model")
+    let pipeline = LlmService::builder(provider, "test-model")
         .layer(TelemetryMiddleware::new())
         .layer(RetryMiddleware::no_backoff(3))
         .build();
@@ -173,7 +173,7 @@ async fn retry_middleware_actually_replays_http_call_on_5xx() {
     let provider = registry.get(&ProviderId::new("openai_test")).unwrap();
 
     // no_backoff so the test doesn't depend on real wall-clock sleeps.
-    let pipeline = Pipeline::builder(provider, "test-model")
+    let pipeline = LlmService::builder(provider, "test-model")
         .layer(TelemetryMiddleware::new())
         .layer(RetryMiddleware::no_backoff(3))
         .build();
@@ -259,7 +259,7 @@ async fn registry_built_from_toml_can_drive_pipeline_call() {
         .get(&ProviderId::new("openai_under_test"))
         .expect("the OpenAI-compat provider is the one we wired");
 
-    let pipeline = Pipeline::builder(provider, "test-model")
+    let pipeline = LlmService::builder(provider, "test-model")
         .layer(TelemetryMiddleware::new())
         .layer(RetryMiddleware::no_backoff(2))
         .build();

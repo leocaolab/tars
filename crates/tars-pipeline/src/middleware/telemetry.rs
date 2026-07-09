@@ -210,16 +210,14 @@ mod tests {
     use async_trait::async_trait;
     use futures::StreamExt;
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+    use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{ModelHint, StopReason, Usage};
+    use tars_types::{Capabilities, Pricing, ProviderId, StopReason, Usage};
     use tracing::Subscriber;
     use tracing::field::{Field, Visit};
     use tracing_subscriber::Registry;
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
-
-    use crate::Pipeline;
-    use crate::service::Service;
 
     /// Captured fields for one tracing event.
     type EventFields = BTreeMap<String, String>;
@@ -301,7 +299,7 @@ mod tests {
     #[tokio::test]
     async fn telemetry_passes_events_through_unchanged() {
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
-        let pipeline = Pipeline::builder(mock, "test-model")
+        let pipeline = LlmService::builder(mock, "test-model")
             .layer(TelemetryMiddleware::new())
             .build();
         let mut s = Arc::new(pipeline)
@@ -328,7 +326,7 @@ mod tests {
         // Mock returns an Error from stream() — telemetry should
         // surface it and not swallow.
         let mock = MockProvider::new("p", CannedResponse::Error("boom".into()));
-        let pipeline = Pipeline::builder(mock, "test-model")
+        let pipeline = LlmService::builder(mock, "test-model")
             .layer(TelemetryMiddleware::new())
             .build();
         let err = match Arc::new(pipeline)
@@ -353,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn telemetry_emits_lifecycle_events_on_happy_path() {
         let mock = MockProvider::new("p", CannedResponse::text("hello"));
-        let pipeline = Pipeline::builder(mock, "m-happy")
+        let pipeline = LlmService::builder(mock, "m-happy")
             .layer(TelemetryMiddleware::new())
             .build();
 
@@ -403,7 +401,7 @@ mod tests {
     #[tokio::test]
     async fn telemetry_emits_failed_event_on_open_error() {
         let mock = MockProvider::new("p", CannedResponse::Error("boom".into()));
-        let pipeline = Pipeline::builder(mock, "m-fail")
+        let pipeline = LlmService::builder(mock, "m-fail")
             .layer(TelemetryMiddleware::new())
             .build();
 
@@ -433,45 +431,61 @@ mod tests {
         assert!(captured.find("llm.call.stream_error").is_none());
     }
 
-    /// A test-only [`LlmService`] that yields a fixed sequence of
+    /// A test-only [`LlmProvider`] that yields a fixed sequence of
     /// `Result<ChatEvent, ProviderError>` items — including `Err`
     /// values, which `MockProvider`'s canned responses can't express.
     /// This lets us drive the *mid-stream* error path (the stream
     /// opens successfully, yields a few events, then errors).
-    struct ScriptedService {
+    struct ScriptedProvider {
+        id: ProviderId,
+        caps: Capabilities,
         events: Mutex<Option<Vec<Result<ChatEvent, ProviderError>>>>,
     }
 
+    impl ScriptedProvider {
+        fn new(events: Vec<Result<ChatEvent, ProviderError>>) -> Arc<Self> {
+            Arc::new(Self {
+                id: ProviderId::new("scripted"),
+                caps: Capabilities::text_only_baseline(Pricing::default()),
+                events: Mutex::new(Some(events)),
+            })
+        }
+    }
+
     #[async_trait]
-    impl Service for ScriptedService {
-        async fn call(
+    impl LlmProvider for ScriptedProvider {
+        fn id(&self) -> &ProviderId {
+            &self.id
+        }
+        fn capabilities(&self) -> &Capabilities {
+            &self.caps
+        }
+        async fn stream(
             self: Arc<Self>,
             _req: ChatRequest,
-                    model: &str,
-        _ctx: RequestContext,
+            _model: &str,
+            _ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             let events = self
                 .events
                 .lock()
-                .expect("scripted service events lock poisoned")
+                .expect("scripted provider events lock poisoned")
                 .take()
-                .expect("ScriptedService called more than once");
+                .expect("ScriptedProvider called more than once");
             Ok(Box::pin(futures::stream::iter(events)))
         }
     }
 
     #[tokio::test]
     async fn telemetry_logs_and_propagates_mid_stream_error() {
-        let scripted: Arc<dyn Service> = Arc::new(ScriptedService {
-            events: Mutex::new(Some(vec![
-                Ok(ChatEvent::started("m-mid")),
-                Ok(ChatEvent::Delta {
-                    text: "partial".into(),
-                }),
-                Err(ProviderError::Internal("midstream-boom".into())),
-            ])),
-        });
-        let pipeline = Pipeline::builder_with_inner(LlmService::from_parts(scripted, "m-mid", std::sync::Arc::from([] as [&'static str; 0])))
+        let scripted = ScriptedProvider::new(vec![
+            Ok(ChatEvent::started("m-mid")),
+            Ok(ChatEvent::Delta {
+                text: "partial".into(),
+            }),
+            Err(ProviderError::Internal("midstream-boom".into())),
+        ]);
+        let pipeline = LlmService::builder(scripted, "m-mid")
             .layer(TelemetryMiddleware::new())
             .build();
 
@@ -528,21 +542,19 @@ mod tests {
     /// against regressions where the visitor or the field set drifts.
     #[tokio::test]
     async fn telemetry_finished_event_carries_usage_tokens() {
-        let scripted: Arc<dyn Service> = Arc::new(ScriptedService {
-            events: Mutex::new(Some(vec![
-                Ok(ChatEvent::started("m-usage")),
-                Ok(ChatEvent::Delta { text: "ok".into() }),
-                Ok(ChatEvent::Finished {
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage {
-                        input_tokens: 7,
-                        output_tokens: 11,
-                        ..Default::default()
-                    },
-                }),
-            ])),
-        });
-        let pipeline = Pipeline::builder_with_inner(LlmService::from_parts(scripted, "test-model", std::sync::Arc::from([] as [&'static str; 0])))
+        let scripted = ScriptedProvider::new(vec![
+            Ok(ChatEvent::started("m-usage")),
+            Ok(ChatEvent::Delta { text: "ok".into() }),
+            Ok(ChatEvent::Finished {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                    ..Default::default()
+                },
+            }),
+        ]);
+        let pipeline = LlmService::builder(scripted, "test-model")
             .layer(TelemetryMiddleware::new())
             .build();
 

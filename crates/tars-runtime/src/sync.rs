@@ -105,7 +105,7 @@ pub fn complete_sync(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use tars_pipeline::{Pipeline, PipelineOpts};
+    use tars_pipeline::{ChainOpts, LlmService};
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
     use tars_types::ProviderId;
 
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn complete_sync_drains_stream_into_response() {
         let provider = MockProvider::new("p", CannedResponse::text("hello"));
-        let pipeline = Pipeline::default_chain(provider, "p", PipelineOpts::new(ProviderId::new("p")));
+        let pipeline = LlmService::default_chain(provider, "p", ChainOpts::new(ProviderId::new("p")));
         let svc: LlmService = pipeline;
 
         let req = ChatRequest::user("ping");
@@ -134,10 +134,10 @@ mod tests {
         use tars_pipeline::{MaxLengthValidator, OutputValidator};
 
         let provider = MockProvider::new("p", CannedResponse::text("hello world"));
-        let mut opts = PipelineOpts::new(ProviderId::new("p"));
+        let mut opts = ChainOpts::new(ProviderId::new("p"));
         opts.validators =
             vec![Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>];
-        let pipeline = Pipeline::default_chain(provider, "p", opts);
+        let pipeline = LlmService::default_chain(provider, "p", opts);
         let svc: LlmService = pipeline;
 
         let req = ChatRequest::user("ping");

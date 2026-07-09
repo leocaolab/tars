@@ -490,13 +490,10 @@ fn wrap_stream_for_emit(
 mod tests {
     use super::*;
     use crate::LlmService;
-    use async_trait::async_trait;
     use std::time::Duration;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
     use tars_melt::event::{LlmRecordStore, PipelineEventLog, PipelineEventQuery, SqliteLlmRecordStore, SqlitePipelineEventLog};
-    use tars_types::{ChatRequest, ModelHint, RequestContext};
-
-    use crate::service::ProviderService;
+    use tars_types::{ChatRequest, RequestContext};
 
     async fn drain(s: tars_provider::LlmEventStream) -> Vec<ChatEvent> {
         let mut s = s;
@@ -513,11 +510,12 @@ mod tests {
         let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().unwrap();
 
         let provider = MockProvider::new("p1", CannedResponse::text("hello"));
-        let inner: Arc<dyn Service> = LlmService::of(provider, "test-model").chain();
-        let svc = EventEmitterMiddleware::new(events.clone(), records.clone()).wrap(inner);
+        let svc = LlmService::builder(provider, "m")
+            .layer(EventEmitterMiddleware::new(events.clone(), records.clone()))
+            .build();
 
         let req = ChatRequest::user("hi");
-        let _ = drain(svc.call(req, "m", RequestContext::test_default()).await.unwrap()).await;
+        let _ = drain(svc.call(req, RequestContext::test_default()).await.unwrap()).await;
 
         // Allow the spawned write task to run.
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -549,16 +547,16 @@ mod tests {
         let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().unwrap();
 
         let provider = MockProvider::new("p1", CannedResponse::text("hello world"));
-        let inner: Arc<dyn Service> = LlmService::of(provider, "test-model").chain();
         // Onion: EventEmitter (outer) → Validation (inner) → Provider.
-        let validated = ValidationMiddleware::new(vec![
-            Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>,
-        ])
-        .wrap(inner);
-        let svc = EventEmitterMiddleware::new(events.clone(), records.clone()).wrap(validated);
+        let svc = LlmService::builder(provider, "m")
+            .layer(EventEmitterMiddleware::new(events.clone(), records.clone()))
+            .layer(ValidationMiddleware::new(vec![
+                Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>,
+            ]))
+            .build();
 
         let req = ChatRequest::user("hi");
-        let _ = drain(svc.call(req, "m", RequestContext::test_default()).await.unwrap()).await;
+        let _ = drain(svc.call(req, RequestContext::test_default()).await.unwrap()).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let stored = events.query(&PipelineEventQuery::default()).await.unwrap();
@@ -589,15 +587,15 @@ mod tests {
 
         // Empty text → NotEmpty rejects.
         let provider = MockProvider::new("p1", CannedResponse::text(""));
-        let inner: Arc<dyn Service> = LlmService::of(provider, "test-model").chain();
-        let validated = ValidationMiddleware::new(vec![
-            Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
-        ])
-        .wrap(inner);
-        let svc = EventEmitterMiddleware::new(events.clone(), records.clone()).wrap(validated);
+        let svc = LlmService::builder(provider, "m")
+            .layer(EventEmitterMiddleware::new(events.clone(), records.clone()))
+            .layer(ValidationMiddleware::new(vec![
+                Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
+            ]))
+            .build();
 
         let req = ChatRequest::user("hi");
-        let result = svc.call(req, "m", RequestContext::test_default()).await;
+        let result = svc.call(req, RequestContext::test_default()).await;
         assert!(
             matches!(result, Err(ProviderError::ValidationFailed { .. })),
             "expected the reject to surface as Err at the outer boundary"

@@ -29,7 +29,7 @@
 //!   - **`Pipeline.from*` constructors** mirror tars-py
 //!     (`from_config_path` / `from_str` / `from_default`). They run
 //!     `ConfigManager::load_*` → `ProviderRegistry::from_config` →
-//!     `Pipeline::default_chain` and store an `Arc<dyn LlmService>`.
+//!     `LlmService::default_chain` and store an `Arc<dyn LlmService>`.
 //!   - **`complete(opts)`** maps the napi-friendly camelCase
 //!     `CompleteOptions` → `tars_types::ChatRequest`, drives the
 //!     held `Arc<dyn LlmService>`, drains the event stream into a
@@ -71,7 +71,7 @@ use crate::ctx::default_context;
 use crate::errors::provider_reason;
 
 use tars_config::ConfigManager;
-use tars_pipeline::{LlmService, Pipeline as RsPipeline, PipelineOpts};
+use tars_pipeline::{ChainOpts, LlmService};
 use tars_provider::{LlmProvider, registry::ProviderRegistry};
 use tars_types::{
     Message, RUN_CONTEXT, RequestContext,
@@ -157,7 +157,7 @@ pub fn bless_check(path: String, text: String) -> Result<BlessResult> {
 
 // ── TS-facing shapes ─────────────────────────────────────────────────
 
-/// Options for [`Pipeline::complete`]. Mirrors `tars-py`'s
+/// Options for [`LlmService::complete`]. Mirrors `tars-py`'s
 /// `Pipeline.complete(**kwargs)` in camelCase.
 #[napi(object)]
 pub struct CompleteOptions {
@@ -188,7 +188,7 @@ pub struct CompleteOptions {
     pub tags: Option<Vec<String>>,
 }
 
-/// Result shape from [`Pipeline::complete`].
+/// Result shape from [`LlmService::complete`].
 #[napi(object)]
 pub struct CompleteResult {
     /// Aggregated assistant text.
@@ -283,12 +283,12 @@ impl Pipeline {
 impl Pipeline {
     /// Internal constructor shared by every `from_*` factory: wrap
     /// the resolved `Arc<dyn LlmProvider>` in TARS's default
-    /// middleware onion (`Pipeline::default_chain`) so cache, retry,
+    /// middleware onion (`LlmService::default_chain`) so cache, retry,
     /// telemetry, and the rest are all active by construction. Uses a fresh
     /// single-user default context (the handle path threads its own).
     fn from_provider(id: String, provider: Arc<dyn LlmProvider>, model: String) -> Self {
-        let opts = PipelineOpts::new(ProviderId::new(id.clone()));
-        let inner = RsPipeline::default_chain(provider, model, opts);
+        let opts = ChainOpts::new(ProviderId::new(id.clone()));
+        let inner = LlmService::default_chain(provider, model, opts);
         Self {
             id,
             inner,
@@ -307,7 +307,7 @@ impl Pipeline {
 /// Drive one non-streaming completion through `svc`, re-establishing the
 /// explicit call context on `RUN_CONTEXT` at the binding boundary (Doc 06 §9:
 /// the `task_local` never crosses the FFI hop, so we re-scope it per call).
-/// Shared by [`Pipeline::complete`] and [`handle::Provider::complete`].
+/// Shared by [`LlmService::complete`] and [`handle::Provider::complete`].
 pub(crate) async fn drive_complete(
     svc: LlmService,
     mut ctx: RequestContext,

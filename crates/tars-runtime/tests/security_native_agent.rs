@@ -36,7 +36,7 @@
 
 use std::sync::Arc;
 
-use tars_pipeline::{LlmService, Pipeline};
+use tars_pipeline::LlmService;
 use tars_provider::{CannedResponse, LlmProvider, MockProvider};
 use tars_runtime::{Budget, Session, SessionOptions};
 use tars_tools::{SandboxPolicy, ToolContext, ToolRegistry, builtins::BashTool};
@@ -48,7 +48,7 @@ use tars_types::{
 /// same `ProviderService` → `Pipeline` wrapping the live path uses.
 fn build_llm(provider: Arc<dyn LlmProvider>) -> LlmService {
     let inner: LlmService = LlmService::of(provider, "gpt-4o");
-    Pipeline::builder_with_inner(inner).build()
+    LlmService::builder_with_inner(inner).build()
 }
 
 /// One canned turn: the model emits a single `bash.run` tool call carrying

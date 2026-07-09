@@ -55,8 +55,8 @@
 //! see [`CircuitBreaker`] — so an open breaker rejects each attempt
 //! before the provider is hit and Retry reacts to that rejection.)
 //!
-//! What `Pipeline::default_chain` / `Pipeline::chain_over` actually
-//! assemble today (each layer conditional on its `PipelineOpts` field),
+//! What `LlmService::default_chain` / `LlmService::chain_over` actually
+//! assemble today (each layer conditional on its `ChainOpts` field),
 //! with the rest filling in as their dependencies come online:
 //!
 //! ```text
@@ -79,10 +79,10 @@
 //!
 //! ```ignore
 //! use std::sync::Arc;
-//! use tars_pipeline::{Pipeline, RetryMiddleware, TelemetryMiddleware};
+//! use tars_pipeline::{LlmService, RetryMiddleware, TelemetryMiddleware};
 //!
 //! let provider: Arc<dyn LlmProvider> = /* registry.get(&id).unwrap() */;
-//! let svc = Pipeline::builder(provider, "claude-sonnet-5")
+//! let svc = LlmService::builder(provider, "claude-sonnet-5")
 //!     .layer(TelemetryMiddleware::new())   // outermost
 //!     .layer(RetryMiddleware::default())   // closest to the provider
 //!     .build();                            // -> LlmService
@@ -106,7 +106,7 @@ pub use middleware::validation::{
     OutputValidator, ValidationMiddleware,
     builtin::{JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, OnExceed, ResponseField},
 };
-pub use middleware::{EventStores, Middleware, Pipeline, PipelineBuilder, PipelineOpts};
+pub use middleware::{ChainOpts, EventStores, LlmServiceBuilder, Middleware};
 pub use service::{LlmService, Next};
 
 // Re-export the few tars-types items that show up in middleware

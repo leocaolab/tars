@@ -1062,6 +1062,8 @@ mod tests {
             permissions: tars_agent::Permissions::allow_all(),
             readable_roots: vec![],
             sandbox: Default::default(),
+            llm_request_ctx: None,
+            stream_hooks: None,
         };
 
         let rt = tokio::runtime::Builder::new_current_thread()

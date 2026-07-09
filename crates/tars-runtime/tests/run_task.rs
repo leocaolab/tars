@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use futures::stream;
 
-use tars_pipeline::{LlmService, Pipeline};
+use tars_pipeline::LlmService;
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_runtime::{
     AgentEvent, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, RunTaskError, Runtime,
@@ -127,7 +127,7 @@ impl LlmProvider for QueuedProvider {
 
 fn build_llm(provider: Arc<QueuedProvider>) -> LlmService {
     let inner: LlmService = LlmService::of(provider, "gpt-4o");
-    Pipeline::builder_with_inner(inner).build()
+    LlmService::builder_with_inner(inner).build()
 }
 
 async fn fresh_runtime() -> (Arc<LocalRuntime>, tempfile::TempDir) {
@@ -599,7 +599,7 @@ async fn dag_fanout_plan_threads_dep_results_into_merge_step() {
     by_schema.insert("Verdict".into(), vec![approve(), approve(), approve()]);
     let provider = SchemaDispatchProvider::new(by_schema);
     let inner: LlmService = LlmService::of(provider, "gpt-4o");
-    let llm: LlmService = Pipeline::builder_with_inner(inner).build();
+    let llm: LlmService = LlmService::builder_with_inner(inner).build();
     let (rt, _dir) = fresh_runtime().await;
     let (orch, worker, critic) = agents();
 
@@ -757,7 +757,7 @@ async fn replan_on_reject_recovers_with_second_plan() {
     );
     let provider = SchemaDispatchProvider::new(by_schema);
     let inner: LlmService = LlmService::of(provider, "gpt-4o");
-    let llm: LlmService = Pipeline::builder_with_inner(inner).build();
+    let llm: LlmService = LlmService::builder_with_inner(inner).build();
     let (rt, _dir) = fresh_runtime().await;
     let (orch, worker, critic) = agents();
 
@@ -836,7 +836,7 @@ async fn replan_exhausted_after_max_replans_consecutive_rejects() {
     );
     let provider = SchemaDispatchProvider::new(by_schema);
     let inner: LlmService = LlmService::of(provider, "gpt-4o");
-    let llm: LlmService = Pipeline::builder_with_inner(inner).build();
+    let llm: LlmService = LlmService::builder_with_inner(inner).build();
     let (rt, _dir) = fresh_runtime().await;
     let (orch, worker, critic) = agents();
 
@@ -1023,7 +1023,7 @@ async fn cancel_on_reject_terminates_in_flight_sibling_workers() {
     );
     let entered_gate_handle = provider.entered_gate_count.clone();
     let inner: LlmService = LlmService::of(provider, "gpt-4o");
-    let llm: LlmService = Pipeline::builder_with_inner(inner).build();
+    let llm: LlmService = LlmService::builder_with_inner(inner).build();
     let (rt, _dir) = fresh_runtime().await;
     let (orch, worker, critic) = agents();
 
