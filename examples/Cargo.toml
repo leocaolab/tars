@@ -1,0 +1,31 @@
+[package]
+name = "tars-examples"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Runnable TARS demos — `cargo run -p tars-examples --example <name>`."
+
+[lints]
+workspace = true
+
+# This crate exists only to host the runnable examples under `examples/`.
+# It depends on the PUBLIC tars crates the demos `use`; there is no library
+# surface of its own (see the empty `src/lib.rs`).
+[dependencies]
+tars-types = { path = "../crates/tars-types" }
+tars-storage = { path = "../crates/tars-storage" }
+tars-runtime = { path = "../crates/tars-runtime" }
+tars-pipeline = { path = "../crates/tars-pipeline" }
+tars-provider = { path = "../crates/tars-provider" }
+tars-tools = { path = "../crates/tars-tools" }
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio-util.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+anyhow = "1"
+tempfile = "3"

@@ -317,7 +317,7 @@ diff"):
 |---|---|---|
 | `MockProvider` / `CannedResponse` / `with_responses` | `tars-provider/src/backends/mock.rs:70,88` | the single-response base `ScriptedProvider` generalizes |
 | `QueuedProvider` (local) | `tars-runtime/tests/run_task.rs:60` | the hand-roll this doc promotes + replaces with matchers |
-| the `Arc<dyn LlmService>` seam | `tars-runtime/examples/testing/main.rs:58` | the one injection point all three modes share |
+| the `Arc<dyn LlmService>` seam | `examples/examples/testing/main.rs:58` | the one injection point all three modes share |
 | `request_fingerprint` | Doc 17 / `tars-types/pipeline_events.rs` | the golden lookup key (no new key) |
 | `bodies.db` CAS / `ContentRef` | `tars-storage/body_store.rs` | the golden store (no new store) |
 | `EventEmitterMiddleware` | `tars-pipeline/event_emitter.rs` | record-mode capture (no new capture) |

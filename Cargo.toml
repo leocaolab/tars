@@ -21,6 +21,7 @@ members = [
     "crates/tars-server",
     "crates/tars-py",
     "crates/tars-node",
+    "examples",
 ]
 # tars-py is a PyO3 cdylib — `cargo build` can't link it without a
 # Python interpreter on the link line. Exclude from default builds so

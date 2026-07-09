@@ -377,7 +377,7 @@ let resp = session.send("Review main.py", RequestContext::test_default()).await?
 
 For a complete worked example covering Worker / Critic / Orchestrator
 with real filesystem tools, see
-[`crates/tars-runtime/examples/multi_step_with_tools.rs`](../crates/tars-runtime/examples/multi_step_with_tools.rs):
+[`examples/examples/multi_step_with_tools.rs`](../examples/examples/multi_step_with_tools.rs):
 
 ```bash
 cargo run -p tars-runtime --example multi_step_with_tools

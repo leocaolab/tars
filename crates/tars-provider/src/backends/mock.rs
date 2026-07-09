@@ -113,7 +113,7 @@ impl MockProvider {
     }
 
     /// Snapshot of the requests recorded so far. **Used by**
-    /// `crates/tars-runtime/examples/testing/main.rs` (deterministic-
+    /// `examples/examples/testing/main.rs` (deterministic-
     /// agent-test demo); the production source tree itself doesn't
     /// call it. `arc scan --judge` doesn't walk the examples build
     /// targets and flagged this as dead — it isn't.

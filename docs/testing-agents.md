@@ -35,7 +35,7 @@ let agent = ReviewAgent::new(scripted.as_service());
 ```
 
 If your agent doesn't have this seam yet, add it first — see the worked example
-in `crates/tars-runtime/examples/testing/main.rs`. Everything below plugs into
+in `examples/examples/testing/main.rs`. Everything below plugs into
 this one point.
 
 ---

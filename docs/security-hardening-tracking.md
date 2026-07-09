@@ -137,7 +137,7 @@ sandbox. deepseek+bash(future) = ReadOnly mode now, WorkspaceWrite/scoped later.
    the reviewer gets git.
 
 ### Housekeeping (pre-existing, NOT from this effort)
-- ⬜ `crates/tars-runtime/examples/non_llm_plan.rs` fails to compile
+- ⬜ `examples/examples/non_llm_plan.rs` fails to compile
   (`BlackboardStore::append_event` called with 7 args, trait declares 8 — a stale
   example after a concurrent trait change). Blocks `cargo test -p tars-runtime`
   (which builds examples); `--lib --tests` is green. 1-line fix, unrelated to
