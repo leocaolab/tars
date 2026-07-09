@@ -189,7 +189,25 @@ pub(crate) fn observe_stream_event_with(
         }
         return;
     }
-    observe_stream_event(ctx, ev);
+    // No direct observers → fall back to the context's stream hooks (the
+    // doc contract: "direct observers win over ctx.stream_hooks"). Firing the
+    // hooks here — NOT calling back into `observe_stream_event`, which would
+    // re-enter this function with `None` and recurse forever (stack overflow).
+    if let Some(hooks) = &ctx.stream_hooks {
+        match ev {
+            ChatEvent::Delta { text } => {
+                if let Some(cb) = &hooks.on_delta {
+                    cb(text);
+                }
+            }
+            ChatEvent::ToolCallStart { name, .. } => {
+                if let Some(cb) = &hooks.on_tool_call_start {
+                    cb(name);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// What an Agent returns from one execute() call.
