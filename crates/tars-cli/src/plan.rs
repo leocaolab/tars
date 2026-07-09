@@ -39,7 +39,7 @@ use tars_pipeline::{
 use tars_runtime::{
     AgentEvent, LocalRuntime, OrchestratorAgent, Runtime, StepIdempotencyKey, execute_agent_step,
 };
-use tars_storage::EventStore;
+use tars_storage::AgentEventLog;
 use tars_types::{AgentId, TrajectoryId};
 use tokio_util::sync::CancellationToken;
 
@@ -275,7 +275,7 @@ async fn build_trajectory_logger(args: &PlanArgs, dispatch: &Dispatch) -> Option
     if args.dispatch.no_trajectory {
         return None;
     }
-    let store: Arc<dyn EventStore> = match event_store::open(args.dispatch.events_path.as_deref()) {
+    let store: Arc<dyn AgentEventLog> = match event_store::open(args.dispatch.events_path.as_deref()) {
         Ok(Some(s)) => s,
         Ok(None) => {
             tracing::warn!("trajectory: no XDG data dir on this platform; skipping log",);

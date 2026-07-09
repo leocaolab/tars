@@ -27,7 +27,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use tars_runtime::{LocalRuntime, MatchMode, Runtime, ToolStep};
-use tars_storage::EventStore;
+use tars_storage::AgentEventLog;
 use tars_types::TrajectoryId;
 
 use crate::event_store as event_store_path;
@@ -81,7 +81,7 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
     let store_arc = event_store_path::open(args.events_path.as_deref())?.context(
         "no event store available — pass --events-path or run on a platform with an XDG data dir",
     )?;
-    let store: Arc<dyn EventStore> = store_arc;
+    let store: Arc<dyn AgentEventLog> = store_arc;
     let runtime = LocalRuntime::new(store);
 
     // Render into an in-memory buffer FIRST, then take the stdout lock
@@ -317,9 +317,9 @@ mod tests {
     use tars_runtime::AgentEvent;
     use tempfile::TempDir;
 
-    async fn fixture(dir: &TempDir) -> (Arc<dyn EventStore>, Arc<LocalRuntime>) {
+    async fn fixture(dir: &TempDir) -> (Arc<dyn AgentEventLog>, Arc<LocalRuntime>) {
         let path = dir.path().join("events.sqlite");
-        let store: Arc<dyn EventStore> = tars_storage::open_event_store_at_path(&path).unwrap();
+        let store: Arc<dyn AgentEventLog> = tars_storage::open_agent_event_log_at_path(&path).unwrap();
         let rt = LocalRuntime::new(Arc::clone(&store));
         (store, rt)
     }

@@ -8,8 +8,8 @@
 //!   so unlike `tars-cache` (24 h default) rows never expire.
 //! - **`result_events`** — an append-only log with a monotonic, gap-free
 //!   `seq` per job and a `since`-cursor read. Reuses the SQL *pattern*
-//!   from [`crate::SqliteEventStore`] (`sqlite.rs` / `event_store.rs`) but
-//!   in OUR table — never the off-able shared `EventStore` instance.
+//!   from [`crate::SqliteAgentEventLog`] (`sqlite.rs` / `agent_event_log.rs`) but
+//!   in OUR table — never the off-able shared `AgentEventLog` instance.
 //! - **`jobs`** — one row per durable job (the status of record).
 //!   `updated_at` is advanced inside the SAME `commit` transaction as each
 //!   step's answer (job-state ≡ answer, atomically).
@@ -20,7 +20,7 @@
 //! The store is a payload-agnostic MECHANISM: the persisted answer's
 //! `message`/`usage` and a job's `plan` are carried as **opaque JSON
 //! strings** ([`RawAnswer::message_json`] / `usage_json`, `plan_json`),
-//! exactly like [`crate::SqlitePipelineEventStore`] persists a
+//! exactly like [`tars_melt::event::SqlitePipelineEventLog`] persists a
 //! `PipelineEvent` as an opaque blob. The consumer (`tars-runtime`) owns
 //! the typed domain (`AgentMessage`, `Plan`) and decodes on the result
 //! side — so this crate never learns those types (no dependency cycle).
@@ -28,7 +28,7 @@
 //! ## Critical invariant
 //!
 //! This store is instantiated on its own `rusqlite::Connection`,
-//! completely independent of [`crate::EventStore`] / `StoreScope::Off` /
+//! completely independent of [`crate::AgentEventLog`] / `StoreScope::Off` /
 //! `*_EVENTS_OFF`. Correctness (checkpoint + resume) never reads or writes
 //! the observability sink.
 
@@ -129,7 +129,7 @@ impl ResultEventKind {
 }
 
 /// One appended result event, as read back from the log (reuses the
-/// `EventRecord` shape from [`crate::EventStore`], in OUR table).
+/// `EventRecord` shape from [`crate::AgentEventLog`], in OUR table).
 #[derive(Clone, Debug)]
 pub struct ResultEventRecord {
     pub job_id: String,
@@ -233,7 +233,7 @@ impl BlackboardStore for DurableBoard {
         _role: Option<&str>,
     ) -> Result<bool, BbError> {
         // Monotonic, gap-free seq per job (== `run`). Computed inside the
-        // caller's transaction, exactly like SqliteEventStore::append.
+        // caller's transaction, exactly like SqliteAgentEventLog::append.
         let next_seq: i64 = conn.query_row(
             "SELECT COALESCE(MAX(seq), 0) + 1 FROM result_events WHERE job_id = ?1",
             params![run],

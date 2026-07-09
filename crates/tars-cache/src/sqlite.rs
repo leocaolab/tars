@@ -29,7 +29,7 @@
 //! Each row carries `expires_at_ms`. Lookups filter expired rows;
 //! writes also do a best-effort sweep of expired rows to keep the file
 //! from growing unboundedly under pure-write workloads. No background
-//! janitor task — Doc 14 M3 will introduce a real one when EventStore
+//! janitor task — Doc 14 M3 will introduce a real one when AgentEventLog
 //! lands.
 
 use std::path::{Path, PathBuf};

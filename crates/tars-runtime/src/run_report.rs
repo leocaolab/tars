@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use tars_storage::EventStore;
+use tars_storage::AgentEventLog;
 use tars_types::{
     AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus, TrajectoryId, Usage,
 };
@@ -36,7 +36,7 @@ macro_rules! bump {
 /// Returns [`RuntimeError::TrajectoryNotFound`] when the trajectory
 /// has no events recorded.
 pub async fn build_run_report(
-    store: &dyn EventStore,
+    store: &dyn AgentEventLog,
     trajectory_id: &TrajectoryId,
 ) -> Result<RunReport, RuntimeError> {
     let records = store.read_all(trajectory_id).await?;
@@ -220,14 +220,14 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
-    use tars_storage::{SqliteEventStore, SqliteEventStoreConfig};
+    use tars_storage::{SqliteAgentEventLog, SqliteAgentEventLogConfig};
     use tars_types::Usage;
 
-    async fn store_with(records: Vec<(TrajectoryId, serde_json::Value)>) -> Arc<dyn EventStore> {
+    async fn store_with(records: Vec<(TrajectoryId, serde_json::Value)>) -> Arc<dyn AgentEventLog> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.sqlite");
-        let store: Arc<SqliteEventStore> =
-            SqliteEventStore::open(SqliteEventStoreConfig::new(path)).unwrap();
+        let store: Arc<SqliteAgentEventLog> =
+            SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(path)).unwrap();
         // Group payloads per trajectory and append in order.
         let mut by_traj: BTreeMap<TrajectoryId, Vec<serde_json::Value>> = BTreeMap::new();
         for (t, p) in records {
@@ -239,7 +239,7 @@ mod tests {
         // Keep the tempdir alive for the duration of the test via Box leak —
         // for tests this is fine; tempfile cleans up on process exit.
         Box::leak(Box::new(dir));
-        store as Arc<dyn EventStore>
+        store as Arc<dyn AgentEventLog>
     }
 
     fn make_usage(input: u64, output: u64) -> Usage {

@@ -34,7 +34,7 @@ use tars_runtime::{
 };
 use tars_storage::{
     BbError, Blackboard, BlackboardDomain, BlackboardStore, Scope, SqliteBlackboard,
-    SqliteEventStore, Transition,
+    SqliteAgentEventLog, Transition,
 };
 use tars_types::{AgentId, Usage};
 
@@ -305,7 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The run-scoped blackboard the whole pipeline shares.
     let bb: Arc<Bb> = Arc::new(SqliteBlackboard::<ReviewBoard>::in_memory("run-1")?);
 
-    let runtime: Arc<dyn Runtime> = LocalRuntime::new(SqliteEventStore::in_memory()?);
+    let runtime: Arc<dyn Runtime> = LocalRuntime::new(SqliteAgentEventLog::in_memory()?);
     let mut registry = WorkerRegistry::new();
     registry.register("scan", Arc::new(ScanWorker));
     registry.register("fix", Arc::new(FixWorker));

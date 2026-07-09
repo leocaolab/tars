@@ -18,7 +18,7 @@ use tars_runtime::{
     AgentEvent, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, RunTaskError, Runtime,
     StepOutcome, VerdictKind, WorkerAgent, run_task,
 };
-use tars_storage::{EventStore, SqliteEventStore};
+use tars_storage::{AgentEventLog, SqliteAgentEventLog};
 use tars_types::{
     AgentId, Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId,
     RequestContext, StopReason, Usage,
@@ -132,8 +132,8 @@ fn build_llm(provider: Arc<QueuedProvider>) -> Arc<dyn LlmService> {
 
 async fn fresh_runtime() -> (Arc<LocalRuntime>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn EventStore> = SqliteEventStore::open(
-        tars_storage::SqliteEventStoreConfig::new(dir.path().join("events.sqlite")),
+    let store: Arc<dyn AgentEventLog> = SqliteAgentEventLog::open(
+        tars_storage::SqliteAgentEventLogConfig::new(dir.path().join("events.sqlite")),
     )
     .unwrap();
     (LocalRuntime::new(store), dir)

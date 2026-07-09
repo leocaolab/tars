@@ -234,7 +234,7 @@ async fn tars_agent_is_also_a_worker_scheduled_by_run_plan() {
         run_plan, LocalRuntime, Plan, PlanStep, RunPlanConfig, Runtime, StepCondition,
         StepOutcome, WorkerRegistry,
     };
-    use tars_storage::{EventStore, SqliteEventStore};
+    use tars_storage::{AgentEventLog, SqliteAgentEventLog};
     use tokio_util::sync::CancellationToken;
 
     // One pure-inference turn: the worker JSON the step parses into a result.
@@ -250,7 +250,7 @@ async fn tars_agent_is_also_a_worker_scheduled_by_run_plan() {
         Arc::new(ToolRegistry::new()), // no tools = pure inference
     );
 
-    let store: Arc<dyn EventStore> = SqliteEventStore::in_memory().expect("in-memory store");
+    let store: Arc<dyn AgentEventLog> = SqliteAgentEventLog::in_memory().expect("in-memory store");
     let rt = LocalRuntime::new(store);
     let traj = rt.create_trajectory(None, "worker-face").await.unwrap();
 

@@ -13,7 +13,9 @@ workspace = true
 tars-types = { path = "../tars-types" }
 tars-provider = { path = "../tars-provider" }
 tars-cache = { path = "../tars-cache" }
-tars-storage = { path = "../tars-storage" }
+# EventEmitterMiddleware emits into the read-able E-pillar stores
+# (PipelineEventLog + LlmRecordStore), which live in tars_melt::event.
+tars-melt = { path = "../tars-melt" }
 
 # Async
 tokio.workspace = true

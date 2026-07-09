@@ -8,7 +8,7 @@
 //!  ├── Agent::execute (via SingleShotAgent)
 //!  │    └── ctx.llm: Arc<dyn LlmService>  ← from tars-pipeline
 //!  │          └── ProviderService → MockProvider (tars-provider)
-//!  └── runtime.append → SqliteEventStore (tars-storage on disk)
+//!  └── runtime.append → SqliteAgentEventLog (tars-storage on disk)
 //! ```
 //!
 //! If any of those layers regresses on its public contract, this
@@ -22,7 +22,7 @@ use tars_runtime::{
     AgentEvent, AgentExecutionError, AgentOutput, LocalRuntime, Runtime, SingleShotAgent,
     execute_agent_step,
 };
-use tars_storage::{EventStore, open_event_store_at_path};
+use tars_storage::{AgentEventLog, open_agent_event_log_at_path};
 use tars_types::{AgentId, ChatRequest, ModelHint};
 use tokio_util::sync::CancellationToken;
 
@@ -30,8 +30,8 @@ use tokio_util::sync::CancellationToken;
 async fn full_stack_agent_step_lands_in_trajectory_log() {
     // ── Wire the stack ──────────────────────────────────────────────
     let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn EventStore> =
-        open_event_store_at_path(&dir.path().join("events.sqlite")).unwrap();
+    let store: Arc<dyn AgentEventLog> =
+        open_agent_event_log_at_path(&dir.path().join("events.sqlite")).unwrap();
     let runtime = LocalRuntime::new(store.clone());
 
     // Pipeline with just ProviderService at the leaf — keep the
@@ -107,8 +107,8 @@ async fn full_stack_agent_step_lands_in_trajectory_log() {
 #[tokio::test]
 async fn agent_failure_writes_step_failed_and_propagates() {
     let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn EventStore> =
-        open_event_store_at_path(&dir.path().join("events.sqlite")).unwrap();
+    let store: Arc<dyn AgentEventLog> =
+        open_agent_event_log_at_path(&dir.path().join("events.sqlite")).unwrap();
     let runtime = LocalRuntime::new(store.clone());
 
     // Mock provider that errors at open time.
@@ -166,8 +166,8 @@ async fn agent_failure_writes_step_failed_and_propagates() {
 async fn step_seq_increments_across_multiple_agent_calls() {
     // Two agent steps in the same trajectory should see seq 1 then 2.
     let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn EventStore> =
-        open_event_store_at_path(&dir.path().join("events.sqlite")).unwrap();
+    let store: Arc<dyn AgentEventLog> =
+        open_agent_event_log_at_path(&dir.path().join("events.sqlite")).unwrap();
     let runtime = LocalRuntime::new(store.clone());
 
     let traj = runtime.create_trajectory(None, "multi-step").await.unwrap();

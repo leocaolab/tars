@@ -1,13 +1,35 @@
-//! Storage-layer errors.
+//! `tars_melt::event` — the read-able **E-pillar** event store (Doc 08
+//! §3, Doc 17). Two durable, full-fidelity, never-sampled stores read
+//! back by eval / `tars events` / debug / replay:
 //!
-//! Three failure shapes — keep them distinct so callers can
-//! decide-by-class (e.g. an `AgentEventLog` consumer might retry on
-//! `Backend` but propagate `Serde` immediately as a programmer error).
+//! - [`PipelineEventLog`] — one [`tars_types::PipelineEvent`] per
+//!   `Pipeline.call` boundary. Distinct from recovery's `AgentEventLog`
+//!   (trajectory truth, tars-storage) — there is no shared generic
+//!   `EventStore<E>` (Doc 09 §2.2, Doc 17 Q1).
+//! - [`LlmRecordStore`] — tenant-scoped CAS holding the per-call
+//!   `LlmRecord` (`ChatRequest` + `ChatResponse`) referenced from a
+//!   [`tars_types::PipelineEvent`] via [`tars_types::ContentRef`].
+//!
+//! The producing pipeline emits once into melt and never reads these
+//! back; the M/L/T egress is fired independently (Doc 08 §3).
+
+mod llm_record_store;
+mod pipeline_event_log;
+
+pub use llm_record_store::{LlmRecordStore, SqliteLlmRecordStore, SqliteLlmRecordStoreConfig};
+pub use pipeline_event_log::{
+    PipelineEventLog, PipelineEventQuery, SqlitePipelineEventLog, SqlitePipelineEventLogConfig,
+};
 
 use thiserror::Error;
 
+/// Errors from the `tars_melt::event` stores (`PipelineEventLog` +
+/// `LlmRecordStore`).
+///
+/// Three failure shapes — kept distinct so callers can decide-by-class
+/// (retry a `Backend` fault, propagate `Serde` as a programmer error).
 #[derive(Debug, Error)]
-pub enum StorageError {
+pub enum StoreError {
     /// JSON encoding / decoding of an event payload failed. Almost
     /// always a programmer error (the event type's `Serialize` /
     /// `Deserialize` impl produced something the storage round-trip
@@ -23,28 +45,22 @@ pub enum StorageError {
     /// (e.g. the `rusqlite::Error`) is preserved for
     /// `std::error::Error::source()` walkers and `{:?}` rendering rather
     /// than being flattened into a string. Build with
-    /// [`StorageError::backend`] (context only) or
-    /// [`StorageError::backend_source`] (context + source).
+    /// [`StoreError::backend`] (context only) or
+    /// [`StoreError::backend_source`] (context + source).
     #[error("backend: {context}")]
     Backend {
         context: String,
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-
-    /// Caller asked for a trajectory that has no rows. Distinct from
-    /// `Backend` so consumers can treat it as "fresh start" rather
-    /// than "the store is broken".
-    #[error("trajectory not found: {0}")]
-    NotFound(String),
 }
 
-impl StorageError {
+impl StoreError {
     /// Backend failure with contextual message but no underlying source
     /// (e.g. an invariant we detected ourselves, like a clock or schema
     /// mismatch).
     pub fn backend(context: impl Into<String>) -> Self {
-        StorageError::Backend {
+        StoreError::Backend {
             context: context.into(),
             source: None,
         }
@@ -57,32 +73,9 @@ impl StorageError {
         context: impl Into<String>,
         source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
     ) -> Self {
-        StorageError::Backend {
+        StoreError::Backend {
             context: context.into(),
             source: Some(source.into()),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn variants_render_with_helpful_prefix() {
-        let err = StorageError::backend("disk full");
-        assert!(err.to_string().contains("backend"));
-        assert!(err.to_string().contains("disk full"));
-    }
-
-    #[test]
-    fn backend_source_is_preserved_in_chain() {
-        use std::error::Error as _;
-        let io = std::io::Error::other("underlying boom");
-        let err = StorageError::backend_source("writing row", io);
-        // Display shows the context; source() exposes the original.
-        assert!(err.to_string().contains("writing row"));
-        let src = err.source().expect("source preserved");
-        assert!(src.to_string().contains("underlying boom"));
     }
 }

@@ -22,7 +22,7 @@ use tars_runtime::{
     ResultEventKind, Runtime, RuntimeError, StepAnswer, StepCondition, Worker, WorkerContext,
     WorkerError, WorkerOutput, WorkerRegistry,
 };
-use tars_storage::SqliteEventStore;
+use tars_storage::SqliteAgentEventLog;
 use tars_types::{AgentId, TrajectoryId, Usage};
 
 // ─── Mocks ──────────────────────────────────────────────────────────────
@@ -126,7 +126,7 @@ fn author_reviewer_plan() -> Plan {
 }
 
 fn events_on_runtime() -> Arc<dyn Runtime> {
-    LocalRuntime::new(SqliteEventStore::in_memory().unwrap())
+    LocalRuntime::new(SqliteAgentEventLog::in_memory().unwrap())
 }
 
 fn registry(worker: Arc<CountingWorker>) -> WorkerRegistry {
@@ -207,7 +207,7 @@ async fn m0_commit_is_idempotent_on_key_kind() {
 #[tokio::test]
 async fn events_off_still_persists_and_resumes() {
     // The durability store must be independent of the OFF-able
-    // observability EventStore. Drive under a NullRuntime (events OFF)
+    // observability AgentEventLog. Drive under a NullRuntime (events OFF)
     // and confirm the answer/job/result_events persist AND the job
     // resumes — with the completed step NEVER re-run.
     let dir = tempfile::tempdir().unwrap();

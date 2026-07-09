@@ -24,7 +24,7 @@ pub struct ChatResponse {
     pub cache_hit: CacheHitInfo,
     /// Per-call validator outcomes (Doc 15). Empty when the pipeline
     /// didn't include `ValidationMiddleware`. `#[serde(default)]` so
-    /// pre-validation EventStore dumps still deserialize cleanly.
+    /// pre-validation AgentEventLog dumps still deserialize cleanly.
     #[serde(default, skip_serializing_if = "is_empty_validation_summary")]
     pub validation_summary: ValidationSummary,
     /// Unix-seconds wall-clock when this response was finalized — i.e. when
@@ -34,7 +34,7 @@ pub struct ChatResponse {
     /// is the call's DISCOVERY time: observability/debugging, and the honest
     /// `at` for anything a consumer derives from this response (decoupled from
     /// when that consumer later persists it). `#[serde(default)]` so older
-    /// EventStore dumps (no `created`) still deserialize.
+    /// AgentEventLog dumps (no `created`) still deserialize.
     #[serde(default)]
     pub created: i64,
 }

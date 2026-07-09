@@ -13,9 +13,16 @@ pub enum TarsError {
     #[error("provider registry: {0}")]
     Registry(#[from] tars_provider::RegistryError),
 
-    /// Opening or writing a per-scope event / body store failed.
+    /// Opening or writing the per-scope recovery event store
+    /// (`AgentEventLog`, tars-storage) failed.
     #[error("store: {0}")]
     Storage(#[from] tars_storage::StorageError),
+
+    /// Opening or writing a per-scope observability store
+    /// (`PipelineEventLog` / `LlmRecordStore`, `tars_melt::event`)
+    /// failed.
+    #[error("event store: {0}")]
+    MeltStore(#[from] tars_melt::event::StoreError),
 
     /// The workspace `<root>/.<tool>/config.toml` could not be parsed.
     #[error("workspace config parse: {0}")]

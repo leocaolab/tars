@@ -1,9 +1,10 @@
-//! [`PipelineEventStore`] — durable stream of one event per
+//! [`PipelineEventLog`] — durable stream of one event per
 //! `Pipeline.call` boundary. See
 //! [Doc 17](../../../docs/architecture/17-pipeline-event-store.md).
 //!
-//! Distinct from [`crate::EventStore`] (trajectory event log, keyed
-//! by `TrajectoryId`). Different access patterns: this trait queries
+//! Distinct from recovery's `AgentEventLog` (tars-storage, the
+//! trajectory event log, keyed by `TrajectoryId`). Different access
+//! patterns: this trait queries
 //! by tenant + time range + tags; trajectory queries by id + sequence.
 //! Q1 in Doc 17 explicitly chose two independent traits over a
 //! generic `EventStore<E>`.
@@ -21,7 +22,7 @@ use rusqlite::{Connection, params};
 
 use tars_types::{PipelineEvent, TenantId};
 
-use crate::error::StorageError;
+use super::StoreError;
 
 /// Pipeline event store schema version.
 ///
@@ -33,7 +34,7 @@ use crate::error::StorageError;
 /// `provider_id: null`. Idempotent.
 const SCHEMA_VERSION: i64 = 2;
 
-/// Filter for `PipelineEventStore::query`. All fields are `AND`-ed
+/// Filter for `PipelineEventLog::query`. All fields are `AND`-ed
 /// together; `None` means "don't filter on this dimension."
 #[derive(Clone, Debug, Default)]
 pub struct PipelineEventQuery {
@@ -50,46 +51,46 @@ pub struct PipelineEventQuery {
 }
 
 #[async_trait]
-pub trait PipelineEventStore: Send + Sync + 'static {
+pub trait PipelineEventLog: Send + Sync + 'static {
     /// Append events. Each event carries its own `event_id`; storage
     /// preserves insertion order via `created_at` index. Idempotent
     /// on duplicate `event_id` (last write wins is fine — call sites
     /// don't re-emit, but a retried write should not ON CONFLICT
     /// fail).
-    async fn append(&self, events: &[PipelineEvent]) -> Result<(), StorageError>;
+    async fn append(&self, events: &[PipelineEvent]) -> Result<(), StoreError>;
 
     /// Query events. Returns up to 10_000 by default; pass `limit` to
     /// override. Order is `timestamp ASC, event_id ASC` for stability.
-    async fn query(&self, q: &PipelineEventQuery) -> Result<Vec<PipelineEvent>, StorageError>;
+    async fn query(&self, q: &PipelineEventQuery) -> Result<Vec<PipelineEvent>, StoreError>;
 
     /// Drop events older than `cutoff`. Returns count removed.
-    async fn purge_before(&self, cutoff: SystemTime) -> Result<u64, StorageError>;
+    async fn purge_before(&self, cutoff: SystemTime) -> Result<u64, StoreError>;
 
     /// Drop a tenant's entire event footprint. Required for tenant-
     /// delete compliance.
-    async fn purge_tenant(&self, tenant_id: &TenantId) -> Result<u64, StorageError>;
+    async fn purge_tenant(&self, tenant_id: &TenantId) -> Result<u64, StoreError>;
 }
 
 #[derive(Clone, Debug)]
-pub struct SqlitePipelineEventStoreConfig {
+pub struct SqlitePipelineEventLogConfig {
     pub path: PathBuf,
 }
 
-impl SqlitePipelineEventStoreConfig {
+impl SqlitePipelineEventLogConfig {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 }
 
 #[derive(Clone)]
-pub struct SqlitePipelineEventStore {
+pub struct SqlitePipelineEventLog {
     conn: Arc<Mutex<Connection>>,
 }
 
-impl SqlitePipelineEventStore {
-    pub fn open(config: SqlitePipelineEventStoreConfig) -> Result<Arc<Self>, StorageError> {
+impl SqlitePipelineEventLog {
+    pub fn open(config: SqlitePipelineEventLogConfig) -> Result<Arc<Self>, StoreError> {
         let conn = Connection::open(&config.path).map_err(|e| {
-            StorageError::backend_source(
+            StoreError::backend_source(
                 format!("opening pipeline event store at {:?}", config.path),
                 e,
             )
@@ -101,9 +102,9 @@ impl SqlitePipelineEventStore {
         }))
     }
 
-    pub fn in_memory() -> Result<Arc<Self>, StorageError> {
+    pub fn in_memory() -> Result<Arc<Self>, StoreError> {
         let conn = Connection::open_in_memory().map_err(|e| {
-            StorageError::backend_source("opening in-memory pipeline event store", e)
+            StoreError::backend_source("opening in-memory pipeline event store", e)
         })?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
@@ -112,27 +113,27 @@ impl SqlitePipelineEventStore {
         }))
     }
 
-    fn pragma_setup(conn: &Connection) -> Result<(), StorageError> {
+    fn pragma_setup(conn: &Connection) -> Result<(), StoreError> {
         for (name, value) in [
             ("journal_mode", "WAL"),
             ("synchronous", "NORMAL"),
             ("temp_store", "MEMORY"),
         ] {
             conn.pragma_update(None, name, value)
-                .map_err(|e| StorageError::backend_source(format!("pragma {name}"), e))?;
+                .map_err(|e| StoreError::backend_source(format!("pragma {name}"), e))?;
         }
         Ok(())
     }
 
-    fn migrate(conn: &Connection) -> Result<(), StorageError> {
+    fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(|e| StorageError::backend_source("read user_version", e))?;
+            .map_err(|e| StoreError::backend_source("read user_version", e))?;
         if current == SCHEMA_VERSION {
             return Ok(());
         }
         if current != 0 && current != 1 {
-            return Err(StorageError::backend(format!(
+            return Err(StoreError::backend(format!(
                 "incompatible pipeline event store schema (file v{current}, code v{SCHEMA_VERSION})"
             )));
         }
@@ -162,7 +163,7 @@ impl SqlitePipelineEventStore {
                     ON pipeline_events(timestamp_ms);
                 "#,
             )
-            .map_err(|e| StorageError::backend_source("create pipeline event schema", e))?;
+            .map_err(|e| StoreError::backend_source("create pipeline event schema", e))?;
         }
 
         if current <= 1 {
@@ -178,7 +179,7 @@ impl SqlitePipelineEventStore {
         }
 
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(|e| StorageError::backend_source("set user_version", e))?;
+            .map_err(|e| StoreError::backend_source("set user_version", e))?;
         Ok(())
     }
 }
@@ -189,7 +190,7 @@ impl SqlitePipelineEventStore {
 /// `null` so the payload matches the new `Option<ProviderId>` shape.
 /// Idempotent — payloads already on the new shape are skipped without
 /// re-serializing (no spurious row writes).
-fn migrate_v1_to_v2_unresolved_to_null(conn: &Connection) -> Result<(), StorageError> {
+fn migrate_v1_to_v2_unresolved_to_null(conn: &Connection) -> Result<(), StoreError> {
     // Scope: only `llm_call_finished` carries `provider_id`. Filter by
     // event_type so we don't waste cycles deserializing/scanning other
     // payload shapes.
@@ -198,18 +199,18 @@ fn migrate_v1_to_v2_unresolved_to_null(conn: &Connection) -> Result<(), StorageE
             "SELECT event_id, payload_json FROM pipeline_events \
              WHERE event_type = 'llm_call_finished'",
         )
-        .map_err(|e| StorageError::backend_source("v1→v2 migrate: prepare select", e))?;
+        .map_err(|e| StoreError::backend_source("v1→v2 migrate: prepare select", e))?;
     let rows = stmt
         .query_map([], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
         })
-        .map_err(|e| StorageError::backend_source("v1→v2 migrate: query", e))?;
+        .map_err(|e| StoreError::backend_source("v1→v2 migrate: query", e))?;
 
     let mut updates: Vec<(String, Vec<u8>)> = Vec::new();
     let mut skipped_unparseable = 0usize;
     for row in rows {
         let (event_id, payload) =
-            row.map_err(|e| StorageError::backend_source("v1→v2 migrate: read row", e))?;
+            row.map_err(|e| StoreError::backend_source("v1→v2 migrate: read row", e))?;
         let mut v: serde_json::Value = match serde_json::from_slice(&payload) {
             Ok(v) => v,
             Err(e) => {
@@ -219,7 +220,7 @@ fn migrate_v1_to_v2_unresolved_to_null(conn: &Connection) -> Result<(), StorageE
                 // event_id) so the skip is observable, not silent.
                 skipped_unparseable += 1;
                 tracing::warn!(
-                    target: "tars_storage::pipeline_event_store",
+                    target: "tars_melt::event::pipeline_event_log",
                     %event_id,
                     error = %e,
                     "v1→v2 migrate: skipping row with unparseable payload_json"
@@ -251,14 +252,14 @@ fn migrate_v1_to_v2_unresolved_to_null(conn: &Connection) -> Result<(), StorageE
                 // trips, the payload is internally inconsistent; fail
                 // the migration rather than silently no-op (which would
                 // leave the legacy sentinel in place undetected).
-                return Err(StorageError::backend(format!(
+                return Err(StoreError::backend(format!(
                     "v1→v2 migrate: LlmCallFinished body for {event_id} carries a \
                      string provider_id but is not a JSON object"
                 )));
             }
         }
         let new_payload = serde_json::to_vec(&v).map_err(|e| {
-            StorageError::backend_source(
+            StoreError::backend_source(
                 format!("v1→v2 migrate: re-encode payload for {event_id}"),
                 e,
             )
@@ -269,7 +270,7 @@ fn migrate_v1_to_v2_unresolved_to_null(conn: &Connection) -> Result<(), StorageE
 
     if skipped_unparseable > 0 {
         tracing::warn!(
-            target: "tars_storage::pipeline_event_store",
+            target: "tars_melt::event::pipeline_event_log",
             count = skipped_unparseable,
             "v1→v2 migrate: skipped unparseable rows (see per-row warnings above)"
         );
@@ -281,12 +282,12 @@ fn migrate_v1_to_v2_unresolved_to_null(conn: &Connection) -> Result<(), StorageE
 
     let mut update_stmt = conn
         .prepare("UPDATE pipeline_events SET payload_json = ?1 WHERE event_id = ?2")
-        .map_err(|e| StorageError::backend_source("v1→v2 migrate: prepare update", e))?;
+        .map_err(|e| StoreError::backend_source("v1→v2 migrate: prepare update", e))?;
     for (event_id, payload) in updates {
         update_stmt
             .execute(rusqlite::params![payload, event_id])
             .map_err(|e| {
-                StorageError::backend_source(format!("v1→v2 migrate: update {event_id}"), e)
+                StoreError::backend_source(format!("v1→v2 migrate: update {event_id}"), e)
             })?;
     }
     Ok(())
@@ -295,7 +296,7 @@ fn migrate_v1_to_v2_unresolved_to_null(conn: &Connection) -> Result<(), StorageE
 const DEFAULT_QUERY_LIMIT: u32 = 10_000;
 
 /// Lock the connection mutex, surfacing a poisoned mutex as a
-/// `StorageError::Backend` rather than panicking the `spawn_blocking`
+/// `StoreError::Backend` rather than panicking the `spawn_blocking`
 /// worker (which would collapse into an opaque join error). A poisoned
 /// mutex means a previous writer panicked mid-operation; SQLite's own
 /// transaction rollback keeps the on-disk state consistent, so we
@@ -334,7 +335,7 @@ fn ts_to_ms(t: SystemTime) -> i64 {
 /// random UUID + `now()`, which silently violates idempotency (a
 /// retried write would land a *second* row). Reject instead so the
 /// caller learns it emitted something this store can't durably key.
-fn inline_columns(ev: &PipelineEvent) -> Result<(String, &'static str, i64, String), StorageError> {
+fn inline_columns(ev: &PipelineEvent) -> Result<(String, &'static str, i64, String), StoreError> {
     match ev {
         PipelineEvent::LlmCallFinished(e) => Ok((
             e.event_id.to_string(),
@@ -348,21 +349,21 @@ fn inline_columns(ev: &PipelineEvent) -> Result<(String, &'static str, i64, Stri
             ts_to_ms(e.timestamp),
             e.tenant_id.as_ref().to_string(),
         )),
-        PipelineEvent::Other => Err(StorageError::backend(
+        PipelineEvent::Other => Err(StoreError::backend(
             "cannot append PipelineEvent::Other: it has no event_id/timestamp, so it \
              cannot satisfy the idempotency-on-event_id contract",
         )),
         // `#[non_exhaustive]` — a future variant we have no matcher for.
         // Same reasoning as `Other`.
-        _ => Err(StorageError::backend(
+        _ => Err(StoreError::backend(
             "cannot append unknown PipelineEvent variant: no stable event_id to key on",
         )),
     }
 }
 
 #[async_trait]
-impl PipelineEventStore for SqlitePipelineEventStore {
-    async fn append(&self, events: &[PipelineEvent]) -> Result<(), StorageError> {
+impl PipelineEventLog for SqlitePipelineEventLog {
+    async fn append(&self, events: &[PipelineEvent]) -> Result<(), StoreError> {
         if events.is_empty() {
             return Ok(());
         }
@@ -376,11 +377,11 @@ impl PipelineEventStore for SqlitePipelineEventStore {
         }
 
         let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
+        tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
             let mut conn = lock_conn(&conn);
             let tx = conn
                 .transaction()
-                .map_err(|e| StorageError::backend_source("begin tx", e))?;
+                .map_err(|e| StoreError::backend_source("begin tx", e))?;
             {
                 let mut stmt = tx
                     .prepare(
@@ -388,30 +389,30 @@ impl PipelineEventStore for SqlitePipelineEventStore {
                          (event_id, event_type, timestamp_ms, tenant_id, payload_json) \
                          VALUES (?, ?, ?, ?, ?)",
                     )
-                    .map_err(|e| StorageError::backend_source("prepare insert", e))?;
+                    .map_err(|e| StoreError::backend_source("prepare insert", e))?;
                 for (id, ty, ts, tenant, blob) in &rows {
                     stmt.execute(params![id, ty, ts, tenant, blob])
-                        .map_err(|e| StorageError::backend_source("insert", e))?;
+                        .map_err(|e| StoreError::backend_source("insert", e))?;
                 }
             }
             tx.commit()
-                .map_err(|e| StorageError::backend_source("commit", e))?;
+                .map_err(|e| StoreError::backend_source("commit", e))?;
             Ok(())
         })
         .await
-        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
+        .map_err(|e| StoreError::backend_source("spawn_blocking", e))??;
 
         Ok(())
     }
 
-    async fn query(&self, q: &PipelineEventQuery) -> Result<Vec<PipelineEvent>, StorageError> {
+    async fn query(&self, q: &PipelineEventQuery) -> Result<Vec<PipelineEvent>, StoreError> {
         let conn = self.conn.clone();
         let tenant = q.tenant_id.as_ref().map(|t| t.as_ref().to_string());
         let since = q.since.map(ts_to_ms);
         let until = q.until.map(ts_to_ms);
         let limit = q.limit.unwrap_or(DEFAULT_QUERY_LIMIT) as i64;
 
-        let blobs = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<u8>>, StorageError> {
+        let blobs = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<u8>>, StoreError> {
             let conn = lock_conn(&conn);
 
             // Build SQL incrementally — keep the where clause to
@@ -430,7 +431,7 @@ impl PipelineEventStore for SqlitePipelineEventStore {
 
             let mut stmt = conn
                 .prepare(&sql)
-                .map_err(|e| StorageError::backend_source("prepare query", e))?;
+                .map_err(|e| StoreError::backend_source("prepare query", e))?;
 
             // Build param list dynamically to match optional clauses.
             let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -452,16 +453,16 @@ impl PipelineEventStore for SqlitePipelineEventStore {
                 .query_map(rusqlite::params_from_iter(param_refs), |r| {
                     r.get::<_, Vec<u8>>(0)
                 })
-                .map_err(|e| StorageError::backend_source("query", e))?;
+                .map_err(|e| StoreError::backend_source("query", e))?;
 
             let mut blobs = Vec::new();
             for row in iter {
-                blobs.push(row.map_err(|e| StorageError::backend_source("row", e))?);
+                blobs.push(row.map_err(|e| StoreError::backend_source("row", e))?);
             }
             Ok(blobs)
         })
         .await
-        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
+        .map_err(|e| StoreError::backend_source("spawn_blocking", e))??;
 
         let mut out = Vec::with_capacity(blobs.len());
         for b in blobs {
@@ -470,39 +471,39 @@ impl PipelineEventStore for SqlitePipelineEventStore {
         Ok(out)
     }
 
-    async fn purge_before(&self, cutoff: SystemTime) -> Result<u64, StorageError> {
+    async fn purge_before(&self, cutoff: SystemTime) -> Result<u64, StoreError> {
         let conn = self.conn.clone();
         let cutoff_ms = ts_to_ms(cutoff);
-        let n = tokio::task::spawn_blocking(move || -> Result<u64, StorageError> {
+        let n = tokio::task::spawn_blocking(move || -> Result<u64, StoreError> {
             let conn = lock_conn(&conn);
             let n = conn
                 .execute(
                     "DELETE FROM pipeline_events WHERE timestamp_ms < ?",
                     params![cutoff_ms],
                 )
-                .map_err(|e| StorageError::backend_source("purge_before", e))?;
+                .map_err(|e| StoreError::backend_source("purge_before", e))?;
             Ok(n as u64)
         })
         .await
-        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
+        .map_err(|e| StoreError::backend_source("spawn_blocking", e))??;
         Ok(n)
     }
 
-    async fn purge_tenant(&self, tenant_id: &TenantId) -> Result<u64, StorageError> {
+    async fn purge_tenant(&self, tenant_id: &TenantId) -> Result<u64, StoreError> {
         let conn = self.conn.clone();
         let tenant = tenant_id.as_ref().to_string();
-        let n = tokio::task::spawn_blocking(move || -> Result<u64, StorageError> {
+        let n = tokio::task::spawn_blocking(move || -> Result<u64, StoreError> {
             let conn = lock_conn(&conn);
             let n = conn
                 .execute(
                     "DELETE FROM pipeline_events WHERE tenant_id = ?",
                     params![tenant],
                 )
-                .map_err(|e| StorageError::backend_source("purge_tenant", e))?;
+                .map_err(|e| StoreError::backend_source("purge_tenant", e))?;
             Ok(n as u64)
         })
         .await
-        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
+        .map_err(|e| StoreError::backend_source("spawn_blocking", e))??;
         Ok(n)
     }
 }
@@ -517,8 +518,8 @@ mod tests {
     };
     use uuid::Uuid;
 
-    async fn store() -> Arc<SqlitePipelineEventStore> {
-        SqlitePipelineEventStore::in_memory().expect("open store")
+    async fn store() -> Arc<SqlitePipelineEventLog> {
+        SqlitePipelineEventLog::in_memory().expect("open store")
     }
 
     fn fake_event(tenant: &str, ts: SystemTime) -> PipelineEvent {
@@ -531,7 +532,7 @@ mod tests {
             provider_id: Some(ProviderId::new("p")),
             actual_model: "m".into(),
             request_fingerprint: [0u8; 32],
-            request_ref: ContentRef::from_body(TenantId::new(tenant), b"req"),
+            request_ref: ContentRef::from_content(TenantId::new(tenant), b"req"),
             has_tools: false,
             has_thinking: false,
             has_structured_output: false,
@@ -674,7 +675,7 @@ mod tests {
         // create the v1 schema, hand-insert a row carrying the legacy
         // sentinel payload.
         let conn = Connection::open_in_memory().unwrap();
-        SqlitePipelineEventStore::pragma_setup(&conn).unwrap();
+        SqlitePipelineEventLog::pragma_setup(&conn).unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE pipeline_events (
@@ -733,7 +734,7 @@ mod tests {
         }
 
         // Run the same migrate() the production path runs at open.
-        SqlitePipelineEventStore::migrate(&conn).unwrap();
+        SqlitePipelineEventLog::migrate(&conn).unwrap();
 
         // user_version is now SCHEMA_VERSION (2).
         let v: i64 = conn
@@ -785,6 +786,6 @@ mod tests {
         assert!(v["LlmCallFinished"]["provider_id"].is_null());
 
         // Running migrate() again is a no-op (already at SCHEMA_VERSION).
-        SqlitePipelineEventStore::migrate(&conn).unwrap();
+        SqlitePipelineEventLog::migrate(&conn).unwrap();
     }
 }

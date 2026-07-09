@@ -8,7 +8,7 @@
 //! whether a Session wraps it.
 //!
 //! Schema lives in `tars-types` (data contract, no backend); the
-//! `PipelineEventStore` trait that persists it lives in `tars-storage`.
+//! `PipelineEventLog` trait that persists it lives in `tars_melt::event`.
 
 use std::time::SystemTime;
 
@@ -56,8 +56,8 @@ pub enum PipelineEvent {
 }
 
 /// Per-call observability + outcome record. Inline scalars (small,
-/// queryable) plus `ContentRef` pointers to bodies in a separate
-/// `BodyStore` (Doc 17 §5).
+/// queryable) plus `ContentRef` pointers to records in a separate
+/// `LlmRecordStore` (Doc 17 §5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LlmCallFinished {
     // ── identity ────────────────────────────────────────────────
@@ -90,7 +90,7 @@ pub struct LlmCallFinished {
     /// `request_ref` (which is tenant-scoped) and from cache key
     /// (which adds tenant + IAM scopes).
     pub request_fingerprint: [u8; 32],
-    /// Pointer to the full request body in `BodyStore`. Tenant-scoped.
+    /// Pointer to the full request record in `LlmRecordStore`. Tenant-scoped.
     pub request_ref: ContentRef,
     pub has_tools: bool,
     pub has_thinking: bool,
@@ -186,7 +186,7 @@ pub struct EvaluationScored {
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum PersistenceMode {
-    /// Default — inline scalars + ContentRef bodies. Sufficient for
+    /// Default — inline scalars + ContentRef records. Sufficient for
     /// metric rollups, cohort filtering, regression gates.
     #[default]
     Limited,
@@ -212,7 +212,7 @@ mod tests {
             provider_id: Some(ProviderId::new("p")),
             actual_model: "m".into(),
             request_fingerprint: [0u8; 32],
-            request_ref: ContentRef::from_body(TenantId::new("t"), b"req"),
+            request_ref: ContentRef::from_content(TenantId::new("t"), b"req"),
             has_tools: false,
             has_thinking: false,
             has_structured_output: false,

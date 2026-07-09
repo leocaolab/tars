@@ -1,8 +1,8 @@
-//! [`EventStore`] trait — append-only per-trajectory event log.
+//! [`AgentEventLog`] trait — append-only per-trajectory event log.
 //!
 //! Doc 04 §3 describes the Trajectory as an event-sourced tree; this
 //! trait is the durable backing for that. Two implementors today:
-//! the SQLite-backed [`crate::SqliteEventStore`] (Personal mode) and
+//! the SQLite-backed [`crate::SqliteAgentEventLog`] (Personal mode) and
 //! a future Postgres impl (Team mode, Doc 14 M6).
 
 use async_trait::async_trait;
@@ -45,7 +45,7 @@ pub struct EventRecord {
 /// blocking work to a runtime executor without forcing every caller
 /// into a thread pool.
 #[async_trait]
-pub trait EventStore: Send + Sync + 'static {
+pub trait AgentEventLog: Send + Sync + 'static {
     /// Append a batch of payloads to `trajectory_id`. Returns the
     /// `sequence_no` of the **last** event written. Empty `payloads`
     /// is a no-op that returns the current high-water (or 0 if none).

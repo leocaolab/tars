@@ -28,6 +28,11 @@ use thiserror::Error;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
+/// The read-able **E-pillar** event store (Doc 08 §3, Doc 17):
+/// `PipelineEventLog` + `LlmRecordStore`. Public as
+/// `tars_melt::event::{...}`.
+pub mod event;
+
 #[cfg(feature = "otlp")]
 mod metrics;
 #[cfg(feature = "otlp")]

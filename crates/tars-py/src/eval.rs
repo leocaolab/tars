@@ -13,7 +13,7 @@
 //!   call) so the score lands in the same store, queryable alongside
 //!   the calls it grades.
 //!
-//! Both go through the Rust `SqlitePipelineEventStore` so the on-disk
+//! Both go through the Rust `SqlitePipelineEventLog` so the on-disk
 //! schema can't drift from a hand-rolled SQL writer.
 
 use std::time::{Duration, SystemTime};
@@ -22,9 +22,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use uuid::Uuid;
 
-use tars_storage::{
-    PipelineEventQuery, PipelineEventStore, SqlitePipelineEventStore,
-    SqlitePipelineEventStoreConfig,
+use tars_melt::event::{
+    PipelineEventLog, PipelineEventQuery, SqlitePipelineEventLog,
+    SqlitePipelineEventLogConfig,
 };
 use tars_types::{EvaluationScored, PipelineEvent, TenantId};
 
@@ -33,7 +33,7 @@ use crate::tokio_runtime;
 
 /// Open the pipeline event store under `dir` (expects
 /// `{dir}/pipeline_events.db`). Shared by both helpers.
-fn open_store(dir: &str) -> PyResult<std::sync::Arc<dyn PipelineEventStore>> {
+fn open_store(dir: &str) -> PyResult<std::sync::Arc<dyn PipelineEventLog>> {
     let path = std::path::Path::new(dir).join("pipeline_events.db");
     if !path.exists() {
         return Err(pyo3::exceptions::PyFileNotFoundError::new_err(format!(
@@ -42,9 +42,9 @@ fn open_store(dir: &str) -> PyResult<std::sync::Arc<dyn PipelineEventStore>> {
              `.event_store(dir)`) first to populate it"
         )));
     }
-    let store = SqlitePipelineEventStore::open(SqlitePipelineEventStoreConfig::new(path))
+    let store = SqlitePipelineEventLog::open(SqlitePipelineEventLogConfig::new(path))
         .map_err(|e| runtime_to_py("open pipeline event store", e))?;
-    Ok(store as std::sync::Arc<dyn PipelineEventStore>)
+    Ok(store as std::sync::Arc<dyn PipelineEventLog>)
 }
 
 /// Read finished LLM calls from the event store as plain dicts (one per

@@ -6,7 +6,7 @@
 //! path end-to-end at the runtime layer, we'd be testing serialization
 //! in isolation but missing the wiring bug where (e.g.) a
 //! `LocalRuntime` constructed against a freshly-opened
-//! `SqliteEventStore` returns surprising things on `replay`.
+//! `SqliteAgentEventLog` returns surprising things on `replay`.
 //!
 //! tars-storage already has its own close-and-reopen test at the
 //! event-store layer; this test layers on top to prove the same
@@ -16,12 +16,12 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use tars_runtime::{AgentEvent, LocalRuntime, Runtime, StepIdempotencyKey};
-use tars_storage::{EventStore, open_event_store_at_path};
+use tars_storage::{AgentEventLog, open_agent_event_log_at_path};
 use tars_types::{ProviderId, TrajectoryId, Usage};
 
 fn build_runtime(dir: &TempDir) -> Arc<LocalRuntime> {
-    let store: Arc<dyn EventStore> =
-        open_event_store_at_path(&dir.path().join("events.sqlite")).expect("event store opens");
+    let store: Arc<dyn AgentEventLog> =
+        open_agent_event_log_at_path(&dir.path().join("events.sqlite")).expect("event store opens");
     LocalRuntime::new(store)
 }
 

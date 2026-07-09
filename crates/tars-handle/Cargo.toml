@@ -16,6 +16,8 @@ tars-provider = { path = "../tars-provider" }
 tars-pipeline = { path = "../tars-pipeline" }
 tars-runtime = { path = "../tars-runtime" }
 tars-storage = { path = "../tars-storage" }
+# Observability E-pillar stores (PipelineEventLog + LlmRecordStore).
+tars-melt = { path = "../tars-melt" }
 
 serde.workspace = true
 toml.workspace = true

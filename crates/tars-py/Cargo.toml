@@ -27,7 +27,8 @@ tars-handle = { path = "../tars-handle" }
 tars-provider = { path = "../tars-provider" }
 tars-pipeline = { path = "../tars-pipeline" }
 tars-cache = { path = "../tars-cache" }
-tars-storage = { path = "../tars-storage" }
+# Observability E-pillar stores (PipelineEventLog + LlmRecordStore).
+tars-melt = { path = "../tars-melt" }
 tars-runtime = { path = "../tars-runtime" }
 serde_json.workspace = true
 uuid = { workspace = true }

@@ -1,5 +1,5 @@
 //! `EventEmitterMiddleware` — emits one `LlmCallFinished` per
-//! `Pipeline.call` boundary to a `PipelineEventStore` + `BodyStore`.
+//! `Pipeline.call` boundary to a `PipelineEventLog` + `LlmRecordStore`.
 //! See [Doc 17 §8](../../docs/architecture/17-pipeline-event-store.md).
 //!
 //! Position in the onion: **outermost layer** (added FIRST to the
@@ -8,7 +8,7 @@
 //! populate them.
 //!
 //! Write semantics: **fire-and-forget**. After the stream drains, the
-//! event + bodies are written in a `tokio::spawn`'d task; the caller's
+//! event + records are written in a `tokio::spawn`'d task; the caller's
 //! response path doesn't block on storage I/O. Write failures degrade
 //! silently with a `tracing::warn!` (same pattern as
 //! `cache.rs::wrap_stream_for_write`).
@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use tars_provider::LlmEventStream;
-use tars_storage::{BodyStore, PipelineEventStore};
+use tars_melt::event::{LlmRecordStore, PipelineEventLog};
 use tars_types::{
     CallResult, ChatEvent, ChatRequest, ChatResponseBuilder, ContentRef, LlmCallFinished,
     PipelineEvent, ProviderError, RequestContext, ValidationReason,
@@ -36,13 +36,13 @@ use crate::service::LlmService;
 /// to the configured stores.
 #[derive(Clone)]
 pub struct EventEmitterMiddleware {
-    events: Arc<dyn PipelineEventStore>,
-    bodies: Arc<dyn BodyStore>,
+    events: Arc<dyn PipelineEventLog>,
+    records: Arc<dyn LlmRecordStore>,
 }
 
 impl EventEmitterMiddleware {
-    pub fn new(events: Arc<dyn PipelineEventStore>, bodies: Arc<dyn BodyStore>) -> Self {
-        Self { events, bodies }
+    pub fn new(events: Arc<dyn PipelineEventLog>, records: Arc<dyn LlmRecordStore>) -> Self {
+        Self { events, records }
     }
 }
 
@@ -54,15 +54,15 @@ impl Middleware for EventEmitterMiddleware {
         Arc::new(EventEmitterService {
             inner,
             events: self.events.clone(),
-            bodies: self.bodies.clone(),
+            records: self.records.clone(),
         })
     }
 }
 
 struct EventEmitterService {
     inner: Arc<dyn LlmService>,
-    events: Arc<dyn PipelineEventStore>,
-    bodies: Arc<dyn BodyStore>,
+    events: Arc<dyn PipelineEventLog>,
+    records: Arc<dyn LlmRecordStore>,
 }
 
 #[async_trait]
@@ -102,7 +102,7 @@ impl LlmService for EventEmitterService {
         let max_output_tokens = req.max_output_tokens;
 
         // Serialize the request body once — used for both the
-        // ContentRef hash and the BodyStore write. If this fails we
+        // ContentRef hash and the LlmRecordStore write. If this fails we
         // cannot produce a meaningful request_fingerprint or request_ref
         // (an empty body would hash to a constant and the stored body
         // would be corrupt), so skip event emission entirely and just
@@ -123,7 +123,7 @@ impl LlmService for EventEmitterService {
             h.update(&req_body_bytes);
             h.finalize().into()
         };
-        let request_ref = ContentRef::from_body(tenant_id.clone(), &req_body_bytes);
+        let request_ref = ContentRef::from_content(tenant_id.clone(), &req_body_bytes);
 
         let result = self.inner.clone().call(req, ctx).await;
 
@@ -151,7 +151,7 @@ impl LlmService for EventEmitterService {
                     stream,
                     StreamCtx {
                         events: self.events.clone(),
-                        bodies: self.bodies.clone(),
+                        records: self.records.clone(),
                         req_body_bytes,
                         request_fingerprint,
                         request_ref,
@@ -179,7 +179,7 @@ impl LlmService for EventEmitterService {
                 // before the event row so the event's `request_ref`
                 // isn't a dangling ContentRef. Still fire-and-forget.
                 let events = self.events.clone();
-                let bodies = self.bodies.clone();
+                let records = self.records.clone();
                 let req_body_for_write = req_body_bytes.clone();
                 let event = build_event(EventInputs {
                     result: result_for_error.expect("error path"),
@@ -210,7 +210,7 @@ impl LlmService for EventEmitterService {
                     // the body write fails the ref would dangle, so skip
                     // emitting the event entirely (best-effort, but never
                     // a broken reference).
-                    if let Err(err) = bodies.put(&body_ref, Bytes::from(req_body_for_write)).await {
+                    if let Err(err) = records.put(&body_ref, Bytes::from(req_body_for_write)).await {
                         tracing::warn!(
                             error = %err,
                             "event_emitter: request body write failed on error path; \
@@ -218,7 +218,7 @@ impl LlmService for EventEmitterService {
                         );
                         return;
                     }
-                    fire_and_forget(events, bodies, event, tenant_id, request_ref).await;
+                    fire_and_forget(events, records, event, tenant_id, request_ref).await;
                 });
                 Err(e)
             }
@@ -230,8 +230,8 @@ impl LlmService for EventEmitterService {
 /// across the stream's lifetime. Passing as a struct cuts the function
 /// signature noise.
 struct StreamCtx {
-    events: Arc<dyn PipelineEventStore>,
-    bodies: Arc<dyn BodyStore>,
+    events: Arc<dyn PipelineEventLog>,
+    records: Arc<dyn LlmRecordStore>,
     req_body_bytes: Vec<u8>,
     request_fingerprint: [u8; 32],
     request_ref: ContentRef,
@@ -347,16 +347,16 @@ fn build_event(i: EventInputs) -> LlmCallFinished {
     }
 }
 
-/// Fire-and-forget write of one event + bodies. Failures degrade
+/// Fire-and-forget write of one event + records. Failures degrade
 /// silently; the caller's response path doesn't depend on storage I/O.
 async fn fire_and_forget(
-    events: Arc<dyn PipelineEventStore>,
-    bodies: Arc<dyn BodyStore>,
+    events: Arc<dyn PipelineEventLog>,
+    records: Arc<dyn LlmRecordStore>,
     event: LlmCallFinished,
     _tenant: tars_types::TenantId,
     _request_ref: ContentRef,
 ) {
-    // Bodies are written by the stream wrapper before this is called
+    // Records are written by the stream wrapper before this is called
     // (see wrap_stream_for_emit). Here we only persist the event row.
     let to_emit = PipelineEvent::LlmCallFinished(Box::new(event));
     if let Err(e) = events.append(&[to_emit]).await {
@@ -365,7 +365,7 @@ async fn fire_and_forget(
             "event_emitter: event append failed (degraded silently)",
         );
     }
-    let _ = bodies; // bodies already written; keeping the param for future v1.1 retry-write
+    let _ = records; // records already written; keeping the param for future v1.1 retry-write
 }
 
 /// Wrap the inner stream so we observe every event, build the
@@ -412,7 +412,7 @@ fn wrap_stream_for_emit(
             None
         };
         let response_ref = response_body_bytes_opt.as_ref().map(|bytes| {
-            ContentRef::from_body(sc.tenant_id.clone(), bytes)
+            ContentRef::from_content(sc.tenant_id.clone(), bytes)
         });
 
         let usage = response.usage;
@@ -426,11 +426,11 @@ fn wrap_stream_for_emit(
             },
         };
 
-        // Bodies first: write request + response so the event row's
+        // Records first: write request + response so the event row's
         // ContentRefs always resolve. Use spawn so the caller's stream
         // doesn't block on storage I/O — main reason the wrapper is
         // here at all.
-        let bodies_for_spawn = sc.bodies.clone();
+        let records_for_spawn = sc.records.clone();
         let events_for_spawn = sc.events.clone();
         let tenant_for_spawn = sc.tenant_id.clone();
         let request_ref_for_spawn = sc.request_ref.clone();
@@ -465,14 +465,14 @@ fn wrap_stream_for_emit(
 
         tokio::spawn(async move {
             let mut event = event;
-            // Bodies — request always; response only if we have it. The
+            // Records — request always; response only if we have it. The
             // event row's ContentRefs must resolve, so a failed body
             // write can't leave its ref hanging on the event:
             //  - request body is required on the event → if its write
             //    fails, skip the event entirely.
             //  - response_ref is optional → if its write fails, null it
             //    out and still emit (the rest of the event is useful).
-            if let Err(e) = bodies_for_spawn
+            if let Err(e) = records_for_spawn
                 .put(&request_ref_for_spawn, Bytes::from(req_body_bytes_for_spawn))
                 .await
             {
@@ -483,7 +483,7 @@ fn wrap_stream_for_emit(
                 return;
             }
             if let (Some(rref), Some(rbytes)) = (response_ref_for_spawn, response_body_bytes_opt) {
-                if let Err(e) = bodies_for_spawn.put(&rref, Bytes::from(rbytes)).await {
+                if let Err(e) = records_for_spawn.put(&rref, Bytes::from(rbytes)).await {
                     tracing::warn!(
                         error = %e,
                         "event_emitter: response body write failed; emitting event without response_ref",
@@ -491,8 +491,8 @@ fn wrap_stream_for_emit(
                     event.response_ref = None;
                 }
             }
-            // Event row — depends on bodies, write last.
-            fire_and_forget(events_for_spawn, bodies_for_spawn, event, tenant_for_spawn, request_ref_for_spawn).await;
+            // Event row — depends on records, write last.
+            fire_and_forget(events_for_spawn, records_for_spawn, event, tenant_for_spawn, request_ref_for_spawn).await;
         });
     }
 }
@@ -502,7 +502,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_storage::{PipelineEventQuery, SqliteBodyStore, SqlitePipelineEventStore};
+    use tars_melt::event::{LlmRecordStore, PipelineEventLog, PipelineEventQuery, SqliteLlmRecordStore, SqlitePipelineEventLog};
     use tars_types::{ChatRequest, ModelHint, RequestContext};
 
     use crate::service::ProviderService;
@@ -518,12 +518,12 @@ mod tests {
 
     #[tokio::test]
     async fn happy_path_emits_one_event_with_bodies() {
-        let events: Arc<dyn PipelineEventStore> = SqlitePipelineEventStore::in_memory().unwrap();
-        let bodies: Arc<dyn BodyStore> = SqliteBodyStore::in_memory().unwrap();
+        let events: Arc<dyn PipelineEventLog> = SqlitePipelineEventLog::in_memory().unwrap();
+        let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().unwrap();
 
         let provider = MockProvider::new("p1", CannedResponse::text("hello"));
         let inner: Arc<dyn LlmService> = ProviderService::new(provider);
-        let svc = EventEmitterMiddleware::new(events.clone(), bodies.clone()).wrap(inner);
+        let svc = EventEmitterMiddleware::new(events.clone(), records.clone()).wrap(inner);
 
         let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
         let _ = drain(svc.call(req, RequestContext::test_default()).await.unwrap()).await;
@@ -537,11 +537,11 @@ mod tests {
             PipelineEvent::LlmCallFinished(e) => {
                 assert_eq!(e.actual_model, "m");
                 assert!(matches!(e.result, CallResult::Ok));
-                // Both bodies should resolve.
-                let req_bytes = bodies.fetch(&e.request_ref).await.unwrap();
+                // Both records should resolve.
+                let req_bytes = records.fetch(&e.request_ref).await.unwrap();
                 assert!(req_bytes.is_some(), "request body fetchable");
                 let resp_ref = e.response_ref.as_ref().expect("response_ref present on Ok");
-                let resp_bytes = bodies.fetch(resp_ref).await.unwrap();
+                let resp_bytes = records.fetch(resp_ref).await.unwrap();
                 assert!(resp_bytes.is_some(), "response body fetchable");
             }
             other => panic!("expected LlmCallFinished, got {other:?}"),
@@ -554,8 +554,8 @@ mod tests {
             OutputValidator, ValidationMiddleware, builtin::MaxLengthValidator,
         };
 
-        let events: Arc<dyn PipelineEventStore> = SqlitePipelineEventStore::in_memory().unwrap();
-        let bodies: Arc<dyn BodyStore> = SqliteBodyStore::in_memory().unwrap();
+        let events: Arc<dyn PipelineEventLog> = SqlitePipelineEventLog::in_memory().unwrap();
+        let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().unwrap();
 
         let provider = MockProvider::new("p1", CannedResponse::text("hello world"));
         let inner: Arc<dyn LlmService> = ProviderService::new(provider);
@@ -564,7 +564,7 @@ mod tests {
             Arc::new(MaxLengthValidator::truncate_above(5)) as Arc<dyn OutputValidator>,
         ])
         .wrap(inner);
-        let svc = EventEmitterMiddleware::new(events.clone(), bodies.clone()).wrap(validated);
+        let svc = EventEmitterMiddleware::new(events.clone(), records.clone()).wrap(validated);
 
         let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
         let _ = drain(svc.call(req, RequestContext::test_default()).await.unwrap()).await;
@@ -593,8 +593,8 @@ mod tests {
         };
         use tars_types::ValidationReason;
 
-        let events: Arc<dyn PipelineEventStore> = SqlitePipelineEventStore::in_memory().unwrap();
-        let bodies: Arc<dyn BodyStore> = SqliteBodyStore::in_memory().unwrap();
+        let events: Arc<dyn PipelineEventLog> = SqlitePipelineEventLog::in_memory().unwrap();
+        let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().unwrap();
 
         // Empty text → NotEmpty rejects.
         let provider = MockProvider::new("p1", CannedResponse::text(""));
@@ -603,7 +603,7 @@ mod tests {
             Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
         ])
         .wrap(inner);
-        let svc = EventEmitterMiddleware::new(events.clone(), bodies.clone()).wrap(validated);
+        let svc = EventEmitterMiddleware::new(events.clone(), records.clone()).wrap(validated);
 
         let req = ChatRequest::user(ModelHint::Explicit("m".into()), "hi");
         let result = svc.call(req, RequestContext::test_default()).await;

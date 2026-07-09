@@ -21,7 +21,7 @@ use tars_pipeline::RequestContext;
 use tars_runtime::{Budget, Session, SessionOptions};
 use tars_server::AppState;
 pub use tars_storage::EventRecord;
-use tars_storage::{EventStore, open_event_store_at_path};
+use tars_storage::{AgentEventLog, open_agent_event_log_at_path};
 use tars_types::{
     Capabilities, ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, ContentBlock, Message,
     ModelHint, Pricing, SharedTelemetry, StopReason, TelemetryAccumulator, TraceId, TrajectoryId,
@@ -104,7 +104,7 @@ pub struct Backend {
     /// The shared trajectory event store (`events.sqlite`) — what `tars run` /
     /// agents (incl. arc) write their decision trees to. `None` if it can't be
     /// opened; the trace view is then simply empty.
-    trajectory_store: Option<Arc<dyn EventStore>>,
+    trajectory_store: Option<Arc<dyn AgentEventLog>>,
 }
 
 impl Backend {
@@ -113,15 +113,15 @@ impl Backend {
     /// view (best-effort: `None` if it can't be opened).
     pub fn from_config(config: &Config) -> anyhow::Result<Self> {
         let trajectory_store = default_trajectory_store_path()
-            .and_then(|p| open_event_store_at_path(&p).ok())
-            .map(|s| s as Arc<dyn EventStore>);
+            .and_then(|p| open_agent_event_log_at_path(&p).ok())
+            .map(|s| s as Arc<dyn AgentEventLog>);
         Self::with_trajectory_store(config, trajectory_store)
     }
 
     /// Build with an explicit (or no) trajectory store — used by tests.
     pub fn with_trajectory_store(
         config: &Config,
-        trajectory_store: Option<Arc<dyn EventStore>>,
+        trajectory_store: Option<Arc<dyn AgentEventLog>>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             state: AppState::from_config(config, None)?,
@@ -525,7 +525,7 @@ mod tests {
     async fn trajectory_view_lists_and_reads() {
         // A temp trajectory store with one trajectory + two events.
         let dir = tempfile::tempdir().unwrap();
-        let store = open_event_store_at_path(&dir.path().join("events.sqlite")).unwrap();
+        let store = open_agent_event_log_at_path(&dir.path().join("events.sqlite")).unwrap();
         let tid = TrajectoryId::new("traj-1");
         store
             .append(
@@ -540,7 +540,7 @@ mod tests {
 
         let config = ConfigManager::load_from_str("[providers.mock]\ntype = \"mock\"\n").unwrap();
         let backend =
-            Backend::with_trajectory_store(&config, Some(store as Arc<dyn EventStore>)).unwrap();
+            Backend::with_trajectory_store(&config, Some(store as Arc<dyn AgentEventLog>)).unwrap();
 
         let trajs = backend.list_trajectories().await;
         assert!(

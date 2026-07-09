@@ -18,7 +18,7 @@
 //! ## Critical invariant — durability is independent of observability
 //!
 //! The durability store is **always-on** and built on its OWN connection.
-//! It NEVER layers correctness on `tars_storage::EventStore` /
+//! It NEVER layers correctness on `tars_storage::AgentEventLog` /
 //! `Runtime::append`, which are the *off-able* observability sink
 //! (`StoreScope::Off`, `ARC_TARS_EVENTS_OFF`). With observability events
 //! fully off/absent, a step's answer, the job's state, and `result_events`

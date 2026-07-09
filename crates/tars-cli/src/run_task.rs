@@ -38,7 +38,7 @@ use tars_runtime::{
     AgentMessage, CriticAgent, LocalRuntime, OrchestratorAgent, RunTaskConfig, RunTaskError,
     Runtime, StepOutcome, TaskOutcome, VerdictKind, WorkerAgent, run_task,
 };
-use tars_storage::{EventStore, SqliteEventStore};
+use tars_storage::{AgentEventLog, SqliteAgentEventLog};
 use tars_tools::{
     ToolRegistry,
     builtins::{ListDirTool, ReadFileTool},
@@ -249,12 +249,12 @@ fn build_worker(args: &RunTaskArgs, model: String) -> Result<Arc<WorkerAgent>> {
 
 async fn build_runtime(args: &RunTaskArgs) -> Result<Arc<dyn Runtime>> {
     if args.dispatch.no_trajectory {
-        let store: Arc<dyn EventStore> = SqliteEventStore::in_memory()
+        let store: Arc<dyn AgentEventLog> = SqliteAgentEventLog::in_memory()
             .context("opening in-memory event store for --no-trajectory mode")?;
         let rt = LocalRuntime::new(store);
         return Ok(rt as Arc<dyn Runtime>);
     }
-    let store: Arc<dyn EventStore> = match event_store::open(args.dispatch.events_path.as_deref())?
+    let store: Arc<dyn AgentEventLog> = match event_store::open(args.dispatch.events_path.as_deref())?
     {
         Some(s) => s,
         None => {
@@ -264,7 +264,7 @@ async fn build_runtime(args: &RunTaskArgs) -> Result<Arc<dyn Runtime>> {
             tracing::warn!(
                 "trajectory: no XDG data dir on this platform; using in-memory event store",
             );
-            SqliteEventStore::in_memory().context("opening in-memory event store fallback")?
+            SqliteAgentEventLog::in_memory().context("opening in-memory event store fallback")?
         }
     };
     let rt = LocalRuntime::new(store);

@@ -1,4 +1,4 @@
-//! SQLite-backed [`EventStore`] — Personal-mode persistence.
+//! SQLite-backed [`AgentEventLog`] — Personal-mode persistence.
 //!
 //! Same scaffolding pattern as `tars-cache::SqliteCacheRegistry`:
 //! single connection in `Arc<Mutex>`, blocking calls inside
@@ -26,28 +26,28 @@ use rusqlite::{Connection, params};
 use tars_types::TrajectoryId;
 
 use crate::error::StorageError;
-use crate::event_store::{EventRecord, EventStore};
+use crate::agent_event_log::{EventRecord, AgentEventLog};
 
 const SCHEMA_VERSION: i64 = 1;
 
 #[derive(Clone, Debug)]
-pub struct SqliteEventStoreConfig {
+pub struct SqliteAgentEventLogConfig {
     pub path: PathBuf,
 }
 
-impl SqliteEventStoreConfig {
+impl SqliteAgentEventLogConfig {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 }
 
 #[derive(Clone)]
-pub struct SqliteEventStore {
+pub struct SqliteAgentEventLog {
     conn: Arc<Mutex<Connection>>,
 }
 
-impl SqliteEventStore {
-    pub fn open(config: SqliteEventStoreConfig) -> Result<Arc<Self>, StorageError> {
+impl SqliteAgentEventLog {
+    pub fn open(config: SqliteAgentEventLogConfig) -> Result<Arc<Self>, StorageError> {
         let conn = Connection::open(&config.path).map_err(|e| {
             StorageError::backend_source(format!("opening event store at {:?}", config.path), e)
         })?;
@@ -127,7 +127,7 @@ impl SqliteEventStore {
 }
 
 #[async_trait]
-impl EventStore for SqliteEventStore {
+impl AgentEventLog for SqliteAgentEventLog {
     async fn append(
         &self,
         trajectory_id: &TrajectoryId,
@@ -289,7 +289,7 @@ impl EventStore for SqliteEventStore {
 /// Default location: `$XDG_DATA_HOME/tars/events.sqlite` (or platform
 /// equivalent). Personal-mode binaries (`tars-cli`, future `tars chat`)
 /// land here unless overridden.
-pub fn default_personal_event_store_path() -> Option<PathBuf> {
+pub fn default_personal_agent_event_log_path() -> Option<PathBuf> {
     // data_dir is the XDG/macOS location for "long-lived user-state
     // files". cache_dir was right for the cache; events are NOT cache
     // (they're durable user history).
@@ -297,13 +297,13 @@ pub fn default_personal_event_store_path() -> Option<PathBuf> {
 }
 
 /// Open at `path`, creating the parent directory if needed.
-pub fn open_event_store_at_path(path: &Path) -> Result<Arc<SqliteEventStore>, StorageError> {
+pub fn open_agent_event_log_at_path(path: &Path) -> Result<Arc<SqliteAgentEventLog>, StorageError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             StorageError::backend_source(format!("create event store dir {parent:?}"), e)
         })?;
     }
-    SqliteEventStore::open(SqliteEventStoreConfig::new(path))
+    SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(path))
 }
 
 /// Lock the connection mutex, recovering rather than panicking if a
@@ -342,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_then_read_all_round_trips() {
-        let store = SqliteEventStore::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().unwrap();
         let t = traj("t1");
         let payloads = vec![
             json!({"kind": "start", "task": "summarise"}),
@@ -363,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_increments_across_calls() {
-        let store = SqliteEventStore::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().unwrap();
         let t = traj("t");
         store.append(&t, &[json!({"a": 1})]).await.unwrap();
         store.append(&t, &[json!({"a": 2})]).await.unwrap();
@@ -375,7 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_payloads_is_no_op_returning_high_water() {
-        let store = SqliteEventStore::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().unwrap();
         let t = traj("t");
         // Empty append on empty trajectory.
         let r = store.append(&t, &[]).await.unwrap();
@@ -391,7 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn distinct_trajectories_are_isolated() {
-        let store = SqliteEventStore::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().unwrap();
         store
             .append(&traj("a"), &[json!({"k": "a1"})])
             .await
@@ -420,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_since_filters_by_sequence_no() {
-        let store = SqliteEventStore::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().unwrap();
         let t = traj("t");
         for i in 1..=5 {
             store.append(&t, &[json!({"i": i})]).await.unwrap();
@@ -433,13 +433,13 @@ mod tests {
 
     #[tokio::test]
     async fn high_water_returns_zero_for_unknown_trajectory() {
-        let store = SqliteEventStore::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().unwrap();
         assert_eq!(store.high_water(&traj("never_used")).await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn read_all_returns_empty_for_unknown_trajectory() {
-        let store = SqliteEventStore::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().unwrap();
         assert!(
             store
                 .read_all(&traj("never_used"))
@@ -451,7 +451,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_trajectories_enumerates_distinct_ids() {
-        let store = SqliteEventStore::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().unwrap();
         store.append(&traj("a"), &[json!({})]).await.unwrap();
         store.append(&traj("b"), &[json!({})]).await.unwrap();
         store.append(&traj("a"), &[json!({})]).await.unwrap();
@@ -473,7 +473,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.sqlite");
         {
-            let store = open_event_store_at_path(&path).unwrap();
+            let store = open_agent_event_log_at_path(&path).unwrap();
             store
                 .append(
                     &traj("crash_test"),
@@ -483,7 +483,7 @@ mod tests {
                 .unwrap();
             // Drop store → connection closes → WAL flushes on next open.
         }
-        let store = open_event_store_at_path(&path).unwrap();
+        let store = open_agent_event_log_at_path(&path).unwrap();
         let read = store.read_all(&traj("crash_test")).await.unwrap();
         assert_eq!(read.len(), 2);
         assert_eq!(read[0].payload, json!({"phase": "before"}));
@@ -492,7 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn schema_version_marker_is_set_on_fresh_db() {
-        let store = SqliteEventStore::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().unwrap();
         let conn = store.conn.lock().unwrap();
         let v: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -509,7 +509,7 @@ mod tests {
         let path = dir.path().join("events.sqlite");
         // Open at version 1 + populate.
         {
-            let store = open_event_store_at_path(&path).unwrap();
+            let store = open_agent_event_log_at_path(&path).unwrap();
             store
                 .append(&traj("durable"), &[json!({"x": 1})])
                 .await
@@ -521,7 +521,7 @@ mod tests {
             conn.pragma_update(None, "user_version", 999_i64).unwrap();
         }
         // Reopen should error.
-        let result = open_event_store_at_path(&path);
+        let result = open_agent_event_log_at_path(&path);
         match result {
             Err(StorageError::Backend { context, .. }) => {
                 assert!(
@@ -530,7 +530,7 @@ mod tests {
                 );
             }
             Err(other) => panic!("expected Backend error, got {other:?}"),
-            // SqliteEventStore isn't Debug; can't print on success.
+            // SqliteAgentEventLog isn't Debug; can't print on success.
             Ok(_) => panic!("expected migration error, got Ok"),
         }
     }

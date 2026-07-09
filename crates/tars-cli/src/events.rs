@@ -8,7 +8,7 @@
 //!   — one-line-per-event summary (timestamp, tenant, model, result).
 //! - `tars events show <event_id> [--with-bodies]` — full JSON payload;
 //!   `--with-bodies` resolves request_ref / response_ref against the
-//!   body store and prints the bytes.
+//!   record store and prints the bytes.
 //! - `tars events reasons [--tenant X] [--since 1d] [--tag T] [--json]`
 //!   — aggregate validation-reject reasons by `kind` over the window
 //!   ("which reason fired most"), reading the `validation_reason`
@@ -20,7 +20,7 @@
 //!
 //! These are diagnostic tools, not part of the typed API. For
 //! programmatic access (tests / dogfood scripts), open the SQLite
-//! files directly or use `tars_storage::SqlitePipelineEventStore`.
+//! files directly or use `tars_melt::event::SqlitePipelineEventLog`.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -28,16 +28,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
-use tars_storage::{
-    BodyStore, PipelineEventQuery, PipelineEventStore, SqliteBodyStore, SqliteBodyStoreConfig,
-    SqlitePipelineEventStore, SqlitePipelineEventStoreConfig,
+use tars_melt::event::{
+    LlmRecordStore, PipelineEventLog, PipelineEventQuery, SqliteLlmRecordStore,
+    SqliteLlmRecordStoreConfig, SqlitePipelineEventLog, SqlitePipelineEventLogConfig,
 };
 use tars_types::{ContentRef, PipelineEvent, TenantId};
 
 #[derive(Args, Debug)]
 pub struct EventsArgs {
     /// Path to the event store directory (containing `pipeline_events.db`
-    /// + `bodies.db`). Defaults to `~/.tars/events/`.
+    /// + `llm_records.db`). Defaults to `~/.tars/events/`.
     #[arg(long, env = "TARS_EVENT_STORE_DIR", global = true)]
     store_dir: Option<PathBuf>,
 
@@ -123,16 +123,16 @@ pub async fn execute(args: EventsArgs) -> Result<()> {
     if !dir.is_dir() {
         anyhow::bail!(
             "event store path is not a directory: {}\n\
-             Expected a directory containing `pipeline_events.db` + `bodies.db`.",
+             Expected a directory containing `pipeline_events.db` + `llm_records.db`.",
             dir.display()
         );
     }
     let events = open_events(&dir)?;
-    let bodies = open_bodies(&dir)?;
+    let records = open_records(&dir)?;
 
     match args.command {
         EventsCommand::List(a) => list(&*events, a).await,
-        EventsCommand::Show(a) => show(&*events, &*bodies, a).await,
+        EventsCommand::Show(a) => show(&*events, &*records, a).await,
         EventsCommand::Reasons(a) => reasons(&*events, a).await,
     }
 }
@@ -145,7 +145,7 @@ fn resolve_store_dir(explicit: Option<&std::path::Path>) -> Result<PathBuf> {
     Ok(home.join(".tars/events"))
 }
 
-fn open_events(dir: &std::path::Path) -> Result<std::sync::Arc<dyn PipelineEventStore>> {
+fn open_events(dir: &std::path::Path) -> Result<std::sync::Arc<dyn PipelineEventLog>> {
     let path = dir.join("pipeline_events.db");
     if !path.exists() {
         anyhow::bail!(
@@ -154,21 +154,21 @@ fn open_events(dir: &std::path::Path) -> Result<std::sync::Arc<dyn PipelineEvent
             path.display()
         );
     }
-    Ok(SqlitePipelineEventStore::open(
-        SqlitePipelineEventStoreConfig::new(path),
+    Ok(SqlitePipelineEventLog::open(
+        SqlitePipelineEventLogConfig::new(path),
     )?)
 }
 
-fn open_bodies(dir: &std::path::Path) -> Result<std::sync::Arc<dyn BodyStore>> {
-    let path = dir.join("bodies.db");
+fn open_records(dir: &std::path::Path) -> Result<std::sync::Arc<dyn LlmRecordStore>> {
+    let path = dir.join("llm_records.db");
     if !path.exists() {
-        // Bodies missing isn't fatal — events still listable.
-        return Ok(SqliteBodyStore::in_memory()?);
+        // Records missing isn't fatal — events still listable.
+        return Ok(SqliteLlmRecordStore::in_memory()?);
     }
-    Ok(SqliteBodyStore::open(SqliteBodyStoreConfig::new(path))?)
+    Ok(SqliteLlmRecordStore::open(SqliteLlmRecordStoreConfig::new(path))?)
 }
 
-async fn list(store: &dyn PipelineEventStore, args: ListArgs) -> Result<()> {
+async fn list(store: &dyn PipelineEventLog, args: ListArgs) -> Result<()> {
     let since = parse_since(&args.since)?;
     // Tag filter is applied in-process (no SQL pushdown yet; that's v2).
     // When a tag is set we must NOT push `--limit` down to the query —
@@ -254,8 +254,8 @@ async fn list(store: &dyn PipelineEventStore, args: ListArgs) -> Result<()> {
 }
 
 async fn show(
-    store: &dyn PipelineEventStore,
-    bodies: &dyn BodyStore,
+    store: &dyn PipelineEventLog,
+    records: &dyn LlmRecordStore,
     args: ShowArgs,
 ) -> Result<()> {
     // The store exposes no by-id lookup, so we scan. The store caps any
@@ -296,9 +296,9 @@ async fn show(
 
     if args.with_bodies {
         if let PipelineEvent::LlmCallFinished(e) = &target {
-            print_body(bodies, &e.request_ref, "REQUEST BODY").await?;
+            print_body(records, &e.request_ref, "REQUEST BODY").await?;
             if let Some(rref) = &e.response_ref {
-                print_body(bodies, rref, "RESPONSE BODY").await?;
+                print_body(records, rref, "RESPONSE BODY").await?;
             } else {
                 println!("\n=== RESPONSE BODY ===\n(none — call failed)");
             }
@@ -358,7 +358,7 @@ fn aggregate_reasons(events: &[PipelineEvent]) -> (usize, Vec<ReasonStat>) {
     (total, stats)
 }
 
-async fn reasons(store: &dyn PipelineEventStore, args: ReasonsArgs) -> Result<()> {
+async fn reasons(store: &dyn PipelineEventLog, args: ReasonsArgs) -> Result<()> {
     let since = parse_since(&args.since)?;
     let q = PipelineEventQuery {
         tenant_id: args.tenant.map(TenantId::new),
@@ -408,9 +408,9 @@ async fn reasons(store: &dyn PipelineEventStore, args: ReasonsArgs) -> Result<()
     Ok(())
 }
 
-async fn print_body(bodies: &dyn BodyStore, r: &ContentRef, header: &str) -> Result<()> {
+async fn print_body(records: &dyn LlmRecordStore, r: &ContentRef, header: &str) -> Result<()> {
     println!("\n=== {header} ===");
-    match bodies.fetch(r).await? {
+    match records.fetch(r).await? {
         Some(bytes) => {
             // Try pretty-printing as JSON; fall back to lossy UTF-8.
             match serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -515,7 +515,7 @@ mod tests {
             provider_id: None,
             actual_model: "m".into(),
             request_fingerprint: [0u8; 32],
-            request_ref: ContentRef::from_body(tenant, b"req"),
+            request_ref: ContentRef::from_content(tenant, b"req"),
             has_tools: false,
             has_thinking: false,
             has_structured_output: false,

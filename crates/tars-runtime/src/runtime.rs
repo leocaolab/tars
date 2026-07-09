@@ -1,6 +1,6 @@
 //! [`Runtime`] trait + [`LocalRuntime`] impl.
 //!
-//! M3 first cut: thin facade over [`tars_storage::EventStore`] that
+//! M3 first cut: thin facade over [`tars_storage::AgentEventLog`] that
 //! handles trajectory creation + typed-event append/read. The Agent
 //! execution loop (Doc 04 §4) lives in a follow-on commit alongside
 //! the actual `Agent` trait, prompt builder, tool registry, etc.
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use tars_pipeline::LlmService;
-use tars_storage::EventStore;
+use tars_storage::AgentEventLog;
 use tars_types::{ChatRequest, TrajectoryId};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -106,14 +106,14 @@ pub trait Runtime: Send + Sync + 'static {
     }
 }
 
-/// Production runtime backed by an [`EventStore`].
+/// Production runtime backed by an [`AgentEventLog`].
 ///
 /// Stateless beyond the event-store handle; cheap to clone via
-/// `Arc::clone`. Construction is a one-liner: pass any `EventStore`
+/// `Arc::clone`. Construction is a one-liner: pass any `AgentEventLog`
 /// (today the SQLite impl; tomorrow Postgres).
 #[derive(Clone)]
 pub struct LocalRuntime {
-    event_store: Arc<dyn EventStore>,
+    event_store: Arc<dyn AgentEventLog>,
     /// Per-trajectory cached `next step_seq` for the parallel-safe
     /// allocator (`next_step_seq` override). Lazily initialised on
     /// first allocation by replaying `count_started_steps`; all
@@ -125,7 +125,7 @@ pub struct LocalRuntime {
 }
 
 impl LocalRuntime {
-    pub fn new(event_store: Arc<dyn EventStore>) -> Arc<Self> {
+    pub fn new(event_store: Arc<dyn AgentEventLog>) -> Arc<Self> {
         Arc::new(Self {
             event_store,
             step_seq_counters: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -457,13 +457,13 @@ pub enum AgentExecutionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tars_storage::SqliteEventStore;
+    use tars_storage::SqliteAgentEventLog;
     use tars_types::{ProviderId, Usage};
 
     use crate::event::StepIdempotencyKey;
 
     async fn fresh() -> Arc<LocalRuntime> {
-        let store: Arc<dyn EventStore> = SqliteEventStore::in_memory().unwrap();
+        let store: Arc<dyn AgentEventLog> = SqliteAgentEventLog::in_memory().unwrap();
         LocalRuntime::new(store)
     }
 

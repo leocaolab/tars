@@ -14,7 +14,7 @@ use tars_runtime::{
     AgentContext, AgentEvent, AgentOutput, LocalRuntime, OrchestratorAgent, OrchestratorError,
     Runtime, execute_agent_step,
 };
-use tars_storage::{EventStore, SqliteEventStore};
+use tars_storage::{AgentEventLog, SqliteAgentEventLog};
 use tars_types::AgentId;
 use tokio_util::sync::CancellationToken;
 
@@ -121,8 +121,8 @@ async fn orchestrator_step_logs_in_trajectory_via_execute_agent_step() {
     // — running it through execute_agent_step writes the standard
     // StepStarted / LlmCallCaptured / StepCompleted lifecycle.
     let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn EventStore> = SqliteEventStore::open(
-        tars_storage::SqliteEventStoreConfig::new(dir.path().join("events.sqlite")),
+    let store: Arc<dyn AgentEventLog> = SqliteAgentEventLog::open(
+        tars_storage::SqliteAgentEventLogConfig::new(dir.path().join("events.sqlite")),
     )
     .unwrap();
     let runtime = LocalRuntime::new(store);

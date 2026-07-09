@@ -592,7 +592,7 @@ impl Pipeline {
         let mut opts = tars_pipeline::PipelineOpts::new(ProviderId::new(id.clone()));
         opts.validators = validators;
         opts.events = event_stores
-            .map(|EventStorePair { events, bodies }| tars_pipeline::EventStores { events, bodies });
+            .map(|EventStorePair { events, records }| tars_pipeline::EventStores { events, records });
         opts.retry = retry;
         opts.cache = cache;
         let pipeline = RsPipeline::default_chain(provider, opts);
@@ -631,13 +631,13 @@ fn build_registry_from_cfg(cfg: &Config) -> PyResult<Arc<ProviderRegistry>> {
 /// underneath.
 #[derive(Clone)]
 pub(crate) struct EventStorePair {
-    pub events: Arc<dyn tars_storage::PipelineEventStore>,
-    pub bodies: Arc<dyn tars_storage::BodyStore>,
+    pub events: Arc<dyn tars_melt::event::PipelineEventLog>,
+    pub records: Arc<dyn tars_melt::event::LlmRecordStore>,
 }
 
 impl EventStorePair {
     /// Open both stores under `dir`. Creates the directory if missing.
-    /// Files: `{dir}/pipeline_events.db`, `{dir}/bodies.db`.
+    /// Files: `{dir}/pipeline_events.db`, `{dir}/llm_records.db`.
     fn open_in_dir(dir: &str) -> PyResult<Self> {
         let dir_path = std::path::PathBuf::from(dir);
         // Validate the caller-supplied path before touching the filesystem:
@@ -661,18 +661,18 @@ impl EventStorePair {
                 .map_err(|e| runtime_to_py("create event store dir", e))?;
         }
         let events_path = dir_path.join("pipeline_events.db");
-        let bodies_path = dir_path.join("bodies.db");
+        let records_path = dir_path.join("llm_records.db");
 
-        let events: Arc<dyn tars_storage::PipelineEventStore> =
-            tars_storage::SqlitePipelineEventStore::open(
-                tars_storage::SqlitePipelineEventStoreConfig::new(events_path),
+        let events: Arc<dyn tars_melt::event::PipelineEventLog> =
+            tars_melt::event::SqlitePipelineEventLog::open(
+                tars_melt::event::SqlitePipelineEventLogConfig::new(events_path),
             )
             .map_err(|e| runtime_to_py("open pipeline event store", e))?;
-        let bodies: Arc<dyn tars_storage::BodyStore> = tars_storage::SqliteBodyStore::open(
-            tars_storage::SqliteBodyStoreConfig::new(bodies_path),
+        let records: Arc<dyn tars_melt::event::LlmRecordStore> = tars_melt::event::SqliteLlmRecordStore::open(
+            tars_melt::event::SqliteLlmRecordStoreConfig::new(records_path),
         )
-        .map_err(|e| runtime_to_py("open body store", e))?;
-        Ok(Self { events, bodies })
+        .map_err(|e| runtime_to_py("open llm record store", e))?;
+        Ok(Self { events, records })
     }
 }
 
@@ -1102,7 +1102,7 @@ impl Pipeline {
         let mut opts = tars_pipeline::PipelineOpts::new(ProviderId::new("routed"));
         opts.validators = validators;
         opts.events = stores
-            .map(|EventStorePair { events, bodies }| tars_pipeline::EventStores { events, bodies });
+            .map(|EventStorePair { events, records }| tars_pipeline::EventStores { events, records });
         opts.cache = cache;
         let pipeline = RsPipeline::chain_over(routing, opts);
         let layer_names: Vec<String> = pipeline

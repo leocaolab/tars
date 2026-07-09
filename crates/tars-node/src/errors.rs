@@ -43,6 +43,7 @@ pub(crate) fn tars_to_js(err: TarsError) -> JsError {
     let code = match &err {
         TarsError::Registry(_) => "TarsRegistryError",
         TarsError::Storage(_) => "TarsStorageError",
+        TarsError::MeltStore(_) => "TarsEventStoreError",
         TarsError::WorkspaceConfig(_) => "TarsWorkspaceConfigError",
         TarsError::Io(_) => "TarsIoError",
         TarsError::UnknownRole { .. } => "TarsUnknownRole",

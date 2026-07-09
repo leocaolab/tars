@@ -16,7 +16,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args;
 use tars_runtime::{RuntimeError, build_run_report};
-use tars_storage::EventStore;
+use tars_storage::AgentEventLog;
 use tars_types::{RunReport, RunStatus, TrajectoryId};
 
 use crate::event_store as event_store_path;
@@ -42,7 +42,7 @@ pub async fn execute(args: RunReportArgs) -> Result<()> {
     let store_arc = event_store_path::open(args.events_path.as_deref())?.context(
         "no event store available — pass --events-path or run on a platform with an XDG data dir",
     )?;
-    let store: Arc<dyn EventStore> = store_arc;
+    let store: Arc<dyn AgentEventLog> = store_arc;
     let traj_id = TrajectoryId::new(args.id);
 
     let report = match build_run_report(&*store, &traj_id).await {

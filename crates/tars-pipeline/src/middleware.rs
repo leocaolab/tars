@@ -138,9 +138,9 @@ impl Pipeline {
 
         let mut builder = Self::builder_with_inner(inner);
 
-        if let Some(EventStores { events: ev, bodies }) = events {
+        if let Some(EventStores { events: ev, records }) = events {
             builder = builder.layer(crate::middleware::event_emitter::EventEmitterMiddleware::new(
-                ev, bodies,
+                ev, records,
             ));
         }
         builder = builder.layer(crate::middleware::telemetry::TelemetryMiddleware::new());
@@ -170,8 +170,8 @@ impl Pipeline {
 
 /// Event store pair for [`PipelineOpts::events`].
 pub struct EventStores {
-    pub events: Arc<dyn tars_storage::PipelineEventStore>,
-    pub bodies: Arc<dyn tars_storage::BodyStore>,
+    pub events: Arc<dyn tars_melt::event::PipelineEventLog>,
+    pub records: Arc<dyn tars_melt::event::LlmRecordStore>,
 }
 
 /// Options for [`Pipeline::default_chain`]. Constructed with
@@ -388,24 +388,24 @@ mod tests {
     async fn default_chain_layers_match_documented_onion() {
         // Validators present, events present → full onion.
         use crate::middleware::validation::{OutputValidator, builtin::NotEmptyValidator};
-        use tars_storage::{
-            SqliteBodyStore, SqliteBodyStoreConfig, SqlitePipelineEventStore,
-            SqlitePipelineEventStoreConfig,
+        use tars_melt::event::{
+            SqliteLlmRecordStore, SqliteLlmRecordStoreConfig, SqlitePipelineEventLog,
+            SqlitePipelineEventLogConfig,
         };
         use tars_types::ProviderId;
 
         let dir = tempfile::tempdir().unwrap();
-        let events = SqlitePipelineEventStore::open(SqlitePipelineEventStoreConfig::new(
+        let events = SqlitePipelineEventLog::open(SqlitePipelineEventLogConfig::new(
             dir.path().join("ev.db"),
         ))
         .unwrap();
-        let bodies =
-            SqliteBodyStore::open(SqliteBodyStoreConfig::new(dir.path().join("bd.db"))).unwrap();
+        let records =
+            SqliteLlmRecordStore::open(SqliteLlmRecordStoreConfig::new(dir.path().join("bd.db"))).unwrap();
 
         let mock = MockProvider::new("p", CannedResponse::text("hi"));
         let mut opts = PipelineOpts::new(ProviderId::new("p"));
         opts.validators = vec![Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>];
-        opts.events = Some(EventStores { events, bodies });
+        opts.events = Some(EventStores { events, records });
         let pipeline = Pipeline::default_chain(mock, opts);
 
         // Outermost → innermost.

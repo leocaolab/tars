@@ -74,6 +74,7 @@ pub fn handle_to_py(err: tars_handle::TarsError) -> PyErr {
     let kind = match &err {
         E::Registry(_) => "registry",
         E::Storage(_) => "storage",
+        E::MeltStore(_) => "event_store",
         E::Io(_) => "io",
         E::UnknownRole { .. } => "unknown_role",
         // `WorkspaceConfig` handled above; kept exhaustive so a new variant

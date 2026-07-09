@@ -2,28 +2,25 @@
 //!
 //! ## Surfaces
 //!
-//! - **`EventStore`** (M3) — append-only trajectory event log keyed by
-//!   `TrajectoryId`. Backs Runtime Trajectory replay (Doc 04 §3) and
-//!   recovery-from-checkpoint.
-//! - **`PipelineEventStore`** (B-20.W3 enabler, Doc 17) — durable stream
-//!   of one event per `Pipeline.call` boundary. Distinct from
-//!   `EventStore`: different access patterns (query by tenant + time
-//!   range), different ID concept (UUID per event vs sequence per
-//!   trajectory). Two independent traits per Doc 17 Q1.
-//! - **`BodyStore`** (B-20.W3 enabler, Doc 17 §6.1) — tenant-scoped CAS
-//!   for ChatRequest / ChatResponse bodies referenced from
-//!   `PipelineEvent`. Tenant-isolation enforced via `ContentRef`
-//!   carrying tenant_id internally.
+//! - **`AgentEventLog`** (M3, Doc 09 §2.2 recovery plane) — append-only
+//!   trajectory event log keyed by `TrajectoryId`. Backs Runtime
+//!   Trajectory replay (Doc 04 §3) and recovery-from-checkpoint.
+//! - **`Blackboard`** — coordination substrate (Doc 09 §2.2).
+//! - **`DurableStore`** — durable job/result board.
+//!
+//! The read-able observability/eval E-pillar stores (`PipelineEventLog`
+//! + `LlmRecordStore`) live in `tars_melt::event`, NOT here (Doc 17 §7,
+//! Doc 08 §3) — they are MELT, not recovery truth.
 //!
 //! Still deferred until they have a concrete consumer:
 //! - `KVStore` — generic small-value persistence. Lands when
 //!   BudgetMiddleware needs cross-restart token-bucket state.
 //!
-//! ## Why `serde_json::Value` at the `EventStore` trait boundary
+//! ## Why `serde_json::Value` at the `AgentEventLog` trait boundary
 //!
-//! `EventStore` stays monomorphic — `Arc<dyn EventStore>` works without
-//! erasing a generic. Callers serialize at the boundary; one helper
-//! line hides the ceremony for typed events:
+//! `AgentEventLog` stays monomorphic — `Arc<dyn AgentEventLog>` works
+//! without erasing a generic. Callers serialize at the boundary; one
+//! helper line hides the ceremony for typed events:
 //!
 //! ```ignore
 //! let payload = serde_json::to_value(&my_event)?;
@@ -33,37 +30,25 @@
 //! The cost vs. a generic `<E>` impl is one extra serde round-trip on
 //! read; given that we're already writing JSON to SQLite (debuggable
 //! via `sqlite3 events.db`), the round-trip is a feature.
-//!
-//! `PipelineEventStore` takes typed `PipelineEvent` directly because
-//! its access patterns (query by tenant+time, subscribe by filter)
-//! benefit from inline columns extracted from the typed shape; the
-//! payload still goes to SQLite as JSON for debug-ability.
 
 pub mod blackboard;
-mod body_store;
+mod agent_event_log;
 mod durable_store;
 mod error;
-mod event_store;
-mod pipeline_event_store;
 mod sqlite;
 
 pub use blackboard::{
     BbError, Blackboard, BlackboardDomain, BlackboardStore, InMemoryBlackboard, Scope,
     SqliteBlackboard, Transition,
 };
-pub use body_store::{BodyStore, SqliteBodyStore, SqliteBodyStoreConfig};
 pub use durable_store::{
     DurableBoard, DurableStore, DurableStoreError, JOB_STATUS_DONE, JOB_STATUS_RUNNING, RawAnswer,
     ResultEventKind, ResultEventRecord, STATUS_COMPLETED, STATUS_PENDING, STATUS_SKIPPED,
     SqliteDurableStore,
 };
 pub use error::StorageError;
-pub use event_store::{EventRecord, EventStore};
-pub use pipeline_event_store::{
-    PipelineEventQuery, PipelineEventStore, SqlitePipelineEventStore,
-    SqlitePipelineEventStoreConfig,
-};
+pub use agent_event_log::{AgentEventLog, EventRecord};
 pub use sqlite::{
-    SqliteEventStore, SqliteEventStoreConfig, default_personal_event_store_path,
-    open_event_store_at_path,
+    SqliteAgentEventLog, SqliteAgentEventLogConfig, default_personal_agent_event_log_path,
+    open_agent_event_log_at_path,
 };

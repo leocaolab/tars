@@ -18,7 +18,7 @@
 //!   prompt design + tool registry + critic protocol, all of which
 //!   are separate M3 commits.
 //! - [`LocalRuntime`]: production impl backed by
-//!   [`tars_storage::EventStore`]. Used by `tars-cli` (next commit)
+//!   [`tars_storage::AgentEventLog`]. Used by `tars-cli` (next commit)
 //!   to log every `tars run` invocation as a one-event trajectory
 //!   so the recovery / replay story has a real consumer to test
 //!   against.

@@ -20,6 +20,16 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
 
+# `event/` module — the read-able E-pillar stores (PipelineEventLog +
+# LlmRecordStore), moved here from tars-storage (Doc 17 §7). These deps
+# back the SQLite impls; mirror tars-storage's non-optional usage.
+tokio.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+# Record bytes for LlmRecordStore.
+bytes.workspace = true
+
 # OTLP trace export (B-8 / M5 observability). Opt-in: the `otlp` feature
 # pulls a heavy tonic/grpc/prost stack, so it's OFF by default — only
 # builds that actually export traces pay for it. Enabling the feature +
@@ -40,7 +50,8 @@ otlp = [
 ]
 
 [dev-dependencies]
-serde_json.workspace = true
+# UUIDs in the pipeline_event_log store tests.
+uuid = { workspace = true }
 # The in-memory span/metric exporters used by the otlp bridge tests.
 # Only pulled when the `otlp` feature is active (tests are
 # `#[cfg(feature = "otlp")]`). tokio drives the metrics PeriodicReader.

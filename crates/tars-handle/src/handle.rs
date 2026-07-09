@@ -20,11 +20,11 @@ use tars_config::{Config, ProvidersConfig, ResilienceConfig, RoutingConfig};
 use tars_pipeline::{EventStores, OutputValidator, Pipeline, PipelineOpts};
 use tars_provider::{HttpProviderBase, LlmProvider, ProviderRegistry};
 use tars_runtime::{LocalRuntime, Runtime};
-use tars_storage::{
-    BodyStore, EventStore, PipelineEventStore, SqliteBodyStore, SqliteBodyStoreConfig,
-    SqliteEventStore, SqlitePipelineEventStore, SqlitePipelineEventStoreConfig,
-    open_event_store_at_path,
+use tars_melt::event::{
+    LlmRecordStore, PipelineEventLog, SqliteLlmRecordStore, SqliteLlmRecordStoreConfig,
+    SqlitePipelineEventLog, SqlitePipelineEventLogConfig,
 };
+use tars_storage::{AgentEventLog, SqliteAgentEventLog, open_agent_event_log_at_path};
 use tars_types::{Capabilities, CancellationToken, ModelTier, ProviderId, SessionId};
 
 use crate::error::TarsError;
@@ -63,13 +63,13 @@ pub struct Tars {
 /// scope opted out (`StoreScope::Off`).
 struct Sink {
     // Task 4: the real consolidated MPSC single-writer sink replaces these.
-    runtime: Arc<dyn EventStore>,
+    runtime: Arc<dyn AgentEventLog>,
     pipeline: Option<PipelineSink>,
 }
 
 struct PipelineSink {
-    events: Arc<dyn PipelineEventStore>,
-    bodies: Arc<dyn BodyStore>,
+    events: Arc<dyn PipelineEventLog>,
+    records: Arc<dyn LlmRecordStore>,
 }
 
 /// Workspace-layer config: `<root>/.<tool>/config.toml`. Only `[roles]`
@@ -104,7 +104,7 @@ impl Default for StoreSettings {
 
 /// Where a pipeline's observability events go. The default ([`Scope`]) uses
 /// the handle's own per-scope sink (the common path — concer). A consumer with
-/// its own store policy (e.g. arc keeps bodies OFF in release so it never
+/// its own store policy (e.g. arc keeps records OFF in release so it never
 /// persists the reviewed repo's proprietary source) supplies [`Use`], or opts a
 /// pipeline out of emission entirely with [`Off`].
 ///
@@ -247,7 +247,7 @@ impl Tars {
 
     /// Build the canonical pipeline for `role`, letting the consumer inject its
     /// own policy via [`PipelineOverrides`]: output validators, an event-store
-    /// override (its own bodies policy, or emit-nothing), and a per-call
+    /// override (its own records policy, or emit-nothing), and a per-call
     /// subprocess-timeout override. Returns the pipeline alongside the resolved
     /// provider's [`Capabilities`].
     ///
@@ -284,7 +284,7 @@ impl Tars {
                 if let Some(p) = &self.sink.pipeline {
                     opts.events = Some(EventStores {
                         events: p.events.clone(),
-                        bodies: p.bodies.clone(),
+                        records: p.records.clone(),
                     });
                 }
             }
@@ -483,7 +483,7 @@ fn open_sink(scope: &StoreScope) -> Result<Sink, TarsError> {
         StoreScope::Off => {
             // No persistent store: the runtime still needs an event store, so
             // give it a throwaway in-memory one; no pipeline emission.
-            let runtime: Arc<dyn EventStore> = SqliteEventStore::in_memory()?;
+            let runtime: Arc<dyn AgentEventLog> = SqliteAgentEventLog::in_memory()?;
             Ok(Sink {
                 runtime,
                 pipeline: None,
@@ -491,16 +491,16 @@ fn open_sink(scope: &StoreScope) -> Result<Sink, TarsError> {
         }
         StoreScope::Workspace(dir) | StoreScope::TarsHome(dir) => {
             std::fs::create_dir_all(dir)?;
-            let runtime: Arc<dyn EventStore> =
-                open_event_store_at_path(&dir.join("events.sqlite"))?;
-            let events: Arc<dyn PipelineEventStore> = SqlitePipelineEventStore::open(
-                SqlitePipelineEventStoreConfig::new(dir.join("pipeline_events.sqlite")),
+            let runtime: Arc<dyn AgentEventLog> =
+                open_agent_event_log_at_path(&dir.join("events.sqlite"))?;
+            let events: Arc<dyn PipelineEventLog> = SqlitePipelineEventLog::open(
+                SqlitePipelineEventLogConfig::new(dir.join("pipeline_events.sqlite")),
             )?;
-            let bodies: Arc<dyn BodyStore> =
-                SqliteBodyStore::open(SqliteBodyStoreConfig::new(dir.join("bodies.sqlite")))?;
+            let records: Arc<dyn LlmRecordStore> =
+                SqliteLlmRecordStore::open(SqliteLlmRecordStoreConfig::new(dir.join("llm_records.sqlite")))?;
             Ok(Sink {
                 runtime,
-                pipeline: Some(PipelineSink { events, bodies }),
+                pipeline: Some(PipelineSink { events, records }),
             })
         }
     }
