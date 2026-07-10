@@ -1,14 +1,18 @@
-//! Process-global spine for tars-py (post scope-facade).
+//! Process-global spine for tars-py.
 //!
-//! The old `Workspaces` / `Tars` per-scope classes are gone. Providers and
-//! keys are global (built once by [`init`]); role resolution now runs against
-//! the process-global [`Config`] + [`ProviderRegistry`] via
-//! [`tars_handle::resolve_role`]. The store dir survives only as a path helper
-//! ([`store_dir`]) the caller opens itself.
+//! [`init`] is the composition root: it installs the global
+//! [`Config`](tars_config::Config) from `<home>/config.toml` and eagerly builds
+//! the one [`ProviderRegistry`], so a bad provider or a missing key surfaces
+//! here rather than on the first completion.
+//!
+//! Role resolution is a single lookup against `[roles]` — `critic` names a
+//! `(provider, model)` pair in config, or it is an error. There is no fallback
+//! to a tier, to a literal provider id, or to "the only provider": a role the
+//! operator did not configure must say so.
 //!
 //! ```python
 //! import tars
-//! tars.init()                                   # global config, once (~/.tars)
+//! tars.init()                                   # global config + registry, once
 //! with tars.context(session="s", tags=["dogfood"]):
 //!     resp = tars.pipeline("critic").complete(model="…", user="review this")
 //! ```
@@ -23,36 +27,35 @@ use std::sync::Arc;
 use pyo3::prelude::*;
 
 use tars_config::{Config, resolve_home};
-use tars_handle::{WorkspaceResolution, resolve_role, resolve_workspace_root, workspace_store_dir};
 use tars_provider::{LlmProvider, ProviderRegistry};
 
 use crate::context::ContextGuard;
-use crate::errors::{handle_to_py, init_to_py, runtime_to_py};
+use crate::errors::{config_to_py, provider_not_registered_to_py, runtime_to_py, unknown_role_to_py};
 use crate::{Pipeline, Provider};
 
 // ── Global init ───────────────────────────────────────────────────────
 
-/// Load the process-global config once and build the one provider registry
-/// (Doc 06 process-isolation model).
+/// Install the process-global config and build the one provider registry.
 ///
 /// `home` maps to `resolve_home` (`--tars_home` > `$TARS_HOME` > `~/.tars`) and
-/// reads `<home>/config.toml`. Idempotent: a second call is a no-op (first load
-/// wins). Providers / keys are global — built once, shared by every call.
+/// reads `<home>/config.toml`. Building the registry here is deliberate: a bad
+/// provider declaration or a missing API key raises now, not on the first call.
+///
+/// **Not idempotent.** A second `init()` raises `TarsConfigError` — the process
+/// already runs against a config this call did not provide, and silently
+/// returning would hide that.
 #[pyfunction]
 #[pyo3(signature = (home = None))]
 pub(crate) fn init(home: Option<PathBuf>) -> PyResult<()> {
-    match tars_handle::init_from_home(home) {
-        // First-wins: a second init is a no-op for the caller (mirrors the old
-        // idempotent `init`), not an error.
-        Ok(()) | Err(tars_handle::InitError::AlreadyInitialized) => Ok(()),
-        Err(e) => Err(init_to_py(e)),
-    }
+    tars_config::global::init_tars(home).map_err(config_to_py)?;
+    ProviderRegistry::init().map_err(|e| runtime_to_py("provider registry", e))?;
+    Ok(())
 }
 
-/// Whether [`init`] has already loaded the global config.
+/// Whether [`init`] has already run (config installed and registry built).
 #[pyfunction]
 pub(crate) fn is_initialized() -> bool {
-    Config::is_loaded()
+    Config::is_loaded() && ProviderRegistry::try_global().is_some()
 }
 
 /// Resolve the tars home directory (`--tars_home` > `$TARS_HOME` > `~/.tars`)
@@ -81,20 +84,32 @@ pub(crate) fn pipeline(role: String) -> PyResult<Pipeline> {
     Ok(Pipeline::from_provider(id, prov, vec![], None))
 }
 
-/// Inspect the `[roles]` mapping: resolve `role` to the provider id it binds
-/// to, without building anything.
+/// Inspect the `[roles]` mapping: the provider id `role` binds to.
 #[pyfunction]
 pub(crate) fn role_provider(role: String) -> PyResult<String> {
     Ok(resolve_global_role(&role)?.0)
 }
 
+/// Inspect the `[roles]` mapping: the model `role` binds to.
+#[pyfunction]
+pub(crate) fn role_model(role: String) -> PyResult<String> {
+    let cfg = Config::get();
+    let entry = cfg.roles.get(&role).ok_or_else(|| unknown_role_to_py(&role))?;
+    Ok(entry.model.clone())
+}
+
+/// One lookup, no guessing. Two distinct failures, each carrying what actually
+/// went wrong: the role isn't configured, or it names a provider the registry
+/// doesn't hold.
 fn resolve_global_role(role: &str) -> PyResult<(String, Arc<dyn LlmProvider>)> {
     let registry =
         ProviderRegistry::global().map_err(|e| runtime_to_py("provider registry", e))?;
     let cfg = Config::get();
-    let (id, prov) =
-        resolve_role(&cfg.roles, &cfg.routing, &registry, role).map_err(handle_to_py)?;
-    Ok((id.to_string(), prov))
+    let entry = cfg.roles.get(role).ok_or_else(|| unknown_role_to_py(role))?;
+    let prov = registry
+        .get(&entry.provider)
+        .ok_or_else(|| provider_not_registered_to_py(role, &entry.provider))?;
+    Ok((entry.provider.to_string(), prov))
 }
 
 /// A context manager that establishes a `RequestContext` for the calls inside
@@ -109,28 +124,4 @@ pub(crate) fn context(
     trace: Option<String>,
 ) -> ContextGuard {
     ContextGuard::new(session, tags, tenant, trace)
-}
-
-// ── Kept path helpers (plain "where does it live", not a scope) ───────
-
-/// Resolve `path` to a canonical workspace root for `tool` (walk-up; a
-/// `.<tool>/` marker beats `.git`). `None` when neither a marker nor `.git` is
-/// found up the tree.
-#[pyfunction]
-pub(crate) fn resolve_root(tool: String, path: PathBuf) -> PyResult<Option<String>> {
-    let resolved = resolve_workspace_root(&tool, &path)
-        .map_err(|e| runtime_to_py("resolve workspace root", e))?;
-    Ok(match resolved {
-        WorkspaceResolution::Workspace(root) => Some(root.to_string_lossy().into_owned()),
-        WorkspaceResolution::Standalone => None,
-    })
-}
-
-/// The per-project store dir for `tool` under `root`: `<root>/.<tool>/tars/`.
-/// A plain path — the caller opens whatever stores it wants there.
-#[pyfunction]
-pub(crate) fn store_dir(tool: String, root: PathBuf) -> String {
-    workspace_store_dir(&tool, &root)
-        .to_string_lossy()
-        .into_owned()
 }

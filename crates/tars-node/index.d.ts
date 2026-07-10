@@ -45,16 +45,6 @@ export declare function provider(role: string, ctx?: JsContext | undefined | nul
  */
 export declare function pipeline(role: string, ctx?: JsContext | undefined | null): Pipeline
 /**
- * Resolve `path` to a canonical workspace root for `tool` (walk-up; `.<tool>/`
- * marker beats `.git`). `null` when neither a marker nor `.git` is found.
- */
-export declare function resolveWorkspaceRoot(tool: string, path: string): string | null
-/**
- * The per-project store dir for `tool` under `root`: `<root>/.<tool>/tars/`.
- * A plain path — the caller opens whatever stores it wants there.
- */
-export declare function workspaceStoreDir(tool: string, root: string): string
-/**
  * Smoke-test export — `import { hello } from '@leocaolab/tars-node'`
  * and `hello('world')` returns `'tars-node says hi, world'`. Pure
  * scaffolding sanity, kept for the Node-side smoke test.

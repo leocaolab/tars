@@ -287,12 +287,12 @@ impl SubprocessRunner for RealSubprocessRunner {
                 // child is killed deterministically the moment the timed-
                 // out future is dropped (we set `kill_on_drop(true)` at
                 // spawn) — i.e. as this match arm returns. No leaked
-                // process survives the timeout.
-                return Err(ProviderError::CliSubprocessDied {
-                    exit_code: None,
-                    stderr: format!(
-                        "timed out after {}s (model={}, prompt_chars={})",
-                        inv.timeout.as_secs(),
+                // process survives the timeout. We killed it; report the
+                // wall-clock abort as `TimedOut`, not `CliSubprocessDied`.
+                return Err(ProviderError::TimedOut {
+                    budget: inv.timeout,
+                    detail: format!(
+                        "claude CLI killed after wall-clock timeout (model={}, prompt_chars={})",
                         inv.model,
                         inv.prompt.len()
                     ),
@@ -482,15 +482,13 @@ impl SubprocessRunner for SharedCliRunner {
             Err(_) => {
                 // Explicit kill — start_kill signals immediately; reap so we
                 // don't leave a zombie (kill_on_drop covers the deferred path).
+                // We killed it; report the wall-clock abort as `TimedOut`, not
+                // `CliSubprocessDied` (whose name would blame the child).
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                return Err(ProviderError::CliSubprocessDied {
-                    exit_code: None,
-                    stderr: format!(
-                        "timed out after {}s (model={})",
-                        inv.timeout.as_secs(),
-                        inv.model
-                    ),
+                return Err(ProviderError::TimedOut {
+                    budget: inv.timeout,
+                    detail: format!("{label} killed after wall-clock timeout (model={})", inv.model),
                 });
             }
         };

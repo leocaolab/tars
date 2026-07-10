@@ -57,6 +57,20 @@ pub enum RegistryError {
         id: ProviderId,
         feature: &'static str,
     },
+    /// `ProviderRegistry::init` ran before the config was installed. The
+    /// composition root must call `tars_config::init_tars` (or `Config::set`)
+    /// first.
+    #[error("tars config not initialized — call tars_config::init_tars() before ProviderRegistry::init()")]
+    ConfigNotInitialized,
+    /// `ProviderRegistry::init` already ran in this process. Reported rather
+    /// than silently ignored: a second initializer would otherwise run against
+    /// a registry it did not build.
+    #[error("provider registry already initialized — ProviderRegistry::init() may run only once")]
+    AlreadyInitialized,
+    /// `ProviderRegistry::global` was called before `ProviderRegistry::init`.
+    /// `global` is a pure getter and never builds.
+    #[error("provider registry not initialized — call ProviderRegistry::init() at startup")]
+    NotInitialized,
 }
 
 /// Built map of providers, indexed by id. Cheap to clone (everything is Arc).

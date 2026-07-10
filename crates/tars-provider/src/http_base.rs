@@ -81,6 +81,8 @@ impl HttpProviderBase {
             .connect_timeout(config.connect_timeout)
             // Deliberately no overall `.timeout()` — streaming responses
             // can take minutes. Idleness is enforced at the SSE loop layer.
+            // A *caller* that wants a total bound sets `ctx.deadline`, which
+            // `stream_via_adapter` applies per-request.
             .user_agent(&config.user_agent)
             .build()
             .map_err(ProviderError::from)?;
@@ -170,7 +172,7 @@ pub async fn stream_via_adapter<A>(
     auth: ResolvedAuth,
     req: ChatRequest,
     model: &str,
-    _ctx: RequestContext,
+    ctx: RequestContext,
 ) -> Result<LlmEventStream, ProviderError>
 where
     A: HttpAdapter,
@@ -183,14 +185,35 @@ where
 
     let body = adapter.translate_request(&req, model)?;
 
-    let response = base
+    let mut rb = base
         .client
-        .request(Method::POST, url)
+        .request(Method::POST, url.clone())
         .headers(headers)
-        .json(&body)
-        .send()
-        .await
-        .map_err(ProviderError::from)?;
+        .json(&body);
+    // The caller's per-call budget, when it set one. Unlike a subprocess, an
+    // HTTP request lives inside this future, so there is no configured total
+    // timeout to default to: absent a deadline the transport bounds
+    // (`connect_timeout` + `stream_idle_timeout`) are the only limits, and how
+    // long a slow-but-progressing stream may run is the caller's call. Held in a
+    // local so the timeout arms below can report the ACTUAL budget the request
+    // was given (and so the SSE body-read path can reach it too).
+    let deadline_budget = ctx.remaining();
+    if let Some(left) = deadline_budget {
+        rb = rb.timeout(left);
+    }
+
+    let response = rb.send().await.map_err(|e| match deadline_budget {
+        // Our per-request deadline fired: reqwest surfaces it as an `is_timeout`
+        // error. Report the wall-clock abort as `TimedOut` (MaybeRetriable) with
+        // the caller's real budget, not a generic `Network` blip — the caller's
+        // budget, not a transport fault, ended the call. Absent a deadline an
+        // `is_timeout` is a connect-timeout transport fault, so it stays `Network`.
+        Some(budget) if e.is_timeout() => ProviderError::TimedOut {
+            budget,
+            detail: format!("HTTP request to {url} timed out (model={model}): {e}"),
+        },
+        _ => ProviderError::from(e),
+    })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -217,6 +240,13 @@ where
 
     let mut buf = ToolCallBuffer::new();
 
+    // Captured into the stream (which is `'static`, so no borrows): reqwest's
+    // per-request timeout also aborts the body stream once headers are in, so an
+    // `is_timeout` error can surface DEEP in the SSE read — not just at `.send()`.
+    // `deadline_budget` is Copy; `model` needs an owned copy to cross the boundary.
+    let body_budget = deadline_budget;
+    let model_owned = model.to_string();
+
     let stream = async_stream::try_stream! {
         let mut sse = sse;
         loop {
@@ -228,6 +258,18 @@ where
             };
             let Some(event_result) = next else { break };
             let frame = event_result.map_err(|e| {
+                // reqwest's per-request deadline can abort the body stream too;
+                // surfaced as `Transport(reqwest::Error)` with `is_timeout()`.
+                // Report it as `TimedOut` with the real budget, same as `.send()`.
+                if let (Some(budget), eventsource_stream::EventStreamError::Transport(re)) =
+                    (body_budget, &e)
+                    && re.is_timeout()
+                {
+                    return ProviderError::TimedOut {
+                        budget,
+                        detail: format!("HTTP SSE body read timed out (model={model_owned}): {re}"),
+                    };
+                }
                 ProviderError::Network(Box::new(e))
             })?;
             let decoded = SseEvent {

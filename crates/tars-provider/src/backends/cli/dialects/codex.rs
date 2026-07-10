@@ -135,7 +135,7 @@ impl CliDialect for CodexCliDialect {
             self.executable.clone(),
             model,
             prompt,
-            self.timeout,
+            ctx.call_budget(self.timeout),
             STRIPPED_ENV_KEYS_UPPER.iter().map(|s| s.to_string()).collect(),
             ctx.cwd.clone(),
             ctx.sandbox.clone(),

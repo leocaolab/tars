@@ -1845,9 +1845,8 @@ fn _tars_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(handle::provider, m)?)?;
     m.add_function(wrap_pyfunction!(handle::pipeline, m)?)?;
     m.add_function(wrap_pyfunction!(handle::role_provider, m)?)?;
+    m.add_function(wrap_pyfunction!(handle::role_model, m)?)?;
     m.add_function(wrap_pyfunction!(handle::context, m)?)?;
-    m.add_function(wrap_pyfunction!(handle::resolve_root, m)?)?;
-    m.add_function(wrap_pyfunction!(handle::store_dir, m)?)?;
     m.add_class::<context::ContextGuard>()?;
     m.add_class::<Provider>()?;
     m.add_class::<Pipeline>()?;

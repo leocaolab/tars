@@ -19,7 +19,6 @@
 >   `&cfg.routing`, `&registry`) — no scope object.
 > - **paths:** `resolve_workspace_root`, `workspace_store_dir`, `tars_home_store_dir`,
 >   `standalone_store_dir`, `StoreScope` (the §7 path law, still live).
-> - **resilience:** `resilience_configs(&cfg.resilience)` → `(RetryConfig, CircuitBreakerConfig)`.
 > The load-bearing *decisions* below (process isolation, config layering, the path law,
 > observability-only store) all stand; only the **bundling** into one `Tars` struct — and
 > its per-scope sink + cancel + deterministic-Drop lifecycle — is gone. Scope/lifecycle is

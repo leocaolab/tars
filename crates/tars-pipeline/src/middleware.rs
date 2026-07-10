@@ -101,16 +101,6 @@ impl LlmService {
         model: impl Into<String>,
         opts: ChainOpts,
     ) -> LlmService {
-        // CircuitBreaker is a per-provider wrapper (innermost, below
-        // Retry): wrap the single provider here so an open breaker
-        // rejects before the provider is hit. Routed `chain_over` callers
-        // have no single provider to wrap — they wrap each candidate
-        // before assembling the routed inner, so the field is theirs to
-        // ignore.
-        let provider = match &opts.circuit_breaker {
-            Some(cfg) => crate::middleware::circuit_breaker::CircuitBreaker::wrap(provider, cfg.clone()),
-            None => provider,
-        };
         Self::chain_over(LlmService::of(provider, model), opts)
     }
 
@@ -128,9 +118,6 @@ impl LlmService {
             cache_registry,
             cache_factory,
             retry,
-            // Consumed by `default_chain` (provider-level wrapper); a
-            // routed inner service has no single provider to wrap.
-            circuit_breaker: _,
             cache,
         } = opts;
 
@@ -208,22 +195,6 @@ pub struct ChainOpts {
     /// (3 attempts, exp backoff, 30s cap).
     pub retry: Option<crate::middleware::retry::RetryConfig>,
 
-    /// Per-provider circuit breaker. `None` (default) = no breaker.
-    /// When set, [`LlmService::default_chain`] wraps the provider with
-    /// [`crate::CircuitBreaker`] (innermost, below Retry): after
-    /// `failure_threshold` consecutive open-time failures it opens and
-    /// rejects calls for `cooldown` with
-    /// [`tars_types::ProviderError::CircuitOpen`] (a `Retriable` class,
-    /// so Retry / Routing react). The breaker state lives on the wrapper,
-    /// so every call routed through the same built pipeline SHARES it —
-    /// concurrent callers fast-fail the moment any of them trips it,
-    /// which is the point for fan-out workloads (hundreds of concurrent
-    /// calls against one provider shouldn't each burn a full retry loop
-    /// when it's down). Ignored by [`LlmService::chain_over`] — a routed
-    /// inner has no single provider to wrap; routed callers wrap each
-    /// candidate provider individually before building the inner.
-    pub circuit_breaker: Option<crate::middleware::circuit_breaker::CircuitBreakerConfig>,
-
     /// Include the `CacheLookup` layer. `true` (default) matches the
     /// canonical chain. Set `false` to skip caching entirely — useful
     /// for callers that need every call to hit the provider (latency
@@ -244,7 +215,6 @@ impl ChainOpts {
             cache_registry: None,
             cache_factory: None,
             retry: None,
-            circuit_breaker: None,
             cache: true,
         }
     }
@@ -419,12 +389,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_chain_wires_circuit_breaker_when_configured() {
-        // A provider that always fails; with the breaker configured to
-        // open after 2 consecutive failures, the 3rd call must reject
-        // with CircuitOpen WITHOUT reaching the provider. Retry is set to
-        // a single attempt and cache disabled so each `call` = one
-        // provider hit and the breaker's per-call accounting is exact.
+    async fn circuit_breaker_wrapped_provider_rejects_once_open() {
+        // A provider that always fails, wrapped by a breaker that opens
+        // after 2 consecutive failures: the 3rd call must reject with
+        // CircuitOpen WITHOUT reaching the provider. The breaker sits
+        // below Retry because it wraps the provider the chain is built
+        // over. Retry is a single attempt and cache disabled so each
+        // `call` = one provider hit and the breaker's accounting is exact.
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::time::Duration;
         use tars_provider::{LlmEventStream, LlmProvider};
@@ -460,6 +431,13 @@ mod tests {
             caps: Capabilities::text_only_baseline(Pricing::default()),
             hits: hits.clone(),
         });
+        let provider = crate::middleware::circuit_breaker::CircuitBreaker::wrap(
+            provider,
+            crate::middleware::circuit_breaker::CircuitBreakerConfig {
+                failure_threshold: 2,
+                cooldown: Duration::from_secs(30),
+            },
+        );
 
         let mut opts = ChainOpts::new(ProviderId::new("p"));
         opts.cache = false;
@@ -472,10 +450,6 @@ mod tests {
             max_attempts_maybe_retriable: 1,
             max_wait: Duration::MAX,
             jitter: Duration::ZERO,
-        });
-        opts.circuit_breaker = Some(crate::middleware::circuit_breaker::CircuitBreakerConfig {
-            failure_threshold: 2,
-            cooldown: Duration::from_secs(30),
         });
         let pipeline = Arc::new(LlmService::default_chain(provider, "test-model", opts));
 

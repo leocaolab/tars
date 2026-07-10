@@ -112,39 +112,50 @@ pub(crate) async fn run_streaming(
         Ok::<(), ProviderError>(())
     };
 
-    let wait_fut = tokio::time::timeout(inv.timeout, child.wait());
+    // The timeout must bound BOTH the stdout drain and the child's exit. A
+    // wedged child holds stdout open without writing, so `read_fut` never
+    // resolves; timing out only `child.wait()` and then `join!`-ing the pair
+    // would wait for the reader forever and never reach the timeout arm.
+    let collect = async {
+        let (read_res, wait_res) = tokio::join!(read_fut, child.wait());
+        (read_res, wait_res)
+    };
 
-    let (read_res, wait_res) = tokio::join!(read_fut, wait_fut);
+    let Ok((read_res, wait_res)) = tokio::time::timeout(inv.timeout, collect).await else {
+        // Kill FIRST: the stderr drain only reaches EOF once the child is gone,
+        // so awaiting `stderr_task` on a wedged child would hang the very path
+        // meant to bound it. (`kill_on_drop` covers the spawn helper's `Child`;
+        // here we hold a `&mut` and return without dropping it.)
+        if let Err(e) = child.start_kill() {
+            tracing::warn!(error = %e, "claude_cli stream: failed to kill child after timeout");
+        }
+        let stderr_buf = stderr_task.await.unwrap_or_default();
+        let stderr_s = truncate(&String::from_utf8_lossy(&stderr_buf), 500);
+        // We killed the child; it didn't die on its own. Report the wall-clock
+        // abort as `TimedOut`, not `CliSubprocessDied` (whose name would blame
+        // the child for our kill). `budget` is the invocation budget; `detail`
+        // carries the same diagnostics the old stderr string did.
+        return Err(ProviderError::TimedOut {
+            budget: inv.timeout,
+            detail: format!(
+                "stream-json child killed after wall-clock timeout (model={}, prompt_chars={}, stderr: {stderr_s})",
+                inv.model,
+                inv.prompt.len()
+            ),
+        });
+    };
+
     let stderr_buf = stderr_task.await.unwrap_or_default();
 
     read_res?;
 
     let status = match wait_res {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
+        Ok(s) => s,
+        Err(e) => {
             let stderr_s = truncate(&String::from_utf8_lossy(&stderr_buf), 500);
             return Err(ProviderError::CliSubprocessDied {
                 exit_code: None,
                 stderr: format!("wait failed: {e} (stderr: {stderr_s})"),
-            });
-        }
-        Err(_) => {
-            // The wait timed out — the child is still running. Kill it
-            // before returning so a wedged `claude` doesn't outlive the
-            // call (kill_on_drop covers the spawn helper's `Child`, but
-            // here we hold a `&mut` and return without dropping it).
-            if let Err(e) = child.start_kill() {
-                tracing::warn!(error = %e, "claude_cli stream: failed to kill child after timeout");
-            }
-            let stderr_s = truncate(&String::from_utf8_lossy(&stderr_buf), 500);
-            return Err(ProviderError::CliSubprocessDied {
-                exit_code: None,
-                stderr: format!(
-                    "timed out after {}s (model={}, prompt_chars={}, stderr: {stderr_s})",
-                    inv.timeout.as_secs(),
-                    inv.model,
-                    inv.prompt.len()
-                ),
             });
         }
     };
@@ -299,5 +310,97 @@ fn emit_event_summary(ev: &Value, sid: &str) {
         other => {
             eprintln!("[claude_cli {sid}] {other}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    fn inv(timeout: Duration) -> SubprocessInvocation {
+        SubprocessInvocation::neutral(
+            "sh".to_string(),
+            "test-model".to_string(),
+            "prompt".to_string(),
+            timeout,
+            HashSet::new(),
+            None,
+            tars_sandbox::SandboxPolicy::default(),
+        )
+    }
+
+    /// A wedged child holds stdout open and writes nothing, so the NDJSON
+    /// reader never sees EOF. The invocation timeout must still fire, kill the
+    /// child, and return — bounding BOTH the drain and the child's exit.
+    ///
+    /// Before the fix, the timeout wrapped only `child.wait()` and the pair was
+    /// `join!`-ed. `join!` waits for every future, so the reader's forever-pending
+    /// await swallowed the elapsed timer and this test hung.
+    #[tokio::test]
+    async fn timeout_fires_while_child_holds_stdout_open() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sh");
+
+        let started = Instant::now();
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_streaming(&mut child, &inv(Duration::from_millis(200))),
+        )
+        .await
+        .expect("run_streaming must return, not hang past its own timeout")
+        .expect_err("a child that never writes must not succeed");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timeout must fire near the 200ms budget, took {:?}",
+            started.elapsed()
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("timed out"), "expected a timeout error, got: {msg}");
+        // We killed the child; it did not die on its own — the abort is a
+        // `TimedOut`, NOT a `CliSubprocessDied`, and `budget` is the invocation
+        // budget the call was given (200ms here).
+        match err {
+            ProviderError::TimedOut { budget, .. } => {
+                assert_eq!(
+                    budget,
+                    Duration::from_millis(200),
+                    "budget must equal the invocation timeout"
+                );
+            }
+            other => panic!("expected ProviderError::TimedOut, got: {other:?}"),
+        }
+    }
+
+    /// The child is actually killed, not merely abandoned — a subprocess lives
+    /// outside the future, so dropping the future would leave it running.
+    #[tokio::test]
+    async fn timed_out_child_is_killed() {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(false)
+            .spawn()
+            .expect("spawn sh");
+
+        let _ = run_streaming(&mut child, &inv(Duration::from_millis(200))).await;
+        // `start_kill` was issued on the timeout path; reaping must now succeed
+        // promptly rather than blocking for the child's full `sleep 30`.
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("killed child must be reapable without waiting out its sleep")
+            .expect("wait");
+        assert!(!status.success(), "a killed child must not report success");
     }
 }

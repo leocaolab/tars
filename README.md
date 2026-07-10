@@ -294,10 +294,10 @@ the provider's configured `default_model`, so you don't have to name one.)
 ### 2 — Service: the resilient, validated onion
 
 `LlmService::default_chain(provider, model, opts)` wraps that provider in the
-canonical middleware chain — telemetry, cache, retry, optional circuit-breaker,
-output validation, and event emission — and returns an `LlmService` (the one
-public service type). Every response carries a `telemetry` block (`cache_hit`,
-`retry_count`, layer trace, latency, cost).
+canonical middleware chain — telemetry, cache, retry, output validation, and
+event emission — and returns an `LlmService` (the one public service type).
+Every response carries a `telemetry` block (`cache_hit`, `retry_count`, layer
+trace, latency, cost).
 
 ```rust
 use tars_pipeline::{ChainOpts, LlmService};
@@ -305,11 +305,8 @@ use tars_pipeline::{ChainOpts, LlmService};
 let (id, provider, model) =
     tars_handle::resolve_role_bound(&cfg.roles, &cfg.routing, &registry, "critic")?;
 
-// Retry + circuit-breaker are config, not code: [resilience] feeds them.
-let (retry, circuit_breaker) = tars_handle::resilience_configs(&cfg.resilience);
 let mut opts = ChainOpts::new(id.clone());
-opts.retry = retry;
-opts.circuit_breaker = circuit_breaker;
+opts.retry = Some(retry_cfg);   // omit ⇒ RetryConfig::default()
 
 let svc = LlmService::default_chain(provider, model, opts);   // -> LlmService
 let mut stream = svc.call(req, ctx).await?;
@@ -325,20 +322,19 @@ and read `provider.capabilities()` for the pre-flight
 model-bound leaf `LlmService` (provider + its `default_model`, no chain); wrap
 it in the onion with `LlmService::builder_with_inner(svc).layer(...).build()`.
 
-Retry and circuit-breaker are **config, not code**: the `[resilience]`
-section (v1.2.3+) feeds `default_chain`'s `RetryConfig` /
-`CircuitBreakerConfig` via `tars_handle::resilience_configs` so consumers
-don't re-type the same literals — absent ⇒ tars's default chain (default
-retry, no breaker).
+Retry is always in the chain: `opts.retry = None` ⇒ `RetryConfig::default()`
+(3 attempts, exponential backoff, 30s cap).
 
-```toml
-[resilience.retry]
-max_attempts = 6
-respect_retry_after = true
+A circuit breaker is **not** a chain layer — it's a provider wrapper you opt
+into before building the chain, so an open breaker rejects below Retry:
 
-[resilience.circuit_breaker]      # presence turns the breaker ON
-failure_threshold = 4
-cooldown_secs = 30.0
+```rust
+use tars_pipeline::{CircuitBreaker, CircuitBreakerConfig};
+
+let provider = CircuitBreaker::wrap(provider, CircuitBreakerConfig {
+    failure_threshold: 4,
+    cooldown: Duration::from_secs(30),
+});
 ```
 
 ### 3 — Runtime: orchestrated DAG, ephemeral or durable

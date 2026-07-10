@@ -1,9 +1,10 @@
-//! Process-global spine for tars-node (post scope-facade).
+//! Process-global spine for tars-node.
 //!
-//! The old `Workspaces` / `TarsHandle` per-scope classes are gone. `init`
-//! builds the process-global config + registry; `provider` / `pipeline` resolve
-//! a role against them via [`tars_handle::resolve_role`]. The store dir survives
-//! only as a path helper ([`workspace_store_dir`]) the caller opens itself.
+//! [`init`] is the composition root: it installs the global config from
+//! `<home>/config.toml` and eagerly builds the one provider registry.
+//! `provider` / `pipeline` resolve a role against them with a single `[roles]`
+//! lookup — a role names a `(provider, model)` pair, or it is an error. No
+//! fallback chain, no guessing.
 //!
 //! ```js
 //! const tars = require('tars');
@@ -16,40 +17,39 @@
 //! separate model-decoupling change) lands later. It uses the current
 //! registry / pipeline / `ChatRequest` APIs unchanged.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use napi_derive::napi;
 
 use tars_config::{Config, resolve_home};
-use tars_handle::{
-    WorkspaceResolution, resolve_workspace_root as rs_resolve_root,
-    workspace_store_dir as rs_store_dir,
-};
 use tars_pipeline::{ChainOpts, LlmService};
 use tars_provider::{LlmProvider, ProviderRegistry};
 use tars_types::{ProviderId, RequestContext};
 
 use crate::ctx::{JsContext, build_context, default_context};
-use crate::errors::{JsError, init_to_js, io_to_js, registry_to_js, tars_to_js};
+use crate::errors::{
+    JsError, config_to_js, provider_not_registered_to_js, registry_to_js, unknown_role_to_js,
+};
 use crate::{CompleteOptions, CompleteResult, Pipeline, drive_complete};
 
-/// Load the process-global config + build the shared provider registry once
-/// (Doc 06 §C1). Idempotent (a second call is a no-op). A bad provider / key
-/// surfaces here, at startup, not on the first role resolution.
+/// Install the process-global config and eagerly build the shared provider
+/// registry. A bad provider / key surfaces here, at startup, not on the first
+/// role resolution.
+///
+/// **Not idempotent.** A second `init()` rejects with `TarsConfigError`: the
+/// process already runs against a config this call did not provide.
 #[napi]
 pub fn init(home: Option<String>) -> napi::Result<(), String> {
-    match tars_handle::init_from_home(home.map(PathBuf::from)) {
-        // First-wins: a second init is a no-op for the caller, not an error.
-        Ok(()) | Err(tars_handle::InitError::AlreadyInitialized) => Ok(()),
-        Err(e) => Err(init_to_js(e)),
-    }
+    tars_config::global::init_tars(home.map(PathBuf::from)).map_err(config_to_js)?;
+    ProviderRegistry::init().map_err(registry_to_js)?;
+    Ok(())
 }
 
-/// Whether [`init`] has run (the global config is loaded).
+/// Whether [`init`] has run (config installed and registry built).
 #[napi]
 pub fn is_initialized() -> bool {
-    Config::is_loaded()
+    Config::is_loaded() && ProviderRegistry::try_global().is_some()
 }
 
 /// Resolve the tars home dir (`home` > `$TARS_HOME` > `~/.tars`) without
@@ -84,34 +84,18 @@ pub fn pipeline(role: String, ctx: Option<JsContext>) -> napi::Result<Pipeline, 
     Ok(Pipeline::from_service(id, inner, ctx))
 }
 
+/// One `[roles]` lookup, no guessing. Two distinct failures, each naming what
+/// actually went wrong.
 fn resolve_global(
     role: &str,
 ) -> std::result::Result<(String, Arc<dyn LlmProvider>, String), JsError> {
     let registry = ProviderRegistry::global().map_err(registry_to_js)?;
     let cfg = Config::get();
-    let (id, prov, model) =
-        tars_handle::resolve_role_bound(&cfg.roles, &cfg.routing, &registry, role)
-            .map_err(tars_to_js)?;
-    Ok((id.to_string(), prov, model))
-}
-
-/// Resolve `path` to a canonical workspace root for `tool` (walk-up; `.<tool>/`
-/// marker beats `.git`). `null` when neither a marker nor `.git` is found.
-#[napi]
-pub fn resolve_workspace_root(tool: String, path: String) -> napi::Result<Option<String>, String> {
-    match rs_resolve_root(&tool, Path::new(&path)).map_err(io_to_js)? {
-        WorkspaceResolution::Workspace(root) => Ok(Some(root.to_string_lossy().into_owned())),
-        WorkspaceResolution::Standalone => Ok(None),
-    }
-}
-
-/// The per-project store dir for `tool` under `root`: `<root>/.<tool>/tars/`.
-/// A plain path — the caller opens whatever stores it wants there.
-#[napi]
-pub fn workspace_store_dir(tool: String, root: String) -> String {
-    rs_store_dir(&tool, Path::new(&root))
-        .to_string_lossy()
-        .into_owned()
+    let entry = cfg.roles.get(role).ok_or_else(|| unknown_role_to_js(role))?;
+    let prov = registry
+        .get(&entry.provider)
+        .ok_or_else(|| provider_not_registered_to_js(role, &entry.provider))?;
+    Ok((entry.provider.to_string(), prov, entry.model.clone()))
 }
 
 /// Layer 1 provider handle — a raw backend bound to a role + call context.

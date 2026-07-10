@@ -12,7 +12,7 @@
 //! ├── TarsConfigError           load / parse / validate / unknown provider id
 //! ├── TarsProviderError         backend call failed (auth, rate-limit, parse, …)
 //! ├── TarsRuntimeError          HTTP base / registry build / internal wiring
-//! └── TarsHandleError           workspace-open / role-resolution (Doc 06 handle)
+//! └── TarsRoleError             a `[roles]` name did not resolve to a provider
 //! ```
 //!
 //! `TarsProviderError` carries three structured attributes the caller
@@ -40,65 +40,51 @@ create_exception!(tars._tars_py, TarsError, PyException);
 create_exception!(tars._tars_py, TarsConfigError, TarsError);
 create_exception!(tars._tars_py, TarsProviderError, TarsError);
 create_exception!(tars._tars_py, TarsRuntimeError, TarsError);
-// Doc 06 handle failures: opening a workspace (registry / store / io) or
-// resolving a `role` to a provider. Rooted at `TarsError` so a catch-all
-// still matches; carries a typed `kind` tag (+ `role`/`tried` for the
-// unknown-role case) so callers branch on structure, not the message.
-create_exception!(tars._tars_py, TarsHandleError, TarsError);
+// A `role` did not resolve to a provider. Rooted at `TarsError` so a catch-all
+// still matches; carries a typed `kind` tag plus the real `role` / `provider`
+// that failed, so callers branch on structure rather than the message.
+create_exception!(tars._tars_py, TarsRoleError, TarsError);
 
 /// Map a `ConfigError` to its Python exception.
 pub fn config_to_py(err: ConfigError) -> PyErr {
     TarsConfigError::new_err(err.to_string())
 }
 
-/// Map a [`tars_handle::TarsError`] to a `TarsHandleError`, preserving the
-/// structured `role` + `tried` fields (and a `kind` tag) so a caller branches
-/// on them rather than parsing the message. Its only variant is the
-/// role-resolution failure (the old registry/store/io/workspace-config
-/// failures went away with the scope facade).
-pub fn handle_to_py(err: tars_handle::TarsError) -> PyErr {
-    let message = err.to_string();
-    Python::with_gil(|py| match build_handle_exc(py, &err, message) {
-        Ok(exc) => exc,
-        Err(decorate_err) => decorate_err,
+/// `role` is not in the `[roles]` table. Carries `kind` + `role` so a caller
+/// branches on structure rather than parsing the message.
+pub fn unknown_role_to_py(role: &str) -> PyErr {
+    let exc = TarsRoleError::new_err(format!(
+        "role `{role}` is not configured — add a [roles.{role}] section with \
+         `provider` and `model`"
+    ));
+    decorate(exc, |value| {
+        value.setattr("kind", "unknown_role")?;
+        value.setattr("role", role)
     })
 }
 
-/// Build a decorated [`TarsHandleError`]: sets `kind` + the structured `role` /
-/// `tried` fields for the role-resolution failure.
-fn build_handle_exc(
-    py: Python<'_>,
-    err: &tars_handle::TarsError,
-    message: String,
-) -> PyResult<PyErr> {
-    use tars_handle::TarsError as E;
-    let exc = TarsHandleError::new_err(message);
-    let value = exc.value(py);
-    match err {
-        E::UnknownRole { role, tried } => {
-            value.setattr("kind", "unknown_role")?;
-            value.setattr("role", role)?;
-            value.setattr("tried", tried.as_ref().map(|p| p.to_string()))?;
-        }
-        E::NoModelForRole { role, provider } => {
-            value.setattr("kind", "no_model_for_role")?;
-            value.setattr("role", role)?;
-            value.setattr("provider", provider.to_string())?;
-        }
-    }
-    Ok(exc)
+/// `role` resolves to a provider id the registry does not hold — the `[roles]`
+/// entry and the `[providers]` table disagree. Carries the real role and the
+/// real provider id, never a placeholder.
+pub fn provider_not_registered_to_py(role: &str, provider: &tars_types::ProviderId) -> PyErr {
+    let exc = TarsRoleError::new_err(format!(
+        "role `{role}` names provider `{provider}`, which is not in the registry — \
+         add a [providers.{provider}] section"
+    ));
+    decorate(exc, |value| {
+        value.setattr("kind", "provider_not_registered")?;
+        value.setattr("role", role)?;
+        value.setattr("provider", provider.to_string())
+    })
 }
 
-/// Map a [`tars_handle::InitError`] (composition-root failure) to its Python
-/// exception: config-load failures are config-shaped; registry-build failures
-/// are runtime/wiring.
-pub fn init_to_py(err: tars_handle::InitError) -> PyErr {
-    use tars_handle::InitError as E;
-    match err {
-        E::Config(e) => config_to_py(e),
-        E::Registry(e) => runtime_to_py("provider registry", e),
-        E::AlreadyInitialized => TarsRuntimeError::new_err("tars already initialized"),
-    }
+/// Attach structured attributes to `exc`; if decoration itself fails, that
+/// failure is what the caller sees (never a silently half-built exception).
+fn decorate(exc: PyErr, f: impl FnOnce(&Bound<'_, PyAny>) -> PyResult<()>) -> PyErr {
+    Python::with_gil(|py| match f(&exc.value(py).clone().into_any()) {
+        Ok(()) => exc,
+        Err(decorate_err) => decorate_err,
+    })
 }
 
 /// Map a generic runtime/wiring error (HTTP base build, registry build,
@@ -228,6 +214,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("TarsConfigError", py.get_type::<TarsConfigError>())?;
     m.add("TarsProviderError", py.get_type::<TarsProviderError>())?;
     m.add("TarsRuntimeError", py.get_type::<TarsRuntimeError>())?;
-    m.add("TarsHandleError", py.get_type::<TarsHandleError>())?;
+    m.add("TarsRoleError", py.get_type::<TarsRoleError>())?;
     Ok(())
 }

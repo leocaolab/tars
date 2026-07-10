@@ -670,7 +670,7 @@ tars admin provider add \
   --base-url "https://api.groq.com/openai/v1" \
   --auth-secret "secret/data/tars/groq"
 
-# Adjust [resilience] retry / circuit-breaker or the [roles] map (carefully)
+# Adjust the [roles] map (carefully)
 # Via config reload (not direct admin API), to preserve git trail
 ```
 
@@ -989,7 +989,7 @@ If SLA terms are triggered (e.g., 99.5% monthly availability):
 | Level | Examples | Approval |
 |---|---|---|
 | Standard | Docker image patch / log level adjustment | Self-service |
-| Normal | New provider go-live / new [roles] or [resilience] rule | Lead approve |
+| Normal | New provider go-live / new [roles] rule | Lead approve |
 | Emergency | Hot fix for a P0 | Director approve + post-fact review |
 | Significant | Major DB schema change / architectural change | CAB review |
 

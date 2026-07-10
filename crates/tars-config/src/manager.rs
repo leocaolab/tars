@@ -10,7 +10,7 @@ use tars_types::ProviderId;
 use crate::builtin::merge_builtin_with_user;
 use crate::error::{ConfigError, ValidationError};
 use crate::providers::ProvidersConfig;
-use crate::resilience::ResilienceConfig;
+use crate::roles::RoleConfig;
 use crate::routing::RoutingConfig;
 use crate::sandbox::SandboxConfig;
 
@@ -29,24 +29,22 @@ pub struct Config {
     #[serde(default)]
     pub routing: RoutingConfig,
 
-    /// `[roles]` — a **flat** map of arbitrary role name → provider id, the
-    /// shape real consumers already write (`arc`'s `.arc/config.toml`,
-    /// `concer`'s `.concer/config.toml`):
+    /// `[roles]` — arbitrary role name → `(provider, model)`. See
+    /// [`crate::roles`].
     ///
     /// ```toml
-    /// [roles]
-    /// critic = "deepseek"
-    /// fixer  = "claude_cli"
+    /// [roles.critic]
+    /// provider = "deepseek"
+    /// model    = "deepseek-chat"
     /// ```
     ///
     /// Distinct from [`routing`](Self::routing): `routing.tiers` keys on the
     /// fixed [`ModelTier`](tars_types::ModelTier) enum, whereas `roles` keys on
-    /// free-form names. The [`Tars`](../../tars_handle/struct.Tars.html) handle
-    /// resolves a role through this map *first*, then falls back to the tier /
-    /// literal-id / default / sole-provider chain. Each value should reference a
+    /// free-form names. Resolution is one lookup, no fallback chain; a role
+    /// that is not configured is an error. Each `provider` must reference a
     /// declared provider id (checked by [`validate`](Self::validate)).
     #[serde(default)]
-    pub roles: HashMap<String, ProviderId>,
+    pub roles: HashMap<String, RoleConfig>,
 
     /// M4 (D6): user security config → `tars_sandbox::SandboxPolicy`, threaded
     /// into `ToolContext.sandbox`. **Optional** — absent `[sandbox]` = `None` =
@@ -63,14 +61,6 @@ pub struct Config {
     /// keyless DuckDuckGo default.
     #[serde(default)]
     pub web_search: Option<sisurf_core::SearchConfig>,
-
-    /// `[resilience]` — LLM transport retry + circuit-breaker tuning fed into
-    /// every handle-built pipeline. **Optional** — absent = tars's current
-    /// behaviour (default retry, no breaker), so no existing consumer changes.
-    /// See [`crate::resilience`]; the conversion into tars-pipeline's
-    /// `RetryConfig` / `CircuitBreakerConfig` lives in tars-pipeline.
-    #[serde(default)]
-    pub resilience: ResilienceConfig,
 
     /// IDs that came from the user's TOML, captured *before* the
     /// builtin-merge step so callers can distinguish "explicitly
@@ -97,20 +87,25 @@ impl Config {
         // Routing references must point at known provider IDs.
         let known: HashSet<_> = self.providers.iter().map(|(id, _)| id.clone()).collect();
         self.routing.validate(&known, &mut errs);
-        // Each `[roles]` value must reference a known provider id — same
-        // dangling-reference check the routing tiers get.
-        for (role, id) in &self.roles {
+        // Each `[roles]` entry must reference a known provider id — same
+        // dangling-reference check the routing tiers get — and name a model.
+        for (role, entry) in &self.roles {
+            let id = &entry.provider;
             if !known.contains(id) {
                 errs.push(ValidationError::new(
-                    format!("roles.{role}"),
+                    format!("roles.{role}.provider"),
                     format!(
                         "references unknown provider `{id}` — add a [providers.{id}] section or fix the role mapping"
                     ),
                 ));
             }
+            if entry.model.trim().is_empty() {
+                errs.push(ValidationError::new(
+                    format!("roles.{role}.model"),
+                    "is empty — a role must name the concrete model it calls".to_string(),
+                ));
+            }
         }
-        // `[resilience]` numeric ranges (counts >= 1, durations finite & >= 0).
-        self.resilience.validate(&mut errs);
         if errs.is_empty() { Ok(()) } else { Err(errs) }
     }
 
@@ -302,29 +297,26 @@ mod tests {
     }
 
     #[test]
-    fn flat_roles_table_loads_as_name_to_provider_map() {
-        // The shape real consumers write: a FLAT [roles] table of
-        // arbitrary_name = "provider_id" (NOT [roles.tiers]).
+    fn roles_table_loads_as_name_to_provider_and_model() {
         let toml_str = r#"
             [providers.deepseek]
             type = "openai_compat"
             base_url = "http://localhost:8000/v1"
             default_model = "deepseek-chat"
 
-            [roles]
-            critic = "deepseek"
-            fixer  = "mlx"
+            [roles.critic]
+            provider = "deepseek"
+            model    = "deepseek-chat"
+
+            [roles.fixer]
+            provider = "mlx"
+            model    = "mlx-community/Qwen3-8B"
         "#;
-        let cfg = ConfigManager::load_from_str(toml_str).expect("flat [roles] must load");
-        assert_eq!(
-            cfg.roles.get("critic"),
-            Some(&tars_types::ProviderId::new("deepseek"))
-        );
+        let cfg = ConfigManager::load_from_str(toml_str).expect("[roles.<name>] must load");
+        assert_eq!(cfg.roles["critic"].provider, tars_types::ProviderId::new("deepseek"));
+        assert_eq!(cfg.roles["critic"].model, "deepseek-chat");
         // `mlx` is a built-in, merged in, so a role pointing at it validates.
-        assert_eq!(
-            cfg.roles.get("fixer"),
-            Some(&tars_types::ProviderId::new("mlx"))
-        );
+        assert_eq!(cfg.roles["fixer"].provider, tars_types::ProviderId::new("mlx"));
     }
 
     #[test]
@@ -336,13 +328,15 @@ mod tests {
     #[test]
     fn role_referencing_unknown_provider_fails_validation() {
         let toml_str = r#"
-            [roles]
-            critic = "no_such_provider"
+            [roles.critic]
+            provider = "no_such_provider"
+            model    = "whatever"
         "#;
         let err = ConfigManager::load_from_str(toml_str).unwrap_err();
         match err {
             ConfigError::ValidationFailed { errors } => {
-                assert!(errors.iter().any(|e| e.key == "roles.critic"));
+                // The key points at the offending *field*, not just the role.
+                assert!(errors.iter().any(|e| e.key == "roles.critic.provider"));
                 assert!(errors.iter().any(|e| e.message.contains("no_such_provider")));
             }
             _ => panic!("wrong error variant: {err:?}"),

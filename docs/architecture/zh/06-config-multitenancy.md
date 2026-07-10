@@ -8,7 +8,6 @@
 > - **全局 config + registry:** `tars_handle::init(Config)`(DI)/ `init_from_home(home)`(CLI)安装进程级全局 `Config`(`Config::get()`),并预先构建唯一的 `ProviderRegistry`(`ProviderRegistry::global()` / `try_global()`);`is_initialized()`。
 > - **role → provider/service:** 自由函数 `resolve_role` / `resolve_role_bound` / `resolve_service` / `resolve_provider_id`(针对显式传入的 `&cfg.roles`、`&cfg.routing`、`&registry`)——没有 scope 对象。
 > - **paths:** `resolve_workspace_root`、`workspace_store_dir`、`tars_home_store_dir`、`standalone_store_dir`、`StoreScope`(§7 的路径法则,仍然有效)。
-> - **resilience:** `resilience_configs(&cfg.resilience)` → `(RetryConfig, CircuitBreakerConfig)`。
 > 下面那些承重的*决策*(进程隔离、配置分层、路径法则、只做可观测性的 store)全部成立;只有把它们**打包**进一个 `Tars` struct——以及它的 per-scope sink + cancel + 确定性 Drop 生命周期——没有了。Scope / 生命周期现在是**消费者**自己拥有的(tars 只提供 DI 缝,不提供句柄)。带着这个替换去读下面的章节。
 
 ---
