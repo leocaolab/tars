@@ -31,8 +31,8 @@
 //!     `ConfigManager::load_*` → `ProviderRegistry::from_config` →
 //!     `LlmService::default_chain` and store a concrete `LlmService`.
 //!   - **Role spine** (`init` / `provider(role)` / `pipeline(role)`)
-//!     resolves a role against the process-global config + registry via
-//!     `tars_handle::resolve_role`, mirroring tars-py's free functions.
+//!     resolves a role against the process-global config + registry with a
+//!     single `[roles]` lookup, mirroring tars-py's free functions.
 //!   - **`complete(opts)`** maps the napi-friendly camelCase
 //!     `CompleteOptions` → `tars_types::ChatRequest`, drives the
 //!     held `LlmService`, drains the event stream into a
@@ -58,8 +58,7 @@ mod handle;
 // site, not this re-export.
 pub use ctx::JsContext;
 pub use handle::{
-    Provider, init, is_initialized, pipeline, provider, resolve_workspace_root, tars_home,
-    workspace_store_dir,
+    Provider, init, is_initialized, pipeline, provider, tars_home,
 };
 
 use std::sync::Arc;

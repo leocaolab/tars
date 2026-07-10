@@ -115,7 +115,7 @@ impl CliDialect for OpenCodeDialect {
             self.executable.clone(),
             model,
             prompt,
-            self.timeout,
+            ctx.call_budget(self.timeout),
             // opencode authenticates via its own `opencode auth login` /
             // provider env keys — nothing to strip.
             std::collections::HashSet::new(),

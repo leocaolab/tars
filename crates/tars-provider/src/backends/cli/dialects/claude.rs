@@ -78,7 +78,7 @@ impl CliDialect for ClaudeCliDialect {
             model,
             system,
             prompt,
-            timeout: self.timeout,
+            timeout: ctx.call_budget(self.timeout),
             stripped_env: STRIPPED_ENV_KEYS_UPPER
                 .iter()
                 .map(|s| s.to_string())
@@ -189,6 +189,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(d.argv(&inv), build_argv_with(&inv, streaming_enabled()));
+    }
+
+    /// The caller's `ctx.deadline` is the per-call wall-clock budget and it
+    /// WINS over the provider's configured `timeout_secs`. Config is the
+    /// default used when the caller says nothing — not a ceiling. A subprocess
+    /// outlives its future, so this leaf is the only place that can enforce it.
+    #[test]
+    fn caller_deadline_overrides_the_configured_timeout() {
+        let d = ClaudeCliDialect::new(
+            "claude".into(),
+            Duration::from_secs(42),
+            ClaudeCliTools::Default,
+            false,
+            None,
+            false,
+            vec![],
+        );
+        let mut ctx = RequestContext::test_default();
+        ctx.deadline = Some(std::time::Instant::now() + Duration::from_secs(600));
+        let inv = d.invocation(&ChatRequest::user("x"), "sonnet", &ctx).unwrap();
+        // A longer deadline buys a longer run (arc's reconcile), not a clamp to 42s.
+        assert!(
+            inv.timeout > Duration::from_secs(500) && inv.timeout <= Duration::from_secs(600),
+            "deadline must set the budget, got {:?}",
+            inv.timeout
+        );
+
+        // And a shorter deadline cuts the call off early.
+        let mut ctx = RequestContext::test_default();
+        ctx.deadline = Some(std::time::Instant::now() + Duration::from_secs(5));
+        let inv = d.invocation(&ChatRequest::user("x"), "sonnet", &ctx).unwrap();
+        assert!(inv.timeout <= Duration::from_secs(5), "got {:?}", inv.timeout);
+    }
+
+    /// An expired deadline saturates to ZERO, so the subprocess is not spawned
+    /// for a full run it has no time for.
+    #[test]
+    fn expired_deadline_yields_a_zero_budget() {
+        let d = ClaudeCliDialect::new(
+            "claude".into(),
+            Duration::from_secs(42),
+            ClaudeCliTools::Default,
+            false,
+            None,
+            false,
+            vec![],
+        );
+        let mut ctx = RequestContext::test_default();
+        ctx.deadline = Some(std::time::Instant::now() - Duration::from_secs(1));
+        let inv = d.invocation(&ChatRequest::user("x"), "sonnet", &ctx).unwrap();
+        assert_eq!(inv.timeout, Duration::ZERO);
     }
 
     #[test]

@@ -39,6 +39,13 @@ pub enum ConfigError {
     #[error("cannot resolve tars home: set $TARS_HOME or --tars_home (or ensure HOME is set)")]
     NoHome,
 
+    /// The process-global config was already installed by an earlier
+    /// `init_tars` / `Config::set`. Reported rather than silently dropped:
+    /// a second installer would otherwise run against a config it did not
+    /// provide, with no way to find out.
+    #[error("tars config already initialized — init_tars/Config::set may run only once per process")]
+    AlreadyInitialized,
+
     #[error("internal: {0}")]
     Internal(String),
 }

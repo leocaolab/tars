@@ -98,7 +98,7 @@ impl CliDialect for AntigravityDialect {
             self.executable.clone(),
             model,
             prompt,
-            self.timeout,
+            ctx.call_budget(self.timeout),
             // Empty strip table: agy's auth env (GEMINI_API_KEY /
             // ANTIGRAVITY_API_KEY) must pass through.
             std::collections::HashSet::new(),

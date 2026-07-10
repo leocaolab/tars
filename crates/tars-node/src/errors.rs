@@ -1,7 +1,7 @@
 //! Typed-error → JS mapping for the handle-based surface (Doc 12 §7.3).
 //!
 //! The doc contract is a **discriminable class hierarchy**
-//! (`TarsError → TarsConfigError / TarsProviderError / TarsHandleError`),
+//! (`TarsError → TarsConfigError / TarsProviderError / TarsUnknownRole / …`),
 //! *not* one stringified message. napi-rs's JS `Error` carries a `.code`
 //! property whose value is the Rust `Error<S>`'s status string
 //! (`napi_create_error(env, code, msg)`), so we key the JS `.code` off the
@@ -18,7 +18,7 @@
 //! ## Sync vs async
 //!
 //! Every **synchronous** boundary (`init`, `provider(role)` /
-//! `pipeline(role)`, `resolveWorkspaceRoot`, …) returns `Result<T, String>` — the
+//! `pipeline(role)`, …) returns `Result<T, String>` — the
 //! napi alias `Result<T, S = Status>` with `S = String`, i.e.
 //! `Result<T, napi::Error<String>>` — so `.code` is our domain string.
 //! The **async** `complete()` path is locked by napi to
@@ -28,44 +28,47 @@
 
 use napi::Error;
 
-use tars_handle::{InitError, TarsError};
+use tars_config::ConfigError;
 use tars_provider::RegistryError;
-use tars_types::ProviderError;
+use tars_types::{ProviderError, ProviderId};
 
 /// A JS-facing error whose `.code` is a domain-typed string (see module docs).
 pub(crate) type JsError = Error<String>;
 
-/// Map a [`TarsError`] to a JS error with a discriminable `.code`. Its only
-/// variant now is the role-resolution failure; the message is the real
-/// `Display` text (the truth), never a placeholder.
-pub(crate) fn tars_to_js(err: TarsError) -> JsError {
-    let code = match &err {
-        TarsError::UnknownRole { .. } => "TarsUnknownRole",
-        TarsError::NoModelForRole { .. } => "TarsNoModelForRole",
-    };
-    Error::new(code.to_string(), err.to_string())
-}
-
-/// Map a composition-root [`InitError`] to a discriminable JS error `.code`.
-pub(crate) fn init_to_js(err: InitError) -> JsError {
-    match err {
-        InitError::Config(e) => Error::new("TarsConfigError".to_string(), e.to_string()),
-        InitError::Registry(e) => Error::new("TarsRegistryError".to_string(), e.to_string()),
-        InitError::AlreadyInitialized => Error::new(
-            "TarsAlreadyInitialized".to_string(),
-            "tars already initialized".to_string(),
+/// `role` is not in the `[roles]` table. The message names the role and the
+/// section to add — never a sterile sentinel.
+pub(crate) fn unknown_role_to_js(role: &str) -> JsError {
+    Error::new(
+        "TarsUnknownRole".to_string(),
+        format!(
+            "role `{role}` is not configured — add a [roles.{role}] section with \
+             `provider` and `model`"
         ),
-    }
+    )
 }
 
-/// Map a [`RegistryError`] (provider-registry build) to `TarsRegistryError`.
+/// `role` names a provider the registry does not hold — `[roles]` and
+/// `[providers]` disagree. Carries both real names in the message.
+pub(crate) fn provider_not_registered_to_js(role: &str, provider: &ProviderId) -> JsError {
+    Error::new(
+        "TarsProviderNotRegistered".to_string(),
+        format!(
+            "role `{role}` names provider `{provider}`, which is not in the registry — \
+             add a [providers.{provider}] section"
+        ),
+    )
+}
+
+/// Map a [`ConfigError`] (composition-root config load / parse / validate) to a
+/// discriminable JS error `.code`.
+pub(crate) fn config_to_js(err: ConfigError) -> JsError {
+    Error::new("TarsConfigError".to_string(), err.to_string())
+}
+
+/// Map a [`RegistryError`] (provider-registry build / lookup) to
+/// `TarsRegistryError`.
 pub(crate) fn registry_to_js(err: RegistryError) -> JsError {
     Error::new("TarsRegistryError".to_string(), err.to_string())
-}
-
-/// Map a filesystem error at a handle boundary to `TarsIoError`.
-pub(crate) fn io_to_js(err: std::io::Error) -> JsError {
-    Error::new("TarsIoError".to_string(), err.to_string())
 }
 
 /// Async-path reason for a provider-call [`ProviderError`]. napi's async

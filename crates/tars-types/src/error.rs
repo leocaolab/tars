@@ -66,6 +66,22 @@ pub enum ProviderError {
         stderr: String,
     },
 
+    /// The call exceeded its wall-clock budget and was aborted — the subprocess
+    /// was killed, or the HTTP request dropped. Nothing *died*: we stopped it.
+    /// Kept distinct from [`CliSubprocessDied`](Self::CliSubprocessDied), whose
+    /// name would otherwise report our own kill as the child's failure.
+    ///
+    /// `budget` is what this call was given: the caller's `ctx.deadline`
+    /// remainder when it set one, else the provider's configured `timeout_secs`.
+    /// `detail` carries whatever the resource said on the way down (stderr tail,
+    /// model, prompt size) — the truth, not a sentinel.
+    ///
+    /// `MaybeRetriable`: more time *might* help. When the caller's deadline drove
+    /// the abort, a retry re-reads `ctx.remaining()`, gets ~zero, and fails
+    /// immediately — the budget, not the retry policy, is what stops the loop.
+    #[error("timed out after {budget:?}: {detail}")]
+    TimedOut { budget: Duration, detail: String },
+
     /// Model emitted a tool_use for a tool that isn't registered.
     /// Surfaced by the Session auto-loop when it can't find a handler
     /// for the model's chosen tool name. **Permanent class** — retrying
@@ -122,7 +138,9 @@ impl ProviderError {
             | BudgetExceeded
             | UnknownTool { .. }
             | ValidationFailed { .. } => ErrorClass::Permanent,
-            Parse(_) | Internal(_) | CliSubprocessDied { .. } => ErrorClass::MaybeRetriable,
+            Parse(_) | Internal(_) | CliSubprocessDied { .. } | TimedOut { .. } => {
+                ErrorClass::MaybeRetriable
+            }
         }
     }
 
@@ -161,6 +179,7 @@ impl ProviderError {
             Network(_) => K::Network,
             Parse(_) => K::Parse,
             CliSubprocessDied { .. } => K::CliSubprocessDied,
+            TimedOut { .. } => K::TimedOut,
             UnknownTool { .. } => K::UnknownTool,
             ValidationFailed { .. } => K::ValidationFailed,
             Internal(_) => K::Internal,
@@ -188,6 +207,7 @@ pub enum ProviderErrorKind {
     Network,
     Parse,
     CliSubprocessDied,
+    TimedOut,
     UnknownTool,
     ValidationFailed,
     Internal,
@@ -212,6 +232,7 @@ impl ProviderErrorKind {
             Network => "network",
             Parse => "parse",
             CliSubprocessDied => "cli_subprocess_died",
+            TimedOut => "timed_out",
             UnknownTool => "unknown_tool",
             ValidationFailed => "validation_failed",
             Internal => "internal",

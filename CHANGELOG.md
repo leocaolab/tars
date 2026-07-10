@@ -19,6 +19,90 @@ is authoritative. This file aggregates.
 
 ---
 
+## 1.6 — delete `tars-handle`; timeout is a parameter — `v1.6.0`
+
+**Breaking.** Three app-layer concepts that had sunk into infra are removed, and
+a per-call timeout stops being provider-construction state.
+
+### Deleted: the `tars-handle` crate
+The composition-root facade had grown past its one job. Every consumer bypassed
+its door and reimplemented the same hole; what remained was app logic living in
+a library.
+
+- **`resolve_role`'s five-rule fallback chain is gone.** A role now resolves in
+  ONE lookup. It used to fall through — flat map → tier → literal provider id →
+  `default` tier → sole provider — so a typo'd role, or a `[roles]` entry naming
+  an unregistered provider, silently resolved to *some other model* instead of
+  erroring. Two tests were freezing that.
+- **`paths.rs` deleted** (`resolve_workspace_root`, `workspace_store_dir`,
+  `StoreScope`, …). "A project is a git repo with a `.<tool>/` marker" is the
+  consumer's concept — the `tool: &str` parameter was the tell: tars had to be
+  told the caller's own name to do the job. Zero tars-internal callers.
+- **`startup.rs` deleted.** `init` / `init_from_home` wrapped a door nobody
+  walked through: arc and concer both called `Config::install_global` directly.
+
+### Deleted: the `[resilience]` config section
+`ResilienceConfig`, `RetryTuning`, `BreakerTuning`, `llm_default()`,
+`or_llm_default()`, `resilience_configs()`. Two apps had hand-copied the same
+retry/breaker constants, so the numbers were moved *down* into tars and named
+`llm_default` — a generic-sounding name for one app's policy. tars then had two
+contradicting defaults, and its own (`RetryConfig::default()`, 3 attempts, no
+breaker) was the one the apps' tests guarded against as a "regression".
+Deduplicating two apps is an app-layer job. `ChainOpts.circuit_breaker` goes with
+it: a breaker is `CircuitBreaker::wrap(provider, cfg)` before the chain is built.
+
+### `[roles]` binds a model
+```toml
+[roles.critic]
+provider = "deepseek"
+model    = "deepseek-chat"
+```
+Was `critic = "deepseek"`, with the model reverse-looked-up from the provider's
+`default_model` — so two roles on one provider could not differ, which is the
+entire point of having roles. Both fields required; no fallback.
+`resolve_role_bound` / `NoModelForRole` are gone with the reverse lookup.
+
+### Composition root: two doors, both fallible
+```rust
+tars_config::init_tars(home)?      // read <home>/config.toml, install it
+tars_config::Config::set(cfg)?     // DI: the app hands over a Config it built
+tars_provider::ProviderRegistry::init()?   // eager build; a bad key fails HERE
+tars_provider::ProviderRegistry::global()  // pure getter — no longer builds
+```
+`Config::set` returned `()` and dropped your config on a lost race; both doors
+now report `AlreadyInitialized`. `global()` was a getter that secretly built the
+registry, so a bad provider surfaced on the first LLM call instead of at startup.
+
+### A call's wall-clock budget is a parameter (`RequestContext::deadline`)
+`ctx.deadline` existed with **zero readers**. `[providers.X] timeout_secs` — a
+CLI-only knob, absent from all eight HTTP providers — was baked into the provider
+at construction, so overriding it per call meant rebuilding the provider. It is
+now the *default* used when the caller sets no deadline; `ctx.remaining()` /
+`ctx.call_budget(default)` carry the caller's budget to whichever leaf owns the
+resource. No middleware: `ctx` was already the fourth argument of
+`LlmProvider::stream`, and two leaves were spelling it `_ctx`.
+
+Enforced by the CLI providers (a subprocess outlives the future — dropping the
+future does not kill the child) and by HTTP as a per-request total timeout.
+`HttpProviderConfig` grew no field: `connect_timeout` + `stream_idle_timeout`
+were already the right transport bounds.
+
+**Two real bugs fell out, both pinned with a test proven to fail against the old
+code:**
+- `cli/streaming.rs` timed out only `child.wait()` and then `join!`-ed it with
+  the stdout reader. `join!` waits for *every* future, so a wedged child holding
+  stdout open made the reader pend forever and the elapsed timer was never
+  reached — `timeout_secs` did not bound the most common hang.
+- On that path `stderr_task.await` ran *before* `start_kill()`, so the drain
+  could not reach EOF and the timeout arm hung too.
+
+### `ProviderError::TimedOut { budget, detail }`
+A timeout used to be reported as `CliSubprocessDied { exit_code: None }`. Nothing
+died — we killed it. `budget` is what the call was given; `detail` carries the
+real stderr tail / model / prompt size. `MaybeRetriable`; wire form `timed_out`.
+
+---
+
 ## 1.3 — model-library CLI + durable agent runtime — `v1.3.0`
 
 Two additions: a data-driven way to **see and refresh** which models each

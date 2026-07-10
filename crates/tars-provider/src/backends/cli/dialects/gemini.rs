@@ -97,7 +97,7 @@ impl CliDialect for GeminiCliDialect {
             self.executable.clone(),
             model,
             prompt,
-            self.timeout,
+            ctx.call_budget(self.timeout),
             STRIPPED_ENV_KEYS_UPPER.iter().map(|s| s.to_string()).collect(),
             // When the OS jail is on, gemini's process is confined to the
             // request's worktree (previously gemini ignored cwd → unconfined).

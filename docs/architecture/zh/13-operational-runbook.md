@@ -670,7 +670,7 @@ tars admin provider add \
   --base-url "https://api.groq.com/openai/v1" \
   --auth-secret "secret/data/tars/groq"
 
-# 调整 [resilience] retry / circuit-breaker 或 [roles] 映射 (谨慎)
+# 调整 [roles] 映射 (谨慎)
 # 通过 config reload (不是直接 admin API),保留 git 痕迹
 ```
 
@@ -989,7 +989,7 @@ tars admin <whatever-needed>
 | 级别 | 例子 | 审批 |
 |---|---|---|
 | Standard | Docker image patch / log level 调整 | 自助 |
-| Normal | 新 provider 上线 / 新 [roles] 或 [resilience] rule | Lead approve |
+| Normal | 新 provider 上线 / 新 [roles] rule | Lead approve |
 | Emergency | 修复 P0 的 hot fix | Director approve + post-fact review |
 | Significant | 数据库 schema 重大变更 / 架构调整 | CAB review |
 

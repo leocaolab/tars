@@ -197,9 +197,9 @@ impl LlmProvider for ClaudeSdkProvider {
         self: Arc<Self>,
         req: ChatRequest,
         model: &str,
-        _ctx: RequestContext,
+        ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        let resp = self.call(&req, model).await?;
+        let resp = self.call(&req, model, &ctx).await?;
         // Daemon returns a single JSON; project as canonical streaming
         // triple so callers' aggregation paths work unchanged.
         let usage = normalize_usage(&resp.usage);
@@ -226,7 +226,12 @@ impl ClaudeSdkProvider {
     /// Issue one chat request. Acquires (or spawns) the session,
     /// registers a pending oneshot, writes the request line, awaits
     /// the matching reply with the configured timeout.
-    async fn call(&self, req: &ChatRequest, model: &str) -> Result<DaemonChatReply, ProviderError> {
+    async fn call(
+        &self,
+        req: &ChatRequest,
+        model: &str,
+        ctx: &RequestContext,
+    ) -> Result<DaemonChatReply, ProviderError> {
         let prompt = serialize_messages(req);
         if prompt.is_empty() {
             return Err(ProviderError::InvalidRequest(
@@ -283,7 +288,11 @@ impl ClaudeSdkProvider {
         // forever and the per-call timeout never fired (observed: a claude_sdk
         // reviewer wedged >40 min on llm_client.rs / validators.rs, far past
         // the 900 s timeout). Guard the whole request→reply round-trip.
-        let outcome = tokio::time::timeout(self.timeout, async {
+        // The caller's per-call budget wins over the configured default: a
+        // daemon request is a subprocess round-trip, so nothing but this
+        // timeout bounds it.
+        let budget = ctx.call_budget(self.timeout);
+        let outcome = tokio::time::timeout(budget, async {
             {
                 let mut stdin = session.stdin.lock().await;
                 stdin.write_all(line.as_bytes()).await.map_err(|e| {
@@ -325,10 +334,13 @@ impl ClaudeSdkProvider {
             Err(_) => {
                 session.pending.lock().await.remove(&id);
                 self.clear_session(&session).await;
-                Err(ProviderError::Internal(format!(
-                    "claude_sdk: timed out in request/reply round-trip after {:?}",
-                    self.timeout
-                )))
+                Err(ProviderError::TimedOut {
+                    budget,
+                    detail: format!(
+                        "claude_sdk: timed out in request/reply round-trip (model={model}, prompt_chars={})",
+                        prompt.len()
+                    ),
+                })
             }
         }
     }

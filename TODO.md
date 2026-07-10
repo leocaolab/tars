@@ -6,6 +6,29 @@ Forward-looking list. Each entry: **what** to do, **why** it's deferred (not "sh
 
 ---
 
+## Layering — tars-melt leaks into consumers' dep graphs
+
+- **`ChainOpts.events` forces consumers to depend on `tars-melt`.** `EventStores`
+  is re-exported from `tars-pipeline`, but its fields are typed
+  `Arc<dyn tars_melt::event::PipelineEventLog>` / `Arc<dyn tars_melt::event::LlmRecordStore>`.
+  A consumer that wants to wire its own event stores (arc, concer) cannot name
+  those types — nor open `SqlitePipelineEventLog` / `SqliteLlmRecordStore`, nor
+  impl a null record store — without adding `tars-melt` to its own `Cargo.toml`.
+  So the pipeline layer's public API obliges its users to reach past it into a
+  crate it happens to be built on.
+  · **Why deferred:** arc's v1.5.0 migration needed to land; adding the dep is one
+  line and mechanically correct, while the fix is an API decision (does
+  `tars-pipeline` re-export the two traits + the two sqlite impls + `StoreError`,
+  or does an `EventStores::sqlite_at(dir)` constructor hide them entirely?).
+  · **Trigger:** the next consumer that has to add `tars-melt` for no reason of its
+  own, or any change to the `PipelineEventLog` / `LlmRecordStore` traits — at which
+  point the blast radius is every consumer, not just tars.
+  · **Evidence:** `arc/crates/Cargo.toml` and `arc/crates/arc_agents/Cargo.toml` each
+  grew a `tars-melt` line whose only justification is `assemble.rs`'s `NullRecordStore`
+  and `open_event_stores`.
+
+---
+
 ## 1.1 — provider-layer follow-ups (post-1.0)
 
 Deferred out of the 1.0 provider release ([tracking](docs/provider-layer-tracking.md)).

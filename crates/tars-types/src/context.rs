@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub use tokio_util::sync::CancellationToken;
 
@@ -198,5 +198,35 @@ impl RequestContext {
             Some(d) => Instant::now() >= d,
             None => false,
         }
+    }
+
+    /// Wall-clock budget left for this call, or `None` when the caller set no
+    /// [`deadline`](Self::deadline).
+    ///
+    /// This is the **parameter** half of a provider's time bound: the caller
+    /// says how long *this* unit of work may take. The provider's configured
+    /// timeout (`[providers.X] timeout_secs`) is only the default used when the
+    /// caller says nothing. A provider that owns a resource outliving the future
+    /// — a subprocess — MUST honor this, because dropping the future does not
+    /// kill its child. HTTP providers may honor it; dropping their future
+    /// already closes the connection.
+    ///
+    /// Returns `Some(Duration::ZERO)` once the deadline has passed, so a caller
+    /// that spawns on a blown budget fails immediately rather than running a
+    /// full call it has no time for.
+    pub fn remaining(&self) -> Option<Duration> {
+        self.deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
+    }
+
+    /// The wall-clock budget one provider call gets: the caller's
+    /// [`remaining`](Self::remaining) if it set a deadline, else `default` —
+    /// the provider's configured `timeout_secs`.
+    ///
+    /// The caller **wins** when it speaks: a longer deadline buys a longer run
+    /// (a reconcile that legitimately takes 20 minutes), a shorter one cuts the
+    /// call off early. Config is the default, not a ceiling.
+    pub fn call_budget(&self, default: Duration) -> Duration {
+        self.remaining().unwrap_or(default)
     }
 }
