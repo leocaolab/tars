@@ -400,6 +400,36 @@ built once on a branch and discarded, because the actual fix — arc's fixer emi
 start — makes the map disappear at the source. Do this only when something genuinely needs a
 dynamic-key map under a schema-enforcing provider; then fix both dialects together, no half-guard.
 
+### B-25. `with_persona` panics on tools+schema — should degrade, not panic (MED — blocks arc's fixer schema)
+
+`WorkerAgent::with_persona` (`tars-runtime/src/worker.rs:275`) **panics** when a tool-carrying worker
+is given any `output_schema` other than `None`. Its stated reason: many providers reject
+`response_format` together with `tools`, so the schema "can NEVER be delivered — would silently drop
+it and the caller would never know."
+
+That reasoning treats a schema as a *contract* the provider must honor. **A schema is a hint.** Under
+hint semantics the panic is wrong on two counts:
+
+1. **Too broad — it kills `claude_sdk`, which CAN deliver schema+tools.** `backends/claude_sdk.rs:137`
+   wires the request schema to the Agent SDK's `outputFormat`, "separate from agentic tools, so strict
+   schema works even with tools fully disabled." The blanket panic误伤 the one provider where the
+   contradiction doesn't exist.
+2. **Wrong severity — a hint the provider can't enforce is a *degradation*, not a programming error.**
+   The right shape: branch on `StructuredOutputMode`. `StrictSchema`-with-tools-conflict ⇒ drop the
+   schema, fall back to prompt-only, **warn once** (a warn that actually reaches the operator, not the
+   `tracing::warn!` nobody reads that this very retro-family keeps catching). `claude_sdk` ⇒ deliver
+   it. `None`/`JsonObjectMode` ⇒ already dropped, no-op.
+
+The panic's real fear — a silently-dropped schema the caller *relied on* — only bites when the
+**decode is tolerant**. A caller whose decode is strict (arc's fixer: `issue_id` required, duplicate
+= error, unknown-id dropped, and diff-as-truth over the git diff) makes the schema redundant, so the
+drop is safe. So the fix is: keep the honest-drop guarantee, but make "honest" = warn-once, not panic.
+
+**Why MED, not LOW**: this is the concrete blocker for arc's fixer step 2 (send an array schema so a
+StrictSchema provider enforces the shape). Today arc can't attach one without hitting this panic. Note
+arc's own todo `WorkerAgent::with_persona panics on tools + a non-None output schema` tracks the arc
+side of the same wall.
+
 ### B-22. Streaming JSON array framer (LOW / parked)
 - **What**: a generic, resumable, byte-budgeted framer over `ChatEvent::Delta` that emits
   each array element as its braces balance and returns a typed `TruncatedAtEnd` /
