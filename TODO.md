@@ -355,6 +355,26 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **Dependencies**: none.
 - **Origin**: downstream consumer (2026-05-08) raised the "single-validator-chain assumption" flag → tars-side audit + writing a failing test found the actual bug is one layer worse than the audit suspected (not just "chain inconsistency corruption", but "any Filter + Cache coexistence + Cache hit skips validation").
 
+### B-22. Streaming JSON array framer (LOW / parked)
+- **What**: a generic, resumable, byte-budgeted framer over `ChatEvent::Delta` that emits
+  each array element as its braces balance and returns a typed `TruncatedAtEnd` /
+  `AbortedByBudget{offset}` status carrying the real raw prefix (never a sentinel). Generic
+  lift of arc's `critic/decode.rs` salvage; one DI seam (`array_path`, shaped like the
+  existing `JsonAgentResponse::wrapper_tags()`); would live in `tars-utils`. Needs zero
+  schemars, so it's independent of every open `call-typed.md` decision.
+- **Why parked**: it salvages a failure that should not be salvaged. The 65k runaway
+  (`arc/docs/retro/2026-07-10-a-failed-pass-reports-clean.md`) was three arc-side silences,
+  and the framer fixes none of them — recovering N−1 findings from a truncated stream just
+  makes a runaway look like an ordinary outcome. Its narrow real value (per-element
+  streaming; a client-side read abort whose money-saving is UNVERIFIED against provider
+  billing) does not clear the bar.
+- **Do these two first — both higher value, both cheaper, both independent**: (16a) propagate
+  the decode `Err` at `arc/.../critic/agent.rs:1221` instead of `unwrap_or_else`-ing it into
+  an empty findings map (a failed pass must not read as clean); (16b) set
+  `ChatRequest.max_output_tokens` (`tars-types/src/chat.rs:46`, already present, currently
+  `None`) — the real server-side money-saver.
+- **Design**: [docs/design/streaming-json-framer.md](docs/design/streaming-json-framer.md).
+
 ### B-19. `tars-tui` — interactive terminal UI (path C: build-our-own, not fork-codex)
 - **Where**: New crate `crates/tars-tui/` (doesn't exist yet). Consumer of `tars-runtime::Session` + `tars-pipeline::Pipeline`. ratatui-based.
 - **What**: Interactive terminal frontend for `tars chat`-style multi-turn conversations. v1 scope: chat history rendering, streaming markdown tokens, tool-call display (folded → expanded), slash commands (`/clear` / `/fork` / `/save` / `/quit`), status bar (model / usage / cache hit / latency), multi-line input with editing shortcuts. Sized at ~3-5k lines for v1.
