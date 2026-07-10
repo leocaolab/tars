@@ -96,11 +96,45 @@ impl TarsAgent {
     }
 
     /// Give the agent a domain [`WorkerPersona`] — its own system prompt and
-    /// (optionally) its own structured-output schema, instead of the built-in
-    /// worker protocol. This is what makes a TarsAgent a *reviewer* / *verifier*
-    /// / *critic* (own persona + verdict schema) rather than a generic
-    /// plan-step worker, while still being scheduled as an `Agent` + `Worker`.
+    /// its own structured-output schema ([`OutputSchema`](crate::OutputSchema)),
+    /// instead of the built-in worker protocol. This is what makes a TarsAgent a
+    /// *reviewer* / *verifier* / *critic* (own persona + verdict schema) rather
+    /// than a generic plan-step worker, while still being scheduled as an
+    /// `Agent` + `Worker`.
+    ///
+    /// This is also the one construction seam where a persona's requested schema
+    /// meets a BOUND provider (`self.llm`), so it is where we surface the
+    /// "sent-but-not-enforced" signal: if the persona asks for a
+    /// provider-enforced schema (`WorkerResult` / `Custom(..)`) but the bound
+    /// provider's `supports_structured_output` is `None` (e.g. `claude_cli`,
+    /// `gemini_cli`, `codex_cli`), the schema is transmitted and dropped by the
+    /// adapter, and the call relies on the PROMPT alone. That is deliberate (one
+    /// request shape for every provider), NOT an error — but a Rust caller
+    /// otherwise gets zero signal that enforcement won't happen, so we
+    /// `tracing::warn!` once here. This is a DIFFERENT concern from the
+    /// tools-vs-schema panic in [`WorkerAgent::with_persona`]: there the
+    /// provider COULD enforce but tools block us from sending; here we send but
+    /// the provider won't enforce.
+    ///
+    /// Note the placement: `WorkerAgent` itself never holds an `LlmService` (the
+    /// provider is threaded per call via `AgentContext.llm`), so the warning
+    /// cannot live on `WorkerAgent::with_persona` — only a provider-bound agent
+    /// (`TarsAgent`) has both facts at construction.
     pub fn with_persona(mut self, persona: crate::worker::WorkerPersona) -> Self {
+        if let Some(schema_name) = structured_output_not_enforced_warning(
+            &persona.output_schema,
+            self.llm
+                .provider()
+                .capabilities()
+                .supports_structured_output,
+        ) {
+            tracing::warn!(
+                provider = %self.llm.provider().id(),
+                schema = %schema_name,
+                "provider does not enforce structured output; the {schema_name} schema will \
+                 not constrain the model, and this agent depends on the prompt alone",
+            );
+        }
         self.worker = self.worker.clone().with_persona(persona);
         self
     }
@@ -121,6 +155,29 @@ impl TarsAgent {
         }
         s
     }
+}
+
+/// Decide whether a "structured output will NOT be enforced" warning is owed at
+/// [`TarsAgent::with_persona`] construction. Returns `Some(schema_name)` when
+/// the persona asks for a provider-enforced schema (`WorkerResult` / `Custom`)
+/// AND the bound provider's mode is [`StructuredOutputMode::None`] (it will not
+/// enforce it); `None` otherwise. `OutputSchema::None` asks for nothing, so it
+/// never warns — losing nothing is not worth a log line.
+///
+/// Pure and total so it can be asserted directly: this workspace ships no
+/// tracing-capture harness (no `tracing-test` / `tracing-subscriber` dev-dep),
+/// and the warn's DECISION — not the emitted line — is the load-bearing part.
+fn structured_output_not_enforced_warning(
+    output_schema: &crate::worker::OutputSchema,
+    mode: tars_types::StructuredOutputMode,
+) -> Option<&str> {
+    use crate::worker::OutputSchema;
+    let name = match output_schema {
+        OutputSchema::None => return None,
+        OutputSchema::WorkerResult => "WorkerResult",
+        OutputSchema::Custom(name, _) => name.as_str(),
+    };
+    matches!(mode, tars_types::StructuredOutputMode::None).then_some(name)
 }
 
 /// Lift a [`WorkerError`] (runtime layer) to the task-level
@@ -359,6 +416,51 @@ mod tests {
             }
             other => panic!("expected typed TaskError::Provider, got {other:?}"),
         }
+    }
+
+    /// The construction-time "sent-but-not-enforced" decision: a persona that
+    /// asks for a real schema (`Custom` / `WorkerResult`) against a `None`-mode
+    /// provider owes a warning (naming the schema); `OutputSchema::None` never
+    /// does. Asserting the DECISION, not the log line — the workspace has no
+    /// tracing-capture harness and the predicate is what gates the warn.
+    #[test]
+    fn structured_output_not_enforced_warning_fires_only_when_owed() {
+        use crate::worker::OutputSchema;
+        use tars_types::StructuredOutputMode;
+
+        // Custom schema + provider that will NOT enforce → warn, naming the schema.
+        assert_eq!(
+            structured_output_not_enforced_warning(
+                &OutputSchema::Custom("CriticResponse".into(), serde_json::json!({})),
+                StructuredOutputMode::None,
+            ),
+            Some("CriticResponse"),
+        );
+        // WorkerResult is also provider-enforced → same warning when None-mode.
+        assert_eq!(
+            structured_output_not_enforced_warning(
+                &OutputSchema::WorkerResult,
+                StructuredOutputMode::None,
+            ),
+            Some("WorkerResult"),
+        );
+        // OutputSchema::None asks for nothing → never warns, even on None-mode.
+        assert_eq!(
+            structured_output_not_enforced_warning(
+                &OutputSchema::None,
+                StructuredOutputMode::None,
+            ),
+            None,
+        );
+        // A provider that DOES enforce (StrictSchema) → no warning; the schema
+        // will be honored.
+        assert_eq!(
+            structured_output_not_enforced_warning(
+                &OutputSchema::Custom("CriticResponse".into(), serde_json::json!({})),
+                StructuredOutputMode::StrictSchema,
+            ),
+            None,
+        );
     }
 
     /// The helper's other leg: a WorkerError with no typed provider error

@@ -140,7 +140,7 @@ impl ChatRequest {
         if self.structured_output.is_some()
             && matches!(caps.supports_structured_output, StructuredOutputMode::None)
         {
-            reasons.push(CompatibilityReason::StructuredOutputUnsupported);
+            reasons.push(CompatibilityReason::StructuredOutputNotEnforced);
         }
 
         // Thinking / reasoning — Auto + Budget both demand provider
@@ -261,9 +261,15 @@ pub enum CompatibilityCheck {
 pub enum CompatibilityReason {
     /// Request has tool specs but provider's `supports_tool_use=false`.
     ToolUseUnsupported { tool_count: usize },
-    /// Request has `structured_output` schema but provider's
-    /// `supports_structured_output=None`.
-    StructuredOutputUnsupported,
+    /// Request carries a `structured_output` schema, but the provider's
+    /// `supports_structured_output` is `None` — so the provider will NOT
+    /// enforce it. This is advisory, not a rejection: the request is still
+    /// built and sent unchanged. The schema is transmitted (and typically
+    /// dropped by the provider's adapter, e.g. `claude_cli` / `gemini_cli` /
+    /// `codex_cli`), and the caller is relying on the PROMPT to elicit the
+    /// shape — the one-request-shape-for-every-provider contract. The name is
+    /// "NotEnforced", not "Unsupported": nothing is broken by sending it.
+    StructuredOutputNotEnforced,
     /// Request has `thinking != Off` but provider's
     /// `supports_thinking=false`.
     ThinkingUnsupported { mode: ThinkingMode },
@@ -293,9 +299,9 @@ impl std::fmt::Display for CompatibilityReason {
                 f,
                 "request has {tool_count} tool(s) but provider does not support tool_use"
             ),
-            Self::StructuredOutputUnsupported => write!(
+            Self::StructuredOutputNotEnforced => write!(
                 f,
-                "request has structured_output schema but provider does not support structured output"
+                "request carries a structured_output schema but the provider will not enforce it (the schema is sent and likely dropped by the adapter; the caller relies on the prompt)"
             ),
             Self::ThinkingUnsupported { mode } => write!(
                 f,
@@ -328,7 +334,7 @@ impl CompatibilityReason {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::ToolUseUnsupported { .. } => "tool_use",
-            Self::StructuredOutputUnsupported => "structured_output",
+            Self::StructuredOutputNotEnforced => "structured_output",
             Self::ThinkingUnsupported { .. } => "thinking",
             Self::VisionUnsupported => "vision",
             Self::ContextWindowExceeded { .. } => "context_window",
@@ -404,7 +410,7 @@ impl Capabilities {
         if req.requires_structured_output
             && matches!(self.supports_structured_output, StructuredOutputMode::None)
         {
-            reasons.push(CompatibilityReason::StructuredOutputUnsupported);
+            reasons.push(CompatibilityReason::StructuredOutputNotEnforced);
         }
         if req.estimated_max_prompt_tokens > 0
             && req.estimated_max_prompt_tokens > self.max_context_tokens
@@ -702,19 +708,29 @@ mod tests {
     }
 
     #[test]
-    fn compat_structured_output_blocked_by_none_mode() {
+    fn compat_structured_output_not_enforced_is_advisory_not_a_rejection() {
         let mut req = ChatRequest::user("hi");
         req.structured_output = Some(JsonSchema::loose(serde_json::json!({"type":"object"})));
+        // A schema against a None-mode provider yields the NotEnforced reason —
+        // an advisory. It must NOT be a hard error: the schema is still sent (the
+        // provider/adapter decides), and the caller relies on the prompt. This is
+        // the deliberate behaviour the critic depends on over `claude_cli`.
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
                 assert!(
                     reasons
                         .iter()
-                        .any(|r| matches!(r, CompatibilityReason::StructuredOutputUnsupported))
+                        .any(|r| matches!(r, CompatibilityReason::StructuredOutputNotEnforced))
                 );
             }
-            _ => panic!("expected Incompatible"),
+            _ => panic!("expected the NotEnforced advisory reason"),
         }
+        // compatibility_check takes &self and mutates nothing: the request still
+        // carries its schema — nothing was dropped or rejected.
+        assert!(
+            req.structured_output.is_some(),
+            "the schema must survive the advisory check unchanged",
+        );
     }
 
     #[test]

@@ -73,20 +73,42 @@ use crate::prompt::PromptBuilder;
 /// model can't run forever.
 pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 50;
 
+/// What structured-output (`response_format` / `json_schema`) contract a
+/// [`WorkerPersona`] imposes on the provider. This is a THREE-state choice made
+/// explicit on purpose: an `Option` here once carried two different meanings —
+/// "send no schema" and "I haven't decided" — and the code silently resolved
+/// the ambiguity by sending a THIRD thing (tars's generic `WorkerResult`) that
+/// nobody asked for. That default-for-absent is the
+/// `default-substituted-for-absent-or-failed` trap; naming each state kills it.
+#[derive(Clone, Debug)]
+pub enum OutputSchema {
+    /// Send no structured-output schema at all. The model's output is parsed
+    /// tolerantly downstream (`parse_worker_response` / a persona's own
+    /// decoder). Choose this for a persona whose reply is prose or a bespoke
+    /// shape that is NOT `{summary, confidence}`.
+    None,
+    /// Send tars's generic `WorkerResult` schema (`{summary, confidence}`,
+    /// both required, `additionalProperties: false`). You get this ONLY if you
+    /// ask for it deliberately — it is never substituted for an unstated
+    /// choice. (A worker with NO persona is tars's own generic worker and gets
+    /// `WorkerResult` by definition; that is a separate, intentional path.)
+    WorkerResult,
+    /// Send your own `(schema_name, json_schema)`.
+    Custom(String, serde_json::Value),
+}
+
 /// Domain overrides for an agent that isn't the generic plan-step worker —
 /// a reviewer/verifier/critic with its OWN system prompt (persona) and its
 /// OWN structured-output contract, instead of the built-in
 /// `WORKER_SYSTEM_PROMPT` + `WorkerResult` schema. The tool loop, trajectory
 /// logging, and provider plumbing are unchanged — only the request's system
-/// text and (optionally) its `response_format` schema differ.
+/// text and its `response_format` schema (see [`OutputSchema`]) differ.
 #[derive(Clone, Debug)]
 pub struct WorkerPersona {
     /// Replaces `WORKER_SYSTEM_PROMPT[_WITH_TOOLS]` verbatim.
     pub system_prompt: String,
-    /// `(schema_name, json_schema)` for provider-side structured output.
-    /// `None` leaves the built-in schema decision (WorkerResult when the
-    /// worker has no tools; nothing when it does).
-    pub output_schema: Option<(String, serde_json::Value)>,
+    /// The structured-output contract this persona imposes. See [`OutputSchema`].
+    pub output_schema: OutputSchema,
 }
 
 /// LLM-driven Worker — the agent that actually does the work for one
@@ -216,11 +238,39 @@ impl WorkerAgent {
     }
 
     /// Give this worker a domain [`WorkerPersona`] — its own system prompt and
-    /// (optionally) its own structured-output schema, replacing the built-in
-    /// `WORKER_SYSTEM_PROMPT` + `WorkerResult` contract. Returns a fresh Arc.
-    /// Use for a reviewer/verifier/critic whose output isn't a generic
-    /// `WorkerResult`. The tool loop and trajectory logging are unchanged.
+    /// its own structured-output schema ([`OutputSchema`]), replacing the
+    /// built-in `WORKER_SYSTEM_PROMPT` + `WorkerResult` contract. Returns a
+    /// fresh Arc. Use for a reviewer/verifier/critic whose output isn't a
+    /// generic `WorkerResult`. The tool loop and trajectory logging are
+    /// unchanged.
+    ///
+    /// # Panics
+    ///
+    /// A worker that actually carries tools (a NON-empty registry) with a
+    /// persona whose `output_schema` is anything other than [`OutputSchema::None`]
+    /// is a programming error, and this panics. The reason is structural, not a
+    /// preference: many providers reject `response_format` together with `tools`
+    /// (see the comment in [`Self::build_worker_request`]), so a schema supplied
+    /// alongside real tools can NEVER be delivered — `build_worker_request`
+    /// would silently drop it and the caller would never know. Refusing here, at
+    /// the call that introduces the contradiction, is the earliest honest
+    /// failure; the alternative (a `tracing::warn!` at request-build time) hides
+    /// the mistake behind a log line far from its cause. An empty registry
+    /// (e.g. a critic/verifier `TarsAgent` that has `Some(ToolRegistry::new())`
+    /// but no tools) is NOT tool-using and is unaffected.
     pub fn with_persona(self: Arc<Self>, persona: WorkerPersona) -> Arc<Self> {
+        let has_real_tools = self.tools.as_ref().is_some_and(|r| !r.is_empty());
+        if has_real_tools && !matches!(persona.output_schema, OutputSchema::None) {
+            panic!(
+                "WorkerAgent::with_persona: a tool-using worker (domain {:?}) was \
+                 given a persona output_schema other than OutputSchema::None. \
+                 Providers reject response_format together with tools, so the \
+                 schema could only be silently dropped. Use OutputSchema::None \
+                 for tool-using workers, or drop the tools if you need a \
+                 provider-enforced schema.",
+                self.domain,
+            );
+        }
         Arc::new(Self {
             id: self.id.clone(),
             model: self.model.clone(),
@@ -352,13 +402,27 @@ impl WorkerAgent {
         // matches the drive-loop's existing "don't re-impose structured_output
         // mid tool-loop" contract.
         // Provider-side structured output only for tool-free workers (the
-        // response_format-with-tools rejection above). A persona may supply its
-        // OWN schema (e.g. a verdict {verdict, reason, confidence}); otherwise
-        // the built-in WorkerResult.
+        // response_format-with-tools rejection above). Every branch is an
+        // EXPLICIT decision — nothing is defaulted for an unstated choice:
+        //   - no persona           → tars's generic worker → WorkerResult;
+        //   - persona None         → send nothing (prose / bespoke shape);
+        //   - persona WorkerResult → the generic schema, because it was asked for;
+        //   - persona Custom(..)   → the persona's own schema.
+        // A persona carrying a non-None schema on a tool-USING worker is
+        // rejected at `with_persona` (see there), so `has_tools` never silently
+        // drops one here.
         if !has_tools {
-            match self.persona.as_ref().and_then(|p| p.output_schema.as_ref()) {
-                Some((name, schema)) => pb = pb.structured_output(name.clone(), schema.clone()),
+            match &self.persona {
                 None => pb = pb.structured_output("WorkerResult", worker_json_schema()),
+                Some(p) => match &p.output_schema {
+                    OutputSchema::None => {}
+                    OutputSchema::WorkerResult => {
+                        pb = pb.structured_output("WorkerResult", worker_json_schema())
+                    }
+                    OutputSchema::Custom(name, schema) => {
+                        pb = pb.structured_output(name.clone(), schema.clone())
+                    }
+                },
             }
         }
         let mut req = pb.build();
@@ -954,7 +1018,7 @@ mod tests {
         let w = WorkerAgent::new(AgentId::new("verify"), "gpt-4o", "verify").with_persona(
             WorkerPersona {
                 system_prompt: "You are a strict code-review VERIFIER.".into(),
-                output_schema: Some(("Verdict".into(), verdict_schema)),
+                output_schema: OutputSchema::Custom("Verdict".into(), verdict_schema),
             },
         );
         let plan = sample_plan();
@@ -976,6 +1040,132 @@ mod tests {
             .collect();
         assert!(required.contains(&"verdict"));
         assert!(!required.contains(&"summary"));
+    }
+
+    /// The assertion that would have caught the original bug: a persona that
+    /// says `OutputSchema::None` must send NO structured-output schema. Before
+    /// the enum, `output_schema: None` was silently replaced with tars's generic
+    /// `WorkerResult` — starving a findings/verdict parser on any strict-schema
+    /// provider.
+    #[test]
+    fn output_schema_none_sends_no_structured_output() {
+        let w = WorkerAgent::new(AgentId::new("critic"), "gpt-4o", "critic").with_persona(
+            WorkerPersona {
+                system_prompt: "You review code.".into(),
+                output_schema: OutputSchema::None,
+            },
+        );
+        let plan = sample_plan();
+        let empty = std::collections::HashMap::new();
+        let req = w.build_worker_request(&plan, &plan.steps[0], &[], &empty);
+        assert!(
+            req.structured_output.is_none(),
+            "OutputSchema::None must impose no schema; got {:?}",
+            req.structured_output
+        );
+    }
+
+    /// `OutputSchema::WorkerResult` sends tars's generic schema — but ONLY
+    /// because it was asked for, never as a fallback for an unstated choice.
+    #[test]
+    fn output_schema_worker_result_sends_generic_schema_when_asked() {
+        let w = WorkerAgent::new(AgentId::new("w"), "gpt-4o", "d").with_persona(WorkerPersona {
+            system_prompt: "generic".into(),
+            output_schema: OutputSchema::WorkerResult,
+        });
+        let plan = sample_plan();
+        let empty = std::collections::HashMap::new();
+        let req = w.build_worker_request(&plan, &plan.steps[0], &[], &empty);
+        let schema = req
+            .structured_output
+            .as_ref()
+            .expect("WorkerResult requested → schema present");
+        assert_eq!(schema.name.as_deref(), Some("WorkerResult"));
+    }
+
+    /// No persona at all ⇒ tars's generic worker ⇒ `WorkerResult`. This path is
+    /// unchanged by the enum: the outer `Option<WorkerPersona>` legitimately
+    /// means "generic worker", for which `WorkerResult` is the right, intentional
+    /// schema.
+    #[test]
+    fn no_persona_still_gets_worker_result() {
+        let w = WorkerAgent::new(AgentId::new("w"), "gpt-4o", "d");
+        let plan = sample_plan();
+        let empty = std::collections::HashMap::new();
+        let req = w.build_worker_request(&plan, &plan.steps[0], &[], &empty);
+        let schema = req
+            .structured_output
+            .as_ref()
+            .expect("no persona → generic WorkerResult");
+        assert_eq!(schema.name.as_deref(), Some("WorkerResult"));
+    }
+
+    /// A worker that actually carries tools plus a non-`None` schema is a
+    /// programming error (the provider would reject `response_format` + `tools`,
+    /// so the schema could only be silently dropped). It must fail at
+    /// construction, not vanish at request-build time.
+    #[test]
+    #[should_panic(expected = "output_schema other than OutputSchema::None")]
+    fn tools_plus_custom_schema_panics_at_construction() {
+        use tars_tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+        use tars_types::JsonSchema;
+
+        // A trivial tool so the registry is NON-empty (an empty registry is not
+        // "tool-using" and is allowed a schema — that's the critic/verifier case).
+        struct Noop;
+        #[async_trait]
+        impl Tool for Noop {
+            fn name(&self) -> &str {
+                "noop"
+            }
+            fn description(&self) -> &str {
+                "does nothing"
+            }
+            fn input_schema(&self) -> &JsonSchema {
+                static S: std::sync::OnceLock<JsonSchema> = std::sync::OnceLock::new();
+                S.get_or_init(|| JsonSchema::strict("NoopArgs", json!({"type": "object"})))
+            }
+            async fn execute(
+                &self,
+                _args: serde_json::Value,
+                _ctx: ToolContext,
+            ) -> Result<ToolResult, ToolError> {
+                Ok(ToolResult::success("ok"))
+            }
+        }
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(Noop)).unwrap();
+        let w = WorkerAgent::with_tools(AgentId::new("w"), "gpt-4o", "d", Arc::new(registry));
+        // Should panic: real tools + a Custom schema can never be delivered.
+        let _ = w.with_persona(WorkerPersona {
+            system_prompt: "x".into(),
+            output_schema: OutputSchema::Custom("Verdict".into(), json!({"type": "object"})),
+        });
+    }
+
+    /// An EMPTY registry is not tool-using — a critic/verifier `TarsAgent` holds
+    /// `Some(ToolRegistry::new())` yet must still be allowed its own schema.
+    #[test]
+    fn empty_registry_allows_custom_schema() {
+        use tars_tools::ToolRegistry;
+        let w = WorkerAgent::with_tools(
+            AgentId::new("verify"),
+            "gpt-4o",
+            "verify",
+            Arc::new(ToolRegistry::new()),
+        )
+        .with_persona(WorkerPersona {
+            system_prompt: "verify".into(),
+            output_schema: OutputSchema::Custom("Verdict".into(), json!({"type": "object"})),
+        });
+        let plan = sample_plan();
+        let empty = std::collections::HashMap::new();
+        let req = w.build_worker_request(&plan, &plan.steps[0], &[], &empty);
+        let schema = req
+            .structured_output
+            .as_ref()
+            .expect("empty registry is not tool-using → schema honored");
+        assert_eq!(schema.name.as_deref(), Some("Verdict"));
     }
 
     #[test]
