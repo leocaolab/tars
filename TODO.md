@@ -355,6 +355,51 @@ Most warnings are `happy-path-only-enumeration` or `assertion-strength-mismatch`
 - **Dependencies**: none.
 - **Origin**: downstream consumer (2026-05-08) raised the "single-validator-chain assumption" flag → tars-side audit + writing a failing test found the actual bug is one layer worse than the audit suspected (not just "chain inconsistency corruption", but "any Filter + Cache coexistence + Cache hit skips validation").
 
+### B-23. Two facts recorded and never read (LOW — no consumer today)
+
+- **`stop_reason` reaches nobody.** `LlmCallFinished` persists it (`tars-types/src/pipeline_events.rs`),
+  but `WorkerAgent::drive_with_tools` branches only on `tool_calls.is_empty()`, and arc's critic never
+  mentions the word. So "the model was truncated" is a fact no layer knows at runtime — the 65k
+  runaway was inferred from a token count, a proxy, while the fact sat in the database.
+- **`tars.llm.tokens` is success-only.** `tars-melt/src/metrics.rs:12` — *"input+output tokens
+  (finished only)"*. A counter that skips failures reports a runaway as free. Same shape as the arc
+  aggregate that was deleted for it (`arc/docs/retro/2026-07-10-a-failed-pass-reports-clean.md` §3).
+  Note the event log itself is correct — `usage` is a top-level field on `LlmCallFinished`, carried on
+  success *and* failure. Only the OTLP counter drops the failed calls.
+
+**Why LOW**: neither has a consumer today. Recorded so the next person who needs a truncation signal,
+or an honest cost counter, does not re-derive them. Do not spend time here until something reads them.
+
+### B-24. `adapt_schema`'s map→array rewrite is an un-reversible leak (LOW — fires for nobody today)
+
+`schema_adapt.rs`, the `SchemaDialect::Gemini` arm ("B.1 map→array conversion"): a dynamic-key map
+schema `{type:object, additionalProperties:<schema>}` is rewritten to `{type:array, items:<T + issue_id>}`,
+injecting an `issue_id: string` as the lost map key's carrier. Three problems:
+
+1. **`map.clear()` wipes every sibling key** of the converted node (a `description`/`title`/`required`
+   is silently destroyed).
+2. **The injected `issue_id` is documented only in a `//` comment.** tars adds a property the caller
+   never declared, and nothing in tars reverses it — the array→map fold lives in arc, against a field
+   name that exists nowhere in tars's public API. Rename the carrier and arc breaks on Gemini only,
+   at runtime.
+3. **tars cannot reverse it.** `parse_event` (`backends/gemini/adapter.rs`) sees one SSE frame and
+   emits `ChatEvent::Delta { text }` — no request, no schema. A transform whose inverse must be
+   hand-written downstream is a leak, not an abstraction. Contrast `$ref` inlining (v1.8.0): tars
+   *could* complete that alone, so it does. A transform tars cannot complete, it should not begin.
+
+**And it's only half-guarded.** The `OpenAi` arm (`schema_adapt.rs:307`) documents that strict mode
+needs `additionalProperties:false` on every object, but only *adds* it when missing — a map's
+`additionalProperties` has a *value*, so it passes through untouched and OpenAI rejects it in a late,
+opaque 400. Same unrepresentable shape, two dialects, zero consistent handling.
+
+**Why LOW / not done now**: verified (2026-07-10) that **no live call site sends a dynamic-key map** —
+arc's critic/judge send arrays or fixed structs, arc's fixer sends no schema, concer is all
+`OutputSchema::None`. The rewrite fires for nobody. The right fix (drop the rewrite; return a typed
+`UnrepresentableMap { pointer }` for **both** Gemini *and* OpenAi; keep the boolean-form strip) was
+built once on a branch and discarded, because the actual fix — arc's fixer emitting an array from the
+start — makes the map disappear at the source. Do this only when something genuinely needs a
+dynamic-key map under a schema-enforcing provider; then fix both dialects together, no half-guard.
+
 ### B-22. Streaming JSON array framer (LOW / parked)
 - **What**: a generic, resumable, byte-budgeted framer over `ChatEvent::Delta` that emits
   each array element as its braces balance and returns a typed `TruncatedAtEnd` /

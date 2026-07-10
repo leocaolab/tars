@@ -106,10 +106,14 @@ equal.** `opencode` and `antigravity` route through `cli_delegate_capabilities()
 weaker and quieter invariant than an equality: an equality you might notice when you break
 it, because both sides move.
 
-`docs/design/call-typed.md` — a `call_typed<T>` spike. Two premises turned out false: the
-Gemini map→array rewrite **is** reversible (`issue_id` is the key carrier), and a
-hand-written `ResponseSchema` impl **does** compile alongside a blanket impl, provided the
-type does not also derive `JsonSchema`. Seven open decisions, none taken.
+`docs/design/call-typed.md` — a `call_typed<T>` spike, **and its decision: not building it.**
+It would make `schemars` a direct, public, semver-binding dependency of tars, to buy one
+consumer a guarantee it can get by deriving its schema from the type it decodes into. The
+`Value` at `OutputSchema::Custom` is the right boundary — schemars belongs to the consumer.
+The doc is kept for the two facts the spike established, both counter-intuitive and both
+load-bearing elsewhere: the Gemini map→array rewrite **is** reversible (`issue_id` is the
+injected key carrier, `schema_adapt.rs:230`), and a hand-written schema impl **does** compile
+alongside a blanket impl, provided the type does not also derive `JsonSchema`.
 
 `docs/design/streaming-json-framer.md` + `TODO.md` B-22 — parked, LOW priority. A framer
 salvages a failure that should not be salvaged. Fix the swallowed `Err`, and set

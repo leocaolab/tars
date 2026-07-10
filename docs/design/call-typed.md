@@ -1,10 +1,39 @@
 # `call_typed<T>` — design evidence and open decisions
 
-Status: **design + prototype**. This doc records what a running spike proved
-about three questions that fix the shape of a proposed
-`LlmService::call_typed<T>(req, ctx) -> Result<T, ProviderError>`, then lays the
-remaining choices in front of the owner with their costs. It does **not** decide
-the tradeoffs.
+> **Status: NOT BUILDING. Decided 2026-07-10.**
+>
+> `call_typed<T>` would make `schemars` a **direct, public, semver-binding**
+> dependency of tars, to buy one consumer a compile-time guarantee it can already
+> get by deriving its schema from the type it decodes into. tars's public schema
+> boundary is `OutputSchema::Custom(String, serde_json::Value)` — a `Value`. That
+> layering is right: schemars belongs to the consumer, `Value` belongs to tars.
+> `tars`'s own `Cargo.lock` already carries schemars `0.8.22`, `0.9.0` and `1.2.1`
+> simultaneously (all transitive); a consumer on the wrong major would get
+> "trait `ResponseSchema` is not implemented for `CriticResponse`", which really
+> means "your schemars version differs from tars's".
+>
+> **The seven open decisions below are moot. Nothing tracks them.** This document
+> is kept for the two facts the spike established, which are load-bearing
+> elsewhere and were both counter-intuitive:
+>
+> 1. **The Gemini `map → array` rewrite is reversible.** `adapt_schema` injects
+>    `issue_id` into each array item as the key's carrier
+>    (`schema_adapt.rs:230`). A dynamic-key map has no key *schema* to destroy —
+>    `additionalProperties` constrains values. So "un-adapt is impossible" is
+>    false; tars simply does not do it, and the reversal lives in arc, against a
+>    contract written in one `//` comment.
+> 2. **A hand-written impl coexists with a blanket impl** as long as the type does
+>    not also derive `JsonSchema` (E0119 only when it does both). And the method
+>    must not be named `json_schema` — it collides with
+>    `schemars::JsonSchema::json_schema` (E0034).
+>
+> Read the rest as evidence, not as a plan.
+
+Status: **design + prototype** *(historical — see the banner above)*. This doc
+records what a running spike proved about three questions that fix the shape of a
+proposed `LlmService::call_typed<T>(req, ctx) -> Result<T, ProviderError>`, then
+lays the remaining choices in front of the owner with their costs. It does **not**
+decide the tradeoffs.
 
 The spike is a standalone crate (`scratchpad/typed_spike`, plus four
 `scratchpad/q2_*` crates for the coherence tests). It depends on the real
