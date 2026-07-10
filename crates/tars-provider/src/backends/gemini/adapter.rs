@@ -226,27 +226,36 @@ impl GeminiAdapter {
         }
     }
 
-    fn translate_tools(tools: &[tars_types::ToolSpec]) -> Value {
+    fn translate_tools(tools: &[tars_types::ToolSpec]) -> Result<Value, ProviderError> {
         let declarations: Vec<Value> = tools
             .iter()
             .map(|t| {
-                json!({
+                // A tool's input_schema is authored in standard JSON-Schema
+                // (it carries `additionalProperties`, `$schema`, draft-07
+                // keywords). Gemini's `function_declarations[].parameters`
+                // rejects those outright ("Unknown name additionalProperties")
+                // — the SAME dialect mismatch `responseSchema` already
+                // adapts. Run tool params through the same Gemini transform.
+                // A `$ref` the schema can't resolve is a permanent bad-request
+                // (the tool's schema is malformed), surfaced verbatim.
+                let parameters = crate::schema_adapt::adapt_schema(
+                    &t.input_schema.schema,
+                    crate::schema_adapt::SchemaDialect::Gemini,
+                )
+                .map_err(|e| {
+                    ProviderError::InvalidRequest(format!(
+                        "tool '{}' parameter schema: {e}",
+                        t.name
+                    ))
+                })?;
+                Ok(json!({
                     "name": t.name,
                     "description": t.description,
-                    // A tool's input_schema is authored in standard JSON-Schema
-                    // (it carries `additionalProperties`, `$schema`, draft-07
-                    // keywords). Gemini's `function_declarations[].parameters`
-                    // rejects those outright ("Unknown name additionalProperties")
-                    // — the SAME dialect mismatch `responseSchema` already
-                    // adapts. Run tool params through the same Gemini transform.
-                    "parameters": crate::schema_adapt::adapt_schema(
-                        &t.input_schema.schema,
-                        crate::schema_adapt::SchemaDialect::Gemini,
-                    ),
-                })
+                    "parameters": parameters,
+                }))
             })
-            .collect();
-        json!([{"functionDeclarations": declarations}])
+            .collect::<Result<_, ProviderError>>()?;
+        Ok(json!([{"functionDeclarations": declarations}]))
     }
 }
 
@@ -308,7 +317,10 @@ impl HttpAdapter for GeminiAdapter {
             config["responseSchema"] = crate::schema_adapt::adapt_schema(
                 &schema.schema,
                 crate::schema_adapt::SchemaDialect::Gemini,
-            );
+            )
+            .map_err(|e| {
+                ProviderError::InvalidRequest(format!("responseSchema: {e}"))
+            })?;
         }
 
         // Thinking config. Off → 0, Auto → -1 (dynamic), Budget(b) → b.
@@ -386,7 +398,7 @@ impl HttpAdapter for GeminiAdapter {
         }
 
         if !req.tools.is_empty() {
-            body["tools"] = Self::translate_tools(&req.tools);
+            body["tools"] = Self::translate_tools(&req.tools)?;
             // tool_choice → toolConfig.functionCallingConfig.mode
             let mode = match &req.tool_choice {
                 tars_types::ToolChoice::Auto => json!({"mode": "AUTO"}),
@@ -933,7 +945,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let out = GeminiAdapter::translate_tools(std::slice::from_ref(&spec));
+        let out = GeminiAdapter::translate_tools(std::slice::from_ref(&spec)).unwrap();
         let text = serde_json::to_string(&out).unwrap();
         assert!(
             !text.contains("additionalProperties"),

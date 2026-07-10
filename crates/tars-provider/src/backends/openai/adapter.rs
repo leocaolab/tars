@@ -317,7 +317,10 @@ impl OpenAiAdapter {
                             "schema": crate::schema_adapt::adapt_schema(
                                 &schema.schema,
                                 crate::schema_adapt::SchemaDialect::OpenAi,
-                            ),
+                            )
+                            .map_err(|e| {
+                                ProviderError::InvalidRequest(format!("response schema: {e}"))
+                            })?,
                             "strict": schema.strict,
                         }
                     });
