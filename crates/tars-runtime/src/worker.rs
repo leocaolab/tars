@@ -109,6 +109,20 @@ pub struct WorkerPersona {
     pub system_prompt: String,
     /// The structured-output contract this persona imposes. See [`OutputSchema`].
     pub output_schema: OutputSchema,
+    /// Optional cap on the model's OUTPUT tokens for every request this persona
+    /// builds — threaded to [`ChatRequest::max_output_tokens`]. `None` (the
+    /// default for a bare `WorkerPersona`) leaves the provider's own ceiling as
+    /// the only bound.
+    ///
+    /// Set this for a persona whose reply is free prose a weak model can loop
+    /// in (a reviewer/critic's per-finding rationale). A request-level bound
+    /// stops generation SERVER-SIDE on every provider that reads the field —
+    /// including the `JsonObjectMode` / native-CLI providers that DISCARD the
+    /// output schema — so it is the only bound that reaches a free-text runaway
+    /// there. A schema `maxLength` only binds providers that actually enforce
+    /// the schema, so it is a complement, not a substitute. A runaway is turned
+    /// from a full-ceiling burn into a cheap, salvageable truncation.
+    pub max_output_tokens: Option<u32>,
 }
 
 /// LLM-driven Worker — the agent that actually does the work for one
@@ -430,6 +444,16 @@ impl WorkerAgent {
         // Off; a thinking-ONLY model (gemini-3.x-pro) rejects a 0 budget, so the
         // mode must come from the caller's provider config, not the default.
         req.thinking = self.thinking;
+        // Bound the model's output when the persona asks for it. Applied on EVERY
+        // path (stub + tool loop — `drive_with_tools` clones this request each
+        // turn, so the cap rides along) and INDEPENDENT of `structured_output`,
+        // because a request parameter binds even on providers that discard the
+        // schema. Without it the only ceiling on a free-prose runaway is the
+        // provider's own `max_tokens` (65,536 observed), which a weak model
+        // looping in an unconstrained string field burns in full before the
+        // caller learns anything. `None` persona / `None` cap ⇒ unset (serialized
+        // away), so no existing request shape changes.
+        req.max_output_tokens = self.persona.as_ref().and_then(|p| p.max_output_tokens);
         req
     }
 
@@ -1019,6 +1043,7 @@ mod tests {
             WorkerPersona {
                 system_prompt: "You are a strict code-review VERIFIER.".into(),
                 output_schema: OutputSchema::Custom("Verdict".into(), verdict_schema),
+                max_output_tokens: None,
             },
         );
         let plan = sample_plan();
@@ -1053,6 +1078,7 @@ mod tests {
             WorkerPersona {
                 system_prompt: "You review code.".into(),
                 output_schema: OutputSchema::None,
+                max_output_tokens: None,
             },
         );
         let plan = sample_plan();
@@ -1072,6 +1098,7 @@ mod tests {
         let w = WorkerAgent::new(AgentId::new("w"), "gpt-4o", "d").with_persona(WorkerPersona {
             system_prompt: "generic".into(),
             output_schema: OutputSchema::WorkerResult,
+            max_output_tokens: None,
         });
         let plan = sample_plan();
         let empty = std::collections::HashMap::new();
@@ -1140,6 +1167,7 @@ mod tests {
         let _ = w.with_persona(WorkerPersona {
             system_prompt: "x".into(),
             output_schema: OutputSchema::Custom("Verdict".into(), json!({"type": "object"})),
+            max_output_tokens: None,
         });
     }
 
@@ -1157,6 +1185,7 @@ mod tests {
         .with_persona(WorkerPersona {
             system_prompt: "verify".into(),
             output_schema: OutputSchema::Custom("Verdict".into(), json!({"type": "object"})),
+            max_output_tokens: None,
         });
         let plan = sample_plan();
         let empty = std::collections::HashMap::new();
@@ -1166,6 +1195,75 @@ mod tests {
             .as_ref()
             .expect("empty registry is not tool-using → schema honored");
         assert_eq!(schema.name.as_deref(), Some("Verdict"));
+    }
+
+    /// A persona's `max_output_tokens` reaches the built `ChatRequest`, so a
+    /// caller (arc's critic) can bound a free-prose runaway server-side instead
+    /// of letting it burn the provider's full ceiling. The bound is independent
+    /// of the schema branch: it applies whether the persona sends a schema or
+    /// not. An unset cap (or no persona at all) leaves `max_output_tokens` as
+    /// `None`, so no existing request shape changes.
+    #[test]
+    fn persona_max_output_tokens_reaches_the_request() {
+        let plan = sample_plan();
+        let empty = std::collections::HashMap::new();
+
+        // Cap set on a schema-bearing persona → threaded onto the request.
+        let capped = WorkerAgent::new(AgentId::new("critic"), "gpt-4o", "critic").with_persona(
+            WorkerPersona {
+                system_prompt: "review".into(),
+                output_schema: OutputSchema::Custom("CriticResponse".into(), json!({"type": "object"})),
+                max_output_tokens: Some(16_384),
+            },
+        );
+        assert_eq!(
+            capped
+                .build_worker_request(&plan, &plan.steps[0], &[], &empty)
+                .max_output_tokens,
+            Some(16_384),
+            "a persona cap must reach ChatRequest.max_output_tokens",
+        );
+
+        // Cap set on a schema-LESS persona (OutputSchema::None) → still threaded.
+        let capped_no_schema = WorkerAgent::new(AgentId::new("critic"), "gpt-4o", "critic")
+            .with_persona(WorkerPersona {
+                system_prompt: "review".into(),
+                output_schema: OutputSchema::None,
+                max_output_tokens: Some(4_096),
+            });
+        assert_eq!(
+            capped_no_schema
+                .build_worker_request(&plan, &plan.steps[0], &[], &empty)
+                .max_output_tokens,
+            Some(4_096),
+            "the cap is independent of the structured-output branch",
+        );
+
+        // Persona with no cap → unset.
+        let uncapped = WorkerAgent::new(AgentId::new("critic"), "gpt-4o", "critic").with_persona(
+            WorkerPersona {
+                system_prompt: "review".into(),
+                output_schema: OutputSchema::None,
+                max_output_tokens: None,
+            },
+        );
+        assert_eq!(
+            uncapped
+                .build_worker_request(&plan, &plan.steps[0], &[], &empty)
+                .max_output_tokens,
+            None,
+            "an unset persona cap leaves max_output_tokens None",
+        );
+
+        // No persona at all (generic worker) → unset, so no request shape changes.
+        let generic = WorkerAgent::new(AgentId::new("w"), "gpt-4o", "d");
+        assert_eq!(
+            generic
+                .build_worker_request(&plan, &plan.steps[0], &[], &empty)
+                .max_output_tokens,
+            None,
+            "the generic worker imposes no output bound",
+        );
     }
 
     #[test]
