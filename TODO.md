@@ -400,35 +400,58 @@ built once on a branch and discarded, because the actual fix — arc's fixer emi
 start — makes the map disappear at the source. Do this only when something genuinely needs a
 dynamic-key map under a schema-enforcing provider; then fix both dialects together, no half-guard.
 
-### B-25. `with_persona` panics on tools+schema — should degrade, not panic (MED — blocks arc's fixer schema)
+### B-25. Tool-using worker can't attach a schema — hardcode past it (MED — blocks arc's fixer step 2)
 
-`WorkerAgent::with_persona` (`tars-runtime/src/worker.rs:275`) **panics** when a tool-carrying worker
-is given any `output_schema` other than `None`. Its stated reason: many providers reject
-`response_format` together with `tools`, so the schema "can NEVER be delivered — would silently drop
-it and the caller would never know."
+**The wall, precisely — it is TWO gates, not one:**
 
-That reasoning treats a schema as a *contract* the provider must honor. **A schema is a hint.** Under
-hint semantics the panic is wrong on two counts:
+1. `WorkerAgent::with_persona` (`worker.rs:277`) **panics** when a tool-carrying worker is given any
+   `output_schema` other than `None`.
+2. `build_worker_request` (`worker.rs:428`) is the gate that actually drops it: `if !has_tools { …
+   attach structured_output … }`. When tools are present the whole `match` is skipped, so the schema
+   never reaches the `ChatRequest`. The panic just stops you reaching this line, and makes its comment
+   ("`has_tools` never silently drops one here") self-consistent. **Removing one without the other
+   does nothing** — delete the panic and `build_worker_request` still drops the schema at `:428`.
 
-1. **Too broad — it kills `claude_sdk`, which CAN deliver schema+tools.** `backends/claude_sdk.rs:137`
-   wires the request schema to the Agent SDK's `outputFormat`, "separate from agentic tools, so strict
-   schema works even with tools fully disabled." The blanket panic误伤 the one provider where the
-   contradiction doesn't exist.
-2. **Wrong severity — a hint the provider can't enforce is a *degradation*, not a programming error.**
-   The right shape: branch on `StructuredOutputMode`. `StrictSchema`-with-tools-conflict ⇒ drop the
-   schema, fall back to prompt-only, **warn once** (a warn that actually reaches the operator, not the
-   `tracing::warn!` nobody reads that this very retro-family keeps catching). `claude_sdk` ⇒ deliver
-   it. `None`/`JsonObjectMode` ⇒ already dropped, no-op.
+**Why it exists**: many HTTP providers reject `response_format` together with `tools`
+("response_format type is unavailable"), and the none-is-not-none retro was about a schema silently
+substituted/dropped that the caller relied on. So the guard's fear is real *for a tolerant caller*.
 
-The panic's real fear — a silently-dropped schema the caller *relied on* — only bites when the
-**decode is tolerant**. A caller whose decode is strict (arc's fixer: `issue_id` required, duplicate
-= error, unknown-id dropped, and diff-as-truth over the git diff) makes the schema redundant, so the
-drop is safe. So the fix is: keep the honest-drop guarantee, but make "honest" = warn-once, not panic.
+**Why it's wrong now**: a schema is a **hint**, and the fear doesn't apply to a strict caller.
 
-**Why MED, not LOW**: this is the concrete blocker for arc's fixer step 2 (send an array schema so a
-StrictSchema provider enforces the shape). Today arc can't attach one without hitting this panic. Note
-arc's own todo `WorkerAgent::with_persona panics on tools + a non-None output schema` tracks the arc
-side of the same wall.
+- **The "can this provider deliver schema+tools" judgment cannot be made in the worker.** `WorkerAgent`
+  has **no `Capabilities` at runtime** — grep `worker.rs`: `Capabilities` appears only under
+  `#[cfg(test)]` (`:1303`). It holds an `LlmService` (provider+model) and cannot see the
+  `StructuredOutputMode`. The knowledge lives in the adapter: `openai/adapter.rs:305` already branches
+  on `self.structured_mode` AND sees `req.tools` (`:289`), and already emits `tools` and
+  `response_format` into the **same** body — so "providers reject both" is per-provider, not a law.
+- The guard's real harm — a silently-dropped schema a caller *relied on* — only bites when the
+  **decode is tolerant**. arc's fixer decode is strict (`issue_id` required, duplicate = `DuplicateId`,
+  unknown-id dropped, `MissingReply`) and backed by **diff-as-truth** (the git diff is the result, not
+  the model's self-report). The schema is redundant belt over suspenders; dropping it is safe.
+- `claude_sdk` is a live counterexample to "can't be delivered": `backends/claude_sdk.rs:137` wires
+  the schema to the SDK's `outputFormat`, separate from agentic tools.
+
+**Recommendation — hardcode, do not build the proper path.** `WorkerAgent` is slated for removal
+(2026-07-10, Leo), so do NOT thread `Capabilities` into the worker or build per-mode branching there.
+Minimal change:
+- delete the `with_persona` panic (`:277-287`);
+- at `build_worker_request:428`, attach the persona's schema **regardless of `has_tools`** — a
+  tool-using worker with a `Custom`/`WorkerResult` persona now sends its schema as a hint;
+- let the adapter do what it already does per `structured_mode` (deliver / json_object / drop).
+- If a warn is wanted for the "attached but this provider's mode discards it" case, it belongs in the
+  **adapter** (which knows the mode), not the worker — and it must reach the operator, not be a
+  `tracing::warn!` nobody reads (the tell this retro-family keeps catching). For a strict-decode caller
+  it changes nothing, so it is optional.
+
+**Caveat for arc**: the fixer role today is `claude_cli` = `StructuredOutputMode::None`, so an attached
+schema is dropped and the prompt stays the contract — enforcement only bites if the fixer points at a
+StrictSchema provider (`claude_sdk`/`openai`/`gemini`/`vllm`). So step 2 is "the schema is now
+*expressible and attachable*", not "now enforced on the current provider".
+
+**Fallout**: attaching a schema changes `ChatRequest` (a tool-using worker starts carrying
+`structured_output`), which moves the cassette fingerprint. Land this together with the one-shot
+cassette re-record, not before. arc's own todo (`WorkerAgent::with_persona panics on tools + a
+non-None output schema`) tracks the arc side of the same wall.
 
 ### B-22. Streaming JSON array framer (LOW / parked)
 - **What**: a generic, resumable, byte-budgeted framer over `ChatEvent::Delta` that emits
