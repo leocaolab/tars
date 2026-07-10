@@ -19,6 +19,104 @@ is authoritative. This file aggregates.
 
 ---
 
+## 1.8 — a precondition in a comment, and an output nobody bounded — `v1.8.0`
+
+**Breaking, twice.** `adapt_schema` returns a `Result`. `WorkerPersona` gains a field.
+
+### `adapt_schema` inlines `$ref`s instead of stripping them
+
+The precondition "`$ref`s are already inlined" lived in a doc comment
+(`schema_adapt.rs`), and when a caller violated it the Gemini branch **dropped the
+`$ref` key outright** — `"$ref", // belt-and-suspenders — refs should be inlined already` —
+and emitted an array item that had **lost its properties**. Hand it a raw
+`schemars::schema_for!` output (which emits `$ref` + `definitions` by default) and the
+provider enforced a structurally valid, silently wrong schema.
+
+Both candidate fixes must be fallible: a dangling or cyclic `$ref` cannot be resolved under
+either. Once fallibility is unavoidable, **inlining strictly dominates erroring** — erroring
+would force every caller to hand-write `inline_refs`, which is exactly the workaround arc
+wrote twice, in two files.
+
+Inlining must also run **before** the dialect transforms. A constraint hidden behind a `$ref`
+— an `allOf`-wrapped enum inside `definitions` — is invisible to the flatten otherwise.
+
+```rust
+pub fn adapt_schema(schema: &Value, dialect: SchemaDialect)
+    -> Result<Value, SchemaAdaptError>;
+
+pub enum SchemaAdaptError {
+    DanglingRef { pointer: String, known: Vec<String> },
+    RefCycle { pointer: String },
+}
+```
+
+The error carries the unresolved pointer verbatim. No sentinel, no partial shape, no
+silently degraded schema. `$ref` cycles are detected with a DFS path-stack; diamond reuse
+(the same definition in sibling branches) is not a cycle.
+
+Three call sites, all inside `tars-provider` (gemini ×2, openai ×1); each propagates as
+`ProviderError::InvalidRequest` naming the schema.
+
+**Known silent drops in the Gemini branch, reported and NOT fixed:** `map.clear()` wipes the
+sibling keys of a converted map node; `const` is removed with no equivalent single-value
+`enum` emitted, so a *constraint* vanishes; a multi-type union (`["string","number","null"]`)
+falls through untouched. And the `issue_id` injection — tars adds a property the caller never
+declared, as the map key's carrier — is documented **only in an internal comment**, and
+nothing in tars reverses it.
+
+### `WorkerPersona.max_output_tokens`
+
+`ChatRequest.max_output_tokens` has existed all along, and nobody ever set it. arc's critic
+had no seam to: `WorkerPersona` exposed only `system_prompt` and `output_schema`, and the
+`ChatRequest` is built inside `build_worker_request`, which the caller never sees.
+
+Observed live: a `gemini-2.5-flash` critic call looped inside a free-prose `reply` field —
+one 693-character sentence repeated **342 times** — and burned **65,521 output tokens**
+before hitting the provider's own ceiling and returning `stop_reason: max_tokens`. The
+caller's decode then failed, and (in arc) that failure was swallowed into an empty findings
+map: a review pass that *failed* reported *clean*, for free, silently.
+
+```rust
+pub struct WorkerPersona {
+    pub system_prompt: String,
+    pub output_schema: OutputSchema,
+    pub max_output_tokens: Option<u32>,   // NEW
+}
+```
+
+Applied on every path (stub + tool loop), independent of the `structured_output` branch.
+
+Note **which mechanism protects whom.** `max_output_tokens` is a *request parameter*, so it
+binds regardless of `StructuredOutputMode` — it is the only bound that reaches `deepseek`
+(`JsonObjectMode` discards the schema entirely). A schema-level `maxLength` binds only
+schema-*enforcing* providers, so it reaches neither `deepseek` nor the native CLIs. And
+`claude_cli` post-truncates rather than forwarding the field
+(`claude_cli/provider.rs`), so there the bound saves latency, not tokens.
+
+`#[serde(skip_serializing_if = "Option::is_none")]` means an unset persona serializes
+byte-identically — no cassette fingerprint moves until a caller actually sets it.
+
+### Docs
+
+`docs/retro/2026-07-09-none-is-not-none.md` claimed arc's `is_native_agent` set and tars's
+`StructuredOutputMode::None` set "are the same set … agree by coincidence". **They are not
+equal.** `opencode` and `antigravity` route through `cli_delegate_capabilities()` →
+`text_only_baseline()` → `StructuredOutputMode::None`, so `None` has five members and
+`is_native_agent` has three. The load-bearing relation is an **inclusion**, which is a
+weaker and quieter invariant than an equality: an equality you might notice when you break
+it, because both sides move.
+
+`docs/design/call-typed.md` — a `call_typed<T>` spike. Two premises turned out false: the
+Gemini map→array rewrite **is** reversible (`issue_id` is the key carrier), and a
+hand-written `ResponseSchema` impl **does** compile alongside a blanket impl, provided the
+type does not also derive `JsonSchema`. Seven open decisions, none taken.
+
+`docs/design/streaming-json-framer.md` + `TODO.md` B-22 — parked, LOW priority. A framer
+salvages a failure that should not be salvaged. Fix the swallowed `Err`, and set
+`max_output_tokens`, before ever building it.
+
+---
+
 ## 1.7 — `None` is not none — `v1.7.0`
 
 **Breaking.** `WorkerPersona.output_schema` changes type. Every caller must re-decide once; that is
