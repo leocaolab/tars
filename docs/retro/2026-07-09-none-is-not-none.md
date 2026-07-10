@@ -52,17 +52,40 @@ found nothing".
 ## Why the fixer and merger survived
 
 ```
-arc:  is_native_agent = { ClaudeCli, GeminiCli, CodexCli }   (arc_types/src/config.rs:260)
-tars: those three are exactly the StructuredOutputMode::None backends
+arc:  is_native_agent            = { claude_cli, gemini_cli, codex_cli }
+                                   (arc_types/src/config.rs:259-261)
+tars: StructuredOutputMode::None = { claude_cli, gemini_cli, codex_cli,
+                                     opencode, antigravity }
       claude_sdk is StrictSchema — and is NOT native
 ```
 
 native ⇒ `NativeLoop` ⇒ empty tool registry ⇒ `has_tools == false` ⇒ schema imposed.
 non-native ⇒ `ReadWrite` ⇒ `has_tools == true` ⇒ schema not imposed.
 
-So the set of providers that get a schema imposed and the set that throw it away are the same
-set. Two independent enums, in two repositories, agree by coincidence. Nothing enforces it. The
-day a native CLI gains structured output, the fixer inherits the critic's bug.
+So a native provider is always handed a schema — and every native provider happens to be one that
+throws schemas away. The fixer survives on that, and **only** on that.
+
+Note the shape of the relation. It is **not** equality: `opencode` and `antigravity` are
+`None`-mode too — they route through `cli_delegate_capabilities()`
+(`tars-provider/src/registry.rs:230`) → `text_only_baseline()` →
+`StructuredOutputMode::None` (`tars-types/src/capabilities.rs:80`). The load-bearing fact is an
+**inclusion**:
+
+```
+is_native_agent  ⊆  StructuredOutputMode::None
+```
+
+Two independent enums, in two repositories, and one is a subset of the other by coincidence.
+Nothing enforces it. Nothing even *states* it. An inclusion is a weaker, quieter invariant than
+an equality — an equality you might notice when you break it, because both sides move. This one
+breaks the day a single native CLI gains structured output, on the other side of a repository
+boundary, and the fixer silently inherits the critic's bug.
+
+*(The inclusion is strict, and that gap is itself a live bug — in the opposite direction. arc
+maps `opencode` and `antigravity` to `ProviderType::Other`, so `is_native_agent()` is `false`,
+so the fixer hands them arc's tars tool registry — while `tars-provider/src/registry.rs:225-229`
+says of exactly those two: "the delegate runs its OWN agent loop." Set `fixer = "opencode"` today
+and it flails on tool names it cannot call. Tracked in arc's config redesign.)*
 
 ## The principle — a two-state type carrying three meanings
 
