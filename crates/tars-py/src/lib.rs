@@ -1416,7 +1416,7 @@ fn compatibility_to_py(c: tars_types::CompatibilityCheck) -> CompatibilityResult
                                 "max": *max,
                             }))
                         }
-                        CompatibilityReason::StructuredOutputUnsupported
+                        CompatibilityReason::StructuredOutputNotEnforced
                         | CompatibilityReason::VisionUnsupported => None,
                         // `#[non_exhaustive]` wildcard.
                         _ => None,

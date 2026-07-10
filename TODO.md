@@ -6,6 +6,34 @@ Forward-looking list. Each entry: **what** to do, **why** it's deferred (not "sh
 
 ---
 
+## `WorkerAgent::with_persona` panics on tools + a non-`None` output schema
+
+`tars-runtime/src/worker.rs` — accepted deliberately, recorded so the decision is visible:
+
+```rust
+let has_real_tools = self.tools.as_ref().is_some_and(|r| !r.is_empty());
+if has_real_tools && !matches!(persona.output_schema, OutputSchema::None) { panic!(…) }
+```
+
+Providers reject `response_format` alongside `tools`, so a schema supplied with real tools can
+never be delivered. Failing at the call that introduces the contradiction beats
+`build_worker_request` silently dropping it far from the mistake. It is the same class as
+`Config::get()`'s sanctioned panic: a **programmer** error, not a data error — unreachable from
+config, only from code.
+
+· **Why deferred:** `tars` is a library and `tars-server` is a long-lived process, so a panic is a
+process kill. A `try_with_persona -> Result` would be strictly more honest, at the cost of builder
+ergonomics on `Arc<Self>`.
+· **Trigger:** the first time a *configuration* (not code) can pair a tool-using role with a persona
+schema — e.g. if `[roles]` ever carries an output schema. At that moment it stops being a programmer
+error and the panic becomes a config-triggered crash.
+· **Note:** the guard keys off `!registry.is_empty()`, not `tools.is_some()`. Every `TarsAgent`
+(critic / verifier / judge) is built with an *empty* `ToolRegistry` and legitimately carries a
+`Custom` schema. `build_worker_request`'s own `has_tools` uses the same definition. Keep them in
+sync — if they drift, the panic fires on a legal construction or misses an illegal one.
+
+---
+
 ## Layering — tars-melt leaks into consumers' dep graphs
 
 - **`ChainOpts.events` forces consumers to depend on `tars-melt`.** `EventStores`

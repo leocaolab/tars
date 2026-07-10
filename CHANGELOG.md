@@ -19,6 +19,61 @@ is authoritative. This file aggregates.
 
 ---
 
+## 1.7 — `None` is not none — `v1.7.0`
+
+**Breaking.** `WorkerPersona.output_schema` changes type. Every caller must re-decide once; that is
+the point.
+
+### `OutputSchema` — a two-state type was carrying three meanings
+
+```rust
+pub enum OutputSchema {
+    None,                              // send no structured-output schema
+    WorkerResult,                      // send tars's generic one — say so deliberately
+    Custom(String, serde_json::Value), // send your own
+}
+```
+
+`WorkerPersona.output_schema` was `Option<(String, Value)>`, and `worker.rs`'s `None` arm did **not**
+mean "send nothing" — it sent `worker_json_schema()` = `{summary: string, confidence: number}`,
+`additionalProperties: false`, both required. The type said *absent*; the behaviour was *a specific
+value you did not pick*.
+
+**Eighteen call sites across arc and concer were silently instructed to emit `{summary, confidence}`.**
+arc's critic (which parses findings), arc's L5 rot tribunal (which parses a verdict), arc's stateful
+reducer, arc's delegate agent, and **fourteen of concer's prose writing / proofreading / reply
+personas**. Every one survived only because its provider throws the schema away: `deepseek` is
+`JsonObjectMode`, `claude_cli` is `None`-mode. On any `StrictSchema` provider (`openai`, `gemini`,
+`vllm`, `claude_sdk`) the critic returns zero findings and the rot tribunal fail-safes to `ESSENTIAL`
+forever — both silently.
+
+Two of the eighteen were found by reading. The other sixteen were found only because the type stopped
+letting the question go unanswered. Full write-up: `docs/retro/2026-07-09-none-is-not-none.md`.
+
+`WorkerAgent.persona: Option<WorkerPersona>` is unchanged — *no persona* is a real absence (tars's own
+generic worker, for which `WorkerResult` is correct). Only the inner `Option` lied.
+
+### The second silence, closed with it
+
+`if !has_tools` silently discarded an explicitly supplied schema. The reason is real — providers reject
+`response_format` alongside `tools` — but the discard was invisible to whoever wrote `Custom(..)`.
+`WorkerAgent::with_persona` now refuses the combination at construction rather than dropping it far
+from the mistake. (The guard keys off a non-empty `ToolRegistry`, matching `build_worker_request`'s own
+`has_tools`; a tool-free agent with a `Custom` schema is legal and common.)
+
+### `CompatibilityReason::StructuredOutputUnsupported` → `StructuredOutputNotEnforced`
+
+The old name read as "unsupported — do not send". The truth is "sent, and this provider will not
+enforce it", which is exactly the contract arc depends on: **one request shape for every provider;
+enforcement is the provider's business; the prompt is the fallback**. `compatibility_check` is an
+advisory, not a rejection, and its test now says so.
+
+`TarsAgent::with_persona` warns once, at construction, when a supplied schema meets a `None`-mode
+provider — naming the provider, the schema, and the consequence. Nothing on the Rust path said this
+out loud before; `compatibility_check`'s only caller is `tars-py`.
+
+---
+
 ## 1.6 — delete `tars-handle`; timeout is a parameter — `v1.6.0`
 
 **Breaking.** Three app-layer concepts that had sunk into infra are removed, and
