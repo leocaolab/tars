@@ -95,7 +95,10 @@ impl PerCallBudgetMiddleware {
         Ok(Self {
             cap_usd,
             pricing: capabilities.pricing,
-            default_max_output_tokens: capabilities.max_output_tokens,
+            // `None` output cap (local/unbounded) → conservative worst-case for
+            // cost estimation. Local providers price at $0 so the bound is
+            // immaterial there; paid providers carry a real cap.
+            default_max_output_tokens: capabilities.max_output_tokens.unwrap_or(4_096),
             zero_pricing_warned: AtomicBool::new(false),
         })
     }
@@ -434,7 +437,7 @@ mod tests {
     fn pricing_new_from_capabilities() {
         // Sanity: the canonical caller path works without explicit field tunes.
         let mut caps = Capabilities::text_only_baseline(priced(3.0, 15.0));
-        caps.max_output_tokens = 4096;
+        caps.max_output_tokens = Some(4096);
         let mw = PerCallBudgetMiddleware::new(0.10, &caps);
         // Pulled out the pricing and the default_max_output_tokens.
         assert_eq!(mw.pricing.input_per_million, 3.0);

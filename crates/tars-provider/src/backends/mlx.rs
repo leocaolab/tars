@@ -87,36 +87,11 @@ fn normalize_auth(auth: Auth) -> Auth {
     }
 }
 
-/// Conservative defaults tuned for Apple Silicon hosts running 8B–32B
-/// quantized models in unified memory. Override per-deployment.
+/// Provider-level caps from the DB (`data/provider.toml`) `mlx` block. No model
+/// rows (the user picks the loaded model), so context/output come out `None`;
+/// `CapabilitiesOverrides` set the real window per deployment.
 fn mlx_default_capabilities() -> tars_types::Capabilities {
-    use std::collections::HashSet;
-    use tars_types::{Capabilities, Modality, Pricing, PromptCacheKind, StructuredOutputMode};
-
-    let mut modalities = HashSet::new();
-    modalities.insert(Modality::Text);
-    Capabilities {
-        // Most MLX-converted Qwen / Llama / Mistral models top out
-        // around 32K–128K context. 32K is the safer default; bump per
-        // deployment when you've actually loaded a long-context model.
-        max_context_tokens: 32_768,
-        max_output_tokens: 4_096,
-        supports_tool_use: true,
-        // mlx-lm currently emits tool calls serially; parallel batches
-        // round-trip through OpenAI shape but model quality varies.
-        supports_parallel_tool_calls: false,
-        // mlx-lm.server supports `response_format=json_object`; strict
-        // schema enforcement is model-dependent. Default to JSON-only.
-        supports_structured_output: StructuredOutputMode::JsonObjectMode,
-        supports_vision: false, // VLMs need a different runner today
-        supports_thinking: false,
-        supports_cancel: true,
-        prompt_cache: PromptCacheKind::None,
-        streaming: true,
-        modalities_in: modalities.clone(),
-        modalities_out: modalities,
-        pricing: Pricing::default(), // local = free
-    }
+    tars_config::capabilities_for("mlx", "")
 }
 
 #[cfg(test)]

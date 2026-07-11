@@ -43,8 +43,9 @@ pub use global::resolve_home;
 pub use manager::{Config, ConfigManager};
 pub use roles::RoleConfig;
 pub use model_kb::{
-    KbModality, ModelEntry, ModelKb, ModelStatus, ModelTier, ProviderModels, Thinking,
-    ThinkingParam, MODEL_KB,
+    capabilities_for, BillingModel, KbModality, ModelEntry, ModelKb, ModelStatus, ModelTier,
+    ProviderCapabilities, ProviderDef, ProviderModels, PromptCacheSpec, Thinking, ThinkingParam,
+    MODEL_KB,
 };
 pub use paths::default_config_path;
 pub use providers::{

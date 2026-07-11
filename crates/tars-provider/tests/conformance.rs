@@ -418,8 +418,10 @@ macro_rules! conformance_suite {
                     "modalities_out must be non-empty",
                 );
                 assert!(
-                    caps.max_context_tokens > 0,
-                    "max_context_tokens must be positive",
+                    // `None` = no declared ceiling (local model / unknown
+                    // window) is valid; a declared cap must be positive.
+                    caps.max_context_tokens.is_none_or(|n| n > 0),
+                    "max_context_tokens, when declared, must be positive",
                 );
                 // id() round-trips through Display + is non-empty.
                 let id_str = provider.id().as_ref();

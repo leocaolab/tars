@@ -65,11 +65,20 @@ pub struct MockProvider {
     state: Mutex<MockState>,
 }
 
+/// The mock's code-defined capabilities: a text-only baseline stamped with
+/// `InterfaceKind::Mock` (no real call is ever placed). Mock/cassette keep
+/// code-defined caps — they are NOT in `data/provider.toml`.
+fn mock_capabilities() -> Capabilities {
+    let mut c = Capabilities::text_only_baseline(Pricing::default());
+    c.interface = tars_types::InterfaceKind::Mock;
+    c
+}
+
 impl MockProvider {
     pub fn new(id: impl Into<ProviderId>, response: CannedResponse) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
-            capabilities: Capabilities::text_only_baseline(Pricing::default()),
+            capabilities: mock_capabilities(),
             state: Mutex::new(MockState {
                 response,
                 queue: VecDeque::new(),
@@ -89,7 +98,7 @@ impl MockProvider {
             .unwrap_or_else(|| CannedResponse::text(""));
         Arc::new(Self {
             id: id.into(),
-            capabilities: Capabilities::text_only_baseline(Pricing::default()),
+            capabilities: mock_capabilities(),
             state: Mutex::new(MockState {
                 response: fallback,
                 queue: responses.into(),

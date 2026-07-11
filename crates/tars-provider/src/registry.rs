@@ -222,21 +222,6 @@ impl ProviderRegistry {
     }
 }
 
-/// Capabilities for a black-box CLI-delegate provider (opencode/antigravity).
-/// Text-only, no structured/tool surface exposed back to TARS (the delegate
-/// runs its OWN agent loop), subscription-billed, prompt cache delegated to the
-/// binary. Output cap is post-clamped by the backend (these CLIs take no
-/// `--max-output-tokens`).
-fn cli_delegate_capabilities() -> tars_types::Capabilities {
-    let mut caps = tars_types::Capabilities::text_only_baseline(tars_types::Pricing::default());
-    caps.max_context_tokens = 200_000;
-    caps.max_output_tokens = 64_000;
-    caps.supports_cancel = false; // spawn-per-call; cancel is via Drop only
-    caps.prompt_cache = tars_types::PromptCacheKind::Delegated;
-    caps.streaming = false;
-    caps
-}
-
 /// Build a single provider from its [`ProviderConfig`] variant.
 ///
 /// Returned as `Arc<dyn LlmProvider>` so the caller can put concrete
@@ -265,26 +250,22 @@ fn build_one(
         ProviderConfig::OpenaiCompat {
             base_url,
             auth,
-            default_model: _,
+            default_model,
             extras,
             capabilities,
         } => {
-            let mut builder = OpenAiProviderBuilder::new(id, auth.clone())
-                .base_url(base_url.clone())
-                .extras(extras.clone());
-            // openai_compat endpoints (DeepSeek, Qwen, vLLM, local …) speak the
-            // OpenAI wire format but generally DON'T implement OpenAI's strict
-            // `response_format: json_schema` — they support `json_object` (or
-            // nothing). Inheriting StrictSchema (the OpenAI-proper default) made
-            // every structured request fail with "This response_format type is
-            // unavailable now" (DeepSeek as an arc scan critic / structured
-            // worker). Downgrade the default to JsonObjectMode here; an explicit
-            // `[capabilities]` override still wins via apply_to.
-            let mut caps = crate::backends::openai::default_openai_capabilities();
-            caps.supports_structured_output =
-                tars_types::StructuredOutputMode::JsonObjectMode;
+            // A named definition (e.g. `deepseek`, keyed by the provider id)
+            // resolves its real caps from the provider DB — `deepseek` states
+            // `json_object` there directly, so the old StrictSchema→JsonObject
+            // patch is gone. An anonymous user instance (a local vLLM the DB
+            // doesn't name) falls back to `text_only_baseline`. Either way the
+            // user's `[capabilities]` overrides win last.
+            let mut caps = tars_config::capabilities_for(id.as_str(), default_model);
             capabilities.apply_to(&mut caps);
-            builder = builder.capabilities(caps);
+            let builder = OpenAiProviderBuilder::new(id, auth.clone())
+                .base_url(base_url.clone())
+                .extras(extras.clone())
+                .capabilities(caps);
             builder.build(http, auth_resolver)
         }
 
@@ -380,6 +361,7 @@ fn build_one(
             profile,
         } => crate::backends::bedrock::BedrockProviderBuilder::new(id, region.clone(), model.clone())
             .profile(profile.clone())
+            .capabilities(tars_config::capabilities_for("bedrock", model))
             .build(),
 
         // Same variant, feature OFF: fail with an actionable message
@@ -485,19 +467,15 @@ fn build_one(
         ProviderConfig::Opencode {
             executable,
             timeout_secs,
-            default_model: _,
+            default_model,
         } => {
+            let caps = tars_config::capabilities_for("opencode", default_model);
             let dialect = Arc::new(OpenCodeDialect::new(
                 executable.clone(),
                 Duration::from_secs(*timeout_secs),
             ));
             let runner = Arc::new(SharedCliRunner::new(dialect.clone()));
-            Arc::new(AgentCliBackend::new(
-                id,
-                cli_delegate_capabilities(),
-                dialect,
-                runner,
-            ))
+            Arc::new(AgentCliBackend::new(id, caps, dialect, runner))
         }
 
         // Antigravity (Doc 32 M3): the shared AgentCliBackend driven by an
@@ -505,19 +483,15 @@ fn build_one(
         ProviderConfig::Antigravity {
             executable,
             timeout_secs,
-            default_model: _,
+            default_model,
         } => {
+            let caps = tars_config::capabilities_for("antigravity", default_model);
             let dialect = Arc::new(AntigravityDialect::new(
                 executable.clone(),
                 Duration::from_secs(*timeout_secs),
             ));
             let runner = Arc::new(SharedCliRunner::new(dialect.clone()));
-            Arc::new(AgentCliBackend::new(
-                id,
-                cli_delegate_capabilities(),
-                dialect,
-                runner,
-            ))
+            Arc::new(AgentCliBackend::new(id, caps, dialect, runner))
         }
 
         ProviderConfig::Mock { canned_response } => {

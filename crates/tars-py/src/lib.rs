@@ -374,8 +374,11 @@ impl CapabilitiesSummary {
             // Python-friendly large-number arithmetic (Python ints are
             // arbitrary-precision but other Usage fields are u64, so
             // staying consistent avoids type-juggling on the Python side).
-            max_context_tokens: u64::from(caps.max_context_tokens),
-            max_output_tokens: u64::from(caps.max_output_tokens),
+            // `None` (no declared ceiling — local/unknown) surfaces as 0 to
+            // Python, meaning "no limit". The distinction between "unknown" and
+            // "unlimited" isn't carried across the binding.
+            max_context_tokens: caps.max_context_tokens.map(u64::from).unwrap_or(0),
+            max_output_tokens: caps.max_output_tokens.map(u64::from).unwrap_or(0),
             supports_tool_use: caps.supports_tool_use,
             supports_vision: caps.supports_vision,
             supports_thinking: caps.supports_thinking,

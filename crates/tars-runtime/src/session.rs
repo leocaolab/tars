@@ -113,7 +113,10 @@ impl Budget {
                 // context window — we don't try to subtract `max_output_tokens`
                 // here because Session doesn't know what max_output the
                 // caller will request next.
-                let total = caps.max_context_tokens as usize;
+                // `None` context cap (local model, unknown window) has no ratio
+                // to divide — fall back to a conservative 32k so trimming still
+                // does something sane rather than never firing.
+                let total = caps.max_context_tokens.unwrap_or(32_000) as usize;
                 // Convert tokens → char-equivalent at the typical 4:1
                 // ratio (matches Chars budget so the same cost function
                 // applies). Rough but consistent.
