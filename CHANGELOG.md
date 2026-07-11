@@ -19,6 +19,66 @@ is authoritative. This file aggregates.
 
 ---
 
+## 1.9 — provider definitions are data, and `InterfaceKind` — `v1.9.0`
+
+**Breaking.** `Capabilities` gains `interface: InterfaceKind`, and
+`max_context_tokens`/`max_output_tokens` become `Option<u32>`.
+
+### Provider static facts move out of code into `data/provider.toml`
+
+They were split three ways and disagreed silently: 15 hand-written `Capabilities`
+literals in backend constructors, a per-model KB (`data/models.toml`), and a
+hardcoded builtin table. Every non-gemini backend hardcoded `max_context`/
+`max_output` for its *default* model and was stale for every other model —
+anthropic shipped `8_192` where the model is `128_000` (16×), openai `128_000` vs
+`1_050_000` (8×), and `Pricing::default()` (all zeros) meant silent $0 billing on
+every model but gemini's. Only gemini read the KB at build time; this generalizes
+that one correct backend to all of them.
+
+- `data/provider.toml` (schema_version 2): one tars-authored file, provider-level
+  facts (`interface`, `billed`, a `[capabilities]` block) plus embedded per-model
+  rows. Numbers verified against official docs; UNKNOWN left blank with a comment;
+  subscription/local prices genuinely blank (no fabricated zeros).
+- `capabilities_for(provider, model)` — the one assembler. The 15 hand-written
+  `Capabilities` are deleted; each backend calls it. `cli_delegate_capabilities()`
+  deleted. The registry `openai_compat` StrictSchema→JsonObjectMode patch deleted
+  (deepseek states `json_object` in the file; anonymous instances fall back to
+  `text_only_baseline` + `CapabilitiesOverrides`).
+
+### `InterfaceKind { Cli, Http, Api, Mock }`
+
+How tars reaches and DRIVES a provider — the interface, not the wire dialect.
+Declared per `ProviderConfig` variant via a **total match** (no `_ =>`), never
+detected: a 17th variant fails to compile until its interface is stated. It folds
+two non-observable axes — who runs the agent loop (`Cli` = the vendor binary;
+the rest = tars) and what the transport is (`Http` = tars-built HTTP; `Api` = a
+vendor SDK/daemon: claude_sdk over NDJSON, bedrock over aws_sdk). Lives on
+`Capabilities` (so cassettes carry it), projected by `ProviderConfig::interface()`,
+guarded by `toml.interface == cfg.interface()`. Replaces arc's shadow
+`ProviderType` / `is_native_agent` / the `Other` sentinel (arc side is its own PR).
+
+### `Option<u32>` on the token ceilings
+
+`max_context_tokens`/`max_output_tokens` had no way to say "no limit". Now
+`None` = no ceiling to enforce (the provider documents none, or it is genuinely
+unknown — the data file's comment tells a human which). Every enforcement reader
+(`chat.rs` compat checks, session ContextRatio, budget estimate, py summary)
+treats `None` as "don't enforce".
+
+### `billed = per_token | subscription | free`
+
+The old "every GA model has a price" invariant was false for local (mlx/vllm/
+llamacpp = free) and subscription (CLI + claude_sdk) providers, which the data
+file now carries. The price invariant is rescoped to `billed == per_token` only —
+a blank price on a free/subscription model is the truth, not missing data, and
+carries no fabricated zero.
+
+**Accepted regression:** provider-behavioral pricing (gemini thinking-at-output-
+rate, anthropic cache-write surcharge) is per-model but now a provider-level
+single value; left blank → 0. Cost is debug telemetry, not billing.
+
+---
+
 ## 1.8 — a precondition in a comment, and an output nobody bounded — `v1.8.0`
 
 **Breaking, twice.** `adapt_schema` returns a `Result`. `WorkerPersona` gains a field.
