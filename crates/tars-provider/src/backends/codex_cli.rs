@@ -25,12 +25,11 @@
 //! `AgentCliBackend` emits the events after the turn completes rather than
 //! live (fine for the spawn-per-call consumer).
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tars_types::{
-    Capabilities, Modality, PromptCacheKind, ProviderId, StructuredOutputMode,
+    Capabilities, ProviderId,
 };
 
 use crate::backends::cli::{AgentCliBackend, CodexCliDialect, SharedCliRunner};
@@ -104,35 +103,11 @@ impl CodexCliProviderBuilder {
     }
 }
 
+/// Assembled from the provider DB (`data/provider.toml`) `codex_cli` block.
+/// The block advertises the buffered-runtime caps (streaming/cancel false)
+/// that `AgentCliBackend` actually delivers.
 fn default_capabilities() -> Capabilities {
-    let mut text = HashSet::new();
-    text.insert(Modality::Text);
-    Capabilities {
-        // ChatGPT 5 / 5-codex is roughly 200K context.
-        max_context_tokens: 200_000,
-        // CLI doesn't expose --max-output-tokens; the backend post-truncates.
-        max_output_tokens: 64_000,
-        // The CLI surfaces tool calls as ThreadItem events (codex's INTERNAL
-        // tools). They're NOT exposed back to TARS as our `ToolCall` shape —
-        // codex dispatches them itself.
-        supports_tool_use: false,
-        supports_parallel_tool_calls: false,
-        supports_structured_output: StructuredOutputMode::None,
-        supports_vision: false,
-        supports_thinking: true,
-        // Buffered under `AgentCliBackend`: the runner drains codex's JSONL
-        // to completion into a `Value::Array`, then the backend emits all
-        // ChatEvents after the turn ends — nothing is delivered mid-run, so
-        // there is nothing to cancel mid-call (cancel is via Drop only) and
-        // no incremental token delivery. Advertise both honestly as false.
-        supports_cancel: false,
-        prompt_cache: PromptCacheKind::Delegated,
-        streaming: false,
-        modalities_in: text.clone(),
-        modalities_out: text,
-        // Subscription-billed; per-token pricing N/A here.
-        pricing: tars_types::Pricing::default(),
-    }
+    tars_config::capabilities_for("codex_cli", "")
 }
 
 /// Convenience builder.

@@ -564,13 +564,15 @@ impl CapabilitiesOverrides {
         self.max_context_tokens.is_none() && self.max_output_tokens.is_none()
     }
 
-    /// Apply overrides onto a hardcoded backend default.
+    /// Apply overrides onto an assembled backend default. A set override wins
+    /// over whatever the data file / baseline produced (including `None` = no
+    /// ceiling — a user correcting a local model's real window).
     pub fn apply_to(&self, base: &mut tars_types::Capabilities) {
         if let Some(n) = self.max_context_tokens {
-            base.max_context_tokens = n;
+            base.max_context_tokens = Some(n);
         }
         if let Some(n) = self.max_output_tokens {
-            base.max_output_tokens = n;
+            base.max_output_tokens = Some(n);
         }
     }
 }
@@ -585,6 +587,28 @@ impl AuthDefaults for Auth {
 }
 
 impl ProviderConfig {
+    /// How tars reaches and drives this provider — a total function of the
+    /// variant, so it can never disagree with the variant. The provider DB
+    /// (`data/provider.toml`) also *carries* `interface` for the definition
+    /// blocks; a build-time drift guard (see `builtin.rs` tests) asserts the
+    /// two agree for every provider that has both a variant and a block.
+    ///
+    /// **No catch-all.** A new `ProviderConfig` variant fails to compile here
+    /// until its interface is declared (contrast arc's deleted
+    /// `ProviderType::from_wire` `_ => Other`).
+    pub fn interface(&self) -> tars_types::InterfaceKind {
+        use tars_types::InterfaceKind as Ik;
+        use ProviderConfig::*;
+        match self {
+            ClaudeCli { .. } | GeminiCli { .. } | CodexCli { .. } | Opencode { .. }
+            | Antigravity { .. } => Ik::Cli,
+            Openai { .. } | OpenaiCompat { .. } | Anthropic { .. } | Gemini { .. }
+            | Vllm { .. } | Mlx { .. } | Llamacpp { .. } => Ik::Http,
+            ClaudeSdk { .. } | Bedrock { .. } => Ik::Api,
+            Mock { .. } | Cassette { .. } => Ik::Mock,
+        }
+    }
+
     /// What model the provider defaults to. CLI providers and Mock
     /// always have one; Mock returns "mock-model".
     pub fn default_model(&self) -> &str {
@@ -1084,8 +1108,8 @@ mod tests {
     #[test]
     fn capabilities_overrides_apply_to_replaces_only_set_fields() {
         let mut base = tars_types::Capabilities::text_only_baseline(tars_types::Pricing::default());
-        base.max_context_tokens = 4096;
-        base.max_output_tokens = 1024;
+        base.max_context_tokens = Some(4096);
+        base.max_output_tokens = Some(1024);
 
         // Override only context; output stays at base.
         let overrides = CapabilitiesOverrides {
@@ -1093,8 +1117,8 @@ mod tests {
             max_output_tokens: None,
         };
         overrides.apply_to(&mut base);
-        assert_eq!(base.max_context_tokens, 262144);
-        assert_eq!(base.max_output_tokens, 1024);
+        assert_eq!(base.max_context_tokens, Some(262144));
+        assert_eq!(base.max_output_tokens, Some(1024));
     }
 
     #[test]

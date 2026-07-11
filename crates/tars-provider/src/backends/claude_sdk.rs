@@ -51,8 +51,8 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
 
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message, Modality, PromptCacheKind,
-    ProviderError, ProviderId, RequestContext, StopReason, StructuredOutputMode, Usage,
+    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message,
+    ProviderError, ProviderId, RequestContext, StopReason, Usage,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
@@ -124,33 +124,9 @@ impl ClaudeSdkProviderBuilder {
     }
 }
 
+/// Assembled from the provider DB (`data/provider.toml`) `claude_sdk` block.
 fn default_capabilities() -> Capabilities {
-    let mut modalities = std::collections::HashSet::new();
-    modalities.insert(Modality::Text);
-    Capabilities {
-        max_context_tokens: 200_000,
-        max_output_tokens: 8_192,
-        // Child strips tools (server.mjs sets disallowedTools: ['*']);
-        // this provider is intentionally pure-LLM.
-        supports_tool_use: false,
-        supports_parallel_tool_calls: false,
-        // The daemon wires the request's JSON Schema to the Agent SDK's
-        // `outputFormat: {type:'json_schema'}` — separate from agentic
-        // tools, so strict schema works even with tools fully disabled.
-        supports_structured_output: StructuredOutputMode::StrictSchema,
-        supports_vision: false,
-        supports_thinking: false,
-        supports_cancel: true,
-        // The SDK uses Anthropic prompt caching transparently — same
-        // shape as `claude_cli`.
-        prompt_cache: PromptCacheKind::Delegated,
-        // We aggregate the SDK's events inside the daemon and reply
-        // once. Treat as non-streaming from tars's POV.
-        streaming: false,
-        modalities_in: modalities.clone(),
-        modalities_out: std::collections::HashSet::from([Modality::Text]),
-        pricing: tars_types::Pricing::default(),
-    }
+    tars_config::capabilities_for("claude_sdk", "")
 }
 
 pub struct ClaudeSdkProvider {

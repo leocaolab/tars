@@ -225,6 +225,29 @@ pub fn merge_builtin_with_user(
 mod tests {
     use super::*;
 
+    /// Drift guard (design §8 new invariant): for every built-in provider that
+    /// ALSO has a definition block in `data/provider.toml`, the block's
+    /// declared `interface` MUST equal the variant's total-function
+    /// `ProviderConfig::interface()`. The provider id is the definition key
+    /// (deepseek's `OpenaiCompat` variant keys the "deepseek" block). This is
+    /// the one line that keeps the file and the projection from drifting.
+    #[test]
+    fn toml_interface_matches_config_interface_for_builtins() {
+        let db = &*MODEL_KB;
+        for (id, cfg) in built_in_provider_defaults() {
+            if let Some(def) = db.providers.get(id.as_str()) {
+                assert_eq!(
+                    def.interface,
+                    cfg.interface(),
+                    "provider `{id}`: data/provider.toml interface {:?} disagrees with \
+                     ProviderConfig::interface() {:?}",
+                    def.interface,
+                    cfg.interface(),
+                );
+            }
+        }
+    }
+
     #[test]
     fn defaults_set_includes_all_well_known_providers() {
         let defs = built_in_provider_defaults();

@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest, Modality,
-    PromptCacheKind, ProviderError, ProviderId, RequestContext, StructuredOutputMode,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest,
+    ProviderError, ProviderId, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver};
@@ -75,26 +75,10 @@ impl AnthropicProviderBuilder {
     }
 }
 
+/// Assembled from the provider DB (`data/provider.toml`) for Anthropic's
+/// default model. The builder fallback; not a hand-written literal.
 fn default_capabilities() -> Capabilities {
-    use std::collections::HashSet;
-    let mut modalities = HashSet::new();
-    modalities.insert(Modality::Text);
-    modalities.insert(Modality::Image);
-    Capabilities {
-        max_context_tokens: 200_000,
-        max_output_tokens: 8_192,
-        supports_tool_use: true,
-        supports_parallel_tool_calls: true,
-        supports_structured_output: StructuredOutputMode::ToolUseEmulation,
-        supports_vision: true,
-        supports_thinking: true,
-        supports_cancel: true,
-        prompt_cache: PromptCacheKind::ExplicitMarker,
-        streaming: true,
-        modalities_in: modalities.clone(),
-        modalities_out: HashSet::from([Modality::Text]),
-        pricing: tars_types::Pricing::default(),
-    }
+    tars_config::capabilities_for("anthropic", "")
 }
 
 pub struct AnthropicProvider {

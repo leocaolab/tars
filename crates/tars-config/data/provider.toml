@@ -1,0 +1,825 @@
+# Provider definition DB — DATA, not code. Supersedes data/models.toml.
+#
+# tars-authored (NOT the user's ~/.tars/config.toml). Shipped in the binary
+# via include_str! and parsed once into MODEL_KB (crates/tars-config/src/
+# model_kb.rs). Each `[providers.X]` block carries how tars reaches the
+# provider (`interface`), how it bills (`billed`), the provider-level
+# capability facts (`[providers.X.capabilities]`), and its model rows.
+#
+# Numbers here are transcribed faithfully from the research pass
+# (provider-research/DATA.md). Prices are STANDARD-tier USD per 1M tokens;
+# tiered / intro / audio prices live in comments, not fields. A value the
+# research couldn't confirm is left blank with a `# UNKNOWN` comment; a value
+# that is genuinely absent (subscription/local — no per-token price; no
+# documented ceiling) is left blank, meaning "no limit / no charge".
+#
+# NOTE on CLI providers: the `capabilities` here are what TARS advertises, not
+# the CLI's native transport. Every CLI runs under the buffered AgentCliBackend
+# (emit-after-turn), so tars advertises `streaming=false` + `cancel=false` even
+# where the underlying CLI streams / interrupts (preserving the registry
+# CLI-conformance invariant). DATA.md's native cancel/stream notes are kept in
+# comments per provider.
+
+schema_version = 2
+verified = "2026-07-10"
+
+# ═══════════════════════════════ HTTP providers ═══════════════════════════════
+
+# ─────────────────────────────────── OpenAI ───────────────────────────────────
+# base: https://api.openai.com/v1  ·  key: OPENAI_API_KEY
+[providers.openai]
+interface = "http"
+billed = "per_token"
+default = "gpt-5.4"          # reasoning defaults low → fast/cheap, toggleable up
+coding_default = "gpt-5.6-sol"   # codex fronts these
+
+  [providers.openai.capabilities]
+  structured_output = "strict_schema"
+  tool_use = true
+  parallel_tool_calls = true
+  cancel = true
+  streaming = true             # EXCEPT gpt-5.5-pro (per-model; not expressible here)
+  prompt_cache = "implicit_prefix"   # auto ≥1024 tok
+  # cache-write fee is GPT-5.6-family-only at 1.25× input — per-model, not
+  # provider-level, so left blank here. reasoning tokens billed at output rate
+  # (per-model output rate; no single provider thinking price to carry).
+
+[[providers.openai.models]]
+id = "gpt-5.6-sol"
+tier = "flagship"
+input = 5.00
+output = 30.00
+cached_input = 0.50
+context = 1_050_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+aliases = ["gpt-5.6"]
+
+[[providers.openai.models]]
+id = "gpt-5.6-terra"
+tier = "mid"
+input = 2.50
+output = 15.00
+cached_input = 0.25
+context = 1_050_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-5.6-luna"
+tier = "lite"
+input = 1.00
+output = 6.00
+cached_input = 0.10
+context = 1_050_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-5.5"
+tier = "flagship"
+input = 5.00
+output = 30.00
+cached_input = 0.50
+context = 1_050_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-5.5-pro"
+tier = "flagship"
+input = 30.00
+output = 180.00
+# cached_input blank: no cache discount on the -pro tier
+context = 1_050_000
+max_output = 128_000
+thinking = "only"
+modalities = ["text", "vision"]
+status = "ga"                # NOTE: gpt-5.5-pro has NO streaming (per-model; the
+                            # block-level streaming=true can't express this)
+
+[[providers.openai.models]]
+id = "gpt-5.4"
+tier = "mid"
+input = 2.50
+output = 15.00
+cached_input = 0.25
+context = 1_050_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-5.4-mini"
+tier = "fast"
+input = 0.75
+output = 4.50
+cached_input = 0.075
+context = 400_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-5.4-nano"
+tier = "lite"
+input = 0.20
+output = 1.25
+cached_input = 0.02
+context = 400_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.openai.models]]
+id = "gpt-5.4-pro"
+tier = "flagship"
+input = 30.00
+output = 180.00
+# cached_input blank: no cache discount on the -pro tier
+context = 1_050_000
+max_output = 128_000
+thinking = "only"
+modalities = ["text", "vision"]
+status = "ga"
+
+# ───────────────────────────────── Anthropic ──────────────────────────────────
+# base: https://api.anthropic.com  ·  key: ANTHROPIC_API_KEY
+[providers.anthropic]
+interface = "http"
+billed = "per_token"
+default = "claude-opus-4-8"
+
+  [providers.anthropic.capabilities]
+  structured_output = "strict_schema"   # output_config.format schema-enforces
+  tool_use = true
+  parallel_tool_calls = true
+  cancel = true
+  streaming = true
+  prompt_cache = "explicit_marker"
+  # cache-write fee is 1.25×(5m) / 2×(1h) of input — per-model (scales with the
+  # row's input price), so no single provider cache_creation number is carried.
+  # thinking billed at output rate (per-model output rate).
+
+[[providers.anthropic.models]]
+id = "claude-fable-5"
+tier = "flagship"
+input = 10.00
+output = 50.00
+cached_input = 1.00
+context = 1_000_000
+max_output = 128_000
+thinking = "only"
+modalities = ["text", "vision", "pdf"]
+status = "ga"
+
+[[providers.anthropic.models]]
+id = "claude-opus-4-8"
+tier = "flagship"
+input = 5.00
+output = 25.00
+cached_input = 0.50
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision", "pdf"]
+status = "ga"
+
+[[providers.anthropic.models]]
+id = "claude-opus-4-7"
+tier = "flagship"
+input = 5.00
+output = 25.00
+cached_input = 0.50
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision", "pdf"]
+status = "ga"
+
+[[providers.anthropic.models]]
+id = "claude-opus-4-6"
+tier = "flagship"
+input = 5.00
+output = 25.00
+cached_input = 0.50
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision", "pdf"]
+status = "ga"
+
+[[providers.anthropic.models]]
+id = "claude-sonnet-5"
+tier = "mid"
+input = 3.00                 # intro 2.00 in / 10.00 out through 2026-08-31
+output = 15.00
+cached_input = 0.30
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision", "pdf"]
+status = "ga"
+
+[[providers.anthropic.models]]
+id = "claude-sonnet-4-6"
+tier = "mid"
+input = 3.00
+output = 15.00
+cached_input = 0.30
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision", "pdf"]
+status = "ga"
+
+[[providers.anthropic.models]]
+id = "claude-haiku-4-5"
+tier = "fast"
+input = 1.00
+output = 5.00
+cached_input = 0.10
+context = 200_000
+max_output = 64_000
+thinking = "optional"
+modalities = ["text", "vision", "pdf"]
+status = "ga"
+
+# ─────────────────────────────────── Gemini ───────────────────────────────────
+# base: Google Generative Language API (NOT Vertex)  ·  key: GEMINI_API_KEY
+[providers.gemini]
+interface = "http"
+billed = "per_token"
+default = "gemini-3.5-flash"  # thinking=optional (off verified live) — good default: honors thinking-off
+
+  [providers.gemini.capabilities]
+  structured_output = "strict_schema"    # responseSchema
+  tool_use = true
+  parallel_tool_calls = true
+  cancel = true
+  streaming = true
+  prompt_cache = "implicit_prefix"   # ALSO supports explicit_object (cachedContent)
+  # thinking billed at output rate. This was a per-model hack in the old gemini
+  # backend (thinking_per_million = that model's output). It is NOT expressible
+  # as one provider number, so thinking price is 0 here — a known regression to
+  # revisit if per-model thinking pricing is needed.
+
+[[providers.gemini.models]]
+id = "gemini-3.5-flash"
+tier = "fast"
+input = 1.50
+output = 9.00
+cached_input = 0.15
+context = 1_048_576
+max_output = 65_536
+thinking = "optional"        # thinking-off VERIFIED live: thinkingBudget:0 → thinking tokens=0
+                             # (gemini/adapter.rs:339-341). Research inferred "only" from the
+                             # level-enum floor — wrong; the numeric budget works.
+thinking_param = "level"
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"
+
+[[providers.gemini.models]]
+id = "gemini-3.1-flash-lite"
+tier = "lite"
+input = 0.25
+output = 1.50
+cached_input = 0.025
+context = 1_048_576
+max_output = 65_536
+thinking = "optional"        # default level `minimal` = off. Only `*-pro` is thinking-only
+                             # (adapter.rs:34). Research's "only" was a wrong paper inference.
+thinking_param = "level"
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"               # audio input 0.50 in / 0.05 cached
+# thinking-off unverified
+
+[[providers.gemini.models]]
+id = "gemini-3.1-pro-preview"
+tier = "flagship"
+input = 2.00                 # >200k tier: 4.00 in / 18.00 out / 0.40 cached
+output = 12.00
+cached_input = 0.20
+context = 1_048_576
+max_output = 65_536
+thinking = "only"
+thinking_param = "level"
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "preview"
+
+[[providers.gemini.models]]
+id = "gemini-2.5-pro"
+tier = "flagship"
+input = 1.25                 # >200k tier: 2.50 in / 15.00 out / 0.25 cached
+output = 10.00
+cached_input = 0.125
+context = 1_048_576
+max_output = 65_536
+thinking = "only"
+thinking_param = "budget"
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"
+
+[[providers.gemini.models]]
+id = "gemini-2.5-flash"
+tier = "fast"
+input = 0.30
+output = 2.50
+cached_input = 0.03
+context = 1_048_576
+max_output = 65_536
+thinking = "optional"
+thinking_param = "budget"
+modalities = ["text", "vision", "audio", "video"]
+status = "ga"               # audio input 1.00
+
+[[providers.gemini.models]]
+id = "gemini-2.5-flash-lite"
+tier = "lite"
+input = 0.10
+output = 0.40
+cached_input = 0.01
+context = 1_048_576
+max_output = 65_536
+thinking = "optional"
+thinking_param = "budget"
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"               # audio input 0.30
+
+# ────────────────────────────────── DeepSeek ──────────────────────────────────
+# base: https://api.deepseek.com (OpenAI-compatible wire, OWN provider)
+[providers.deepseek]
+interface = "http"
+billed = "per_token"
+default = "deepseek-v4-flash"
+
+  [providers.deepseek.capabilities]
+  structured_output = "json_object"  # NOT strict (schema enforce only for tool args)
+  tool_use = true
+  parallel_tool_calls = false        # UNKNOWN — couldn't confirm; conservative false
+  cancel = true
+  streaming = true
+  prompt_cache = "implicit_prefix"   # on-disk context cache; no cache-write fee
+
+[[providers.deepseek.models]]
+id = "deepseek-v4-flash"
+tier = "fast"
+input = 0.14
+output = 0.28
+cached_input = 0.0028
+context = 1_000_000
+max_output = 384_000        # documented MAX; default max_tokens UNKNOWN
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+aliases = ["deepseek-chat", "deepseek-reasoner"]  # legacy names, retire 2026-07-24
+
+[[providers.deepseek.models]]
+id = "deepseek-v4-pro"
+tier = "flagship"
+input = 0.435
+output = 0.87
+cached_input = 0.003625
+context = 1_000_000
+max_output = 384_000
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+# ──────────────────────────────────── xAI ─────────────────────────────────────
+# base: https://api.x.ai/v1 (OpenAI-compatible)  ·  key: XAI_API_KEY
+# Data-only: no ProviderConfig variant / consumer today, kept ready.
+[providers.xai]
+interface = "http"
+billed = "per_token"
+default = "grok-4.3"
+
+  [providers.xai.capabilities]
+  structured_output = "strict_schema"
+  tool_use = true
+  parallel_tool_calls = true
+  cancel = true
+  streaming = true
+  prompt_cache = "implicit_prefix"   # reasoning billed as normal output
+
+[[providers.xai.models]]
+id = "grok-4.5"
+tier = "flagship"
+input = 2.00
+output = 6.00
+cached_input = 0.50
+context = 500_000
+# max_output UNKNOWN — no cap documented, couldn't find
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+aliases = ["grok-4.5-latest"]
+
+[[providers.xai.models]]
+id = "grok-4.3"
+tier = "mid"
+input = 1.25
+output = 2.50
+cached_input = 0.20
+context = 1_000_000
+# max_output UNKNOWN
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+aliases = ["grok-4.3-latest", "grok-latest"]
+
+[[providers.xai.models]]
+id = "grok-4.20-0309-reasoning"
+tier = "reasoning"
+input = 1.25
+output = 2.50
+cached_input = 0.20
+context = 1_000_000
+# max_output UNKNOWN
+thinking = "only"
+modalities = ["text", "vision"]
+status = "ga"
+aliases = ["grok-4.20"]
+
+[[providers.xai.models]]
+id = "grok-4.20-0309-non-reasoning"
+tier = "fast"
+input = 1.25
+output = 2.50
+cached_input = 0.20
+context = 1_000_000
+# max_output UNKNOWN
+thinking = "none"
+modalities = ["text", "vision"]
+status = "ga"
+aliases = ["grok-4.20-non-reasoning"]
+
+[[providers.xai.models]]
+id = "grok-build-0.1"
+tier = "coding"
+input = 1.00
+output = 2.00
+cached_input = 0.20
+context = 256_000
+# max_output UNKNOWN
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+aliases = ["grok-code-fast-1"]
+
+# ─── Local (openai_compat family) — user picks the model, no fixed default ────
+# No model rows: the user loads whatever model at a localhost base_url, so
+# per-model facts (context/output/pricing) come from the user's config /
+# CapabilitiesOverrides, not this DB. Only the provider-level facts are known.
+
+[providers.vllm]
+interface = "http"
+billed = "free"
+
+  [providers.vllm.capabilities]
+  structured_output = "strict_schema"   # guided_json (modern vLLM default)
+  tool_use = true
+  parallel_tool_calls = false           # tool-call quality varies
+  cancel = true
+  streaming = true
+  prompt_cache = "none"                  # local = no billing incentive
+
+[providers.mlx]
+interface = "http"
+billed = "free"
+
+  [providers.mlx.capabilities]
+  structured_output = "json_object"      # strict schema is model-dependent
+  tool_use = true
+  parallel_tool_calls = false
+  cancel = true
+  streaming = true
+  prompt_cache = "none"
+
+[providers.llamacpp]
+interface = "http"
+billed = "free"
+
+  [providers.llamacpp.capabilities]
+  structured_output = "json_object"      # grammar-constrained strict is model-dep
+  tool_use = true
+  parallel_tool_calls = false
+  cancel = true
+  streaming = true
+  prompt_cache = "none"
+
+# ═══════════════════════════════ API providers ════════════════════════════════
+
+# ───────────────────────── claude_sdk (Anthropic Agent SDK) ────────────────────
+# subprocess daemon; `claude login` → subscription. pricing ALL BLANK.
+[providers.claude_sdk]
+interface = "api"
+billed = "subscription"
+default = "claude-sonnet-5"   # DATA.md says the SDK alias "claude-sonnet-4-5";
+                             # that isn't a concrete row, so default the current
+                             # concrete sonnet (aliased below).
+
+  [providers.claude_sdk.capabilities]
+  structured_output = "strict_schema"    # SDK outputFormat json_schema, coexists w/ tools
+  tool_use = false                       # daemon disallows tools back to tars
+  parallel_tool_calls = false
+  cancel = true                          # per-call cancel path
+  streaming = false                      # daemon buffers
+  prompt_cache = "delegated"
+
+# modalities: underlying models are text+vision, but the tars daemon feeds
+# TEXT ONLY today → describe what tars surfaces (text), not the model.
+[[providers.claude_sdk.models]]
+id = "claude-fable-5"
+tier = "flagship"
+context = 1_000_000
+max_output = 128_000
+thinking = "only"
+modalities = ["text"]
+status = "ga"
+
+[[providers.claude_sdk.models]]
+id = "claude-opus-4-8"
+tier = "flagship"
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+[[providers.claude_sdk.models]]
+id = "claude-sonnet-5"
+tier = "mid"
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+aliases = ["claude-sonnet-4-5"]
+
+[[providers.claude_sdk.models]]
+id = "claude-haiku-4-5"
+tier = "fast"
+context = 200_000
+max_output = 64_000
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+# ─────────────────────────── bedrock (AWS Bedrock Converse) ────────────────────
+# via aws_sdk, Converse. per-token billed (AWS standard-region = Anthropic list).
+[providers.bedrock]
+interface = "api"
+billed = "per_token"
+default = "anthropic.claude-sonnet-4-5-20250929-v1:0"   # DATA.md default is the
+                             # us.* cross-region profile form (aliased below);
+                             # default the concrete Converse id for the invariant.
+
+  [providers.bedrock.capabilities]
+  structured_output = "tool_use_emulation"   # Converse has no json_schema
+  tool_use = true
+  parallel_tool_calls = true
+  cancel = true
+  streaming = true                           # ConverseStream
+  prompt_cache = "explicit_marker"
+
+# Bedrock uses ITS OWN Converse model IDs. thinking reflects true model
+# capability (optional); the tars-bedrock supports_thinking=false is a separate
+# code M0 limitation, not a data fact. Fable5/Opus4.8/4.7/Sonnet5 are
+# Mantle-endpoint-only (Converse IDs UNKNOWN) → not added (tars uses Converse).
+[[providers.bedrock.models]]
+id = "anthropic.claude-haiku-4-5-20251001-v1:0"
+tier = "fast"
+input = 1.00
+output = 5.00
+cached_input = 0.10
+context = 200_000
+max_output = 64_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.bedrock.models]]
+id = "anthropic.claude-sonnet-4-5-20250929-v1:0"
+tier = "mid"
+input = 3.00
+output = 15.00
+cached_input = 0.30
+context = 200_000
+max_output = 64_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+aliases = ["us.anthropic.claude-sonnet-4-5-20250929-v1:0"]
+
+[[providers.bedrock.models]]
+id = "anthropic.claude-opus-4-5-20251101-v1:0"
+tier = "flagship"
+input = 5.00
+output = 25.00
+cached_input = 0.50
+context = 200_000
+max_output = 64_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.bedrock.models]]
+id = "anthropic.claude-opus-4-6-v1"
+tier = "flagship"
+input = 5.00
+output = 25.00
+cached_input = 0.50
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+[[providers.bedrock.models]]
+id = "anthropic.claude-sonnet-4-6"
+tier = "mid"
+input = 3.00
+output = 15.00
+cached_input = 0.30
+context = 1_000_000
+max_output = 128_000
+thinking = "optional"
+modalities = ["text", "vision"]
+status = "ga"
+
+# ═══════════════════════════════ CLI providers ════════════════════════════════
+# All: structured_output=none (rule 1 — --output-schema is silently ignored when
+# tools/MCP are active, and these are always tool-carrying agent runs).
+# tool_use=false (internal loop). prompt_cache=delegated. pricing ALL BLANK.
+# streaming/cancel forced false (buffered AgentCliBackend); DATA's native
+# stream/cancel notes are in comments.
+
+# ────────────────────────── claude_cli (claude -p) ─────────────────────────────
+[providers.claude_cli]
+interface = "cli"
+billed = "subscription"
+default = "claude-sonnet-4-5"
+
+  [providers.claude_cli.capabilities]
+  structured_output = "none"
+  tool_use = false
+  parallel_tool_calls = false
+  cancel = false             # native: mid-run interrupt_receipt_v1 (tars buffers)
+  streaming = false          # native: stream-json (tars buffers)
+  prompt_cache = "delegated"
+
+# Output clamp: CLAUDE_CODE_MAX_OUTPUT_TOKENS (env default ~32k, commonly 64k,
+# model cap is the ceiling). max_output below is the CLI clamp, not model cap.
+[[providers.claude_cli.models]]
+id = "claude-sonnet-4-5"
+tier = "mid"
+context = 200_000
+max_output = 64_000
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+[[providers.claude_cli.models]]
+id = "claude-opus-4-8"
+tier = "flagship"
+context = 1_000_000
+max_output = 64_000         # CLI clamp
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+# ─────────────────────────── codex_cli (codex exec) ────────────────────────────
+[providers.codex_cli]
+interface = "cli"
+billed = "subscription"
+default = "gpt-5.6-sol"
+
+  [providers.codex_cli.capabilities]
+  structured_output = "none"  # --output-schema exists but ignored with tools
+  tool_use = false
+  parallel_tool_calls = false
+  cancel = false             # UNKNOWN native (kill-subprocess); buffered anyway
+  streaming = false          # native: --json JSONL (tars buffers)
+  prompt_cache = "delegated"
+
+# context / max_output NOT documented for codex → blank (# UNKNOWN). tiers
+# mirror the openai block. modalities: CLI surfaces text.
+[[providers.codex_cli.models]]
+id = "gpt-5.6-sol"
+tier = "flagship"
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+[[providers.codex_cli.models]]
+id = "gpt-5.6-terra"
+tier = "mid"
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+[[providers.codex_cli.models]]
+id = "gpt-5.5"
+tier = "flagship"
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+[[providers.codex_cli.models]]
+id = "gpt-5.4"
+tier = "mid"
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+# ───────────────────── gemini_cli (gemini login) — CONSUMER SUNSET ─────────────
+# Consumer path sunset 2026-06-18, enterprise-only now.
+[providers.gemini_cli]
+interface = "cli"
+billed = "subscription"
+default = "gemini-2.5-flash"
+
+  [providers.gemini_cli.capabilities]
+  structured_output = "none"  # no schema flag (issue #8022)
+  tool_use = false
+  parallel_tool_calls = false
+  cancel = false             # UNKNOWN native (kill-subprocess)
+  streaming = false          # native: stream-json (tars buffers)
+  prompt_cache = "delegated"
+
+# context / max_output blank (# UNKNOWN).
+[[providers.gemini_cli.models]]
+id = "gemini-3-pro-preview"
+tier = "flagship"
+thinking = "only"
+modalities = ["text"]
+status = "preview"
+
+[[providers.gemini_cli.models]]
+id = "gemini-2.5-pro"
+tier = "flagship"
+thinking = "only"
+modalities = ["text"]
+status = "ga"
+
+[[providers.gemini_cli.models]]
+id = "gemini-2.5-flash"
+tier = "fast"
+thinking = "optional"
+modalities = ["text"]
+status = "ga"
+
+# ───────────── opencode — BYO-key frontend over models.dev (open set) ──────────
+# No fixed model set (selected as provider/model), so NO model rows and no
+# default. billed=subscription is the closest marker: tars sees no per-token
+# price (upstream is BYO-key per-token — the invariant never fires either way,
+# there being no rows).
+[providers.opencode]
+interface = "cli"
+billed = "subscription"
+
+  [providers.opencode.capabilities]
+  structured_output = "none"  # no schema
+  tool_use = false
+  parallel_tool_calls = false
+  cancel = false             # UNKNOWN native (kill-subprocess)
+  streaming = false          # UNKNOWN native (treat non-streaming)
+  prompt_cache = "delegated"
+# UNKNOWN: per-CLI output limit, headless schema, machine stream contract.
+
+# ─────────────────── antigravity (agy) — WEAKEST DATA ─────────────────────────
+# Google account sub. Model id strings NOT documented; only `/model
+# gemini-3.1-pro` confirmed. NON-TTY STDOUT DROP BUG (issue #76): `-p` under a
+# pipe/subprocess silently drops stdout — exactly how tars runs it.
+[providers.antigravity]
+interface = "cli"
+billed = "subscription"
+default = "gemini-3.1-pro"
+
+  [providers.antigravity.capabilities]
+  structured_output = "none"
+  tool_use = false
+  parallel_tool_calls = false
+  cancel = false             # UNKNOWN native (kill-subprocess)
+  streaming = false          # UNKNOWN native (non-TTY stdout DROP bug #76)
+  prompt_cache = "delegated"
+
+[[providers.antigravity.models]]
+id = "gemini-3.1-pro"
+tier = "flagship"
+thinking = "optional"       # UNKNOWN — only the id is confirmed; conservative fill
+modalities = ["text"]
+status = "ga"
+# Other ids (Gemini3.5Flash, ClaudeSonnet/Opus, GPT-OSS-120B) undocumented.

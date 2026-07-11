@@ -192,7 +192,10 @@ impl TenantBudgetMiddleware {
         Self {
             store,
             pricing: capabilities.pricing,
-            default_max_output_tokens: capabilities.max_output_tokens,
+            // `None` output cap (local/unbounded) → conservative worst-case for
+            // cost estimation. Local providers price at $0, so the exact bound
+            // is immaterial there; paid providers carry a real cap.
+            default_max_output_tokens: capabilities.max_output_tokens.unwrap_or(4_096),
             zero_pricing_warned: AtomicBool::new(false),
         }
     }

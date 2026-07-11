@@ -147,8 +147,13 @@ impl CassetteProvider {
     ) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
-            capabilities: caps
-                .unwrap_or_else(|| Capabilities::text_only_baseline(Pricing::default())),
+            capabilities: caps.unwrap_or_else(|| {
+                // Legacy cassette with no recorded caps: text-only baseline
+                // stamped Mock — cassette places no real call.
+                let mut c = Capabilities::text_only_baseline(Pricing::default());
+                c.interface = tars_types::InterfaceKind::Mock;
+                c
+            }),
             mode: Mode::Replay { cassette },
         })
     }

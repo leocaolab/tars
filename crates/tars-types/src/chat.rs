@@ -179,20 +179,25 @@ impl ChatRequest {
         // the obvious-overflow case to keep false-positive rate low.
         let prompt_chars = estimate_prompt_chars(self);
         let estimated_tokens = u32::try_from(prompt_chars / 4).unwrap_or(u32::MAX);
-        if estimated_tokens > caps.max_context_tokens {
-            reasons.push(CompatibilityReason::ContextWindowExceeded {
-                estimated_prompt_tokens: estimated_tokens,
-                max_context_tokens: caps.max_context_tokens,
-            });
+        // `None` context cap = no ceiling to enforce (local model, unknown
+        // limit) — skip the check entirely.
+        if let Some(max_ctx) = caps.max_context_tokens {
+            if estimated_tokens > max_ctx {
+                reasons.push(CompatibilityReason::ContextWindowExceeded {
+                    estimated_prompt_tokens: estimated_tokens,
+                    max_context_tokens: max_ctx,
+                });
+            }
         }
 
         // Max output tokens — caller asks for more output than the
-        // provider supports.
-        if let Some(req_max) = self.max_output_tokens {
-            if req_max > caps.max_output_tokens {
+        // provider supports. Both the request cap and the provider cap must
+        // be present for there to be anything to exceed.
+        if let (Some(req_max), Some(max_out)) = (self.max_output_tokens, caps.max_output_tokens) {
+            if req_max > max_out {
                 reasons.push(CompatibilityReason::MaxOutputTokensExceeded {
                     requested: req_max,
-                    max: caps.max_output_tokens,
+                    max: max_out,
                 });
             }
         }
@@ -412,21 +417,21 @@ impl Capabilities {
         {
             reasons.push(CompatibilityReason::StructuredOutputNotEnforced);
         }
-        if req.estimated_max_prompt_tokens > 0
-            && req.estimated_max_prompt_tokens > self.max_context_tokens
-        {
-            reasons.push(CompatibilityReason::ContextWindowExceeded {
-                estimated_prompt_tokens: req.estimated_max_prompt_tokens,
-                max_context_tokens: self.max_context_tokens,
-            });
+        if let Some(max_ctx) = self.max_context_tokens {
+            if req.estimated_max_prompt_tokens > 0 && req.estimated_max_prompt_tokens > max_ctx {
+                reasons.push(CompatibilityReason::ContextWindowExceeded {
+                    estimated_prompt_tokens: req.estimated_max_prompt_tokens,
+                    max_context_tokens: max_ctx,
+                });
+            }
         }
-        if req.estimated_max_output_tokens > 0
-            && req.estimated_max_output_tokens > self.max_output_tokens
-        {
-            reasons.push(CompatibilityReason::MaxOutputTokensExceeded {
-                requested: req.estimated_max_output_tokens,
-                max: self.max_output_tokens,
-            });
+        if let Some(max_out) = self.max_output_tokens {
+            if req.estimated_max_output_tokens > 0 && req.estimated_max_output_tokens > max_out {
+                reasons.push(CompatibilityReason::MaxOutputTokensExceeded {
+                    requested: req.estimated_max_output_tokens,
+                    max: max_out,
+                });
+            }
         }
 
         if reasons.is_empty() {
@@ -597,8 +602,9 @@ mod tests {
         let mut text_only = HashSet::new();
         text_only.insert(Modality::Text);
         Capabilities {
-            max_context_tokens: 32_768,
-            max_output_tokens: 4096,
+            interface: crate::InterfaceKind::Http,
+            max_context_tokens: Some(32_768),
+            max_output_tokens: Some(4096),
             supports_tool_use: false,
             supports_parallel_tool_calls: false,
             supports_structured_output: StructuredOutputMode::None,
@@ -618,8 +624,9 @@ mod tests {
         both.insert(Modality::Text);
         both.insert(Modality::Image);
         Capabilities {
-            max_context_tokens: 200_000,
-            max_output_tokens: 8192,
+            interface: crate::InterfaceKind::Http,
+            max_context_tokens: Some(200_000),
+            max_output_tokens: Some(8192),
             supports_tool_use: true,
             supports_parallel_tool_calls: true,
             supports_structured_output: StructuredOutputMode::StrictSchema,
@@ -879,8 +886,8 @@ mod tests {
     /// build via `text_only_baseline` then zero out supports_* fields.
     fn caps_zero() -> Capabilities {
         let mut c = Capabilities::text_only_baseline(Pricing::default());
-        c.max_context_tokens = 0;
-        c.max_output_tokens = 0;
+        c.max_context_tokens = Some(0);
+        c.max_output_tokens = Some(0);
         c.supports_tool_use = false;
         c.supports_parallel_tool_calls = false;
         c.supports_structured_output = StructuredOutputMode::None;
@@ -1010,8 +1017,8 @@ mod tests {
             ..Default::default()
         };
         let mut caps = caps_minimal();
-        caps.max_context_tokens = 0;
-        caps.max_output_tokens = 0;
+        caps.max_context_tokens = Some(0);
+        caps.max_output_tokens = Some(0);
         // Default everything else — still Compatible.
         assert!(matches!(
             caps.check_requirements(&reqs),

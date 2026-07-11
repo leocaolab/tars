@@ -175,8 +175,9 @@ pub fn default_capabilities() -> Capabilities {
     modalities_in.insert(Modality::Text);
     modalities_in.insert(Modality::Image);
     Capabilities {
-        max_context_tokens: 200_000,
-        max_output_tokens: 8_192,
+        interface: tars_types::InterfaceKind::Api,
+        max_context_tokens: Some(200_000),
+        max_output_tokens: Some(8_192),
         supports_tool_use: true,
         supports_parallel_tool_calls: true,
         supports_structured_output: StructuredOutputMode::ToolUseEmulation,

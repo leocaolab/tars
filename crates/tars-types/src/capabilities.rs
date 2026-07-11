@@ -9,10 +9,61 @@ use serde::{Deserialize, Serialize};
 
 use crate::usage::Pricing;
 
+/// How tars reaches and DRIVES a provider — the interface, not the wire dialect.
+///
+/// Two axes are folded into this one label, and NEITHER is observable at runtime,
+/// so it is always DECLARED (a total match over `ProviderConfig` variants), never
+/// detected:
+///   - who runs the agent loop: `Cli` = the vendor binary runs its own loop with
+///     its own tools and edits the worktree directly (tars hands a prompt, gets
+///     final text, MUST NOT hand it a tool registry); every other kind = tars
+///     drives the loop.
+///   - what the transport is: `Http` = HTTP tars constructs itself; `Api` = a
+///     vendor SDK / long-lived daemon (claude_sdk over NDJSON, bedrock over the
+///     AWS SDK). `claude_cli` and `mlx` are BOTH "local processes" yet land in
+///     different kinds — locality is a separate axis this does not model.
+///
+/// Contrast arc's deleted `ProviderType::from_wire`, whose `_ => Other` silently
+/// misfiled `opencode`/`antigravity`: this enum has no catch-all, so a new variant
+/// fails to compile until its interface is declared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterfaceKind {
+    /// A vendor agent binary that runs its OWN loop with its OWN tools.
+    /// {claude_cli, gemini_cli, codex_cli, opencode, antigravity}
+    Cli,
+    /// tars drives the loop and supplies the tools, over HTTP it constructs.
+    /// {openai, anthropic, gemini, deepseek, xai, vllm, mlx, llamacpp}
+    Http,
+    /// tars drives the loop, but the wire is a vendor SDK / daemon, not raw HTTP
+    /// tars builds. {claude_sdk (Node NDJSON daemon), bedrock (aws_sdk, SigV4)}
+    Api,
+    /// No call is placed. {mock, cassette}
+    Mock,
+}
+
+fn default_interface() -> InterfaceKind {
+    InterfaceKind::Http
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Capabilities {
-    pub max_context_tokens: u32,
-    pub max_output_tokens: u32,
+    /// How tars reaches and drives this provider (declared, never detected).
+    ///
+    /// Defaults to `Http` when absent so serialized descriptors predating this
+    /// field (committed cassette files) still deserialize — `interface` is
+    /// cosmetic on a replayed cassette.
+    #[serde(default = "default_interface")]
+    pub interface: InterfaceKind,
+
+    /// Maximum prompt-context window. `None` = no ceiling to enforce (the
+    /// provider imposes no documented limit, or it is genuinely unknown — the
+    /// data file's comment tells a human which). Readers that enforce a ceiling
+    /// MUST treat `None` as "don't enforce".
+    pub max_context_tokens: Option<u32>,
+    /// Maximum tokens the caller may request as output. `None` = no ceiling
+    /// (see [`Self::max_context_tokens`]).
+    pub max_output_tokens: Option<u32>,
 
     pub supports_tool_use: bool,
     pub supports_parallel_tool_calls: bool,
@@ -73,8 +124,12 @@ impl Capabilities {
         let mut modalities = HashSet::new();
         modalities.insert(Modality::Text);
         Self {
-            max_context_tokens: 32_000,
-            max_output_tokens: 4_096,
+            // The baseline is the fallback for a provider the data file doesn't
+            // name (an anonymous `openai_compat` a user pointed at a local
+            // server). Those are HTTP tars drives itself.
+            interface: InterfaceKind::Http,
+            max_context_tokens: Some(32_000),
+            max_output_tokens: Some(4_096),
             supports_tool_use: false,
             supports_parallel_tool_calls: false,
             supports_structured_output: StructuredOutputMode::None,
@@ -95,6 +150,9 @@ impl Capabilities {
 pub enum StructuredOutputMode {
     None,
     /// `{"type":"json_object"}` — JSON-shaped output but no schema enforcement.
+    /// The `json_object` alias lets `data/provider.toml` spell it the way the
+    /// wire does without changing this enum's serialized form.
+    #[serde(alias = "json_object")]
     JsonObjectMode,
     /// Decode-time schema enforcement (OpenAI strict / Gemini responseSchema).
     StrictSchema,

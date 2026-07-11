@@ -19,12 +19,11 @@
 //! the same write-jail as claude (Doc 29 / FR-3) — confined by default, no env
 //! gate required.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tars_types::{
-    Capabilities, Modality, PromptCacheKind, ProviderId, StructuredOutputMode,
+    Capabilities, ProviderId,
 };
 
 use crate::backends::cli::{AgentCliBackend, GeminiCliDialect, SharedCliRunner};
@@ -78,24 +77,9 @@ impl GeminiCliProviderBuilder {
     }
 }
 
+/// Assembled from the provider DB (`data/provider.toml`) `gemini_cli` block.
 fn default_capabilities() -> Capabilities {
-    let mut text = HashSet::new();
-    text.insert(Modality::Text);
-    Capabilities {
-        max_context_tokens: 1_048_576, // Gemini 2.5+ class
-        max_output_tokens: 8_192,
-        supports_tool_use: false, // CLI -p mode doesn't expose function calling
-        supports_parallel_tool_calls: false,
-        supports_structured_output: StructuredOutputMode::None,
-        supports_vision: false,
-        supports_thinking: false,
-        supports_cancel: false, // spawn-per-call mode
-        prompt_cache: PromptCacheKind::Delegated,
-        streaming: false,
-        modalities_in: text.clone(),
-        modalities_out: text,
-        pricing: tars_types::Pricing::default(),
-    }
+    tars_config::capabilities_for("gemini_cli", "")
 }
 
 /// Convenience builder.

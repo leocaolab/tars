@@ -53,7 +53,9 @@ pub use auth::Auth;
 pub use batch::{BatchResultItem, BatchStatus};
 pub use bless::{Assert, Bless, BlessError, BlessOutcome, Codec, Drift, MatchTier};
 pub use cache::{CacheDirective, CacheHitInfo, ProviderCacheHandle, systemtime_millis};
-pub use capabilities::{Capabilities, Modality, PromptCacheKind, StructuredOutputMode};
+pub use capabilities::{
+    Capabilities, InterfaceKind, Modality, PromptCacheKind, StructuredOutputMode,
+};
 pub use chat::{
     CapabilityRequirements, ChatRequest, CompatibilityCheck, CompatibilityReason, ContentBlock,
     ImageData, Message,

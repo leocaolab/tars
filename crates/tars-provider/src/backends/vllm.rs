@@ -97,33 +97,12 @@ pub fn vllm_local(
     )
 }
 
+/// Provider-level caps from the DB (`data/provider.toml`) `vllm` block. The
+/// block carries no model rows (the user picks the served model), so the
+/// per-model facts (context/output window) come out `None` — no ceiling to
+/// enforce — and the user's `CapabilitiesOverrides` correct them.
 fn local_openai_compat_capabilities() -> tars_types::Capabilities {
-    use std::collections::HashSet;
-    use tars_types::{Capabilities, Modality, Pricing, PromptCacheKind, StructuredOutputMode};
-
-    let mut modalities = HashSet::new();
-    modalities.insert(Modality::Text);
-    Capabilities {
-        // Conservative defaults — overridden per-deployment via builder.
-        max_context_tokens: 32_768,
-        max_output_tokens: 4_096,
-        supports_tool_use: true,
-        supports_parallel_tool_calls: false, // vLLM tool-call quality varies
-        // Assumes the vLLM server has `guided_json` enabled (it is the
-        // default in modern vLLM, but older or stripped builds may not
-        // ship it). If the deployment doesn't support guided_json,
-        // structured-output requests will fail at runtime with a 4xx
-        // from the server — override this capability via the builder.
-        supports_structured_output: StructuredOutputMode::StrictSchema, // guided_json
-        supports_vision: false,
-        supports_thinking: false,
-        supports_cancel: true,
-        prompt_cache: PromptCacheKind::None, // local servers don't bill, no incentive
-        streaming: true,
-        modalities_in: modalities.clone(),
-        modalities_out: modalities,
-        pricing: Pricing::default(), // local = free
-    }
+    tars_config::capabilities_for("vllm", "")
 }
 
 #[cfg(test)]

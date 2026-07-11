@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tars_types::{
-    Capabilities, Modality, PromptCacheKind, ProviderId, StructuredOutputMode,
+    Capabilities, ProviderId,
 };
 
 use crate::backends::cli::{
@@ -116,29 +116,9 @@ impl ClaudeCliProviderBuilder {
     }
 }
 
+/// Assembled from the provider DB (`data/provider.toml`) `claude_cli` block.
 fn default_capabilities() -> Capabilities {
-    let mut text = std::collections::HashSet::new();
-    text.insert(Modality::Text);
-    Capabilities {
-        max_context_tokens: 200_000,
-        // CLI doesn't expose --max-output-tokens; we post-truncate.
-        max_output_tokens: 64_000,
-        supports_tool_use: false, // CLI -p mode doesn't expose tool use
-        supports_parallel_tool_calls: false,
-        supports_structured_output: StructuredOutputMode::None,
-        supports_vision: false,
-        supports_thinking: false,
-        // First iteration: spawn-per-call; cancel works only via Drop
-        // before the call begins. Mid-call cancel needs the long-lived
-        // mode (Doc 01 §6.2.1).
-        supports_cancel: false,
-        prompt_cache: PromptCacheKind::Delegated,
-        streaming: false,
-        modalities_in: text.clone(),
-        modalities_out: text,
-        // Subscription-billed; per-token pricing N/A here.
-        pricing: tars_types::Pricing::default(),
-    }
+    tars_config::capabilities_for("claude_cli", "")
 }
 
 /// Convenience builder — the most common path.

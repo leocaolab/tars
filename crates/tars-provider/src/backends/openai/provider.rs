@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest, Modality,
-    ProviderError, ProviderId, RequestContext, StructuredOutputMode,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest,
+    ProviderError, ProviderId, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver};
@@ -118,25 +118,12 @@ impl OpenAiProviderBuilder {
     }
 }
 
+/// Default OpenAI capabilities, assembled from the provider DB
+/// (`data/provider.toml`) for OpenAI's default model — no longer a
+/// hand-written literal. Used as the builder fallback when the registry
+/// doesn't pass an explicit descriptor.
 pub fn default_openai_capabilities() -> Capabilities {
-    use std::collections::HashSet;
-    let mut modalities = HashSet::new();
-    modalities.insert(Modality::Text);
-    Capabilities {
-        max_context_tokens: 128_000,
-        max_output_tokens: 16_384,
-        supports_tool_use: true,
-        supports_parallel_tool_calls: true,
-        supports_structured_output: StructuredOutputMode::StrictSchema,
-        supports_vision: false, // gpt-4o supports vision; per-model override expected
-        supports_thinking: false,
-        supports_cancel: true, // close stream → reqwest cancels HTTP body
-        prompt_cache: tars_types::PromptCacheKind::ImplicitPrefix { min_tokens: 1024 },
-        streaming: true,
-        modalities_in: modalities.clone(),
-        modalities_out: modalities,
-        pricing: tars_types::Pricing::default(),
-    }
+    tars_config::capabilities_for("openai", "")
 }
 
 /// The provider itself. Cheap to clone (`Arc` everywhere), so the

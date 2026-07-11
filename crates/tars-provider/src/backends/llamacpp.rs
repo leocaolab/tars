@@ -84,37 +84,11 @@ pub fn llamacpp_local(
     )
 }
 
-/// Conservative defaults tuned for Ryzen iGPU / Apple Silicon hosts
-/// running quantized GGUF models. Override per-deployment.
+/// Provider-level caps from the DB (`data/provider.toml`) `llamacpp` block. No
+/// model rows (the user loads the GGUF), so context/output come out `None`;
+/// `CapabilitiesOverrides` set the real window per deployment.
 fn llamacpp_default_capabilities() -> tars_types::Capabilities {
-    use std::collections::HashSet;
-    use tars_types::{Capabilities, Modality, Pricing, PromptCacheKind, StructuredOutputMode};
-
-    let mut modalities = HashSet::new();
-    modalities.insert(Modality::Text);
-    Capabilities {
-        // 8K is a safe default for 7–14B GGUFs at common quantizations;
-        // bump per deployment when running long-context models.
-        max_context_tokens: 8_192,
-        max_output_tokens: 2_048,
-        // llama.cpp added OpenAI-style tool-call support, but quality
-        // is highly model-dependent. Leave on; routing can opt out.
-        supports_tool_use: true,
-        supports_parallel_tool_calls: false,
-        // llama-server supports `response_format=json_object`; grammar-
-        // constrained strict schemas are model+template-dependent.
-        supports_structured_output: StructuredOutputMode::JsonObjectMode,
-        supports_vision: false, // multimodal needs llava/mmproj plumbing
-        supports_thinking: false,
-        supports_cancel: true,
-        // llama-server has its own `cache_prompt` mechanism but doesn't
-        // surface a billing-discount semantic the way hosted APIs do.
-        prompt_cache: PromptCacheKind::None,
-        streaming: true,
-        modalities_in: modalities.clone(),
-        modalities_out: modalities,
-        pricing: Pricing::default(), // local = free
-    }
+    tars_config::capabilities_for("llamacpp", "")
 }
 
 #[cfg(test)]
@@ -131,7 +105,11 @@ mod tests {
             caps.prompt_cache,
             tars_types::PromptCacheKind::None
         ));
-        assert_eq!(caps.max_context_tokens, 8_192);
+        // The DB `llamacpp` block carries no model rows (the user loads the
+        // GGUF), so there is no fixed context ceiling — `None` = no limit to
+        // enforce (was a hand-written 8_192 guess). A user sets the real
+        // window via CapabilitiesOverrides.
+        assert_eq!(caps.max_context_tokens, None);
     }
 
     #[tokio::test]

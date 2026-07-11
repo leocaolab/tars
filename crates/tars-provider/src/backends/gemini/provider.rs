@@ -8,8 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest, Modality,
-    PromptCacheKind, ProviderError, ProviderId, RequestContext, StructuredOutputMode,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest,
+    ProviderError, ProviderId, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};
@@ -63,49 +63,12 @@ impl GeminiProviderBuilder {
     }
 }
 
+/// Assembled from the provider DB (`data/provider.toml`) for Gemini's default
+/// model. Gemini was the ONE backend that already read the KB by hand
+/// (`data/models.toml`); that bespoke read collapses into the shared
+/// `capabilities_for` assembler.
 fn default_capabilities() -> Capabilities {
-    use std::collections::HashSet;
-    let mut modalities = HashSet::new();
-    modalities.insert(Modality::Text);
-    modalities.insert(Modality::Image);
-
-    // Source context/output limits + pricing from the model KB
-    // (`data/models.toml`) for Gemini's default model, instead of stale
-    // hardcoded numbers and a zero `Pricing` (the observed "$0 (free)"
-    // budgeting bug). Fields the KB doesn't carry per-row keep the
-    // provider-behavioral defaults below. Falls back to the previous
-    // constants if the default model is somehow absent from the KB.
-    let kb = &tars_config::MODEL_KB;
-    let entry = kb.default_model("gemini").and_then(|id| kb.find(id));
-    let max_context_tokens =
-        entry.and_then(|m| m.context).map(|c| c as u32).unwrap_or(1_048_576);
-    let max_output_tokens =
-        entry.and_then(|m| m.max_output).map(|o| o as u32).unwrap_or(8_192);
-    let pricing = entry
-        .map(|m| {
-            let mut p = m.pricing();
-            // Gemini reports `thoughts_token_count` separately and bills
-            // it at the output rate (see usage.rs / models.toml header).
-            p.thinking_per_million = p.output_per_million;
-            p
-        })
-        .unwrap_or_default();
-
-    Capabilities {
-        max_context_tokens,
-        max_output_tokens,
-        supports_tool_use: true,
-        supports_parallel_tool_calls: true,
-        supports_structured_output: StructuredOutputMode::StrictSchema,
-        supports_vision: true,
-        supports_thinking: true,
-        supports_cancel: true,
-        prompt_cache: PromptCacheKind::ExplicitObject, // cachedContents API
-        streaming: true,
-        modalities_in: modalities.clone(),
-        modalities_out: HashSet::from([Modality::Text]),
-        pricing,
-    }
+    tars_config::capabilities_for("gemini", "")
 }
 
 pub struct GeminiProvider {
