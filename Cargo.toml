@@ -5,6 +5,7 @@ members = [
     "crates/tars-utils",
     "crates/tars-sandbox",
     "crates/tars-agent",
+    "crates/tars-agent2",
     "crates/tars-config",
     "crates/tars-provider",
     "crates/tars-bedrock",

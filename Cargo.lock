@@ -6023,6 +6023,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tars-agent2"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde_json",
+ "tars-pipeline",
+ "tars-provider",
+ "tars-types",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tars-bedrock"
 version = "1.9.0"
 dependencies = [
