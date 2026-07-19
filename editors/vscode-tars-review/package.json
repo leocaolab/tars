@@ -1,0 +1,62 @@
+{
+  "name": "vscode-tars-review",
+  "displayName": "TARS Review",
+  "description": "Review the workspace with the TARS agent-2 reviewer and show findings as inline editor comments.",
+  "version": "0.1.0",
+  "publisher": "tars",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onCommand:tars.review",
+    "onCommand:tars.clearReview"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "tars.review",
+        "title": "TARS: Review with agent"
+      },
+      {
+        "command": "tars.clearReview",
+        "title": "TARS: Clear review comments"
+      }
+    ],
+    "configuration": {
+      "title": "TARS Review",
+      "properties": {
+        "tars-review.cliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the `review-cli` binary. If empty, defaults to `${workspaceFolder}/target/debug/review-cli`. Build it with `cargo build --bin review-cli`."
+        },
+        "tars-review.maxFiles": {
+          "type": "number",
+          "default": 40,
+          "description": "Maximum number of .rs files to review in one run (guards against huge workspaces / API cost)."
+        },
+        "tars-review.reviewActiveFileOnly": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, review only the active editor's file instead of the whole workspace."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  }
+}

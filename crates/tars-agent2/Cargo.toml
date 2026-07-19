@@ -19,13 +19,17 @@ tars-provider = { path = "../tars-provider" }
 
 async-trait.workspace = true
 futures.workspace = true
+serde = { workspace = true }
 serde_json.workspace = true
 tracing.workspace = true
+# `review-cli` (src/bin) needs an async runtime, and the real HTTP provider
+# needs a tokio reactor — so tokio is a normal dep, not dev-only.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
-# `examples/review` builds an OpenAI-compatible provider (DeepSeek) and models
-# structured `Finding`s. serde for the frontend-contract JSON.
-serde = { workspace = true }
-tars-config = { path = "../tars-config" }
+
+# The file-taking reviewer CLI the VSCode frontend spawns.
+[[bin]]
+name = "review-cli"
+path = "src/bin/review-cli.rs"

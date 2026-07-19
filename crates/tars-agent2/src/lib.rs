@@ -33,6 +33,7 @@ pub mod effect; // effect = an error-reducing actuation toward desired (the oper
 pub mod runtime; // the god-program (algebra): the reconcile loop → fixed point OR fuel
 pub mod components; // a concrete reference world: File (versioned) + ShellCheck (deterministic Diff)
 pub mod llm; // the LLM-driven agent, built on tars_pipeline::LlmService
+pub mod review; // the map-reduce code reviewer: Finding + LlmService construction + parse
 
 pub use agent::{Agent, Intent, Step, Wake};
 pub use components::{File, ShellCheck};
@@ -40,5 +41,6 @@ pub use diff::{Check, CheckResult, Gap, RedCheck, Spec};
 pub use effect::Observation;
 pub use llm::LlmAgent;
 pub use render::{CompView, View};
+pub use review::{Backend, Finding};
 pub use runtime::{Outcome, Runtime};
 pub use world::{CompId, Component, Version, World};
