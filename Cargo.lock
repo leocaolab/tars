@@ -6028,7 +6028,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "serde",
  "serde_json",
+ "tars-config",
  "tars-pipeline",
  "tars-provider",
  "tars-types",

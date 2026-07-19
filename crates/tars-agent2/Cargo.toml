@@ -25,3 +25,7 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+# `examples/review` builds an OpenAI-compatible provider (DeepSeek) and models
+# structured `Finding`s. serde for the frontend-contract JSON.
+serde = { workspace = true }
+tars-config = { path = "../tars-config" }

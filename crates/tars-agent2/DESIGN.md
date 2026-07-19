@@ -74,10 +74,17 @@ This is the arc `observe-operate-review` v11 journey
   fuel-bounded best-effort, never a convergence guarantee.
 
 The mapping onto this crate: `File` (versioned, `onUpdate` on write) = the demo's
-`FileComponent`; findings-as-derived-memoized-view = a future `Check` whose `eval` memoizes on
-`Component::version`; the `Runtime.anneal` loop = the demo's `loop { ensure_reviewed; if open==0
-break; run_fixer }`. The demo is the porting target; this crate is the reusable framework under
-it.
+`FileComponent`; findings-as-derived-memoized-view = a view over the review cache keyed on
+`Component::version`; the memoized reactive review = "review only files not cached at their
+current version". **Ported and runnable:** `cargo run --example review` (see
+`examples/review/main.rs`) reviews the 5-file corpus map-reduce through
+`tars_pipeline::LlmService` over the real DeepSeek provider (`OpenAiProviderBuilder`, base
+`https://api.deepseek.com`) and emits structured `Finding { file, line, message, status,
+severity }` JSON — the Phase-3 frontend contract. It deliberately does **not** drive
+`Runtime`/`Check` to a fixed point: the LLM review is a noisy judgment with no reachable fixed
+point, and agent-2's `Check` trait is sync+deterministic *by design* (you cannot express an async
+LLM judgment as a `Check` without blocking on it) — the guardrail that fixpoint reconciliation is
+for deterministic diffs (the CUJ-1 path), not LLM review.
 
 ---
 

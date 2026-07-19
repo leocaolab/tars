@@ -82,6 +82,16 @@ impl File {
         }
     }
 
+    /// The raw file content (the source an observer/reviewer reads — distinct from [`render`],
+    /// which wraps it with the path + a code fence for the agent's marks view). Its identity is
+    /// the [`Component::version`] (content-hash), so a memoized derivation over the content keys
+    /// on `(id, version)`.
+    ///
+    /// [`render`]: Component::render
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
     fn fail(&self, handler: &str, raw_args: &str, error: String) -> Observation {
         Observation::Failed {
             component: self.id.clone(),
