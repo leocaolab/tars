@@ -97,6 +97,7 @@ pub use middleware::budget::{BudgetConfigError, PerCallBudgetMiddleware};
 pub use middleware::cache::{CacheLookupMiddleware, set_cache_policy};
 pub use middleware::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use middleware::event_emitter::EventEmitterMiddleware;
+pub use middleware::rate_limit::{TpmRateLimitConfig, TpmRateLimiter};
 pub use middleware::retry::{RetryConfig, RetryMiddleware};
 pub use middleware::telemetry::TelemetryMiddleware;
 pub use middleware::tenant_budget::{

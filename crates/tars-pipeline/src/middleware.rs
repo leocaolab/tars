@@ -15,6 +15,7 @@ pub(crate) mod budget;
 pub(crate) mod cache;
 pub(crate) mod circuit_breaker;
 pub(crate) mod event_emitter;
+pub(crate) mod rate_limit;
 pub(crate) mod retry;
 pub(crate) mod telemetry;
 pub(crate) mod tenant_budget;
