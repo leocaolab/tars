@@ -47,11 +47,36 @@ pub struct DurableScheduler {
     runtime: Arc<dyn Runtime>,
     sandbox: SandboxPolicy,
     shared: Option<Arc<dyn Any + Send + Sync>>,
+    /// Roles the scheduler does NOT auto-run — they are completed by an EXTERNAL
+    /// actor (a human, via `AnswerStore::commit_step`). A runnable step whose
+    /// role is awaited PARKS: the job SUSPENDS (returns Ok, status stays
+    /// `running`) when nothing else can progress, and resumes when the external
+    /// answer lands. HITL is exactly this: a `human` step + a human Wake.
+    awaited_roles: std::collections::HashSet<String>,
 }
 
 impl DurableScheduler {
     pub fn new(store: AnswerStore, workers: WorkerRegistry, runtime: Arc<dyn Runtime>) -> Self {
-        Self { store, workers, runtime, sandbox: SandboxPolicy::default(), shared: None }
+        Self {
+            store,
+            workers,
+            runtime,
+            sandbox: SandboxPolicy::default(),
+            shared: None,
+            awaited_roles: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Declare roles completed externally (HITL / async oracle): the scheduler
+    /// never runs a worker for them; it parks + suspends until their answer is
+    /// committed out of band, then resumes.
+    pub fn with_awaited_roles<I, S>(mut self, roles: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.awaited_roles = roles.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Set the OS-confinement policy applied to every step's tools.
@@ -88,7 +113,11 @@ impl DurableScheduler {
             plan.validate().map_err(|e| DurableError::InvalidPlan(e.to_string()))?;
 
             // Pre-flight: every role resolves before any (new) step runs.
+            // Awaited (externally-completed) roles need no worker.
             for step in &plan.steps {
+                if self.awaited_roles.contains(&step.worker_role) {
+                    continue;
+                }
                 if self.workers.find(&step.worker_role).is_none() {
                     return Err(DurableError::NoWorkerForRole {
                         role: step.worker_role.clone(),
@@ -133,11 +162,17 @@ impl DurableScheduler {
                 }
             }
 
-            // ── Runnable = un-done, deps present (survived the skip pass). ──
+            // ── Runnable = un-done, deps present, NOT awaited (survived skip). ──
+            // Awaited steps are completed externally, so they never enter the
+            // worker batch — they park.
             let runnable: Vec<&PlanStep> = plan
                 .steps
                 .iter()
-                .filter(|s| !answers.contains_key(&s.id) && deps_present(s, &answers))
+                .filter(|s| {
+                    !answers.contains_key(&s.id)
+                        && deps_present(s, &answers)
+                        && !self.awaited_roles.contains(&s.worker_role)
+                })
                 .collect();
 
             if runnable.is_empty() {
@@ -145,8 +180,19 @@ impl DurableScheduler {
                     self.store.set_job_status(job_id, JOB_STATUS_DONE)?;
                     return Ok(());
                 }
-                // Nothing ready + not all resolved ⇒ a step's deps never
-                // became present. `Plan::validate` rules out the cycle
+                // ── SUSPEND (HITL): an awaited step is ready but unanswered ⇒
+                // the job parks until an external actor commits its answer.
+                // Leave status `running`; a later run_job resumes. ──
+                let parked = plan.steps.iter().any(|s| {
+                    !answers.contains_key(&s.id)
+                        && deps_present(s, &answers)
+                        && self.awaited_roles.contains(&s.worker_role)
+                });
+                if parked {
+                    return Ok(());
+                }
+                // Nothing ready + not all resolved + nothing parked ⇒ a step's
+                // deps never became present. `Plan::validate` rules out the cycle
                 // that would cause this; guard defensively.
                 let stuck = plan
                     .steps
