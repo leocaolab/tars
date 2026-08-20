@@ -6027,12 +6027,15 @@ name = "tars-agent2"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "dirs 5.0.1",
+ "dotenvy",
  "futures",
  "serde",
  "serde_json",
  "tars-pipeline",
  "tars-provider",
  "tars-types",
+ "tars-utils",
  "tempfile",
  "tokio",
  "tracing",
