@@ -204,14 +204,37 @@ impl DurableScheduler {
             }
 
             // ── Execute this batch; persist each answer (unlocks deps). ──
+            // Structured concurrency + finalizer contract (#40): every step in
+            // the batch shares a child cancel token. On the FIRST failure we
+            // CANCEL it (cascade) and DRAIN the rest — so in-flight siblings
+            // observe `ctx.cancel` and run their finalizers (delete worktree /
+            // close stream) before the batch returns, instead of being silently
+            // dropped mid-flight. Answers that land after the abort are
+            // discarded (first-error wins; they re-derive on resume).
             let prior = completed_messages(&answers);
+            let batch_cancel = CancellationToken::new();
             let mut futs = FuturesUnordered::new();
             for step in runnable {
-                futs.push(self.drive_step(job_id, &plan, step, &prior));
+                futs.push(self.drive_step(job_id, &plan, step, &prior, batch_cancel.child_token()));
             }
+            let mut first_err: Option<DurableError> = None;
             while let Some(res) = futs.next().await {
-                let answer = res?;
-                self.store.commit_step(&answer, ResultEventKind::Completed, None)?;
+                match res {
+                    Ok(answer) if first_err.is_none() => {
+                        self.store.commit_step(&answer, ResultEventKind::Completed, None)?;
+                    }
+                    Ok(_) => { /* completed after abort — discard, honor first-error */ }
+                    Err(e) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                            // Cascade: unblock every sibling's finalizer path.
+                            batch_cancel.cancel();
+                        }
+                    }
+                }
+            }
+            if let Some(e) = first_err {
+                return Err(e);
             }
         }
     }
@@ -240,6 +263,7 @@ impl DurableScheduler {
         plan: &Plan,
         step: &PlanStep,
         prior: &HashMap<String, AgentMessage>,
+        cancel: CancellationToken,
     ) -> Result<StepAnswer, DurableError> {
         let worker: Arc<dyn Worker> = self
             .workers
@@ -250,7 +274,9 @@ impl DurableScheduler {
             // One trajectory per job for the worker's own (off-able) event
             // emission; the durable checkpoint is separate.
             trajectory_id: TrajectoryId::new(job_id.to_string()),
-            cancel: CancellationToken::new(),
+            // The batch's shared cancel — cancelled on a sibling's first error
+            // so this worker can run its finalizer (the #40 contract).
+            cancel,
             refinements: Vec::new(),
             shared: self.shared.clone(),
             sandbox: self.sandbox.clone(),
