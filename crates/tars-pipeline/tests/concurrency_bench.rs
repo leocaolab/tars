@@ -237,3 +237,82 @@ async fn tpm_limiter_curve() {
     );
     eprintln!("\nmonotonicity: 3M-TPM wall {tight:?} > 30M-TPM wall {loose:?} ✓\n");
 }
+
+/// Drive `n` calls split evenly across two services, concurrently; return the
+/// combined wall time.
+async fn drive_split(a: Arc<LlmService>, b: Arc<LlmService>, n: usize) -> Duration {
+    let start = Instant::now();
+    let mut handles = Vec::with_capacity(n);
+    for i in 0..n {
+        let svc = if i % 2 == 0 { a.clone() } else { b.clone() };
+        handles.push(tokio::spawn(async move {
+            let mut s = svc
+                .call(ChatRequest::user(format!("ping {i}")), RequestContext::test_default())
+                .await
+                .expect("call");
+            while let Some(ev) = s.next().await {
+                ev.expect("event");
+            }
+        }));
+    }
+    for h in handles {
+        h.await.expect("join");
+    }
+    start.elapsed()
+}
+
+/// The account-sharing fix, behaviorally: two services over ONE shared account
+/// bucket must deliver a COMBINED rate of ~1×TPM; two services with PRIVATE
+/// buckets (the pre-fix behavior) deliver ~2×TPM. This is the airtight proof that
+/// `shared()` fixes the N×TPM quota blow-out that per-instance buckets caused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_bucket_binds_combined_rate() {
+    let latency = Duration::from_millis(5);
+    let cost = 100.0;
+    let tpm = 6_000_000u32; // 100k tok/s
+    let n = 2_000usize; // 200k tokens total across BOTH services
+    let cfg = || TpmRateLimitConfig {
+        tokens_per_minute: tpm,
+        burst_tokens: Some(6_000),
+        reserved_output_tokens: 100,
+    };
+    let build = |lim: TpmRateLimiter| {
+        Arc::new(
+            LlmService::builder(LatencyMock::new(latency), "m")
+                .layer(lim)
+                .build(),
+        )
+    };
+
+    // Two services, ONE shared account bucket.
+    let shared_wall = drive_split(
+        build(TpmRateLimiter::shared("bench-acct", cfg())),
+        build(TpmRateLimiter::shared("bench-acct", cfg())),
+        n,
+    )
+    .await;
+    // Two services, PRIVATE buckets (the pre-fix N×TPM bug).
+    let private_wall = drive_split(
+        build(TpmRateLimiter::new(cfg())),
+        build(TpmRateLimiter::new(cfg())),
+        n,
+    )
+    .await;
+
+    let shared_tpm = (n as f64 * cost) / shared_wall.as_secs_f64() * 60.0;
+    let private_tpm = (n as f64 * cost) / private_wall.as_secs_f64() * 60.0;
+    eprintln!(
+        "\n=== shared vs private bucket (2 services, configured {tpm} TPM) ===\n\
+         shared  bucket: {shared_wall:?}  combined {shared_tpm:.0} TPM (~1×)\n\
+         private bucket: {private_wall:?}  combined {private_tpm:.0} TPM (~2×, the bug)\n"
+    );
+
+    assert!(
+        shared_tpm < tpm as f64 * 1.25,
+        "shared combined {shared_tpm:.0} must be ~1×TPM {tpm}, not N×"
+    );
+    assert!(
+        private_tpm > tpm as f64 * 1.6,
+        "private combined {private_tpm:.0} must be ~2×TPM (demonstrates the pre-fix blow-out)"
+    );
+}

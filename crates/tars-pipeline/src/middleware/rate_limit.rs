@@ -23,8 +23,19 @@
 //! [`Usage`]; the unused reserve is refunded to the bucket, so the limit binds on
 //! *actual* tokens, not the worst-case reserve. A call that outruns its estimate
 //! (rare) debits the difference from future capacity.
+//!
+//! ## One bucket per provider ACCOUNT (not per LlmService)
+//!
+//! A TPM ceiling belongs to a provider account, not to a service instance. If
+//! every [`LlmService`] built its own bucket, N services over the same account
+//! would each get the full TPM → N×TPM → the real quota blows. So
+//! [`TpmRateLimiter::shared`] keys the bucket by an account string in a process-
+//! global registry: all limiters for `"anthropic:acct-A"` share ONE bucket, and
+//! their combined rate is the account TPM. [`TpmRateLimiter::new`] keeps a private
+//! bucket for the standalone / single-service / test case.
 
-use std::sync::{Arc, Once};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -74,21 +85,21 @@ impl TpmRateLimitConfig {
     }
 }
 
-/// A proactive TPM limiter as a middleware layer. Add it OUTERMOST (before
-/// telemetry / retry / cache) so the backpressure wait happens before any work:
-/// `LlmService::builder_with_inner(chain).layer(TpmRateLimiter::new(cfg)).build()`.
-pub struct TpmRateLimiter {
+/// The shared token pool — ONE per provider account. Multiple [`TpmRateLimiter`]
+/// instances over the same account share an `Arc<SharedBucket>` so the combined
+/// rate is the account TPM, not N×TPM. Holds the semaphore (the tokens) + the
+/// single refiller; the per-call cost estimate lives on the limiter, not here.
+struct SharedBucket {
     sem: Arc<Semaphore>,
     /// Refill rate, tokens per second (`TPM / 60`).
     rate_per_sec: f64,
     capacity: u32,
-    reserved_output: u32,
     /// Spawns the single refiller exactly once, on the first call.
     refiller: Once,
 }
 
-impl TpmRateLimiter {
-    pub fn new(cfg: TpmRateLimitConfig) -> Self {
+impl SharedBucket {
+    fn new(cfg: &TpmRateLimitConfig) -> Arc<Self> {
         let capacity = cfg.capacity();
         let rate_per_sec = cfg.tokens_per_minute as f64 / 60.0;
         // A bucket smaller than one tick's refill can't sustain the configured
@@ -106,28 +117,20 @@ impl TpmRateLimiter {
                 (capacity as f64 / REFILL_TICK.as_secs_f64()) as u64,
             );
         }
-        Self {
+        Arc::new(Self {
             sem: Arc::new(Semaphore::new(capacity as usize)),
             rate_per_sec,
             capacity,
-            reserved_output: cfg.reserved_output_tokens,
             refiller: Once::new(),
-        }
-    }
-
-    /// Build from a provider's capability snapshot — the output reserve comes from
-    /// the provider's `max_output_tokens` (worst case), like the budget middleware.
-    pub fn from_capabilities(tokens_per_minute: u32, caps: &Capabilities) -> Self {
-        Self::new(TpmRateLimitConfig {
-            tokens_per_minute,
-            burst_tokens: None,
-            reserved_output_tokens: caps.max_output_tokens.unwrap_or(4_096),
         })
     }
 
     /// Spawn the refiller once. Runs in the caller's runtime (first `handle` is
     /// always inside one), so construction stays runtime-free.
     fn ensure_refiller(&self) {
+        if self.refiller.is_completed() {
+            return;
+        }
         self.refiller.call_once(|| {
             let sem = self.sem.clone();
             let rate = self.rate_per_sec;
@@ -156,13 +159,102 @@ impl TpmRateLimiter {
         });
     }
 
+    /// Backpressure: park until `reserve` tokens are available, then spend them
+    /// (`forget` — the refiller, not Drop, returns tokens over time).
+    async fn acquire(&self, reserve: u32) {
+        self.ensure_refiller();
+        self.sem
+            .acquire_many(reserve)
+            .await
+            .expect("rate-limit semaphore never closed")
+            .forget();
+    }
+
+    /// Reconcile the reserve against the ACTUAL usage. Refund the unused reserve
+    /// (never past the cap → keeps `available ∈ [0, capacity]`); if the call
+    /// outran its estimate (rare), debit the overshoot from future capacity.
+    fn settle(&self, reserve: u32, actual: u32) {
+        if reserve >= actual {
+            let unused = reserve - actual;
+            let room = (self.capacity as usize).saturating_sub(self.sem.available_permits());
+            let give = (unused as usize).min(room);
+            if give > 0 {
+                self.sem.add_permits(give);
+            }
+        } else {
+            let over = actual - reserve;
+            let sem = self.sem.clone();
+            tokio::spawn(async move {
+                if let Ok(p) = sem.acquire_many_owned(over).await {
+                    p.forget();
+                }
+            });
+        }
+    }
+}
+
+/// The process-global bucket registry, keyed by provider-account string.
+fn registry() -> &'static Mutex<HashMap<String, Arc<SharedBucket>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<SharedBucket>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A proactive TPM limiter as a middleware layer. Add it OUTERMOST (before
+/// telemetry / retry / cache) so the backpressure wait happens before any work:
+/// `LlmService::builder_with_inner(chain).layer(TpmRateLimiter::shared("acct", cfg)).build()`.
+pub struct TpmRateLimiter {
+    bucket: Arc<SharedBucket>,
+    reserved_output: u32,
+}
+
+impl TpmRateLimiter {
+    /// A limiter with its OWN private bucket. Use for a single service, or tests.
+    /// For a real provider account shared by several services, use [`Self::shared`]
+    /// so they don't each get the full TPM.
+    pub fn new(cfg: TpmRateLimitConfig) -> Self {
+        Self {
+            bucket: SharedBucket::new(&cfg),
+            reserved_output: cfg.reserved_output_tokens,
+        }
+    }
+
+    /// A limiter that shares ONE bucket per `account_key` across the process. The
+    /// FIRST call for a key defines the bucket (`cfg`); later calls with the same
+    /// key reuse it and ignore their `cfg`'s rate/burst (they still carry their own
+    /// output reserve). Key by whatever bounds the quota — provider id, or
+    /// `provider:tenant` when accounts are per-tenant.
+    pub fn shared(account_key: impl Into<String>, cfg: TpmRateLimitConfig) -> Self {
+        let reserved_output = cfg.reserved_output_tokens;
+        let bucket = registry()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(account_key.into())
+            .or_insert_with(|| SharedBucket::new(&cfg))
+            .clone();
+        Self {
+            bucket,
+            reserved_output,
+        }
+    }
+
+    /// Build (private bucket) from a provider's capability snapshot — the output
+    /// reserve comes from the provider's `max_output_tokens` (worst case), like the
+    /// budget middleware. For a shared account bucket, use [`Self::shared`].
+    pub fn from_capabilities(tokens_per_minute: u32, caps: &Capabilities) -> Self {
+        Self::new(TpmRateLimitConfig {
+            tokens_per_minute,
+            burst_tokens: None,
+            reserved_output_tokens: caps.max_output_tokens.unwrap_or(4_096),
+        })
+    }
+
     /// The reserve (upper bound) charged before the call: input estimate + the
     /// output reserve, clamped to the bucket so one call can't exceed total
     /// capacity (which would park it forever — the refiller caps at `capacity`).
     fn reserve_tokens(&self, req: &ChatRequest) -> u32 {
         let input = estimate_input_tokens(req);
         let output = req.max_output_tokens.unwrap_or(self.reserved_output);
-        input.saturating_add(output).min(self.capacity)
+        input.saturating_add(output).min(self.bucket.capacity)
     }
 }
 
@@ -178,27 +270,16 @@ impl Middleware for TpmRateLimiter {
         ctx: RequestContext,
         next: Next<'_>,
     ) -> Result<LlmEventStream, ProviderError> {
-        self.ensure_refiller();
-
         let reserve = self.reserve_tokens(&req);
-        // Backpressure: park until the bucket holds the reserve, then spend it
-        // (`forget` — the refiller, not Drop, returns tokens over time).
-        self.sem
-            .acquire_many(reserve)
-            .await
-            .expect("rate-limit semaphore never closed")
-            .forget();
+        self.bucket.acquire(reserve).await;
 
         let stream = next.run(req, ctx).await?;
 
         // Reconcile on the terminal Finished event: refund the unused reserve so
         // the limit binds on ACTUAL tokens. Done once, inline in the drain the
-        // caller already performs — no extra task on the happy path.
-        let sem_limiter = ReconcileHandle {
-            sem: self.sem.clone(),
-            capacity: self.capacity,
-            reserve,
-        };
+        // caller already performs — no extra task on the happy path. The closure
+        // captures the shared bucket (`'static`), so it outlives `&self`.
+        let bucket = self.bucket.clone();
         let mut reconciled = false;
         let wrapped = stream.inspect(move |ev| {
             if reconciled {
@@ -209,40 +290,11 @@ impl Middleware for TpmRateLimiter {
                     usage.input_tokens.saturating_add(usage.output_tokens),
                 )
                 .unwrap_or(u32::MAX);
-                sem_limiter.settle(actual);
+                bucket.settle(reserve, actual);
                 reconciled = true;
             }
         });
         Ok(Box::pin(wrapped))
-    }
-}
-
-/// The subset of limiter state the stream-reconcile closure needs. Kept separate
-/// so the closure is `'static` (it outlives `&self`, riding the returned stream).
-struct ReconcileHandle {
-    sem: Arc<Semaphore>,
-    capacity: u32,
-    reserve: u32,
-}
-
-impl ReconcileHandle {
-    fn settle(&self, actual: u32) {
-        if self.reserve >= actual {
-            let unused = self.reserve - actual;
-            let room = (self.capacity as usize).saturating_sub(self.sem.available_permits());
-            let give = (unused as usize).min(room);
-            if give > 0 {
-                self.sem.add_permits(give);
-            }
-        } else {
-            let over = actual - self.reserve;
-            let sem = self.sem.clone();
-            tokio::spawn(async move {
-                if let Ok(p) = sem.acquire_many_owned(over).await {
-                    p.forget();
-                }
-            });
-        }
     }
 }
 
@@ -293,5 +345,20 @@ mod tests {
         // 40 chars system + 40 chars user = 80 chars → 20 tokens.
         let req = ChatRequest::user("a".repeat(40)).with_system("b".repeat(40));
         assert_eq!(estimate_input_tokens(&req), 20);
+    }
+
+    #[test]
+    fn shared_key_reuses_one_bucket_new_makes_its_own() {
+        let cfg = || TpmRateLimitConfig::new(6_000_000);
+        // Same account key → same Arc<SharedBucket> (combined rate = account TPM,
+        // NOT N×TPM). Different key → different bucket. `new` → always private.
+        let a = TpmRateLimiter::shared("acct-test-A", cfg());
+        let b = TpmRateLimiter::shared("acct-test-A", cfg());
+        let c = TpmRateLimiter::shared("acct-test-B", cfg());
+        let d = TpmRateLimiter::new(cfg());
+        let e = TpmRateLimiter::new(cfg());
+        assert!(Arc::ptr_eq(&a.bucket, &b.bucket), "same key must share one bucket");
+        assert!(!Arc::ptr_eq(&a.bucket, &c.bucket), "different key → different bucket");
+        assert!(!Arc::ptr_eq(&d.bucket, &e.bucket), "new() always builds a private bucket");
     }
 }
