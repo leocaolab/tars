@@ -228,3 +228,4 @@ scope.call_llm(step_id, prompt):
 **spike 暴露出的才是 #40/#42 的具体活:** 动态 frontier(运行时插 issue 为 stable-id 子步)、cancel 时跑 finalizer、HITL = 一个 parked step。**顺序:durable-memoize-resume(最已建、最去风险)→ 动态 frontier → #40 finalizer → HITL(resume 建对后白送)。**
 
 - **裁决:P0 spike 优先,不是 #40/#42 平行开工。** Leo 拥有 P0 方向的拍板([[runtime-convergence-standing-decision]])——spike 要不要按"auto 跑 durable step 核"这个形起步,等 Leo 点头。—— *依据:推理 + 先例*
+- **✅ Leo 点头(2026-08-19):按"auto 跑 durable step 核"起步。** 先做**判据 1 的最小闭环**:一个会崩的 durable job(fix/verify 形状,worker 记 LLM 调用次数),崩溃重启后**已完成 step skip、LLM 不重调**。spike 代码是证据、可弃(§6 纪律)。目标是回答 **#40/#42 能否解决**,不是一次建完。
