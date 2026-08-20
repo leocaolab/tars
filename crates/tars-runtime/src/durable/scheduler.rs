@@ -79,21 +79,24 @@ impl DurableScheduler {
     /// only un-done steps execute. Safe to call repeatedly — a
     /// fully-resolved job is a no-op that marks the job terminal.
     pub async fn run_job(&self, job_id: &str) -> Result<(), DurableError> {
-        let plan = self.store.load_plan(job_id)?;
-        plan.validate().map_err(|e| DurableError::InvalidPlan(e.to_string()))?;
-
-        // Pre-flight: every role resolves, before any step runs (mirrors
-        // run_plan's up-front check).
-        for step in &plan.steps {
-            if self.workers.find(&step.worker_role).is_none() {
-                return Err(DurableError::NoWorkerForRole {
-                    role: step.worker_role.clone(),
-                    step_id: step.id.clone(),
-                });
-            }
-        }
-
         loop {
+            // Re-read the plan EVERY pass — a running step may have GROWN it
+            // (dynamic frontier via `AnswerStore::append_steps`: a triage step
+            // discovers work and appends fix/verify steps). For a static plan
+            // this is behavior-equivalent (the same plan each pass).
+            let plan = self.store.load_plan(job_id)?;
+            plan.validate().map_err(|e| DurableError::InvalidPlan(e.to_string()))?;
+
+            // Pre-flight: every role resolves before any (new) step runs.
+            for step in &plan.steps {
+                if self.workers.find(&step.worker_role).is_none() {
+                    return Err(DurableError::NoWorkerForRole {
+                        role: step.worker_role.clone(),
+                        step_id: step.id.clone(),
+                    });
+                }
+            }
+
             // The frontier is DERIVED from the store, every pass.
             let mut answers = self.store.answers(job_id)?;
 

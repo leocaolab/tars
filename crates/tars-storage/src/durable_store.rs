@@ -417,6 +417,12 @@ pub trait DurableStore: Send + Sync {
     /// The persisted plan JSON for a job (`None` if no such job row).
     fn load_plan_json(&self, job_id: &str) -> Result<Option<String>, DurableStoreError>;
 
+    /// Replace a job's plan JSON — the seam a running step uses to GROW the
+    /// plan (dynamic frontier: a triage step discovers work and appends
+    /// fix/verify steps). A single indexed UPDATE; the frontier re-derives on
+    /// the scheduler's next pass.
+    fn update_plan_json(&self, job_id: &str, plan_json: &str) -> Result<(), DurableStoreError>;
+
     /// A job's current lifecycle status, if the row exists.
     fn job_status(&self, job_id: &str) -> Result<Option<String>, DurableStoreError>;
 
@@ -579,6 +585,14 @@ impl DurableStore for SqliteDurableStore {
         self.lock().execute(
             "UPDATE jobs SET status = ?2, updated_at = ?3 WHERE job_id = ?1",
             params![job_id, status, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    fn update_plan_json(&self, job_id: &str, plan_json: &str) -> Result<(), DurableStoreError> {
+        self.lock().execute(
+            "UPDATE jobs SET plan_json = ?2, updated_at = ?3 WHERE job_id = ?1",
+            params![job_id, plan_json, now_ms()],
         )?;
         Ok(())
     }

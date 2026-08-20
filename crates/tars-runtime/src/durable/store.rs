@@ -24,7 +24,7 @@ use tars_types::Usage;
 
 use crate::durable::error::DurableError;
 use crate::message::AgentMessage;
-use crate::orchestrator::Plan;
+use crate::orchestrator::{Plan, PlanStep};
 
 /// One step's checkpointed result — the AnswerStore value. Its own type
 /// (NOT the cache's `CachedResponse`, which is welded to `ChatResponse`):
@@ -200,6 +200,28 @@ impl AnswerStore {
             .load_plan_json(job_id)?
             .ok_or_else(|| DurableError::JobNotFound(job_id.to_string()))?;
         Ok(serde_json::from_str(&plan_json)?)
+    }
+
+    /// GROW a job's plan at runtime — the dynamic-frontier seam. A running
+    /// step (e.g. a `triage` worker that discovers N issues) appends new steps
+    /// with STABLE ids; the scheduler re-reads the plan each pass and picks
+    /// them up. Idempotent on step id: a step id already in the plan is not
+    /// duplicated, so a crash-then-resume that re-runs the discovering step
+    /// grows the plan to the same shape (determinism by construction).
+    pub fn append_steps(
+        &self,
+        job_id: &str,
+        new_steps: &[PlanStep],
+    ) -> Result<(), DurableError> {
+        let mut plan = self.load_plan(job_id)?;
+        for step in new_steps {
+            if !plan.steps.iter().any(|s| s.id == step.id) {
+                plan.steps.push(step.clone());
+            }
+        }
+        let plan_json = serde_json::to_string(&plan)?;
+        self.store.update_plan_json(job_id, &plan_json)?;
+        Ok(())
     }
 
     /// A job's current lifecycle status, if the row exists.
