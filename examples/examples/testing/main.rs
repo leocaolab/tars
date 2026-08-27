@@ -27,10 +27,11 @@
 
 use std::sync::Arc;
 
-use tars_pipeline::LlmService;
+use tars_pipeline::{LlmService, complete_sync};
 use tars_provider::{CannedResponse, MockProvider};
-use tars_runtime::complete_sync;
 use tars_types::{ChatRequest, ProviderError, RequestContext};
+
+
 
 // ── The agent under test ────────────────────────────────────────────
 //

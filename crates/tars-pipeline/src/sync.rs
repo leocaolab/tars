@@ -21,7 +21,7 @@ use std::sync::LazyLock;
 use futures::StreamExt;
 use tokio::runtime::{Builder, Runtime};
 
-use tars_pipeline::LlmService;
+use crate::LlmService;
 use tars_types::{ChatRequest, ChatResponse, ChatResponseBuilder, ProviderError, RequestContext};
 
 /// Process-wide multi-thread tokio runtime. One shared instance so
@@ -105,7 +105,7 @@ pub fn complete_sync(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use tars_pipeline::{ChainOpts, LlmService};
+    use crate::{ChainOpts, LlmService};
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
     use tars_types::ProviderId;
 
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn complete_sync_substitutes_filtered_response() {
-        use tars_pipeline::{MaxLengthValidator, OutputValidator};
+        use crate::{MaxLengthValidator, OutputValidator};
 
         let provider = MockProvider::new("p", CannedResponse::text("hello world"));
         let mut opts = ChainOpts::new(ProviderId::new("p"));

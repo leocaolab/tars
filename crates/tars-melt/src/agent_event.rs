@@ -86,7 +86,6 @@ impl StepIdempotencyKey {
 /// Returns `None` when `system` is `None`. Distinct from
 /// `Some(sha256(""))` — the absence of a system prompt is a
 /// different audit fact than "the system prompt was empty".
-#[cfg(test)]
 pub fn hash_system_prompt(system: Option<&str>) -> Option<String> {
     use sha2::{Digest, Sha256};
     let s = system?;
@@ -277,11 +276,17 @@ impl AgentEvent {
 
 /// The cross-call tool trajectory of a recorded run: the tool names from
 /// every `LlmCallCaptured` event, concatenated in event (step) order
-/// (Doc 26 M2). Feed the result to
-/// [`crate::trajectory_match`] to score a multi-call agent's tool use.
+/// (Doc 26 M2). Feed the result to `tars-eval`'s `trajectory_match` to
+/// score a multi-call agent's tool use.
 ///
 /// Events come from the trajectory store in append order, which is step
 /// order, so no sort is needed; non-LLM events are skipped.
+///
+/// Note: the arg-carrying sibling `tool_step_sequence` (which paired each
+/// tool name with its recorded args) is NOT here — it depended on
+/// `trajectory_match::ToolStep`, which now lives in `tars-eval`.
+/// Re-adding it belongs there, against `tars-eval`'s own `AgentEvent`
+/// view, so this telemetry crate stays free of an eval dependency.
 pub fn tool_sequence(events: &[AgentEvent]) -> Vec<String> {
     let mut out = Vec::new();
     for ev in events {
@@ -291,7 +296,6 @@ pub fn tool_sequence(events: &[AgentEvent]) -> Vec<String> {
     }
     out
 }
-
 
 #[cfg(test)]
 mod tests {

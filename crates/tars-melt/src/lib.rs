@@ -33,6 +33,15 @@ use tracing_subscriber::fmt::format::FmtSpan;
 /// `tars_melt::event::{...}`.
 pub mod event;
 
+/// The append-only trajectory **event model** (`AgentEvent` + the idempotency /
+/// prompt-hash helpers). It lives with telemetry because its one roll-up
+/// consumer, [`run_report`], is observability — not runtime.
+pub mod agent_event;
+
+/// `build_run_report` — replay a trajectory's [`agent_event`] log and roll it
+/// up into a `RunReport`.
+pub mod run_report;
+
 #[cfg(feature = "otlp")]
 mod metrics;
 #[cfg(feature = "otlp")]

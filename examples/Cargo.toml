@@ -16,7 +16,6 @@ workspace = true
 [dependencies]
 tars-types = { path = "../crates/tars-types" }
 tars-storage = { path = "../crates/tars-storage" }
-tars-runtime = { path = "../crates/tars-runtime" }
 tars-pipeline = { path = "../crates/tars-pipeline" }
 tars-provider = { path = "../crates/tars-provider" }
 tars-tools = { path = "../crates/tars-tools" }

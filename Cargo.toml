@@ -4,7 +4,6 @@ members = [
     "crates/tars-types",
     "crates/tars-utils",
     "crates/tars-sandbox",
-    "crates/tars-agent",
     "crates/tars-config",
     "crates/tars-provider",
     "crates/tars-bedrock",
@@ -12,7 +11,6 @@ members = [
     "crates/tars-cache",
     "crates/tars-melt",
     "crates/tars-storage",
-    "crates/tars-runtime",
     "crates/tars-tools",
     "crates/tars-cli",
     "crates/tars-eval",
@@ -43,7 +41,6 @@ default-members = [
     "crates/tars-cache",
     "crates/tars-melt",
     "crates/tars-storage",
-    "crates/tars-runtime",
     "crates/tars-tools",
     "crates/tars-cli",
     "crates/tars-node",
@@ -98,7 +95,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 
 # Crypto / hash
 sha2 = "0.10"
-# UUID — used by tars-runtime for new TrajectoryId generation.
+# UUID — TrajectoryId / PipelineEvent id generation.
 # v4 (random) is the right shape: no clock dependency, no MAC leak.
 uuid = { version = "1", features = ["v4", "serde"] }
 

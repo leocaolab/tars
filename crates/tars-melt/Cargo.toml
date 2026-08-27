@@ -15,6 +15,14 @@ workspace = true
 # because tars-types is the workspace's universal-foundation crate;
 # centralising every env-var read (ARC-L5-COH-18) is worth it.
 tars-types = { path = "../tars-types" }
+# `run_report` replays a trajectory's AgentEvent log into a RunReport.
+# tars-storage does NOT depend on tars-melt, so this stays acyclic.
+tars-storage = { path = "../tars-storage" }
+
+# `agent_event.rs` derives Serialize/Deserialize on the AgentEvent model and
+# hashes the idempotency key + system prompt.
+serde.workspace = true
+sha2.workspace = true
 
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -50,6 +58,8 @@ otlp = [
 ]
 
 [dev-dependencies]
+# run_report tests build a real SqliteAgentEventLog in a temp dir.
+tempfile = "3"
 # UUIDs in the pipeline_event_log store tests.
 uuid = { workspace = true }
 # The in-memory span/metric exporters used by the otlp bridge tests.

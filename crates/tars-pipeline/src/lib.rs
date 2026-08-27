@@ -92,7 +92,12 @@
 
 mod middleware;
 mod service;
+/// Sync convenience wrappers over the async `LlmService` — one shared runtime,
+/// and the stream drained into a single `ChatResponse` with the
+/// validation-outcome side channel honoured.
+pub mod sync;
 
+pub use sync::{complete_async, complete_sync, shared_runtime};
 pub use middleware::budget::{BudgetConfigError, PerCallBudgetMiddleware};
 pub use middleware::cache::{CacheLookupMiddleware, set_cache_policy};
 pub use middleware::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};

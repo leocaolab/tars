@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use tars_runtime::{RuntimeError, build_run_report};
+use tars_melt::run_report::{RunReportError, build_run_report};
 use tars_storage::AgentEventLog;
 use tars_types::{RunReport, RunStatus, TrajectoryId};
 
@@ -47,7 +47,7 @@ pub async fn execute(args: RunReportArgs) -> Result<()> {
 
     let report = match build_run_report(&*store, &traj_id).await {
         Ok(r) => r,
-        Err(RuntimeError::TrajectoryNotFound(id)) => {
+        Err(RunReportError::TrajectoryNotFound(id)) => {
             anyhow::bail!(
                 "trajectory not found: {id}\n\
                  hint: `tars trajectory list` shows known ids"

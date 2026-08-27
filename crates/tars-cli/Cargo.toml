@@ -29,7 +29,6 @@ tars-pipeline = { path = "../tars-pipeline" }
 tars-cache = { path = "../tars-cache" }
 tars-melt = { path = "../tars-melt" }
 tars-storage = { path = "../tars-storage" }
-tars-runtime = { path = "../tars-runtime" }
 tars-eval = { path = "../tars-eval" }
 tars-tools = { path = "../tars-tools" }
 serde = { workspace = true, features = ["derive"] }

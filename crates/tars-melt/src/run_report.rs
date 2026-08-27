@@ -16,9 +16,32 @@ use tars_storage::AgentEventLog;
 use tars_types::{
     AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus, TrajectoryId, Usage,
 };
+use thiserror::Error;
 
-use crate::error::RuntimeError;
-use crate::event::AgentEvent;
+use crate::agent_event::AgentEvent;
+
+/// Errors from rolling a trajectory's event log up into a [`RunReport`].
+///
+/// Formerly `tars-runtime`'s `RuntimeError`; scoped down to just the
+/// three cases `build_run_report` can actually hit now that the roll-up
+/// lives in the telemetry crate (no runtime facade behind it).
+#[derive(Debug, Error)]
+pub enum RunReportError {
+    /// Reading the event log from storage failed. Carried typed via
+    /// `#[from]` so callers branch on the variant, not a string.
+    #[error("storage: {0}")]
+    Storage(#[from] tars_storage::StorageError),
+
+    /// An event-store row's payload didn't decode into an
+    /// [`AgentEvent`] — almost always a schema/serde mismatch.
+    #[error("serde: {0}")]
+    Serde(#[from] serde_json::Error),
+
+    /// The trajectory has no events recorded. Distinct from `Storage`
+    /// so consumers can treat it as "not started" rather than "broken".
+    #[error("trajectory not found: {0}")]
+    TrajectoryNotFound(String),
+}
 
 /// Get-or-insert `map[key]` and bump its `field` by one, saturating.
 /// Centralizes the entry-or-default + `saturating_add` idiom the
@@ -33,15 +56,15 @@ macro_rules! bump {
 
 /// Build a [`RunReport`] for `trajectory_id` by replaying its event log.
 ///
-/// Returns [`RuntimeError::TrajectoryNotFound`] when the trajectory
+/// Returns [`RunReportError::TrajectoryNotFound`] when the trajectory
 /// has no events recorded.
 pub async fn build_run_report(
     store: &dyn AgentEventLog,
     trajectory_id: &TrajectoryId,
-) -> Result<RunReport, RuntimeError> {
+) -> Result<RunReport, RunReportError> {
     let records = store.read_all(trajectory_id).await?;
     if records.is_empty() {
-        return Err(RuntimeError::TrajectoryNotFound(
+        return Err(RunReportError::TrajectoryNotFound(
             trajectory_id.as_str().to_string(),
         ));
     }
@@ -226,6 +249,9 @@ mod tests {
     async fn store_with(records: Vec<(TrajectoryId, serde_json::Value)>) -> Arc<dyn AgentEventLog> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.sqlite");
+        // NOTE: this repo's SqliteAgentEventLog::open is synchronous (rusqlite);
+        // the working repo's is async (sqlx). The store's own API is the only
+        // difference — everything below is identical.
         let store: Arc<SqliteAgentEventLog> =
             SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(path)).unwrap();
         // Group payloads per trajectory and append in order.
@@ -256,7 +282,7 @@ mod tests {
         let err = build_run_report(&*store, &TrajectoryId::new("nope"))
             .await
             .expect_err("must error");
-        assert!(matches!(err, RuntimeError::TrajectoryNotFound(_)));
+        assert!(matches!(err, RunReportError::TrajectoryNotFound(_)));
     }
 
     #[tokio::test]

@@ -26,8 +26,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use tars_eval::{MatchMode, ToolStep};
-use tars_runtime::{AgentEvent, LocalRuntime, Runtime};
+use tars_eval::trajectory_match::{self, MatchMode, ToolStep};
+use tars_melt::agent_event::AgentEvent;
 use tars_storage::AgentEventLog;
 use tars_types::TrajectoryId;
 
@@ -83,7 +83,6 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
         "no event store available — pass --events-path or run on a platform with an XDG data dir",
     )?;
     let store: Arc<dyn AgentEventLog> = store_arc;
-    let runtime = LocalRuntime::new(store);
 
     // Render into an in-memory buffer FIRST, then take the stdout lock
     // and flush it synchronously. Holding a non-Send `StdoutLock`
@@ -93,8 +92,10 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
     let mut buf: Vec<u8> = Vec::new();
     let mut score_failed = false;
     match args.command {
-        TrajectoryCommand::List => list(&runtime, &mut buf).await?,
-        TrajectoryCommand::Show { id } => show(&runtime, &TrajectoryId::new(id), &mut buf).await?,
+        TrajectoryCommand::List => list(store.as_ref(), &mut buf).await?,
+        TrajectoryCommand::Show { id } => {
+            show(store.as_ref(), &TrajectoryId::new(id), &mut buf).await?
+        }
         TrajectoryCommand::Score {
             id,
             expected,
@@ -107,7 +108,7 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
             })?;
             let exp = parse_expected(&expected)?;
             let passed = score(
-                &runtime,
+                store.as_ref(),
                 &TrajectoryId::new(id),
                 &exp,
                 m,
@@ -129,6 +130,52 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Read + decode one trajectory's melt [`AgentEvent`] log straight from
+/// the event store. Replaces the retired `LocalRuntime::replay`, which
+/// was thin glue over `AgentEventLog::read_all` + per-row deserialize.
+/// An unknown trajectory yields an empty `Vec` (read_all returns no rows,
+/// not an error); a row whose payload doesn't decode into `AgentEvent`
+/// surfaces as `Err` so callers can flag the corrupted trajectory.
+async fn replay(store: &dyn AgentEventLog, id: &TrajectoryId) -> Result<Vec<AgentEvent>> {
+    let records = store
+        .read_all(id)
+        .await
+        .context("reading trajectory events from store")?;
+    records
+        .into_iter()
+        .map(|r| serde_json::from_value::<AgentEvent>(r.payload).context("decode trajectory event"))
+        .collect()
+}
+
+/// The cross-call tool trajectory as `(name, args)` steps — every
+/// `LlmCallCaptured` event's tool calls paired with their recorded args,
+/// in event (step) order. The arg-carrying sibling of melt's names-only
+/// `tool_sequence`; it was dropped from melt (issue #55) to keep that
+/// telemetry crate free of an `eval` dep on [`ToolStep`], so it lives
+/// here in the one place that needs `ToolStep` (the `--mode args` gate).
+fn tool_step_sequence(events: &[AgentEvent]) -> Vec<ToolStep> {
+    let mut out = Vec::new();
+    for ev in events {
+        if let AgentEvent::LlmCallCaptured {
+            tool_calls,
+            tool_call_args,
+            ..
+        } = ev
+        {
+            for (i, name) in tool_calls.iter().enumerate() {
+                out.push(ToolStep {
+                    name: name.clone(),
+                    args: tool_call_args
+                        .get(i)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Resolve the `--expected` spec into tool steps: a comma list of names
@@ -178,7 +225,7 @@ fn parse_expected(spec: &str) -> Result<Vec<ToolStep>> {
 /// Returns whether it passed the threshold. Writes the human/JSON report
 /// to `out`. Uses the full `(name, args)` steps so `--mode args` works.
 async fn score(
-    runtime: &LocalRuntime,
+    store: &dyn AgentEventLog,
     id: &TrajectoryId,
     expected: &[ToolStep],
     mode: MatchMode,
@@ -186,8 +233,7 @@ async fn score(
     json: bool,
     out: &mut dyn Write,
 ) -> Result<bool> {
-    let events = runtime
-        .replay(id)
+    let events = replay(store, id)
         .await
         .context("failed to replay trajectory events")?;
     if events.is_empty() {
@@ -198,7 +244,7 @@ async fn score(
         );
     }
     let actual = tool_step_sequence(&events);
-    let s = tars_eval::trajectory_match::score(&actual, expected, mode);
+    let s = trajectory_match::score(&actual, expected, mode);
     let passed = s >= threshold;
 
     let actual_names: Vec<&str> = actual.iter().map(|t| t.name.as_str()).collect();
@@ -231,8 +277,8 @@ async fn score(
     Ok(passed)
 }
 
-async fn list(runtime: &LocalRuntime, out: &mut dyn Write) -> Result<()> {
-    let mut ids = runtime
+async fn list(store: &dyn AgentEventLog, out: &mut dyn Write) -> Result<()> {
+    let mut ids = store
         .list_trajectories()
         .await
         .context("failed to list trajectories")?;
@@ -251,18 +297,15 @@ async fn list(runtime: &LocalRuntime, out: &mut dyn Write) -> Result<()> {
     // stderr so a human can chase it.
     let mut had_errors = false;
     for id in &ids {
-        match runtime.replay(id).await {
+        match replay(store, id).await {
             Ok(events) => {
                 let count = events.len();
-                let status = if events
-                    .last()
-                    .is_some_and(tars_runtime::AgentEvent::is_terminal)
-                {
+                let status = if events.last().is_some_and(AgentEvent::is_terminal) {
                     // Distinguish completed vs abandoned at the row level
                     // — the last event's discriminator carries it.
                     match events.last().unwrap() {
-                        tars_runtime::AgentEvent::TrajectoryCompleted { .. } => "completed",
-                        tars_runtime::AgentEvent::TrajectoryAbandoned { .. } => "abandoned",
+                        AgentEvent::TrajectoryCompleted { .. } => "completed",
+                        AgentEvent::TrajectoryAbandoned { .. } => "abandoned",
                         _ => "terminal",
                     }
                 } else {
@@ -291,9 +334,8 @@ async fn list(runtime: &LocalRuntime, out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-async fn show(runtime: &LocalRuntime, id: &TrajectoryId, out: &mut dyn Write) -> Result<()> {
-    let events = runtime
-        .replay(id)
+async fn show(store: &dyn AgentEventLog, id: &TrajectoryId, out: &mut dyn Write) -> Result<()> {
+    let events = replay(store, id)
         .await
         .context("failed to replay trajectory events")?;
     if events.is_empty() {
@@ -311,75 +353,65 @@ async fn show(runtime: &LocalRuntime, id: &TrajectoryId, out: &mut dyn Write) ->
     Ok(())
 }
 
-/// Like [`tool_sequence`] but pairs each tool name with its recorded
-/// arguments (Doc 26 M3'), so `trajectory_match`'s `Args` mode can compare
-/// arguments off a recorded trajectory. A call whose args weren't recorded
-/// (older rows, or a name without a positionally-aligned arg) gets
-/// `Value::Null`.
-fn tool_step_sequence(events: &[AgentEvent]) -> Vec<ToolStep> {
-    use ToolStep;
-    let mut out = Vec::new();
-    for ev in events {
-        if let AgentEvent::LlmCallCaptured {
-            tool_calls,
-            tool_call_args,
-            ..
-        } = ev
-        {
-            for (i, name) in tool_calls.iter().enumerate() {
-                out.push(ToolStep {
-                    name: name.clone(),
-                    args: tool_call_args.get(i).cloned().unwrap_or(serde_json::Value::Null),
-                });
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use tars_runtime::AgentEvent;
     use tempfile::TempDir;
 
-    async fn fixture(dir: &TempDir) -> (Arc<dyn AgentEventLog>, Arc<LocalRuntime>) {
+    async fn fixture(dir: &TempDir) -> Arc<dyn AgentEventLog> {
         let path = dir.path().join("events.sqlite");
-        let store: Arc<dyn AgentEventLog> = tars_storage::open_agent_event_log_at_path(&path).unwrap();
-        let rt = LocalRuntime::new(Arc::clone(&store));
-        (store, rt)
+        tars_storage::open_agent_event_log_at_path(&path).unwrap()
+    }
+
+    /// Mint a trajectory by writing its `TrajectoryStarted` event — the
+    /// thin glue the retired `LocalRuntime::create_trajectory` performed.
+    async fn create_traj(store: &dyn AgentEventLog, reason: &str) -> TrajectoryId {
+        let id = TrajectoryId::new(uuid::Uuid::new_v4().simple().to_string());
+        append_event(
+            store,
+            AgentEvent::TrajectoryStarted {
+                traj: id.clone(),
+                parent: None,
+                reason: reason.into(),
+            },
+        )
+        .await;
+        id
+    }
+
+    async fn append_event(store: &dyn AgentEventLog, ev: AgentEvent) {
+        let payload = serde_json::to_value(&ev).unwrap();
+        store.append(ev.trajectory_id(), &[payload]).await.unwrap();
     }
 
     #[tokio::test]
     async fn list_renders_active_completed_abandoned_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let (_store, rt) = fixture(&dir).await;
+        let store = fixture(&dir).await;
 
-        let _a = rt.create_trajectory(None, "active").await.unwrap();
-        let b = rt.create_trajectory(None, "to-complete").await.unwrap();
-        rt.append(
-            &b,
+        let _a = create_traj(store.as_ref(), "active").await;
+        let b = create_traj(store.as_ref(), "to-complete").await;
+        append_event(
+            store.as_ref(),
             AgentEvent::TrajectoryCompleted {
                 traj: b.clone(),
                 summary: "ok".into(),
             },
         )
-        .await
-        .unwrap();
-        let c = rt.create_trajectory(None, "to-abandon").await.unwrap();
-        rt.append(
-            &c,
+        .await;
+        let c = create_traj(store.as_ref(), "to-abandon").await;
+        append_event(
+            store.as_ref(),
             AgentEvent::TrajectoryAbandoned {
                 traj: c.clone(),
                 cause: "x".into(),
             },
         )
-        .await
-        .unwrap();
+        .await;
 
         let mut out: Vec<u8> = Vec::new();
-        list(&rt, &mut out).await.unwrap();
+        list(store.as_ref(), &mut out).await.unwrap();
         let rendered = String::from_utf8(out).unwrap();
 
         assert!(rendered.contains("STATUS"), "header missing: {rendered}");
@@ -403,13 +435,13 @@ mod tests {
         // one corrupted trajectory used to bail out via `?` and hide
         // every other row.
         let dir = tempfile::tempdir().unwrap();
-        let (store, rt) = fixture(&dir).await;
+        let store = fixture(&dir).await;
 
         // One healthy trajectory.
-        let _a = rt.create_trajectory(None, "healthy").await.unwrap();
-        // One corrupted trajectory: bypass the runtime and write a
+        let _a = create_traj(store.as_ref(), "healthy").await;
+        // One corrupted trajectory: write straight to the store a
         // payload that won't deserialize back into `AgentEvent`, so
-        // `replay()` returns `RuntimeError::Serde`.
+        // `replay()` returns an `Err` (decode failure).
         let bad_id = TrajectoryId::new("corrupted-traj-id");
         store
             .append(&bad_id, &[json!({"not": "an AgentEvent"})])
@@ -417,7 +449,7 @@ mod tests {
             .unwrap();
 
         let mut out: Vec<u8> = Vec::new();
-        list(&rt, &mut out).await.unwrap();
+        list(store.as_ref(), &mut out).await.unwrap();
         let rendered = String::from_utf8(out).unwrap();
 
         assert!(
@@ -437,10 +469,10 @@ mod tests {
     #[tokio::test]
     async fn show_errors_for_unknown_trajectory() {
         let dir = tempfile::tempdir().unwrap();
-        let (_store, rt) = fixture(&dir).await;
+        let store = fixture(&dir).await;
         let unknown = TrajectoryId::new("definitely-not-a-real-id");
         let mut out: Vec<u8> = Vec::new();
-        let result = show(&rt, &unknown, &mut out).await;
+        let result = show(store.as_ref(), &unknown, &mut out).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("no events"));
@@ -481,11 +513,14 @@ mod tests {
     }
 
     /// Append LLM calls, each with `(name, args)` tool calls.
-    async fn traj_with_steps(rt: &LocalRuntime, per_call: &[&[(&str, serde_json::Value)]]) -> TrajectoryId {
-        let id = rt.create_trajectory(None, "scored").await.unwrap();
+    async fn traj_with_steps(
+        store: &dyn AgentEventLog,
+        per_call: &[&[(&str, serde_json::Value)]],
+    ) -> TrajectoryId {
+        let id = create_traj(store, "scored").await;
         for (i, calls) in per_call.iter().enumerate() {
-            rt.append(
-                &id,
+            append_event(
+                store,
                 AgentEvent::LlmCallCaptured {
                     traj: id.clone(),
                     step_seq: (i + 1) as u32,
@@ -498,8 +533,7 @@ mod tests {
                     tool_call_args: calls.iter().map(|(_, a)| a.clone()).collect(),
                 },
             )
-            .await
-            .unwrap();
+            .await;
         }
         id
     }
@@ -507,18 +541,18 @@ mod tests {
     #[tokio::test]
     async fn score_passes_on_matching_cross_call_sequence_and_fails_otherwise() {
         let dir = tempfile::tempdir().unwrap();
-        let (_s, rt) = fixture(&dir).await;
+        let store = fixture(&dir).await;
         let n = serde_json::Value::Null;
         // Two LLM calls → cross-call sequence [search, read_file, edit_file].
         let id = traj_with_steps(
-            &rt,
+            store.as_ref(),
             &[&[("search", n.clone()), ("read_file", n.clone())], &[("edit_file", n.clone())]],
         )
         .await;
 
         let expected = vec![ns("search"), ns("read_file"), ns("edit_file")];
         let mut out = Vec::new();
-        let passed = score(&rt, &id, &expected, MatchMode::Exact, 1.0, false, &mut out)
+        let passed = score(store.as_ref(), &id, &expected, MatchMode::Exact, 1.0, false, &mut out)
             .await
             .unwrap();
         assert!(passed);
@@ -528,7 +562,7 @@ mod tests {
 
         // Wrong expected under exact → fail.
         let mut out2 = Vec::new();
-        let passed2 = score(&rt, &id, &[ns("search")], MatchMode::Exact, 1.0, false, &mut out2)
+        let passed2 = score(store.as_ref(), &id, &[ns("search")], MatchMode::Exact, 1.0, false, &mut out2)
             .await
             .unwrap();
         assert!(!passed2);
@@ -539,8 +573,8 @@ mod tests {
         // M3': args are persisted in the trajectory, so --mode args can check
         // them — right tool, wrong args must FAIL where exact passes.
         let dir = tempfile::tempdir().unwrap();
-        let (_s, rt) = fixture(&dir).await;
-        let id = traj_with_steps(&rt, &[&[("search", serde_json::json!({"q": "ducks"}))]]).await;
+        let store = fixture(&dir).await;
+        let id = traj_with_steps(store.as_ref(), &[&[("search", serde_json::json!({"q": "ducks"}))]]).await;
 
         let want_right = vec![ToolStep {
             name: "search".into(),
@@ -551,11 +585,13 @@ mod tests {
             args: serde_json::json!({"q": "geese"}),
         }];
         let run = |exp: Vec<ToolStep>, mode| {
-            let rt = &rt;
+            let store = &store;
             let id = &id;
             async move {
                 let mut o = Vec::new();
-                score(rt, id, &exp, mode, 1.0, false, &mut o).await.unwrap()
+                score(store.as_ref(), id, &exp, mode, 1.0, false, &mut o)
+                    .await
+                    .unwrap()
             }
         };
         assert!(run(want_right.clone(), MatchMode::Args).await); // right args → pass

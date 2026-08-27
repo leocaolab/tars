@@ -4358,19 +4358,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
-name = "tars-agent"
-version = "1.9.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tars-types",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "tars-bedrock"
 version = "1.9.0"
 dependencies = [
@@ -4421,7 +4408,6 @@ dependencies = [
  "tars-melt",
  "tars-pipeline",
  "tars-provider",
- "tars-runtime",
  "tars-storage",
  "tars-tools",
  "tars-types",
@@ -4477,7 +4463,6 @@ dependencies = [
  "serde_json",
  "tars-pipeline",
  "tars-provider",
- "tars-runtime",
  "tars-storage",
  "tars-tools",
  "tars-types",
@@ -4496,8 +4481,12 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "rusqlite",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tars-storage",
  "tars-types",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -4520,7 +4509,6 @@ dependencies = [
  "tars-config",
  "tars-pipeline",
  "tars-provider",
- "tars-runtime",
  "tars-storage",
  "tars-types",
  "tars-utils",
@@ -4596,34 +4584,10 @@ dependencies = [
  "tars-melt",
  "tars-pipeline",
  "tars-provider",
- "tars-runtime",
  "tars-types",
  "tars-utils",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "tars-runtime"
-version = "1.9.0"
-dependencies = [
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tars-agent",
- "tars-pipeline",
- "tars-provider",
- "tars-storage",
- "tars-tools",
- "tars-types",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
  "tracing",
  "uuid",
 ]
