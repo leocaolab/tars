@@ -12,7 +12,7 @@ answer becomes the response.
 
 This is a **local/dev "bring your own agent CLI"** path, not a
 production default. The spec is
-[`architecture/32-cli-delegates.md`](../architecture/32-cli-delegates.md);
+`architecture/32-cli-delegates.md`;
 this is the user-facing walkthrough.
 
 ---
@@ -137,7 +137,7 @@ loop) is owned by `agy`, not tars.
 
 ## 7. See also
 
-- [`architecture/32-cli-delegates.md`](../architecture/32-cli-delegates.md) —
+- `architecture/32-cli-delegates.md` —
   the `AgentCliBackend` + `CliDialect` spec that antigravity is an impl
   of (F5); antigravity is its first `OutputMode::Text` dialect
 - [`opencode.md`](./opencode.md) — the sibling delegate, in JSON event

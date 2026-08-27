@@ -355,5 +355,5 @@ tars trajectory show <that-trace-id>
 
 - [`USER-GUIDE.md`](./USER-GUIDE.md) — calling shapes, validators, errors
 - [`providers/claude-cli.md`](./providers/claude-cli.md) — token-bloat caveats for the CLI backend
-- [`architecture/08-melt-observability.md`](./architecture/08-melt-observability.md) — internals of the tracing layer
-- [`architecture/17-pipeline-event-store.md`](./architecture/17-pipeline-event-store.md) — schema spec for `pipeline_events.db`
+- `architecture/08-melt-observability.md` — internals of the tracing layer
+- `architecture/17-pipeline-event-store.md` — schema spec for `pipeline_events.db`

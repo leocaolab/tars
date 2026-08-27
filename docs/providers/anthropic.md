@@ -374,8 +374,8 @@ A short list of things that look reasonable and aren't:
 
 - [`claude-cli.md`](./claude-cli.md) — subscription-authenticated path
   with the agent-loop discussion
-- [`../architecture/01-llm-provider.md`](../architecture/01-llm-provider.md) —
+- `../architecture/01-llm-provider.md` —
   full provider-trait spec; HTTP-API and CLI backends share §10 (cache),
   §11 (errors), §12 (routing), §15 (anti-patterns)
-- [`../architecture/06-config-multitenancy.md`](../architecture/06-config-multitenancy.md) —
+- `../architecture/06-config-multitenancy.md` —
   per-tenant secret namespacing via custom `AuthResolver`

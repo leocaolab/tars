@@ -12,7 +12,7 @@ so its side effects stay inside the worktree.
 
 This is a **local/dev "bring your own agent CLI"** path, not a
 production default. The spec is
-[`architecture/32-cli-delegates.md`](../architecture/32-cli-delegates.md);
+`architecture/32-cli-delegates.md`;
 this is the user-facing walkthrough.
 
 ---
@@ -154,7 +154,7 @@ clean `InvalidRequest` rather than letting `execve` fail with `E2BIG`.
 
 ## 6. See also
 
-- [`architecture/32-cli-delegates.md`](../architecture/32-cli-delegates.md) —
+- `architecture/32-cli-delegates.md` —
   the `AgentCliBackend` + `CliDialect` spec that opencode is an impl of
   (F4); the shared spawn / stream / sandbox machinery
 - [`antigravity.md`](./antigravity.md) — the sibling delegate, in

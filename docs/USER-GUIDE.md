@@ -1,89 +1,42 @@
 # tars User Guide
 
-A 5-minute orientation for developers who want to call tars from their
-own code. Covers the three common call shapes + when tars is the wrong
-tool. For *why* tars is shaped this way, jump to
-[`architecture/`](./architecture/) — most callers don't need to.
-
-> **Stability**: as of **v1.0** the public API follows SemVer — breaking
-> changes land on major bumps, not minors. The shapes shown here are
-> current; track the [Releases page](../../../releases) for changes.
-
----
-
 ## What tars is
 
-A Rust-first multi-provider LLM runtime: one trait + one middleware
-stack covers Anthropic, OpenAI, Gemini, DeepSeek, vLLM, MLX, llama.cpp,
-and three CLI-based subscription providers (`claude_cli`, `gemini_cli`,
-`codex_cli`). Python bindings ship as a wheel and Node/TypeScript
-bindings as a native addon; you can also use it directly from Rust.
+A Rust library for **calling a language model**, with the parts you would
+otherwise write yourself: a dozen providers behind one trait, a middleware
+pipeline, typed errors, and a record of every call that you can read afterwards.
 
-What you get without writing it yourself:
+It is a caller, not a framework. There is no agent loop, no planner, no
+orchestrator. **You write the control flow.** When the model asks for a tool,
+you dispatch it and hand the result back — because the loop is where your
+program's logic lives, and a library that owns it owns your program.
 
-- **Provider abstraction** — swap models without touching call sites
-- **Middleware pipeline** — telemetry, cache, retry, output validation,
-  pipeline event store, all engaged automatically by the default
-  `Pipeline`
-- **Agent abstraction** — hand a `Task` to a capability set (`TarsAgent`
-  drives the tool loop; `EnsembleAgent` hedges one task across N agents)
-- **Capability pre-flight** — verify a provider supports your request
-  shape (tools, thinking, structured output, context window) before
-  burning a network call
-- **Multi-turn `Session`** — history accumulation + tool dispatch loop
-  + atomic per-turn rollback
-- **Per-call observability** — `cache_hit`, `retry_count`,
-  `validation_summary`, layer trace, latency, all on every response
+What that buys you is that everything below is a plain function call you can
+put a breakpoint in.
 
 ## Hello, tars (5-minute path)
-
-If you just want to confirm tars works on your machine, these three
-commands are the shortest route to a successful LLM call. No Python,
-no Rust code — just shell.
 
 ```bash
 # 1. Build + write a starter config to $TARS_HOME/config.toml (default ~/.tars).
 cargo run -p tars-cli -- init
 
 # 2. Set the credential the starter config references.
-export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
+export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY / GEMINI_API_KEY
 
-# 3. Send one prompt.
-cargo run -p tars-cli -- run -p anthropic "Say hi in 5 words."
+# 3. Check that it resolved — key found, model library loaded.
+cargo run -p tars-cli -- providers
 ```
 
-Expected: the model's reply on stdout, a one-line `usage:` summary on
-stderr. If you see `error in tars run:` instead, double-check the env
-var name matches what `$TARS_HOME/config.toml` (default `~/.tars`) declares
-for that provider.
+`tars providers` is the first thing to run and the first thing to check when
+something is wrong: it says which providers are configured, whether each one's
+credential actually resolves, and what its default model is. A missing env var
+shows up here rather than as a 401 three layers down.
 
-Want a different provider? Replace `-p anthropic` with one of the ids
-in `$TARS_HOME/config.toml` (default `~/.tars`) (`-p openai_main`, `-p claude_cli`, etc.).
-For the long-lived subscription path, see
-[`providers/claude-cli.md`](./providers/claude-cli.md).
+Then send a prompt from Rust or Python — see **Three call shapes** below.
 
-Built-in providers (available without writing any config — just export
-the key): `openai`, `anthropic`, `gemini`, `deepseek`, plus the local /
-subscription backends (`claude_cli`, `gemini_cli`, `codex_cli`,
-`opencode`, `antigravity`, `mlx`, `llamacpp`, `vllm`). Any
-OpenAI-compatible endpoint (Groq, xAI, OpenRouter, LM Studio, Ollama, …)
-works via `type = "openai_compat"` + `base_url`. For keyless cloud, build
-with `--features bedrock` and use `type = "bedrock"` (region + model, no
-key — authed via the AWS credential chain). The CLI delegates
-(`claude_cli`/`gemini_cli`/`codex_cli`/`opencode`/`antigravity`) run the
-vendor's own agent as a black box, each write-jailed to the worktree by
-the tars OS sandbox. DeepSeek is reached via its OpenAI-compatible API
-(`DEEPSEEK_API_KEY`, default model `deepseek-v4-flash`); request
-`deepseek-v4-pro` for the reasoning model — its chain-of-thought arrives
-on the thinking channel automatically:
-
-```bash
-export DEEPSEEK_API_KEY=sk-...
-cargo run -p tars-cli -- run -p deepseek "Say hi in 5 words."
-```
-
-Once that works, the rest of this guide covers calling tars from
-**Python** and **Rust**.
+There is no `tars run`. The CLI's job is to *inspect* (providers, models,
+events, trajectories, eval); sending a prompt is what the library is for, and
+if you only want one completion from a shell, `curl` is already installed.
 
 ## Install
 
@@ -210,6 +163,9 @@ never a sentinel.
 
 ## Three call shapes
 
+Two, now — a completion, and a completion with a tool in the middle.
+
+
 ### 1. Single completion
 
 **Python**
@@ -294,132 +250,29 @@ async fn main() -> anyhow::Result<()> {
 constructs one carrying the real `tenant_id` / `principal_id` /
 `trace_id` so the IAM and audit middleware have something to work with.
 
-### 2. Multi-turn conversation
+### 2. Tools — the model asks, you dispatch
 
-**Python**
-
-```python
-import tars
-
-session = tars.Session(
-    tars.Pipeline.from_default("anthropic"),
-    system="You are a code reviewer.",
-    model="claude-sonnet-4-5",
-)
-
-r1 = session.send("Look at foo.py")
-r2 = session.send("What's the worst issue?")  # remembers r1
-r3 = session.send("How would you fix it?")    # remembers r1 + r2
-
-print(session.history_version)  # bumps on each successful send
-```
-
-`Session` enforces conversation invariants (alternating user/assistant
-messages, no orphan tool calls), trims history when it exceeds the
-budget, and rolls back atomically if any send fails mid-turn.
-
-**Rust**
+There is no auto-loop. `ToolRegistry::dispatch` runs one tool call and hands
+back a `Message` you append and send again. Three lines, and the branch where
+you decide whether to run it at all is yours:
 
 ```rust
-use tars_runtime::{Budget, Session, SessionOptions};
-use tars_types::ModelHint;
-
-// `svc` (the LlmService) and `provider` are from §1. A Session targets one
-// model for its whole life; the model lives on `SessionOptions`.
-let caps = provider.capabilities().clone();
-let mut session = Session::new(
-    svc.clone(),
-    caps,
-    SessionOptions {
-        system: "You are a code reviewer.".into(),
-        model: ModelHint::Explicit("claude-sonnet-4-5".into()),
-        budget: Budget::Chars(400_000),
-        tools: None,
-        tool_ctx: Default::default(),
-        default_max_output_tokens: None,
-    },
-);
-
-// `send` returns (ChatResponse, TelemetryAccumulator); ignore the telemetry here.
-let (r1, _tel) = session.send("Look at foo.py", None).await?;
-let (r2, _tel) = session.send("What's the worst issue?", None).await?;
-let (r3, _tel) = session.send("How would you fix it?", None).await?;
-
-println!("history_version = {}", session.history_version());
+let mut msgs = vec![Message::user("Review src/main.rs")];
+loop {
+    let resp = pipeline.complete(ChatRequest::new(msgs.clone()).with_tools(specs.clone()), ctx.clone()).await?;
+    let Some(call) = resp.tool_calls.first() else { break resp };
+    msgs.push(resp.into_assistant_message());
+    msgs.push(registry.dispatch(call, tool_ctx.clone()).await);
+}
 ```
 
-Same invariants as the Python `Session` — alternating roles, no orphan
-tool calls, atomic rollback on mid-turn failure.
-
-### 3. Tool dispatch (auto-loop)
-
-**Python**
-
-```python
-import tars
-
-def fs_read_file(args):
-    """Tool callable — receives parsed args, returns a JSON-able value."""
-    with open(args["path"]) as f:
-        return f.read()
-
-session = tars.Session(
-    tars.Pipeline.from_default("anthropic"),
-    system="Use the read_file tool to fetch source before reviewing.",
-    model="claude-sonnet-4-5",
-)
-session.register_tool(
-    "read_file",
-    "Read a file's contents.",
-    {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-    fs_read_file,
-)
-
-resp = session.send("Review main.py")
-# tars dispatches read_file → feeds result back to model → final reply
-```
-
-Tools are registered post-construction with
-`session.register_tool(name, description, parameters_schema, callback)`.
-Parallel tool calls are batched into one `tool_result` message per
-protocol requirements.
-
-**Rust**
-
-Rust tools implement the `Tool` trait from `tars-tools`. The built-in
-`ReadFileTool` is a good template; for a custom tool you implement
-`fn name() / fn spec() / async fn invoke()`.
-
-```rust
-use std::sync::Arc;
-use tars_runtime::{Budget, Session, SessionOptions};
-use tars_tools::builtins::ReadFileTool;
-use tars_types::ModelHint;
-
-let mut session = Session::new(
-    svc.clone(),                               // the LlmService from §1
-    provider.capabilities().clone(),
-    SessionOptions {
-        system: "Use the read_file tool to fetch source before reviewing.".into(),
-        model: ModelHint::Explicit("claude-sonnet-4-5".into()),
-        budget: Budget::Chars(400_000),
-        tools: None,
-        tool_ctx: Default::default(),
-        default_max_output_tokens: None,
-    },
-);
-session.register_tool(Arc::new(ReadFileTool::new(tempdir.path())));
-
-let (resp, _tel) = session.send("Review main.py", None).await?;
-```
-
-For a complete worked example covering Worker / Critic / Orchestrator
-with real filesystem tools, see
-[`examples/examples/multi_step_with_tools.rs`](../examples/examples/multi_step_with_tools.rs):
-
-```bash
-cargo run -p tars-runtime --example multi_step_with_tools
-```
+Every built-in that touches the machine — `bash.run`, `write_file`,
+`edit_file`, `web.fetch` — goes through an **approval sink** first, and the
+CLI-delegate providers run inside an OS write-jail (macOS Seatbelt, Linux
+bubblewrap): the worktree, `$TMPDIR` and the delegate's own state dir are
+writable, everything else including `.git` is read-only. There is no unconfined
+path; `--sandbox danger-full-access` is the explicit opt-out and it is spelled
+that way on purpose.
 
 ## Decoding a structured response
 
@@ -633,7 +486,8 @@ confidence intervals. Tag each cohort so the event store can split them
 (`RequestContext::with_tags([...])` in Rust; the `tags=` kwarg on
 `complete` in Python/Node), then compare with `tars eval diff`. The full
 methodology (McNemar, paired bootstrap, precision/recall) lives in
-[eval-methodology.md](eval-methodology.md) and [Doc 18](architecture/18-agent-testing.md).
+the `tars-eval` crate — its judge carries an anti-incest guard, and
+McNemar is the test for "did this change help" on paired items.
 
 ### Reading a run + diff — and where the tooling stops
 
@@ -783,62 +637,6 @@ If the env var is missing or blank, the key stays empty on purpose:
 surfaces as a legible tool error **before any network call** — it never silently
 falls back to a different backend.
 
-## Agents — hand a task to a capability set
-
-The three shapes above are *calls*. An **Agent** is one level up: a set of
-capabilities (skills) you give a **task** to, and it does the work — driving
-its own multi-turn tool loop internally. The contract is `tars-model`'s
-`trait Agent { id, role, skills, run(task) }`; see
-[architecture/20-agent-abstraction.md](architecture/20-agent-abstraction.md).
-
-A **native** agent is LLM-backed — it turns the task into prompts and runs a
-tool loop over a *pure-inference* provider. Swap the provider and the same
-agent is a "gemini agent" or a "claude_cli agent"; tars owns the loop +
-tools + working dir (white box), not the CLI's internal black box.
-
-```rust
-use std::sync::Arc;
-use tars_model::{Agent, AgentContext, Skill, SkillSet, Task, TaskId};
-use tars_runtime::TarsAgent;
-use tars_tools::{builtins::{EditFileTool, WriteFileTool, BashTool}, ToolRegistry};
-
-// 1. The capabilities (concrete tools), jailed to the worktree.
-let mut reg = ToolRegistry::new();
-reg.register_owned(WriteFileTool::with_root(&worktree).unwrap()).unwrap();
-reg.register_owned(EditFileTool::with_root(&worktree).unwrap()).unwrap();
-reg.register_owned(BashTool::new()).unwrap();
-
-// 2. Assemble the agent over a pure-inference provider (`llm`).
-let agent = TarsAgent::new(
-    "agent:fixer", "fix",
-    SkillSet::new()
-        .with(Skill::new("fs.write_file", "write files"))
-        .with(Skill::new("fs.edit_file", "edit files"))
-        .with(Skill::new("bash.run", "run commands")),
-    "claude-sonnet-4-5", llm, Arc::new(reg),
-);
-
-// 3. Hand it a task. cwd scopes where its tools act.
-let task = Task::new(TaskId::new("t1"), "fix the failing test in src/foo.rs");
-let ctx = AgentContext::new().with_cwd(&worktree);
-let out = agent.run(task, ctx).await?;
-println!("{}", out.summary);
-```
-
-**Hedge across agents** — run one task on several agents, take the first
-success (tail-latency hedge at *task* granularity):
-
-```rust
-use tars_runtime::EnsembleAgent;
-use tars_model::AgentRole;
-
-let ens = EnsembleAgent::new(
-    "ens:fix", AgentRole::worker("fix"),
-    vec![claude_cli_agent, gemini_agent, user_agent],
-);
-let out = ens.run(task, ctx).await?; // first to succeed wins; the rest are cancelled
-```
-
 ## Output validators
 
 Attach Python callbacks that run after the model reply, before the
@@ -975,62 +773,32 @@ rate-limit handling, see
 For offline batch processing (~50% pricing, 24h SLA) on Anthropic /
 OpenAI, see [`recipes/batch.md`](./recipes/batch.md).
 
-## Durable agent jobs (`tars-durable`)
-
-The default DAG runner (`tars_runtime::run_plan`) executes a plan of
-agent steps to completion **in one `await`, entirely in memory** — great
-for a short, side-effect-free run, but the whole frontier is lost if the
-process dies mid-run. The new **`tars-durable`** crate adds a durable
-execution layer for work that must survive a restart without re-paying
-for what already finished.
-
-The core idea: **the persisted step-result store IS the checkpoint.**
-
-- **Durable async jobs.** An agent task's DAG runs as a job whose state
-  and per-step answers are persisted as it goes, in the runtime's own
-  always-on sqlite store (`answers` + an append-only `result_events`
-  log + a `jobs` status table), each step checkpointed through **one**
-  atomic transaction.
-- **Resume = memoized re-run.** On restart the DAG is simply re-driven:
-  a step whose answer is already in the store is skipped — **the LLM is
-  never re-called** — and only un-done steps execute. Resume falls out
-  of the model; there's no in-memory frontier to reconstruct.
-- **Critical invariant — correctness never depends on observability.**
-  The durability store is separate from, and independent of, the
-  **off-able** event/telemetry store (`StoreScope::Off`,
-  `ARC_TARS_EVENTS_OFF`, …). With observability events fully off, a
-  job's answers and state still persist and it still resumes. Event
-  logs stay a diagnosis convenience, never the status-of-record.
-
-**Status: M0 + M1 shipped** — the durable checkpoint store (AnswerStore
-+ atomic commit) and the DB-driven memoized-re-run scheduler
-(`DurableScheduler`). **M2–M5 are pending**: the JobManager +
-reconcile-on-open + persisted cancel, the at-least-once delivery outbox,
-the ephemeral streaming event bus, and the end-to-end app wiring.
-
-Full design (CUJs, the outbox two-bit rule, effect classification, the
-reuse map, the roadmap): [`design/durable-agent-runtime.md`](./design/durable-agent-runtime.md).
-
 ## When NOT to use tars
 
-- **You only call one provider, one model, one prompt shape.** A
-  thirty-line `requests.post(...)` is fine; tars's value compounds with
-  scale (multiple providers, retries, cache, observability,
-  multi-tenant). Below that, it's overhead.
-- **You need a hosted dashboard / UI today.** tars is a runtime
-  library; it gives you the data via the event store, but no UI.
-  Pair it with a lightweight dashboard you build yourself, or wait
-  for the eval framework + dashboard work in M9+.
-- **You need streaming chat UI in the browser.** The `Pipeline.call`
-  stream API works, but you're on your own for SSE proxying.
-  v1.0 will ship an HTTP/SSE gateway (Doc 12); not before.
-- **You want LangChain's ecosystem of pre-built chains.** tars is
-  primitives, not a chain library. If you're adding "another LangChain
-  example" you don't need tars.
+- **One provider, one model, one prompt shape.** A thirty-line
+  `requests.post(...)` is fine. The value here compounds with scale —
+  several providers, retries, a cache, a record you can read afterwards —
+  and below that it is overhead you are paying for nothing.
+- **You want an agent framework.** There is no loop here, and that is on
+  purpose. If you want something that plans and decides, you want a
+  different library, or you want to write the loop yourself and call this
+  one from inside it.
+- **You want a hosted dashboard.** The event stores are SQLite files on
+  your disk and the CLI reads them; there is no UI and none is planned in
+  this repo.
+- **You want a chain library.** These are primitives. If what you are
+  writing is "another LangChain example", you do not need tars.
+- **You want streaming into a browser.** `LlmService::call` gives you the
+  stream; SSE proxying is yours.
 
 ## Where to go next
 
-- **For deeper architecture** — [`architecture/00-overview.md`](./architecture/00-overview.md)
-- **For API details by layer** — pick the relevant `architecture/NN-*.md`
-- **For competitive comparison** — [`comparison.md`](./comparison.md)
-- **For "what was the thinking behind X"** — [`audit-stories/`](./audit-stories/)
+- **One page per provider** — [`providers/`](./providers/): auth, models,
+  and the quirks each one actually has.
+- **Batching, retries, budgets** — [`recipes/`](./recipes/).
+- **Seeing what a run did** — [`observability.md`](./observability.md).
+- **Where does this code belong?** — each crate's `README.md` is a
+  placement contract: its role, its effect budget, the dependencies it may
+  and may not take, and the one reason it should ever change.
+- **What actually shipped** — [CHANGELOG.md](../CHANGELOG.md). If a doc
+  here disagrees with the code, the code is right and the doc is a bug.

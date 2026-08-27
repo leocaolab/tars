@@ -15,7 +15,7 @@ How to actually use the cost & reliability middlewares (roadmap §1–§4):
 > provider and, on a typed `Err`, try the next (Recipe 3).
 
 The design rationale is in
-[`docs/roadmap.md`](../roadmap.md). This doc is the **how to use it**
+`docs/roadmap.md`. This doc is the **how to use it**
 cookbook — copy-paste recipes by complexity, then gotchas.
 
 ---
@@ -375,7 +375,7 @@ in `~/.tars/events/pipeline_events.db` and are queryable via
 
 ## See also
 
-- [`../roadmap.md`](../roadmap.md) — design rationale; §5 batch mode (Anthropic/OpenAI shipped, Gemini deferred)
+- `../roadmap.md` — design rationale; §5 batch mode (Anthropic/OpenAI shipped, Gemini deferred)
 - [`../USER-GUIDE.md`](../USER-GUIDE.md) — the calling shapes that these middlewares sit on top of
 - [`../observability.md`](../observability.md) — how to watch what your stack is actually doing
 - [`../providers/claude-cli.md`](../providers/claude-cli.md) — subscription backend caveat (no USD caps)

@@ -8,7 +8,7 @@ delegated wholesale to the AWS SDK. This is the production/cloud path —
 on AWS the workload's own identity (IRSA / EC2 instance role / ECS task
 role / SSO) signs every request, so there is no key material at rest.
 
-The full design is [`architecture/31-bedrock.md`](../architecture/31-bedrock.md);
+The full design is `architecture/31-bedrock.md`;
 this is the user-facing walkthrough.
 
 ---
@@ -173,7 +173,7 @@ comes back as an `InvalidRequest` with that exact message, not a
 
 ## 6. See also
 
-- [`architecture/31-bedrock.md`](../architecture/31-bedrock.md) — the
+- `architecture/31-bedrock.md` — the
   full design: Converse-vs-InvokeModel decision, the keyless auth
   stance, the crate boundary, streaming, and the M3 `Auth`-signer
   generalization

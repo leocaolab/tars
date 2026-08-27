@@ -220,7 +220,7 @@ terminal state is reached.
 
 ## 7. What tars does NOT do for batch
 
-Per the [agent-runtime scope discipline](../roadmap.md#scope-discipline-applies-to-everything-below):
+Per the agent-runtime scope discipline:
 
 | Concern | Who |
 |---|---|
@@ -270,7 +270,7 @@ paths require work tars doesn't ship today:
   this backend (the GeminiProvider uses API-key auth on the GenAI
   endpoint).
 
-Tracked in [roadmap §5 Phase 4](../roadmap.md). Re-opening this is a
+Tracked in roadmap §5 Phase 4. Re-opening this is a
 contributor-welcome ticket — needs someone to pin the current GenAI
 batch API shape and add LRO polling support.
 
@@ -278,7 +278,7 @@ batch API shape and add LRO polling support.
 
 ## See also
 
-- [`../roadmap.md`](../roadmap.md) — design rationale + scope discipline
+- `../roadmap.md` — design rationale + scope discipline
 - [`cost-and-reliability.md`](./cost-and-reliability.md) — the four
   middlewares that apply to *sync* calls (not batch — see §4 above)
 - [`../providers/anthropic.md`](../providers/anthropic.md), [`../providers/claude-cli.md`](../providers/claude-cli.md)

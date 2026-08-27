@@ -1,421 +1,110 @@
-# TARS — Multi-Agent LLM Runtime
+# tars — one way to call a language model
 
-[![ci](https://github.com/leocaolab/tars/actions/workflows/ci.yml/badge.svg)](https://github.com/leocaolab/tars/actions/workflows/ci.yml)
-[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
-[![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](./rust-toolchain.toml)
+A Rust library for making LLM calls, with the parts you end up writing yourself
+either way: a dozen providers behind one trait, a middleware pipeline, typed
+errors, and a record of every call that you can read afterwards.
 
-**Rust-first agent runtime: a dozen LLM providers — direct API, sandboxed
-subscription-CLIs, and keyless cloud (Bedrock) — behind one trait; a composable
-middleware pipeline; an Agent you hand tasks to; a data-driven model knowledge
-base; Python + Node bindings — observability built in.**
+It is a **caller**, not a framework. There is no agent loop here, no planner, no
+orchestrator. You write the control flow; tars makes the call and tells you the
+truth about what happened.
 
----
-
-## Philosophy
-
-The goals are **performance, extensibility, and security** — and the design falls out of
-a few deliberate bets. They say, more honestly than any feature list, both what TARS *is*
-and what it refuses to be.
-
-### Bet 1 — Correctness is a type-system property, not a matter of discipline
-
-This is where TARS is genuinely unlike the rest of the field: it is a **functional,
-strongly-typed** runtime in a space that is stringly-typed to the bone. Elsewhere a
-rate-limit is a substring you grep out of an exception, a tool result is a dict you hope
-has the right keys, and a "structured output" is a blob you re-parse at every call site
-and pray over. TARS refuses all of it.
-
-- **Errors are typed values, not strings.** `TarsError → Permanent / Retryable /
-  RateLimited / Auth` is a real sum type; `retry_after` is a field, not a regex. You
-  match on the variant and the compiler makes you handle it — and no sentinel token
-  (`parse_failed`, `unknown`) ever leaks to a human; the raw truth does.
-- **Parse, don't validate.** `json_decode` takes *your* `T` and returns a valid `T` or a
-  typed error — you can never hold an ill-formed one. The strong type is yours; TARS is
-  the generic engine that hands it back intact.
-- **The pipeline is an algebra.** telemetry → auth → budget → cache → guard → retry →
-  breaker *compose*; capability checks run pre-flight, so an incompatible request fails
-  typed and offline instead of burning a network round-trip. (Provider *selection* —
-  routing, ensemble, fallback — is deliberately **not** a pipeline layer: a caller who
-  wants it composes several services.)
-- **Correctness by construction.** A Turn commits or rolls back on `Drop` — there is no
-  `armed = false` flag to forget. The invariant is held by the type system, not by a
-  reviewer's attention.
-
-This is also precisely **why we don't support MCP.** MCP is the opposite bet — a flat
-`Json → Text` bag with no composition law, where the meaning lives in prose an LLM guesses
-at; and in 2026 it is insecure and unscalable besides (OWASP publishes a whole *MCP Top
-10*; its stateful transport fights a load balancer). Letting that into the core would
-dissolve the one property that makes TARS worth building.
-See [Doc 33 — Why TARS does not support MCP](docs/architecture/33-no-mcp.md).
-
-### Bet 2 — Agents belong *embedded in software*, not floating above it
-
-The durable, valuable place for an agent is **inside** your service — compiled into your
-binary, next to your IAM role, your connection pools, your telemetry — where execution is
-**deterministic, more efficient, and easier to maintain**. The model supplies intent;
-typed Rust performs the act; every call is sandboxed, budgeted, and audited. An embedded
-agent you can reason about beats an autonomous one you can only watch.
-
-### Bet 3 — No autonomous, agent-driven planning — and we say so plainly
-
-Open-ended, self-directed planning — "here is a vague goal, go decide the steps yourself,"
-for things like exploratory coding or research — is **deliberately out of scope**. We
-haven't found a case where wrapping that in TARS beats the tool already built for it. If
-your task genuinely needs a planning agent, **use Claude or Codex directly** — that's what
-they're excellent at. TARS owns the layer *underneath*: the typed, sandboxed, multi-tenant
-execution a planner — yours, or a CLI delegate — runs on top of. Better a sharp boundary
-than a fuzzy "does everything."
-
-### Bet 4 — Skeptical of RAG, and of semantic vectors in general
-
-Vector search buys *fuzzy, approximate* recall — and TARS's whole thesis is that fuzzy and
-approximate is the problem, not the tool. Embedding similarity is **not accuracy**: it
-returns plausible neighbours, misses exact matches, and can't answer a precise or
-structured question the way a `SELECT … WHERE`, a `grep`, or a real index can. It's also
-usually **not necessary**: a capable agent retrieves the way it does everything else —
-search, read, refine, in exact steps — without a pre-baked embedding store. The one thing
-vectors genuinely give you is sub-100 ms approximate lookup at scale, and agentic
-workflows are **not latency-bound** the way a search box is — in most cases we don't need
-the answer *this instant*. So we won't trade determinism and precision for speed we don't
-need, nor take on a whole stateful vector subsystem to maintain (the same wrapper-sprawl
-tax as MCP). TARS is deliberately **not a retrieval framework**; if you truly need RAG,
-wire it in as one tool.
-
----
+```rust
+let pipeline = LlmService::builder(provider, "claude-sonnet-4-5").build();
+let reply = pipeline.complete(ChatRequest::user("Say hi in five words"), ctx).await?;
+```
 
 ## What you get
 
-- **One trait, a dozen providers.** Direct API (OpenAI, Anthropic, Gemini,
-  DeepSeek), any **OpenAI-compatible** endpoint via `base_url` (Groq, xAI,
-  OpenRouter, LM Studio, Ollama, …), local models (vLLM, MLX, llama.cpp),
-  **subscription CLIs** (claude / gemini / codex / opencode / antigravity), and
-  **keyless AWS Bedrock**. Swap providers without touching call sites.
-- **Model versions are DATA, not code.** Model ids, prices, context windows, and
-  thinking-mode live in [`crates/tars-config/data/models.toml`](crates/tars-config/data/models.toml).
-  Bumping a default or refreshing a price is a data edit — no recompile — and cost
-  is resolved **per model** from the reply's actual model.
-- **Sandboxed by default.** Every black-box CLI-delegate agent runs in an OS
-  write-jail (macOS Seatbelt / Linux bubblewrap): the worktree + `$TMPDIR` +
-  `/tmp` + the CLI's own state dir are writable, `.git` and everything else are
-  read-only. No delegate ever runs unconfined; `--sandbox danger-full-access` is
-  the explicit opt-out.
-- **A composable middleware pipeline.** Telemetry → Auth/IAM → Budget → Cache →
-  Guard → Retry → Breaker. The same pipeline runs in-process or as a service.
-  (Provider selection isn't a layer — see below.)
-- **Typed all the way down.** Typed errors (not stringly), **pre-flight capability
-  checks** (catch a tool-use-against-a-non-tool-model before the round-trip), and a
-  generic result-decode seam — hand it a `T`, get back a valid `T` or a typed
-  error (*parse, don't validate*).
-- **An Agent abstraction.** Hand a `Task` to an Agent; LLM-backed or not, both are
-  first-class, and you can hedge one task across N agents.
-- **Live web access, built in.** `web.fetch` (URL → clean Markdown, with the
-  serving tier as provenance) and `web.search` (query → ranked results;
-  DuckDuckGo out of the box, Google CSE / Brave with a key) — thin adapters over
-  the typed [`sisurf-core`](https://github.com/leocaolab/sisurf) engine, gated
-  through the same approval sink as `bash.run`.
-- **First-class Python + Node bindings** (PyO3 / napi-rs).
+**One trait, a dozen providers.** Direct API (OpenAI, Anthropic, Gemini,
+DeepSeek), any **OpenAI-compatible** endpoint via `base_url` (Groq, xAI,
+OpenRouter, LM Studio, Ollama, …), local models (vLLM, MLX, llama.cpp),
+**subscription CLIs** (claude / gemini / codex / opencode), and **keyless AWS
+Bedrock**. Swapping providers does not touch your call sites.
 
----
+**Model facts are DATA, not code.** Model ids, prices, context windows and
+thinking-mode live in
+[`crates/tars-config/data/models.toml`](crates/tars-config/data/models.toml).
+Refreshing a price is a data edit, not a recompile, and cost is resolved **per
+model** from the reply's actual model rather than from what you asked for.
+
+**A composable middleware pipeline.** Telemetry → budget → cache → validation →
+retry → breaker → rate limit. Each is a layer you add or leave out.
+
+**Typed all the way down.** Typed errors rather than strings, a **pre-flight
+capability check** (catch tool-use against a non-tool model before the round
+trip), and a decode seam — hand it a `T`, get a valid `T` or a typed error.
+
+**Every call is recorded, and the record is readable.** `pipeline_events.db`
+holds one row per call; `llm_records.db` holds the request and response bodies
+verbatim. `tars events`, `tars trajectory` and `tars run-report` read them. This
+is the part most stacks skip and then wish they had at 3am.
+
+**Deterministic tests.** The cassette provider records a real call once and
+replays it forever, so a test suite runs with no key, no cost and no variance.
+When a replay misses, you get a located diff of what changed in the request —
+not "re-record and hope".
+
+**Evaluation with real statistics.** `tars-eval` carries an LLM judge with an
+anti-incest guard (the judge's provider may not be the one under test), Wilson
+intervals, **McNemar's paired test** for "did this change actually help",
+metamorphic relations for domains with no ground truth, and tool-trajectory
+scoring.
+
+**Python and Node bindings** (PyO3 / napi-rs), and a CLI whose nine subcommands
+all *inspect*: `probe`, `bench`, `trajectory`, `run-report`, `eval`, `models`,
+`providers`, `init`, `events`.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/leocaolab/tars.git && cd tars
-
-# Rust
-cargo build --workspace --release
-
-# Python
-cd crates/tars-py && maturin develop --release
+cargo run -p tars-cli -- init          # writes $TARS_HOME/config.toml
+export ANTHROPIC_API_KEY=sk-ant-...    # or OPENAI_API_KEY / GEMINI_API_KEY / …
+cargo run -p tars-cli -- providers     # check what resolved
 ```
 
-```bash
-cargo run -p tars-cli -- init      # writes $TARS_HOME/config.toml (default ~/.tars)
-# Built-ins need only an env key: OPENAI_API_KEY / ANTHROPIC_API_KEY /
-# GEMINI_API_KEY / DEEPSEEK_API_KEY. Local + subscription-CLI providers need no key.
+Then read [`docs/USER-GUIDE.md`](docs/USER-GUIDE.md).
 
-cargo run -p tars-cli -- run -P deepseek --prompt "Say hi in five words."
+## What tars is not
+
+**Not an agent framework.** It does not plan, does not loop, does not decide
+what to do next. If you want an agent, write the loop — the library is designed
+to be called from one, and the recording is there precisely so you can debug the
+loop you wrote.
+
+**Not a router.** It will not pick a model for you. Provider selection is a
+decision you make in configuration, where you can see it.
+
+**Not a vector store, not a RAG kit.** Retrieval is your application's problem
+and your application knows the corpus.
+
+## Layout
+
+```
+tars-types      the shared vocabulary — requests, events, errors, ids
+tars-provider   the LlmProvider trait and every backend
+tars-pipeline   LlmService + the middleware layers
+tars-cache      response cache
+tars-melt       telemetry: metrics, the event stores, the trajectory record
+tars-storage    the SQLite stores under those
+tars-tools      the Tool trait + built-ins (fs, bash, web) behind an approval sink
+tars-sandbox    OS write-jail — macOS Seatbelt / Linux bubblewrap
+tars-eval       judges, statistics, metamorphic relations, trajectory scoring
+tars-config     configuration, the model library, provider definitions
+tars-cli        the `tars` binary
+tars-py         Python bindings          tars-node   Node bindings
+tars-bedrock    AWS SigV4 for Bedrock    tars-utils  pure helpers
 ```
 
-tars reads its global config from **`$TARS_HOME/config.toml`** —
-`$TARS_HOME` resolves as `--tars_home` flag > `$TARS_HOME` env var >
-`~/.tars` (the default). The providers declared there are global, shared by
-every tars consumer/tool; each provider's API key is read from the env var
-its `api_key_env` names (optionally loaded from `$TARS_HOME/.env`), never
-stored in the file.
+Each crate has a `README.md` that is a **placement contract**: its role, its
+effect budget, the dependencies it may and may not take, and the one reason it
+should ever change. If you are wondering where a change belongs, that is where
+the answer is.
 
-Check the setup without sending a paid call:
+## Status
 
-```bash
-cargo run -p tars-cli -- providers          # configured providers + key-env health
-cargo run -p tars-cli -- providers --check  # + a live reachability probe
-cargo run -p tars-cli -- models             # models each provider offers (from the model library)
-```
+[CHANGELOG.md](CHANGELOG.md) is the record of what shipped. If a doc here
+disagrees with the code, the code is right and the doc is a bug.
 
-`tars providers` shows, per provider, its `type`, `default_model`, and
-whether its key env var is set — never the secret itself. `tars models`
-reads the **model library** (`$TARS_HOME/models.json`, refreshed by
-`tars models update`); `--live` queries the provider APIs directly. See
-[USER-GUIDE → Checking your setup](docs/USER-GUIDE.md#checking-your-setup--tars-providers--tars-models).
+## Licence
 
-### Run a completion (Python)
-
-```python
-import tars
-
-# Pipeline = provider + middleware (telemetry, cache, retry).
-p = tars.Pipeline.from_default("anthropic")
-
-resp = p.complete(
-    # the concrete provider-side model — required first arg (the request
-    # itself carries no model; pin one, e.g. "claude-sonnet-5").
-    "claude-sonnet-5",
-    system="You are a precise technical reviewer.",
-    user="Review this Rust function for race conditions: ...",
-    max_output_tokens=2000,
-    thinking=True,
-)
-
-print(resp.text)
-print(resp.usage)        # input/output/cached/thinking tokens
-print(resp.telemetry)    # cache_hit, retry_count, layer trace, latency, cost
-```
-
-### Run a completion (Rust)
-
-```rust
-use tars_pipeline::{LlmService, RetryMiddleware, TelemetryMiddleware};
-use tars_provider::ProviderRegistry;
-use tars_types::{ChatRequest, RequestContext};
-
-// Composition root: install the global config + build the one registry.
-tars_handle::init_from_home(None)?;                 // reads $TARS_HOME/config.toml
-let registry = ProviderRegistry::global()?;
-let provider = registry.get(&"anthropic".into()).unwrap();
-
-// An LlmService is one provider + one bound model + an ordered middleware
-// chain. The first `.layer(...)` is outermost; the provider is innermost.
-let svc = LlmService::builder(provider, "claude-sonnet-5")
-    .layer(TelemetryMiddleware::new())   // outermost
-    .layer(RetryMiddleware::default())   // closest to the provider
-    .build();
-
-// The request is pure content — the model already lives on the service.
-let req = ChatRequest::user("...");
-let mut stream = svc.call(req, RequestContext::personal(trace_id)).await?;
-while let Some(event) = stream.next().await { /* ... */ }
-```
-
-### Typed results — decode a completion into your own struct (Rust)
-
-`resp.text` is a string; getting a value you can trust out of it is the same dirty
-work in every consumer (strip the fence, find the JSON, handle an out-of-range
-int). `tars-types::json_decode` owns that mechanism generically: **the strong type
-is yours; tars is a generic engine — hand it a `T`, get back a `T`.** It never
-learns your type or your envelope tag, and returns either a valid `T` or a typed
-`TarsJsonError` — you can't hold an ill-formed `T` (*parse, don't validate*).
-
-```rust
-use tars_types::{decode, DecodeOpts, JsonAgentResponse};
-
-#[derive(serde::Deserialize)]
-struct FixReport { id: i64, changed: Vec<String> }
-
-impl JsonAgentResponse for FixReport {
-    fn wrapper_tags() -> &'static [&'static str] { &["<fix_report>", "<report>"] }
-}
-
-let mode = caps.supports_structured_output;   // provider's StructuredOutputMode
-let report: FixReport = decode(&resp.text, mode, DecodeOpts::clamping())?;
-```
-
-`mode` drives strict-vs-scrape: `StrictSchema` / `JsonObjectMode` parse `text`
-directly; `None` / `ToolUseEmulation` scrape the first balanced JSON out of chatty
-prose. Shortcuts: `decode_json::<T>(text, mode)`, `resp.json::<T>(mode)`. Python /
-Node callers use `response_schema` + `json.loads` / `JSON.parse`. Full recipe:
-[USER-GUIDE → Decoding a structured response](docs/USER-GUIDE.md#decoding-a-structured-response).
-
----
-
-## The three seams: provider → service → runtime
-
-tars is a stack of three seams you can enter at whichever level you need:
-a **stateless provider call**, a **resilient validated `LlmService`** around
-it, or an **orchestrated durable DAG** over many calls. They share one
-composition root — `tars_handle::init(config)` (or `init_from_home(home)`
-for the CLI) installs the process-global `Config` and eagerly builds the one
-`ProviderRegistry`, so `Config::get()` and `ProviderRegistry::global()` are
-live for the rest of the process. A **role name** resolves to a concrete
-provider through the `[roles]` map:
-
-```toml
-# $TARS_HOME/config.toml
-[roles]
-critic = "deepseek"          # role → provider id
-fixer  = "claude_cli"
-```
-
-```rust
-use tars_config::Config;
-use tars_provider::ProviderRegistry;
-
-tars_handle::init_from_home(None)?;          // reads $TARS_HOME/config.toml
-let cfg = Config::get();
-let registry = ProviderRegistry::global()?;
-```
-
-Role resolution order: the flat `[roles]` map → a routing tier → a literal
-provider id → the `default` tier → the sole provider → else `UnknownRole`.
-
-### 1 — Provider: one stateless inference call
-
-`tars_handle::resolve_role(&cfg.roles, &cfg.routing, &registry, role)` hands
-back `(ProviderId, Arc<dyn LlmProvider>)` — the raw, stateless LLM seam. The
-model is an explicit argument (the request is model-agnostic content):
-`complete` accumulates a whole `ChatResponse`; `stream` gives you the event
-stream.
-
-```rust
-use tars_types::{ChatRequest, RequestContext};
-
-let (_id, provider) =
-    tars_handle::resolve_role(&cfg.roles, &cfg.routing, &registry, "critic")?;
-let req = ChatRequest::user("Say hi in 5 words.");
-let resp = provider
-    .complete(req, "deepseek-chat", RequestContext::personal(trace_id))
-    .await?;                                          // model is explicit
-println!("{}", resp.text);
-```
-
-No retry, no cache, no validation — just the call. Reach here when you
-want the provider and nothing around it. (`resolve_role_bound` also returns
-the provider's configured `default_model`, so you don't have to name one.)
-
-### 2 — Service: the resilient, validated onion
-
-`LlmService::default_chain(provider, model, opts)` wraps that provider in the
-canonical middleware chain — telemetry, cache, retry, output validation, and
-event emission — and returns an `LlmService` (the one public service type).
-Every response carries a `telemetry` block (`cache_hit`, `retry_count`, layer
-trace, latency, cost).
-
-```rust
-use tars_pipeline::{ChainOpts, LlmService};
-
-let (id, provider, model) =
-    tars_handle::resolve_role_bound(&cfg.roles, &cfg.routing, &registry, "critic")?;
-
-let mut opts = ChainOpts::new(id.clone());
-opts.retry = Some(retry_cfg);   // omit ⇒ RetryConfig::default()
-
-let svc = LlmService::default_chain(provider, model, opts);   // -> LlmService
-let mut stream = svc.call(req, ctx).await?;
-while let Some(event) = stream.next().await { /* deltas + telemetry */ }
-```
-
-Need output validators or the provider's `Capabilities` (e.g. a
-structured-output / tool-use pre-flight)? Set `opts.validators = vec![...]`,
-and read `provider.capabilities()` for the pre-flight
-(`ChatRequest::compatibility_check`).
-
-`resolve_service(...)` is the business-facing shortcut when you just want a
-model-bound leaf `LlmService` (provider + its `default_model`, no chain); wrap
-it in the onion with `LlmService::builder_with_inner(svc).layer(...).build()`.
-
-Retry is always in the chain: `opts.retry = None` ⇒ `RetryConfig::default()`
-(3 attempts, exponential backoff, 30s cap).
-
-A circuit breaker is **not** a chain layer — it's a provider wrapper you opt
-into before building the chain, so an open breaker rejects below Retry:
-
-```rust
-use tars_pipeline::{CircuitBreaker, CircuitBreakerConfig};
-
-let provider = CircuitBreaker::wrap(provider, CircuitBreakerConfig {
-    failure_threshold: 4,
-    cooldown: Duration::from_secs(30),
-});
-```
-
-### 3 — Runtime: orchestrated DAG, ephemeral or durable
-
-Build a `Runtime` (e.g. `LocalRuntime::new(store)`) and hand it to
-**`tars_runtime::run_plan`** to execute a `Plan` (a DAG of `PlanStep`s
-with `depends_on`) of agent steps to completion. `run_plan` runs the
-whole DAG **in one `await`, in memory** — ideal for short, ephemeral,
-side-effect-free runs, but the frontier is lost if the process dies.
-
-For work that must **survive a restart without re-paying for finished
-steps**, the new **`tars-durable`** crate adds a durable execution layer
-where *the persisted step-result store IS the checkpoint*:
-
-- durable async agent **jobs** (state + per-step answers persisted as
-  the DAG runs, in the runtime's own always-on store);
-- **resume = memoized re-run** — a step whose answer is already stored is
-  skipped, so the LLM is never re-called; only un-done steps execute;
-- **correctness never depends on the off-able observability event store**
-  (the durability store is separate and always-on).
-
-Status: **M0 + M1 shipped** (`DurableStore` checkpoint + `DurableScheduler`
-memoized-re-run); M2–M5 (JobManager/reconcile, delivery outbox, streaming
-bus, app wiring) pending. Design:
-[docs/design/durable-agent-runtime.md](docs/design/durable-agent-runtime.md).
-
----
-
-## Providers
-
-| Provider           | Streaming | Tools  | Vision | Thinking | Auth              |
-|--------------------|-----------|--------|--------|----------|-------------------|
-| OpenAI             | ✅        | ✅     | ✅     | ✅       | API key           |
-| Anthropic          | ✅        | ✅     | ✅     | ✅       | API key           |
-| Gemini             | ✅        | ✅     | ✅     | ✅       | API key           |
-| DeepSeek           | ✅        | ✅     | —      | ✅       | API key           |
-| **Bedrock**        | ✅        | ✅     | ✅     | ✅       | AWS IAM (keyless) |
-| vLLM / MLX / llama.cpp | ✅    | varies | varies | varies   | none / optional   |
-| Claude CLI         | buffered¹ | ✅     | ✅     | ✅       | subscription      |
-| Gemini CLI         | buffered¹ | ✅     | ✅     | —        | subscription      |
-| Codex CLI          | buffered¹ | ✅     | —      | —        | subscription      |
-| **OpenCode CLI**   | buffered¹ | ✅     | —      | ✅       | subscription / BYO |
-| **Antigravity CLI**| buffered¹ | ✅     | —      | —        | OAuth / env key   |
-
-¹ *buffered* = the delegate returns the whole turn at once (event content is
-identical; no incremental token stream yet).
-
-**Three ways in, one canonical `ChatRequest`/`ChatResponse`:**
-
-- **HTTP wire.** OpenAI, Anthropic, Gemini, DeepSeek + **any OpenAI-compatible**
-  endpoint via `type = "openai_compat"` + `base_url` (Groq, xAI, OpenRouter, LM
-  Studio, Ollama, vLLM, MLX, llama.cpp). Per-provider wire quirks live in a small
-  `OpenAiDialect`, not `if`-branches in shared code.
-- **CLI delegates** (`claude_cli` / `gemini_cli` / `codex_cli` / `opencode` /
-  `antigravity`). Reuse the vendor's official CLI + your existing subscription/OAuth
-  session — no separate API key. Each is a black-box agent, so **each runs OS-
-  sandboxed** (write-jailed). Best-effort behind routing fallback.
-- **Keyless cloud.** **Bedrock** via the unified `Converse` API; auth is the AWS
-  credential chain (SigV4 by the SDK) — no key at rest, and on AWS the workload
-  identity signs. Feature-gated (`--features bedrock`) so the AWS SDK stays out of
-  the default build.
-
-Design: [30 — OpenAI dialects](docs/architecture/30-openai-dialect.md) ·
-[31 — Bedrock](docs/architecture/31-bedrock.md) ·
-[32 — CLI delegates](docs/architecture/32-cli-delegates.md).
-
----
-
-## Documentation
-
-- **[USER-GUIDE.md](docs/USER-GUIDE.md)** — 5-minute orientation for calling tars
-  from your own code.
-- **[Comparison](docs/comparison.md)** — TARS vs LangChain / LiteLLM / Letta /
-  AutoGen / NVIDIA NIM.
-- **[Architecture docs](docs/README.md)** — design rationale and trade-offs, by
-  subsystem (provider, pipeline, cache, agent runtime, tools, security,
-  observability, storage, …). English, with Chinese mirrors under
-  [`docs/architecture/zh/`](docs/architecture/zh/).
-
----
-
-## License
-
-Apache-2.0.
+See [LICENSE](LICENSE).

@@ -6,7 +6,7 @@ interactive Claude Code session — we never see your credentials — but
 called as a one-shot subprocess via `claude -p`.
 
 This document is **not** the spec (that's
-[`architecture/01-llm-provider.md §17`](../architecture/01-llm-provider.md));
+`architecture/01-llm-provider.md §17`);
 it's the user-facing walkthrough for getting the Builder right.
 
 ---
@@ -416,5 +416,5 @@ The token-bloat behavior described in §1 was the **old**
 default-argv-shape. With these defaults landed, the same workload now
 produces a pure-inference single LLM call without the agent loop.
 
-See [§17.5 in the architecture doc](../architecture/01-llm-provider.md)
+See §17.5 in the architecture doc
 for the matching test obligations.
