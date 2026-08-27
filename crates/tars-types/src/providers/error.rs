@@ -108,9 +108,42 @@ pub enum ProviderError {
         reason: ValidationReason,
     },
 
+    /// A cassette provider had no recording covering the request. Carries the
+    /// structured facts of the miss — the wanted fingerprint + canonical form,
+    /// and the nearest captured baseline (if any) — so the testing layer can
+    /// render a located diff instead of a bare "not found". The truth travels
+    /// in the error, not a sentinel.
+    #[error("cassette MISS for request fp={want_fp} — no recording covers it \
+             (baseline={}, picked by {}, {} identical leading bytes). \
+             Build the located diff from these facts, then decide: fix the \
+             prompt if the change is wrong, re-record if it is intended.",
+            baseline_fp.as_deref().unwrap_or("<none captured — cassette predates request capture>"),
+            baseline_selected_by.as_deref().unwrap_or("n/a"),
+            identical_leading_bytes(want_canon, baseline_canon.as_deref()))]
+    CassetteMiss {
+        want_fp: String,
+        want_canon: String,
+        baseline_fp: Option<String>,
+        baseline_canon: Option<String>,
+        /// `label` | `seq` | `prefix`. A `prefix` baseline is a GUESS and the
+        /// consumer must render it as one — a diff against the wrong baseline
+        /// points at a change that never happened.
+        baseline_selected_by: Option<String>,
+    },
+
     /// Catch-all for adapter bugs. Should be rare.
     #[error("internal: {0}")]
     Internal(String),
+}
+
+/// How many leading bytes of `want` and `baseline` are byte-identical — the
+/// "N identical leading bytes" figure the [`ProviderError::CassetteMiss`]
+/// message reports so a reader sees how far the request matched before diverging.
+fn identical_leading_bytes(want: &str, baseline: Option<&str>) -> usize {
+    match baseline {
+        None => 0,
+        Some(b) => want.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -139,7 +172,11 @@ impl ProviderError {
             | BudgetExceeded
             | UnknownTool { .. }
             | ValidationFailed { .. } => ErrorClass::Permanent,
-            Parse(_) | Internal(_) | CliSubprocessDied { .. } | TimedOut { .. } => {
+            Parse(_)
+            | CassetteMiss { .. }
+            | Internal(_)
+            | CliSubprocessDied { .. }
+            | TimedOut { .. } => {
                 ErrorClass::MaybeRetriable
             }
         }
@@ -183,7 +220,7 @@ impl ProviderError {
             TimedOut { .. } => K::TimedOut,
             UnknownTool { .. } => K::UnknownTool,
             ValidationFailed { .. } => K::ValidationFailed,
-            Internal(_) => K::Internal,
+            CassetteMiss { .. } | Internal(_) => K::Internal,
         }
     }
 }

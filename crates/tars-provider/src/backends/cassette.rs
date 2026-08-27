@@ -1,4 +1,12 @@
-//! Cassette provider — deterministic LLM replay for testing (Doc 18 §5a).
+//! Cassette provider — deterministic LLM replay for testing.
+//!
+//! Stays a provider: it serves recorded events rather than live ones, and
+//! nothing more. Diffing a MISS, blessing a baseline, judging whether a change
+//! is a regression is testing-layer work in the testing layer that consumes the miss. That
+//! split is load-bearing: a MISS here reports the FACTS (the fingerprint, and
+//! the recorded request when one was captured) and does not decide whether the
+//! difference is acceptable — the same cassette pins "same result" for one test
+//! and "same steps" for another, so only the consumer's assertions can judge.
 //!
 //! Pins the LLM so a code-change A/B isolates the CODE, not model noise. Two
 //! modes, ONE request-fingerprint function (so record and replay agree):
@@ -26,16 +34,129 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream};
+use futures::{stream, StreamExt};
 
 use tars_types::{
-    ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, ProviderProfile, RequestContext,
+    ProviderProfile, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, RequestContext,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
 
-/// The recorded response for one request: the exact successful event sequence.
-type Recording = Vec<ChatEvent>;
+/// One recorded call: the event sequence, plus the canonical request text the
+/// fingerprint was taken over.
+///
+/// `request` is what makes a MISS diffable. It is optional because cassettes
+/// recorded before this field exists must keep loading — for those, a MISS can
+/// still only report the fingerprint, and the error says so instead of
+/// pretending the diff is empty.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Recording {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+    /// The consumer's label for this call (`cassette.step`), when it supplied
+    /// one. It is what makes "the same step's previous recording" a
+    /// deterministic lookup instead of a guess — see [`pick_baseline`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    pub events: Vec<ChatEvent>,
+}
+
+impl Recording {
+    /// A recording with no captured request — the shape every pre-existing
+    /// cassette on disk deserializes into.
+    fn from_events(events: Vec<ChatEvent>) -> Self {
+        Self { request: None, step: None, events }
+    }
+}
+
+/// Accepts BOTH shapes: the legacy bare `[event, …]` array and the current
+/// `{ request?, events }` object. Written by hand rather than `#[serde(untagged)]`
+/// so a malformed object reports ITS error instead of the untagged
+/// "data did not match any variant", which hides the real cause.
+impl<'de> serde::Deserialize<'de> for Recording {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Obj {
+            #[serde(default)]
+            request: Option<String>,
+            #[serde(default)]
+            step: Option<String>,
+            events: Vec<ChatEvent>,
+        }
+        let v = serde_json::Value::deserialize(d)?;
+        match v {
+            serde_json::Value::Array(_) => serde_json::from_value::<Vec<ChatEvent>>(v)
+                .map(Recording::from_events)
+                .map_err(serde::de::Error::custom),
+            _ => serde_json::from_value::<Obj>(v)
+                .map(|o| Recording { request: o.request, step: o.step, events: o.events })
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+/// Pick the recording a MISS should be compared against, and say how it was
+/// picked.
+///
+/// Selection only — no diffing and no rendering. Those are the testing layer's
+/// job (the testing layer that consumes the miss); this side owns the recordings, so it is
+/// the only place that CAN choose, and it hands the choice out as a fact.
+///
+/// Priority:
+///   1. `label` — the consumer's `cassette.step`. Deterministic, and the only
+///      option that survives concurrent calls.
+///   2. `prefix` — longest shared prefix. A GUESS; callers must render it as
+///      one, because a diff against the wrong baseline points at a change that
+///      never happened.
+///
+/// (`seq` is absent on purpose: nothing here tracks position within a session,
+/// and inventing one would be sound only while the journey stayed serial.)
+///
+/// A label narrows the candidates; it does not always single one out — a
+/// multi-turn step (a tool loop) records one request PER TURN under the same
+/// label. Within that narrowed set the shared prefix picks, and an exact tie
+/// breaks on the fingerprint. Both stages must be total orders: taking the
+/// first match out of a `HashMap` would make the baseline depend on iteration
+/// order, so the same failure would diff against a different recording run to
+/// run — nondeterminism dressed as a fact.
+fn pick_baseline<'a>(
+    want: &str,
+    want_step: Option<&str>,
+    cassette: &'a HashMap<String, Recording>,
+) -> Option<(&'a String, &'a String, &'static str)> {
+    let shared = |a: &str, b: &str| a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    // Ranked candidates among a subset, most-similar first, fingerprint-tiebroken.
+    let best = |keep: &dyn Fn(&Recording) -> bool| {
+        cassette
+            .iter()
+            .filter(|(_, r)| keep(r))
+            .filter_map(|(fp, r)| r.request.as_ref().map(|q| (fp, q, shared(want, q))))
+            .max_by(|(fa, _, na), (fb, _, nb)| na.cmp(nb).then_with(|| fb.cmp(fa).reverse()))
+    };
+
+    if let Some(step) = want_step.filter(|s| !s.is_empty()) {
+        if let Some((fp, req, _)) = best(&|r: &Recording| r.step.as_deref() == Some(step)) {
+            return Some((fp, req, "label"));
+        }
+    }
+    let (fp, req, _) = best(&|_: &Recording| true)?;
+    Some((fp, req, "prefix"))
+}
+
+/// The consumer's label for this call, read from the request context.
+///
+/// Lives in `attributes` because that map's stated purpose is passing values
+/// through to inner layers — and "which step of the journey is this" is the
+/// consumer's knowledge, not tars's: the orchestration is not in tars, so
+/// nothing here could derive it.
+pub const STEP_ATTR: &str = "cassette.step";
+
+fn step_of(ctx: &RequestContext) -> Option<String> {
+    ctx.read_attributes()
+        .get(STEP_ATTR)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
 
 /// Collapse run-varying paths so a recording replays across runs — AND across
 /// machines/tempdirs. A white-box agent's system prompt embeds its absolute
@@ -86,15 +207,26 @@ fn normalize_volatile(canon: &str) -> String {
 /// MUST compute it identically — both call this on the live `ChatRequest`, after
 /// the same volatile-path normalization.
 pub fn request_fingerprint(req: &ChatRequest, model: &str) -> String {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    canon_request(req, model).hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// The EXACT text the fingerprint is taken over, after volatile-path
+/// normalization.
+///
+/// Recorded alongside every response so a MISS can be explained rather than
+/// merely announced. A fingerprint alone tells you "the request changed" and
+/// nothing else, which leaves re-recording as the only available move — and
+/// re-recording an unexplained change stamps whatever drifted, regression
+/// included, as the new baseline. Keeping the canonical text turns the golden
+/// back into a witness: `nearest_diff` below shows WHICH bytes moved.
+pub fn canon_request(req: &ChatRequest, model: &str) -> String {
     // The request itself is model-agnostic content; the concrete model
     // is passed alongside (bound at service construction) and MUST
     // participate so recordings for different models don't collide.
     let body = serde_json::to_string(req).unwrap_or_else(|_| format!("{req:?}"));
-    let canon = format!("model={model}\0{body}");
-    let canon = normalize_volatile(&canon);
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    canon.hash(&mut h);
-    format!("{:016x}", h.finish())
+    normalize_volatile(&format!("model={model}\0{body}"))
 }
 
 enum Mode {
@@ -106,9 +238,7 @@ enum Mode {
         flush_path: Option<PathBuf>,
     },
     /// Serve recorded events by fingerprint; a miss is an error (signal).
-    Replay {
-        cassette: HashMap<String, Recording>,
-    },
+    Replay { cassette: HashMap<String, Recording> },
 }
 
 pub struct CassetteProvider {
@@ -226,20 +356,13 @@ impl CassetteProvider {
 /// Serialize a captured map + the recorded provider's capabilities to a cassette
 /// file (sorted keys → stable, diff-friendly). Best-effort: a write failure is
 /// logged, never panics.
-fn write_cassette(
-    map: &HashMap<String, Recording>,
-    caps: &ProviderProfile,
-    path: &std::path::Path,
-) {
+fn write_cassette(map: &HashMap<String, Recording>, caps: &ProviderProfile, path: &std::path::Path) {
     if map.is_empty() {
         return;
     }
     let recordings: std::collections::BTreeMap<String, Recording> =
         map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    let file = CassetteFile {
-        capabilities: Some(caps.clone()),
-        recordings,
-    };
+    let file = CassetteFile { capabilities: Some(caps.clone()), recordings };
     match serde_json::to_string_pretty(&file) {
         Ok(json) => {
             if let Some(parent) = path.parent() {
@@ -270,18 +393,38 @@ impl LlmProvider for CassetteProvider {
         model: &str,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        let key = request_fingerprint(&req, model);
+        // Compute the canonical text once: it IS the fingerprint's input, and
+        // both branches need it — replay to diff a miss, record to store it.
+        let canon = canon_request(&req, model);
+        let key = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            canon.hash(&mut h);
+            format!("{:016x}", h.finish())
+        };
+        debug_assert_eq!(key, request_fingerprint(&req, model), "canon and fingerprint must agree");
         match &self.mode {
             Mode::Replay { cassette } => match cassette.get(&key) {
-                Some(events) => {
+                Some(rec) => {
                     let out: Vec<Result<ChatEvent, ProviderError>> =
-                        events.iter().cloned().map(Ok).collect();
+                        rec.events.iter().cloned().map(Ok).collect();
                     Ok(Box::pin(stream::iter(out)))
                 }
-                None => Err(ProviderError::Internal(format!(
-                    "cassette MISS for request fp={key} — an input the recording \
-                     didn't cover (a prompt changed?). Re-record or fix the prompt."
-                ))),
+                None => {
+                    let picked = pick_baseline(&canon, step_of(&ctx).as_deref(), cassette);
+                    // Hand the located-miss facts to the testing layer as a
+                    // structured error — the wanted fingerprint + canonical
+                    // request, plus the nearest captured baseline (if any) and how
+                    // it was chosen — so a located-diff renderer in the testing layer can
+                    // render a located diff. The truth travels in the error, never
+                    // a flattened sentinel string.
+                    Err(ProviderError::CassetteMiss {
+                        want_fp: key,
+                        want_canon: canon,
+                        baseline_fp: picked.map(|(fp, _, _)| fp.clone()),
+                        baseline_canon: picked.map(|(_, q, _)| q.clone()),
+                        baseline_selected_by: picked.map(|(_, _, by)| by.to_string()),
+                    })
+                }
             },
             Mode::Record {
                 inner,
@@ -292,11 +435,20 @@ impl LlmProvider for CassetteProvider {
                 // then re-emit verbatim (collect-then-replay; recording is not
                 // latency-sensitive). Only a clean stream (no transport error)
                 // is cached — a failed call must not be frozen as a "response".
+                // Read the step label BEFORE the context is moved into the inner
+                // provider: it identifies this call for a future miss, and a
+                // recording made without it can only ever be found by guesswork.
+                let step = step_of(&ctx);
                 let events: Vec<Result<ChatEvent, ProviderError>> =
                     inner.clone().stream(req, model, ctx).await?.collect().await;
                 if events.iter().all(|e| e.is_ok()) {
-                    let recording: Recording =
-                        events.iter().map(|e| e.as_ref().unwrap().clone()).collect();
+                    // Capture the canonical request beside the events: it is what
+                    // a later MISS diffs against.
+                    let recording = Recording {
+                        request: Some(canon),
+                        step,
+                        events: events.iter().map(|e| e.as_ref().unwrap().clone()).collect(),
+                    };
                     let snapshot = {
                         let mut guard = captured.lock().unwrap_or_else(|e| e.into_inner());
                         guard.insert(key, recording);
@@ -374,10 +526,7 @@ mod tests {
     async fn record_then_replay_round_trips_by_fingerprint() {
         let real = MockProvider::with_responses(
             "real",
-            vec![
-                CannedResponse::text("FINDING_A"),
-                CannedResponse::text("FINDING_B"),
-            ],
+            vec![CannedResponse::text("FINDING_A"), CannedResponse::text("FINDING_B")],
         );
         let rec = CassetteProvider::record("cass", real);
         assert_eq!(collect_text(rec.clone(), req("file-1")).await, "FINDING_A");
@@ -399,52 +548,92 @@ mod tests {
         use tars_types::{StopReason, Usage};
         let tool_resp = CannedResponse::Sequence(vec![
             ChatEvent::started("real"),
-            ChatEvent::ToolCallStart {
-                index: 0,
-                id: "c1".into(),
-                name: "fs.write_file".into(),
-            },
+            ChatEvent::ToolCallStart { index: 0, id: "c1".into(), name: "fs.write_file".into() },
             ChatEvent::ToolCallEnd {
                 index: 0,
                 id: "c1".into(),
                 parsed_args: serde_json::json!({"path": "a.rs", "content": "fixed"}),
                 thought_signature: None,
             },
-            ChatEvent::Finished {
-                stop_reason: StopReason::ToolUse,
-                usage: Usage::default(),
-            },
+            ChatEvent::Finished { stop_reason: StopReason::ToolUse, usage: Usage::default() },
         ]);
         let real = MockProvider::with_responses("real", vec![tool_resp]);
         let rec = CassetteProvider::record("cass", real);
-        assert_eq!(
-            collect_tool_names(rec.clone(), req("fix")).await,
-            vec!["fs.write_file"]
-        );
+        assert_eq!(collect_tool_names(rec.clone(), req("fix")).await, vec!["fs.write_file"]);
         let cassette = rec.take_captured();
 
         let play = CassetteProvider::replay("cass", cassette);
         // the tool call survives record→replay
-        assert_eq!(
-            collect_tool_names(play.clone(), req("fix")).await,
-            vec!["fs.write_file"]
-        );
+        assert_eq!(collect_tool_names(play.clone(), req("fix")).await, vec!["fs.write_file"]);
     }
 
     #[tokio::test]
     async fn replay_miss_is_a_signal() {
         let play = CassetteProvider::replay("cass", HashMap::new());
-        let err = play
-            .stream(
-                req("uncovered"),
-                "test-model",
-                RequestContext::test_default(),
-            )
-            .await;
-        assert!(
-            err.is_err(),
-            "a cassette miss must surface as an error, not a silent wrong answer"
-        );
+        let err = match play
+            .stream(req("uncovered"), "test-model", RequestContext::test_default())
+            .await
+        {
+            Ok(_) => panic!("a cassette miss must surface as an error, not a silent wrong answer"),
+            Err(e) => e,
+        };
+        // The miss is the STRUCTURED error carrying the wanted fingerprint — not a
+        // flattened Internal string. With an empty cassette there is no baseline.
+        match err {
+            ProviderError::CassetteMiss {
+                want_fp,
+                baseline_fp,
+                baseline_selected_by,
+                ..
+            } => {
+                assert!(!want_fp.is_empty(), "want_fp must carry the request fingerprint");
+                assert!(baseline_fp.is_none(), "empty cassette → no baseline to diff");
+                assert!(baseline_selected_by.is_none());
+            }
+            other => panic!("expected CassetteMiss, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_miss_carries_the_nearest_baseline() {
+        // Record one call, then replay and ask for a DIFFERENT prompt: the miss
+        // hands back the recorded call as the nearest baseline (prefix-picked),
+        // with BOTH canonical requests, so a located-diff renderer in the testing layer
+        // can locate where the request diverged. This is the producer side of the
+        // structured miss — the facts must travel in the error, not a sentinel.
+        let real = MockProvider::with_responses("real", vec![CannedResponse::text("A")]);
+        let rec = CassetteProvider::record("cass", real);
+        let _ = collect_text(rec.clone(), req("shared-prefix ONE")).await;
+        let cassette = rec.take_captured();
+        assert_eq!(cassette.len(), 1);
+
+        let play = CassetteProvider::replay("cass", cassette);
+        let err = match play
+            .stream(req("shared-prefix TWO"), "test-model", RequestContext::test_default())
+            .await
+        {
+            Ok(_) => panic!("a miss against a populated cassette is still an error"),
+            Err(e) => e,
+        };
+        match err {
+            ProviderError::CassetteMiss {
+                want_fp,
+                want_canon,
+                baseline_fp,
+                baseline_canon,
+                baseline_selected_by,
+            } => {
+                assert!(!want_fp.is_empty());
+                assert!(want_canon.contains("shared-prefix TWO"), "want_canon carries the request");
+                assert!(baseline_fp.is_some(), "the recorded call is the nearest baseline");
+                assert!(
+                    baseline_canon.as_deref().unwrap().contains("shared-prefix ONE"),
+                    "baseline_canon carries the recorded request to diff against"
+                );
+                assert_eq!(baseline_selected_by.as_deref(), Some("prefix"));
+            }
+            other => panic!("expected CassetteMiss, got {other:?}"),
+        }
     }
 
     #[test]
@@ -471,10 +660,7 @@ mod tests {
         // FIRST fixer call MISSes when replayed from a different directory.
         let here = r#"{"system":"Working directory (absolute): /Users/dev/checkout-a/.arc/worktrees/fix-1140ccbb\nfix it"}"#;
         let there = r#"{"system":"Working directory (absolute): /private/tmp/.tmpXY9/repo/.arc/worktrees/fix-563e568e\nfix it"}"#;
-        assert_ne!(
-            here, there,
-            "raw strings differ (different tmp/root prefixes)"
-        );
+        assert_ne!(here, there, "raw strings differ (different tmp/root prefixes)");
         assert_eq!(
             request_fingerprint_of(here),
             request_fingerprint_of(there),
@@ -492,11 +678,7 @@ mod tests {
 
         // A prompt with no worktree path (the critic) passes through untouched.
         let critic = r#"{"system":"review crates/foo.rs against the rubric"}"#;
-        assert_eq!(
-            normalize_volatile(critic),
-            critic,
-            "non-worktree prompts are unchanged"
-        );
+        assert_eq!(normalize_volatile(critic), critic, "non-worktree prompts are unchanged");
     }
 
     /// Hash a canonical string the same way `request_fingerprint` does, but
@@ -521,11 +703,123 @@ mod tests {
         };
         let json = serde_json::to_string(&file).unwrap();
         let back: CassetteFile = serde_json::from_str(&json).unwrap();
-        assert!(
-            back.capabilities.unwrap().supports_tool_use,
-            "caps survive the cassette file"
-        );
+        assert!(back.capabilities.unwrap().supports_tool_use, "caps survive the cassette file");
         // legacy bare map fails to parse as CassetteFile (no `recordings` key)
         assert!(serde_json::from_str::<CassetteFile>(r#"{"abc":[]}"#).is_err());
+    }
+
+    /// Cassettes recorded before request capture must keep loading — the field
+    /// is additive, not a format break.
+    #[test]
+    fn a_recording_loads_from_the_legacy_bare_event_array() {
+        let legacy: Recording = serde_json::from_str(r#"[{"type":"delta","text":"hi"}]"#)
+            .expect("the pre-capture shape must still deserialize");
+        assert_eq!(legacy.events.len(), 1);
+        assert!(legacy.request.is_none(), "a legacy recording has no request to diff against");
+
+        let current: Recording =
+            serde_json::from_str(r#"{"request":"model=m body","events":[{"type":"delta","text":"hi"}]}"#)
+                .expect("the current shape deserializes");
+        assert_eq!(current.request.as_deref(), Some("model=m body"));
+        assert_eq!(current.events.len(), 1);
+    }
+
+    /// A label makes "the same step's previous recording" a lookup, not a
+    /// guess — and it must win even when another recording is textually closer.
+    #[test]
+    fn a_step_label_selects_the_baseline_over_the_closer_looking_one() {
+        let mut cassette = HashMap::new();
+        cassette.insert(
+            "fp_other".to_string(),
+            Recording {
+                request: Some("model=m\nalmost exactly the live text".to_string()),
+                step: Some("verify:F-1".to_string()),
+                events: vec![],
+            },
+        );
+        cassette.insert(
+            "fp_same_step".to_string(),
+            Recording {
+                request: Some("model=m\ncompletely different bytes".to_string()),
+                step: Some("review:lib.rs".to_string()),
+                events: vec![],
+            },
+        );
+
+        let (fp, _, by) = pick_baseline(
+            "model=m\nalmost exactly the live text!",
+            Some("review:lib.rs"),
+            &cassette,
+        )
+        .expect("a labelled recording exists");
+        assert_eq!(by, "label");
+        assert_eq!(fp, "fp_same_step", "the same STEP wins over the closer TEXT");
+    }
+
+    /// With no label there is only the prefix heuristic — and it must report
+    /// itself as such, because a diff against the wrong baseline points at a
+    /// change that never happened.
+    #[test]
+    fn without_a_label_the_baseline_is_a_declared_guess() {
+        let mut cassette = HashMap::new();
+        cassette.insert(
+            "fp_near".to_string(),
+            Recording { request: Some("model=m shared head AAA".to_string()), step: None, events: vec![] },
+        );
+        cassette.insert(
+            "fp_far".to_string(),
+            Recording { request: Some("zzz unrelated".to_string()), step: None, events: vec![] },
+        );
+
+        let (fp, _, by) = pick_baseline("model=m shared head BBB", None, &cassette)
+            .expect("a recorded request exists");
+        assert_eq!(by, "prefix", "no label ⇒ the choice is a heuristic and says so");
+        assert_eq!(fp, "fp_near");
+    }
+
+    /// Nothing captured ⇒ no baseline. Returning one anyway would let a caller
+    /// render an empty diff, which reads as "nothing changed".
+    #[test]
+    fn no_captured_request_yields_no_baseline_rather_than_an_empty_one() {
+        let mut cassette = HashMap::new();
+        cassette.insert(
+            "fp".to_string(),
+            Recording { request: None, step: Some("review:lib.rs".into()), events: vec![] },
+        );
+        assert!(pick_baseline("anything", Some("review:lib.rs"), &cassette).is_none());
+        assert!(pick_baseline("anything", None, &cassette).is_none());
+    }
+
+    /// A label NARROWS the candidates; a multi-turn step records one request per
+    /// turn under the same label, so the choice within that set must still be a
+    /// total order. Taking the first `HashMap` match would make the baseline
+    /// depend on iteration order — the same failure would diff against a
+    /// different turn run to run, which is nondeterminism reported as a fact.
+    #[test]
+    fn among_same_label_turns_the_closest_one_wins_deterministically() {
+        let mut cassette = HashMap::new();
+        for (fp, req) in [
+            ("fp_turn1", "model=m\nTURN ONE entirely different"),
+            ("fp_turn2", "model=m\nshared head, turn two"),
+            ("fp_turn3", "model=m\nshared head, turn three"),
+        ] {
+            cassette.insert(
+                fp.to_string(),
+                Recording {
+                    request: Some(req.to_string()),
+                    step: Some("fix:F-1".into()),
+                    events: vec![],
+                },
+            );
+        }
+
+        // Every run must agree — re-select repeatedly over a rehashed map.
+        for _ in 0..20 {
+            let shuffled: HashMap<String, Recording> = cassette.clone().into_iter().collect();
+            let (fp, _, by) = pick_baseline("model=m\nshared head, turn thr", Some("fix:F-1"), &shuffled)
+                .expect("labelled recordings exist");
+            assert_eq!(by, "label");
+            assert_eq!(fp, "fp_turn3", "the closest turn under the label, every time");
+        }
     }
 }
