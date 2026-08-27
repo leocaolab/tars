@@ -1,20 +1,34 @@
-//! tars-eval — eval / quality machinery for tars.
+//! tars-harness — how tars is tested and scored.
 //!
-//! Scoring, judging, and testing primitives that sit *over* the tars
-//! transport (`tars-types` + `tars-pipeline::LlmService`) but have
-//! nothing to do with the agent *runtime*. Split out of the stale
-//! `tars-runtime` crate so the eval story stands on its own:
+//! Everything here sits *over* the transport (`tars-types` +
+//! `tars-pipeline::LlmService`) and knows nothing about the agent runtime. Two
+//! halves share the crate because they are used together and separately would
+//! only import each other:
 //!
+//! **Testing.** What you reach for to hold a change still.
+//!
+//! - [`bless`]: the golden-file approval loop — committed field-level
+//!   assertions, drift reported per field rather than as one failed compare.
+//! - [`cassette_diff`]: what changed between a recorded request and the live
+//!   one, located — the answer a cassette MISS owes its reader.
+//! - [`check`]: deterministic invariants over one request/response
+//!   ([`Invariant`], [`CheckRunner`], membership / validator invariants).
+//!
+//! **Scoring.** What you reach for to say whether a change was an improvement.
+//!
+//! - [`eval`]: the corpus-replay engine behind `tars eval` — replay, judge,
+//!   diff, bless, in one pass over a case directory.
 //! - [`judge`]: LLM-as-judge — the [`Judge`] trait, [`LlmJudge`],
 //!   [`run_judge_pass`], anti-incest guard, default prompt.
 //! - [`judge_stats`]: pure statistics over judge verdicts — precision,
 //!   Wilson CI, unsure-rate, McNemar's paired test.
 //! - [`arg_judge`]: LLM judge for tool-call *argument* equivalence.
-//! - [`check`]: cheap deterministic invariants over a request/response
-//!   ([`Invariant`], [`CheckRunner`], membership / validator invariants).
 //! - [`metamorphic`]: metamorphic relations + mutation catch-rate for
 //!   golden-free / self-consistency testing.
 //! - [`trajectory_match`]: pure tool-trajectory scoring (names / args).
+//!
+//! The name is `harness`, not `eval`: eval is one module here, and more than
+//! half of what is in this crate is testing machinery that no eval run touches.
 
 pub mod arg_judge;
 pub mod bless;

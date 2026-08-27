@@ -13,7 +13,7 @@ members = [
     "crates/tars-storage",
     "crates/tars-tools",
     "crates/tars-cli",
-    "crates/tars-eval",
+    "crates/tars-harness",
     "crates/tars-py",
     "crates/tars-node",
     "examples",

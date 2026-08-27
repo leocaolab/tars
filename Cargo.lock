@@ -4817,7 +4817,7 @@ dependencies = [
  "serde_json",
  "tars-cache",
  "tars-config",
- "tars-eval",
+ "tars-harness",
  "tars-melt",
  "tars-pipeline",
  "tars-provider",
@@ -4850,7 +4850,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "tars-eval"
+name = "tars-examples"
+version = "1.9.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "serde_json",
+ "tars-pipeline",
+ "tars-provider",
+ "tars-storage",
+ "tars-tools",
+ "tars-types",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "tars-harness"
 version = "1.9.0"
 dependencies = [
  "anyhow",
@@ -4868,24 +4886,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "tars-examples"
-version = "1.9.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "serde_json",
- "tars-pipeline",
- "tars-provider",
- "tars-storage",
- "tars-tools",
- "tars-types",
- "tempfile",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -4924,7 +4924,7 @@ dependencies = [
  "serde_json",
  "tars-cache",
  "tars-config",
- "tars-eval",
+ "tars-harness",
  "tars-pipeline",
  "tars-provider",
  "tars-types",
@@ -4976,7 +4976,7 @@ dependencies = [
  "serde_json",
  "tars-bedrock",
  "tars-config",
- "tars-eval",
+ "tars-harness",
  "tars-sandbox",
  "tars-types",
  "tars-utils",

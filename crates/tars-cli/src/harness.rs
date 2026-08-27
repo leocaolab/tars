@@ -1,17 +1,21 @@
-//! `tars eval` — the CLI surface for the corpus replay + judge + diff
-//! engine. The engine itself lives in `tars_eval::eval` (stage 2 of
-//! the harness split); this module is only the clap arg definitions plus
-//! a thin dispatch that resolves config → registry → provider and maps
-//! the parsed flags onto the engine's plain config structs.
+//! `tars harness` — the CLI surface over the testing + scoring crate.
 //!
-//! See `docs/eval-and-arc-llm-roadmap.md §1.3` and `tars_eval::eval`
+//! The machinery lives in `tars-harness`; this module is only the clap arg
+//! definitions plus a thin dispatch that resolves config → registry → provider
+//! and maps the parsed flags onto the engine's plain config structs.
+//!
+//! The group is `harness`, not `eval`, because replaying a corpus is one of the
+//! things under it — `bless`, `diff` and `migrate-checks` are testing commands
+//! that never run an eval.
+//!
+//! See `docs/eval-and-arc-llm-roadmap.md §1.3` and `tars_harness::eval`
 //! for the design intent + corpus/output layout.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use tars_eval::eval::{
+use tars_harness::eval::{
     EvalBlessConfig, EvalDiffConfig, EvalJudgeConfig, EvalRunConfig, run_bless, run_diff,
     run_eval, run_judge, run_migrate_checks,
 };
@@ -20,16 +24,16 @@ use crate::config_loader;
 use crate::dispatch::{build_registry_with_breaker, pick_provider};
 
 #[derive(Args, Debug)]
-pub struct EvalArgs {
+pub struct HarnessArgs {
     #[command(subcommand)]
-    pub command: EvalCommand,
+    pub command: HarnessCommand,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum EvalCommand {
+pub enum HarnessCommand {
     /// Replay a corpus of cases through a pipeline, writing per-case
     /// outputs + a manifest two runs can be diffed against.
-    Run(EvalRunArgs),
+    Eval(EvalRunArgs),
     /// Behavioral diff of two eval runs (baseline vs candidate).
     /// Compares operational metrics (errors / tokens / latency) and
     /// per-check violation rates — NOT raw output text. See
@@ -169,9 +173,9 @@ pub struct EvalRunArgs {
     pub judge_model: Option<String>,
 }
 
-pub async fn execute(args: EvalArgs, config_path: Option<PathBuf>) -> Result<()> {
+pub async fn execute(args: HarnessArgs, config_path: Option<PathBuf>) -> Result<()> {
     match args.command {
-        EvalCommand::Run(a) => {
+        HarnessCommand::Eval(a) => {
             // Resolve config → registry → provider (same path `tars run` uses),
             // then hand the engine plain values.
             let cfg = config_loader::load(config_path)?;
@@ -193,15 +197,15 @@ pub async fn execute(args: EvalArgs, config_path: Option<PathBuf>) -> Result<()>
             })
             .await
         }
-        EvalCommand::Diff(a) => run_diff(EvalDiffConfig {
+        HarnessCommand::Diff(a) => run_diff(EvalDiffConfig {
             baseline: a.baseline,
             candidate: a.candidate,
             json: a.json,
             trajectory: a.trajectory,
             trajectory_mode: a.trajectory_mode,
         }),
-        EvalCommand::MigrateChecks(a) => run_migrate_checks(&a.dir),
-        EvalCommand::Judge(a) => {
+        HarnessCommand::MigrateChecks(a) => run_migrate_checks(&a.dir),
+        HarnessCommand::Judge(a) => {
             let cfg = config_loader::load(config_path)?;
             let registry = build_registry_with_breaker(&cfg, /* breaker */ true)?;
             run_judge(EvalJudgeConfig {
@@ -212,7 +216,7 @@ pub async fn execute(args: EvalArgs, config_path: Option<PathBuf>) -> Result<()>
             })
             .await
         }
-        EvalCommand::Bless(a) => run_bless(EvalBlessConfig {
+        HarnessCommand::Bless(a) => run_bless(EvalBlessConfig {
             run: a.run,
             select: a.select,
             accept: a.accept,

@@ -1,10 +1,10 @@
 [package]
-name = "tars-eval"
+name = "tars-harness"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Eval / quality machinery — judge, checks, metamorphic relations, trajectory scoring (over tars-types + tars-pipeline, no runtime)."
+description = "How tars is tested and scored — bless, cassette diff, invariants, the eval engine, judges, metamorphic relations, trajectory scoring."
 
 [lints]
 workspace = true

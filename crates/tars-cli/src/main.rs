@@ -19,7 +19,7 @@ use tars_melt::{TelemetryConfig, TelemetryFormat};
 mod bench;
 mod config_loader;
 mod dispatch;
-mod eval;
+mod harness;
 mod event_store;
 mod events;
 mod init;
@@ -128,10 +128,10 @@ enum Command {
     /// per-provider breakdown, errors). See
     /// `docs/eval-and-arc-llm-roadmap.md §1.1`.
     RunReport(run_report::RunReportArgs),
-    /// Eval subcommands: corpus replay, judge, and diff (all shipped).
+    /// Testing + scoring: corpus replay, judge, diff, bless.
     /// See `docs/eval-and-arc-llm-roadmap.md §1.3`.
     #[command(subcommand_value_name = "COMMAND")]
-    Eval(eval::EvalArgs),
+    Harness(harness::HarnessArgs),
     /// Discover provider models over a persisted model library.
     /// `tars models` reads the library (fast/offline); `tars models update`
     /// refreshes it from the live provider APIs and flags stale defaults.
@@ -184,7 +184,7 @@ async fn main() -> ExitCode {
         Command::Bench(_) => "bench",
         Command::Trajectory(_) => "trajectory",
         Command::RunReport(_) => "run-report",
-        Command::Eval(_) => "eval",
+        Command::Harness(_) => "harness",
         Command::Models(_) => "models",
         Command::Providers(_) => "providers",
         Command::Init(_) => "init",
@@ -216,7 +216,7 @@ async fn main() -> ExitCode {
             }
             run_report::execute(args).await
         }
-        Command::Eval(args) => eval::execute(args, cli.config).await,
+        Command::Harness(args) => harness::execute(args, cli.config).await,
         Command::Models(args) => models::execute(args, cli.config).await,
         Command::Providers(args) => providers_cmd::execute(args, cli.config).await,
         Command::Init(args) => {

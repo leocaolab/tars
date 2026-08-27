@@ -276,7 +276,7 @@ impl AgentEvent {
 
 /// The cross-call tool trajectory of a recorded run: the tool names from
 /// every `LlmCallCaptured` event, concatenated in event (step) order
-/// (Doc 26 M2). Feed the result to `tars-eval`'s `trajectory_match` to
+/// (Doc 26 M2). Feed the result to `tars-harness`'s `trajectory_match` to
 /// score a multi-call agent's tool use.
 ///
 /// Events come from the trajectory store in append order, which is step
@@ -284,8 +284,8 @@ impl AgentEvent {
 ///
 /// Note: the arg-carrying sibling `tool_step_sequence` (which paired each
 /// tool name with its recorded args) is NOT here — it depended on
-/// `trajectory_match::ToolStep`, which now lives in `tars-eval`.
-/// Re-adding it belongs there, against `tars-eval`'s own `AgentEvent`
+/// `trajectory_match::ToolStep`, which now lives in `tars-harness`.
+/// Re-adding it belongs there, against `tars-harness`'s own `AgentEvent`
 /// view, so this telemetry crate stays free of an eval dependency.
 pub fn tool_sequence(events: &[AgentEvent]) -> Vec<String> {
     let mut out = Vec::new();

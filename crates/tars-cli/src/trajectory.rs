@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use tars_eval::trajectory_match::{self, MatchMode, ToolStep};
+use tars_harness::trajectory_match::{self, MatchMode, ToolStep};
 use tars_melt::agent_event::AgentEvent;
 use tars_storage::AgentEventLog;
 use tars_types::TrajectoryId;
