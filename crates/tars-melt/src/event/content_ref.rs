@@ -1,15 +1,15 @@
 //! [`ContentRef`] — opaque, tenant-scoped handle to an `LlmRecord`
-//! stored in some `LlmRecordStore` (defined in `tars_melt::event`). See
-//! [Doc 17 §6](../../../docs/architecture/17-pipeline-event-store.md) for the full
-//! design + tenant-isolation rationale.
+//! stored in some `LlmRecordStore` (defined in `tars_melt::event`). See the
+//! [pipeline event-store design](../../../docs/architecture/17-pipeline-event-store.md)
+//! for the full tenant-isolation rationale.
 //!
 //! Self-contained — carries `tenant_id` so callers can't accidentally
 //! cross-tenant fetch. `LlmRecordStore::fetch(&ContentRef)` enforces
 //! scoping internally; no caller-provided tenant parameter, no
 //! foot-gun, no probe vector.
 //!
-//! Cross-tenant record dedup is **forbidden** by Doc 06 §1
-//! (tenant isolation). Same content bytes from two tenants get two
+//! Cross-tenant record dedup is **forbidden** (tenant isolation).
+//! Same content bytes from two tenants get two
 //! distinct `ContentRef` (different `tenant_id` prefixes in store
 //! key). Within-tenant dedup still happens — most storage savings
 //! come from re-asking the same prompt within a tenant anyway.

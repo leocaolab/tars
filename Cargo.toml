@@ -102,8 +102,17 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Cache
 moka = { version = "0.12", features = ["future"] }
 
-# SQLite (cache L2, future event store, content store)
-rusqlite = { version = "0.32", features = ["bundled", "blob"] }
+# sqlx — the one SQLite driver. Async, with versioned migrations
+# (sqlx::migrate!). Each DB file gets one SqlitePool. It replaced rusqlite +
+# refinery + spawn_blocking across the stores, and both are gone from the tree —
+# one driver, one migration mechanism.
+#
+# `macros` is on for `sqlx::migrate!` (compile-time-embeds the migration dir, no
+# DB needed); we do NOT yet use the compile-time-checked
+# `query!` — queries go through runtime `sqlx::query` with bound params (still
+# injection-safe). Moving to `query!` + a committed `.sqlx` offline cache is a
+# later hardening step.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 
 # Test deps
 wiremock = "0.6"

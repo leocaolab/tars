@@ -2,21 +2,21 @@
 //! §3, Doc 17). Two durable, full-fidelity, never-sampled stores read
 //! back by eval / `tars events` / debug / replay:
 //!
-//! - [`PipelineEventLog`] — one [`pipeline_events::PipelineEvent`] per
+//! - [`PipelineEventLog`] — one [`PipelineEvent`] per
 //!   `Pipeline.call` boundary. Distinct from recovery's `AgentEventLog`
 //!   (trajectory truth, tars-storage) — there is no shared generic
 //!   `EventStore<E>` (Doc 09 §2.2, Doc 17 Q1).
 //! - [`LlmRecordStore`] — tenant-scoped CAS holding the per-call
 //!   `LlmRecord` (`ChatRequest` + `ChatResponse`) referenced from a
-//!   [`pipeline_events::PipelineEvent`] via [`ContentRef`].
+//!   [`PipelineEvent`] via [`ContentRef`].
 //!
 //! The producing pipeline emits once into melt and never reads these
 //! back; the M/L/T egress is fired independently (Doc 08 §3).
 
 pub mod content_ref;
+pub mod pipeline_events;
 mod llm_record_store;
 mod pipeline_event_log;
-pub mod pipeline_events;
 
 pub use content_ref::ContentRef;
 pub use llm_record_store::{LlmRecordStore, SqliteLlmRecordStore, SqliteLlmRecordStoreConfig};

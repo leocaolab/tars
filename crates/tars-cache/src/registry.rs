@@ -5,9 +5,9 @@
 //! - per-entry TTL via `expire_after_create` policy
 //! - lock-free reads
 //!
-//! M1 deliberately omits L2 (Redis / SQLite) and L3 (provider-side
-//! handles). Adding either is a new `CacheRegistry` impl with the
-//! same trait surface.
+//! L2 (persistent) and L3 (provider-side handles) are separate
+//! `CacheRegistry` impls with the same trait surface — see
+//! [`crate::SqliteCacheRegistry`] for L2.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -47,7 +47,7 @@ pub struct CachedResponse {
 pub trait CacheRegistry: Send + Sync + 'static {
     /// Look up a previously cached response for `key`. `Ok(None)` =
     /// miss; errors are typed but the middleware degrades them to
-    /// misses (Doc 03 §4.3).
+    /// misses.
     async fn lookup(
         &self,
         key: &CacheKey,
@@ -55,8 +55,8 @@ pub trait CacheRegistry: Send + Sync + 'static {
     ) -> Result<Option<CachedResponse>, CacheError>;
 
     /// Store a successful response. Caller is responsible for the
-    /// "should we cache this?" decision (Doc 03 §5.1) — the registry
-    /// just persists what it's given.
+    /// "should we cache this?" decision — the registry just persists
+    /// what it's given.
     async fn write(
         &self,
         key: CacheKey,
@@ -79,8 +79,7 @@ pub struct MemoryCacheRegistryConfig {
     /// Hard upper bound on entries. Eviction policy is W-TinyLFU
     /// (moka default) — surprisingly resilient to scan-style workloads.
     pub max_entries: u64,
-    /// Default TTL when [`CachePolicy::l1_ttl`] is `None`. 5 minutes
-    /// matches Doc 03 §2.1's "L1 typical".
+    /// Default TTL when the policy carries no per-request override.
     pub default_ttl: Duration,
 }
 
@@ -101,13 +100,6 @@ pub struct MemoryCacheRegistry {
 
 impl MemoryCacheRegistry {
     pub fn new(config: MemoryCacheRegistryConfig) -> Self {
-        // Single global TTL applied to every entry. moka's plain
-        // `insert` doesn't take a per-entry TTL — per-entry overrides
-        // would require an `Expiry` policy impl plus a per-value TTL
-        // field, which is deliberate non-goal for M1's L1. Callers
-        // passing `policy.l1_ttl` get a debug log in `write` and the
-        // entry still uses `default_ttl`. L2 (Sqlite) honours
-        // `l1_ttl` on its own builder.
         // A zero capacity would make moka evict every entry immediately,
         // turning the "cache" into a silent no-op that's painful to
         // diagnose. Reject it loudly at construction — this is a
@@ -154,19 +146,12 @@ impl CacheRegistry for MemoryCacheRegistry {
         if !policy.l1.is_enabled() {
             return Ok(());
         }
-        // Audit `tars-cache-src-registry-1`: previously this computed
-        // `policy.l1_ttl.unwrap_or(self.default_ttl)` and immediately
-        // discarded it with `let _ = ...`, while the constructor doc
-        // claimed `l1_ttl` would override on a per-write basis. moka's
-        // per-entry TTL actually requires an `Expiry` policy impl on
-        // the builder — `Cache::insert` doesn't take a TTL. Be honest
-        // about it: log a debug message when a caller tries to
-        // override and we silently ignore. SqliteCacheRegistry's L2
-        // path DOES honor `l1_ttl` (per its own builder); a future
-        // moka builder rev that exposes per-entry insert can plumb
-        // this through here.
-        // Read via `l1_ttl_effective` so a caller that passes `l1=false`
-        // with an override doesn't log a misleading "we ignored your
+        // moka's `insert` has no per-entry TTL — that would need an
+        // `Expiry` policy impl on the builder — so a per-write override
+        // can't be honored here; log it rather than silently drop it.
+        // (`SqliteCacheRegistry`'s L2 path does honor the override.)
+        // Read via `l1_ttl_effective` so a caller passing `l1=Disabled`
+        // with an override doesn't get a misleading "we ignored your
         // ttl" — the override is genuinely meaningless when L1 is off,
         // and the accessor surfaces that as `None`.
         if let Some(requested) = policy.l1_ttl_effective() {
@@ -356,9 +341,9 @@ mod tests {
 
     #[tokio::test]
     async fn per_write_l1_ttl_override_is_silently_ignored() {
-        // Documents the limitation called out in the audit comment in
-        // `write`: callers may pass `policy.l1_ttl`, and we log + drop
-        // it. The default_ttl of the registry wins.
+        // Documents the limitation in `write`: a per-write l1_ttl
+        // override is logged and dropped; the registry's default_ttl
+        // wins.
         let r = MemoryCacheRegistry::new(MemoryCacheRegistryConfig {
             max_entries: 100,
             default_ttl: Duration::from_secs(300),

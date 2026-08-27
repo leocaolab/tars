@@ -1,26 +1,21 @@
 //! Per-request cache policy. Threaded through `RequestContext.attributes`
 //! by upstream callers (Agent layer / explicit override).
 //!
-//! M1 only honours `l1`. The `l2`/`l3` fields are placeholders that
-//! match Doc 03 §2.2's full policy shape so the public API doesn't
-//! change when the other levels land.
+//! `l1` is honoured by every registry; `l2` only by
+//! [`crate::SqliteCacheRegistry`]; `l3` by nothing yet.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// Per-level cache policy. Sum-as-product fix for the original
-/// `(bool, Option<Duration>)` shape that admitted the meaningless
-/// "disabled but has a TTL override" state (`arc scan --judge`
-/// finding `ARC-L5-B-7`).
+/// Per-level cache policy. A sum type, so the meaningless "disabled but
+/// has a TTL override" state is unrepresentable.
 ///
 /// - `Disabled` — level off, no key compute / lookup / write.
 /// - `Default` — level on, use the registry's configured TTL.
 /// - `Override { ttl }` — level on, use `ttl` instead of the default.
 ///
-/// **Wire shape** (since `ARC-L5-B-5` killed the legacy flat adapter):
-/// natural serde tagged-enum JSON, with `snake_case` variant tags so
-/// the on-disk form reads idiomatically:
+/// **Wire shape** — serde tagged-enum JSON, `snake_case` variant tags:
 ///
 /// ```text
 ///   "disabled"
@@ -28,9 +23,9 @@ use serde::{Deserialize, Serialize};
 ///   {"override": {"ttl": {"secs": 60, "nanos": 0}}}
 /// ```
 ///
-/// The illegal `(disabled, Some(ttl))` state is now unrepresentable
-/// at every layer — domain type, wire form, and the in-memory
-/// `serde_json::Value` carried in `RequestContext.attributes`.
+/// The illegal `(disabled, Some(ttl))` state is unrepresentable at every
+/// layer — domain type, wire form, and the in-memory `serde_json::Value`
+/// carried in `RequestContext.attributes`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheLayerPolicy {
@@ -62,11 +57,8 @@ impl CacheLayerPolicy {
 
 /// Cache policy across all three tiers.
 ///
-/// **Wire shape** since `ARC-L5-B-5` dropped the bespoke flat-JSON
-/// adapter (`CachePolicyWire` and its `lift`/`project` helpers — the
-/// helpers carried a `(bool, Option<Duration>)` tuple that was itself
-/// `ARC-L5-D-3` ROT). Now derived `Serialize`/`Deserialize` over the
-/// typed enum per layer:
+/// **Wire shape** — derived `Serialize`/`Deserialize`, one tagged enum
+/// per layer:
 ///
 /// ```text
 ///   {"l1": "default", "l2": "default", "l3": "disabled"}
@@ -74,24 +66,21 @@ impl CacheLayerPolicy {
 /// ```
 ///
 /// The wire format is internal: `RequestContext.attributes` is an
-/// in-memory `HashMap<String, serde_json::Value>` per request — not a
-/// persisted store — so there is no legacy on-disk payload that needs
-/// to keep round-tripping. The adapter that lived here was defensive
-/// code for a producer that never materialised.
+/// in-memory `HashMap<String, serde_json::Value>` per request, not a
+/// persisted store, so there is no legacy on-disk payload to keep
+/// round-tripping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CachePolicy {
     pub l1: CacheLayerPolicy,
-    /// **Not yet honoured** — landed when `tars-storage` ships L2.
     pub l2: CacheLayerPolicy,
-    /// **Not yet honoured** — landed when `ExplicitCacheProvider`
-    /// (D-1) ships.
+    /// Not yet honoured — no provider-side explicit cache exists yet.
     pub l3: CacheLayerPolicy,
 }
 
 impl Default for CachePolicy {
-    /// L1 + L2 on (matches Doc 03 §2.2). L3 is opt-in per request
-    /// because explicit provider-side caches cost storage rent and
-    /// only pay back for long-prefix multi-turn workloads.
+    /// L1 + L2 on. L3 is opt-in per request because explicit
+    /// provider-side caches cost storage rent and only pay back for
+    /// long-prefix multi-turn workloads.
     ///
     /// L2 only does anything when the registry impl is L2-aware
     /// ([`crate::SqliteCacheRegistry`]). [`crate::MemoryCacheRegistry`]
@@ -147,7 +136,7 @@ mod tests {
         let p = CachePolicy::default();
         assert!(p.l1.is_enabled());
         assert!(p.l2.is_enabled());
-        assert!(!p.l3.is_enabled(), "L3 stays opt-in per Doc 03 §2.2");
+        assert!(!p.l3.is_enabled(), "L3 stays opt-in");
         assert!(p.any_enabled());
     }
 

@@ -128,8 +128,8 @@ pub async fn execute(args: EventsArgs) -> Result<()> {
             dir.display()
         );
     }
-    let events = open_events(&dir)?;
-    let records = open_records(&dir)?;
+    let events = open_events(&dir).await?;
+    let records = open_records(&dir).await?;
 
     match args.command {
         EventsCommand::List(a) => list(&*events, a).await,
@@ -146,7 +146,7 @@ fn resolve_store_dir(explicit: Option<&std::path::Path>) -> Result<PathBuf> {
     Ok(home.join(".tars/events"))
 }
 
-fn open_events(dir: &std::path::Path) -> Result<std::sync::Arc<dyn PipelineEventLog>> {
+async fn open_events(dir: &std::path::Path) -> Result<std::sync::Arc<dyn PipelineEventLog>> {
     let path = dir.join("pipeline_events.db");
     if !path.exists() {
         anyhow::bail!(
@@ -157,18 +157,17 @@ fn open_events(dir: &std::path::Path) -> Result<std::sync::Arc<dyn PipelineEvent
     }
     Ok(SqlitePipelineEventLog::open(
         SqlitePipelineEventLogConfig::new(path),
-    )?)
+    )
+    .await?)
 }
 
-fn open_records(dir: &std::path::Path) -> Result<std::sync::Arc<dyn LlmRecordStore>> {
+async fn open_records(dir: &std::path::Path) -> Result<std::sync::Arc<dyn LlmRecordStore>> {
     let path = dir.join("llm_records.db");
     if !path.exists() {
         // Records missing isn't fatal — events still listable.
-        return Ok(SqliteLlmRecordStore::in_memory()?);
+        return Ok(SqliteLlmRecordStore::in_memory().await?);
     }
-    Ok(SqliteLlmRecordStore::open(
-        SqliteLlmRecordStoreConfig::new(path),
-    )?)
+    Ok(SqliteLlmRecordStore::open(SqliteLlmRecordStoreConfig::new(path)).await?)
 }
 
 async fn list(store: &dyn PipelineEventLog, args: ListArgs) -> Result<()> {

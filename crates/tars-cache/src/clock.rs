@@ -9,8 +9,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Source of "now" in Unix-epoch milliseconds. `Send + Sync` so it can
-/// live behind an `Arc<dyn Clock>` shared across the cache's async tasks.
+/// Source of "now" in Unix-epoch milliseconds.
 pub trait Clock: Send + Sync {
     /// Milliseconds since the Unix epoch.
     fn now_ms(&self) -> i64;

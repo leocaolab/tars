@@ -249,11 +249,10 @@ mod tests {
     async fn store_with(records: Vec<(TrajectoryId, serde_json::Value)>) -> Arc<dyn AgentEventLog> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.sqlite");
-        // NOTE: this repo's SqliteAgentEventLog::open is synchronous (rusqlite);
-        // the working repo's is async (sqlx). The store's own API is the only
-        // difference — everything below is identical.
         let store: Arc<SqliteAgentEventLog> =
-            SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(path)).unwrap();
+            SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(path))
+                .await
+                .unwrap();
         // Group payloads per trajectory and append in order.
         let mut by_traj: BTreeMap<TrajectoryId, Vec<serde_json::Value>> = BTreeMap::new();
         for (t, p) in records {

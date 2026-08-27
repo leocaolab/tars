@@ -636,15 +636,24 @@ impl EventStorePair {
         let events_path = dir_path.join("pipeline_events.db");
         let records_path = dir_path.join("llm_records.db");
 
-        let events: Arc<dyn tars_melt::event::PipelineEventLog> =
-            tars_melt::event::SqlitePipelineEventLog::open(
-                tars_melt::event::SqlitePipelineEventLogConfig::new(events_path),
-            )
+        // `SqlitePipelineEventLog::open` is async (one pool per file); this
+        // pyo3 constructor is sync, so drive it on the shared runtime.
+        let events: Arc<dyn tars_melt::event::PipelineEventLog> = tokio_runtime()?
+            .block_on(async {
+                tars_melt::event::SqlitePipelineEventLog::open(
+                    tars_melt::event::SqlitePipelineEventLogConfig::new(events_path),
+                )
+                .await
+            })
             .map_err(|e| runtime_to_py("open pipeline event store", e))?;
-        let records: Arc<dyn tars_melt::event::LlmRecordStore> =
-            tars_melt::event::SqliteLlmRecordStore::open(
-                tars_melt::event::SqliteLlmRecordStoreConfig::new(records_path),
-            )
+        // Same: async open, sync constructor.
+        let records: Arc<dyn tars_melt::event::LlmRecordStore> = tokio_runtime()?
+            .block_on(async {
+                tars_melt::event::SqliteLlmRecordStore::open(
+                    tars_melt::event::SqliteLlmRecordStoreConfig::new(records_path),
+                )
+                .await
+            })
             .map_err(|e| runtime_to_py("open llm record store", e))?;
         Ok(Self { events, records })
     }

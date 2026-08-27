@@ -1,11 +1,11 @@
-//! LLM response cache — Doc 03.
+//! LLM response cache.
 //!
-//! M1 ships **L1 only** (`MemoryCacheRegistry`, moka-backed in-process
-//! LRU). L2 (Redis-or-SQLite shared cache) lands when `tars-storage`
-//! exists. L3 (provider-side `cachedContent` / `cache_control` handles)
-//! waits on the `ExplicitCacheProvider` sub-trait (TODO D-1).
+//! Two registry implementations behind one [`CacheRegistry`] trait:
+//! [`MemoryCacheRegistry`] (L1 only, moka-backed in-process LRU) and
+//! [`SqliteCacheRegistry`] (L1 + persistent L2). L3 (provider-side
+//! `cachedContent` / `cache_control` handles) is not built yet.
 //!
-//! ## Cache key construction (Doc 03 §3.2)
+//! ## Cache key construction
 //!
 //! [`CacheKeyFactory::compute`] enforces:
 //!
@@ -14,15 +14,11 @@
 //!   a kill-switch when a key-construction bug is discovered.
 //! - **Tenant + IAM scopes prefix every key**. Without IAM scopes
 //!   participating, two principals with different read-rights against
-//!   the same RAG corpus would share the same cache slot — the
-//!   classic IDOR pattern Doc 03 §3.1 calls out as the prime hazard.
+//!   the same RAG corpus would share the same cache slot — the classic
+//!   IDOR hazard.
 //! - **`temperature != 0`** → key construction fails fast with
 //!   [`CacheError::NonDeterministic`]. Caching a stochastic output
 //!   defeats the point.
-//! - **`ModelHint::Tier` and `ModelHint::Ensemble`** → fail fast.
-//!   Routing must resolve to `Explicit` before the cache layer sees
-//!   the request. (See Doc 03 §4.2 for the future tier-fingerprint
-//!   second pass; not built yet.)
 
 mod clock;
 mod error;
@@ -39,3 +35,4 @@ pub use registry::{CacheRegistry, CachedResponse, MemoryCacheRegistry, MemoryCac
 pub use sqlite::{
     SqliteCacheRegistry, SqliteCacheRegistryConfig, default_personal_cache_path, open_at_path,
 };
+

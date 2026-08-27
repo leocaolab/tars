@@ -7,27 +7,25 @@
 //! boundary: one entry per completed `Pipeline.call`, regardless of
 //! whether a Session wraps it.
 //!
-//! Schema lives in `tars-types` (data contract, no backend); the
-//! `PipelineEventLog` trait that persists it lives in `tars_melt::event`.
+//! Schema + the `PipelineEventLog` trait that persists it both live in
+//! `tars_melt::event`; the referenced core value types come from `tars-types`.
 
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::ContentRef;
-use tars_types::ProviderErrorKind;
-use tars_types::StopReason;
-use tars_types::TelemetryAccumulator;
-use tars_types::Usage;
-use tars_types::{ProviderId, SessionId, TenantId, TraceId};
-use tars_types::{ValidationReason, ValidationSummary};
+use super::content_ref::ContentRef;
+use tars_types::telemetry::TelemetryAccumulator;
+use tars_types::{
+    ProviderErrorKind, ProviderId, SessionId, StopReason, TenantId, TraceId, Usage,
+    ValidationReason, ValidationSummary,
+};
 
 /// Top-level event variant. `#[non_exhaustive]` plus a catchall
 /// `Other` variant give two layers of forward-compat: old readers
 /// don't fail on unknown variants, and new variants can be added
-/// without SemVer break (forward-compat catchall pattern; see
-/// Doc 17 §4).
+/// without SemVer break.
 ///
 /// Variants box their inner structs (`LlmCallFinished` is ~600 bytes;
 /// boxing keeps the enum's stack footprint to a pointer) so consumers
@@ -41,9 +39,7 @@ pub enum PipelineEvent {
     LlmCallFinished(Box<LlmCallFinished>),
 
     /// Score produced by an evaluator (Online or Offline). FK back
-    /// to the `LlmCallFinished` it scored. Defined now; not yet
-    /// emitted — Phase 2 / W3 main body wires the runner that
-    /// generates these.
+    /// to the `LlmCallFinished` it scored. Defined now; not yet emitted.
     EvaluationScored(Box<EvaluationScored>),
 
     /// Forward-compat catchall. Old readers deserialise unknown
@@ -57,7 +53,7 @@ pub enum PipelineEvent {
 
 /// Per-call observability + outcome record. Inline scalars (small,
 /// queryable) plus `ContentRef` pointers to records in a separate
-/// `LlmRecordStore` (Doc 17 §5).
+/// `LlmRecordStore`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LlmCallFinished {
     // ── identity ────────────────────────────────────────────────
@@ -67,18 +63,14 @@ pub struct LlmCallFinished {
     /// `None` when the caller invoked `Pipeline.complete` directly
     /// without a `Session`.
     pub session_id: Option<SessionId>,
-    /// For B-21 OTel cross-system correlation. May be `None` if the
-    /// caller didn't supply one; tars never invents trace IDs.
+    /// For OTel cross-system correlation. May be `None` if the caller
+    /// didn't supply one; tars never invents trace IDs.
     pub trace_id: Option<TraceId>,
 
     // ── request (inline scalars + body ref) ─────────────────────
     /// Provider that actually ran the call. `None` when routing
     /// short-circuited before provider resolution (cache hit, early
-    /// validation failure) — historically the same state was carried
-    /// as the `ProviderId::new("unresolved")` sentinel string (fix
-    /// ARC-L5-SW-10); old events with that literal value are
-    /// rewritten to `None` by the tars-storage v1→v2 schema
-    /// migration.
+    /// validation failure).
     pub provider_id: Option<ProviderId>,
     /// Model actually called — post-routing resolution, not the
     /// caller's `ModelHint`. Useful for "which model did each
@@ -106,7 +98,7 @@ pub struct LlmCallFinished {
 
     // ── observability snapshots ─────────────────────────────────
     /// In-memory accumulator captured at end-of-call. Same shape as
-    /// what `Response.telemetry` exposes today (B-15 / Stage 4).
+    /// what `Response.telemetry` exposes.
     pub telemetry: TelemetryAccumulator,
     /// Per-validator outcomes captured at end-of-call. Empty when
     /// no validators ran.
@@ -127,7 +119,7 @@ pub struct LlmCallFinished {
     /// byte-identical for the overwhelming majority of events (every
     /// non-validation-reject call), so this is a backward-compatible
     /// schema addition: older event blobs without the field deserialize
-    /// to `None`. (B-20.v2 follow-up.)
+    /// to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation_reason: Option<ValidationReason>,
 
@@ -153,15 +145,14 @@ pub enum CallResult {
         /// Typed error discriminator — the same [`ProviderErrorKind`]
         /// every other consumer (telemetry's `error_kind`,
         /// `TarsProviderError.kind`) is keyed on. Serializes to the
-        /// identical snake_case wire string ("rate_limited", "network",
-        /// "validation_failed", ...) it used to carry as a raw `String`,
-        /// so the persisted JSON form is unchanged.
+        /// snake_case wire string ("rate_limited", "network",
+        /// "validation_failed", ...) so the persisted JSON form is stable.
         kind: ProviderErrorKind,
     },
 }
 
 /// Score produced by an evaluator. Defined for forward schema
-/// compat; not yet emitted — Phase 2 wires the runner.
+/// compat; not yet emitted.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EvaluationScored {
     pub event_id: Uuid,
@@ -177,7 +168,7 @@ pub struct EvaluationScored {
     pub tags: Vec<String>,
 }
 
-/// Per-tenant persistence dial. Default `Limited`. See Doc 17 §8.1.
+/// Per-tenant persistence dial. Default `Limited`.
 ///
 /// Distinct from sampling — sampling decides "do we emit this call
 /// at all", `PersistenceMode` decides "if we emit, how much detail
@@ -271,7 +262,8 @@ mod tests {
     fn validation_reason_omitted_from_wire_when_none() {
         // Backward-compat: the overwhelming majority of events carry no
         // reject reason; the field must not appear in their JSON so the
-        // persisted form is byte-identical to pre-B-20.v2 blobs.
+        // persisted form is byte-identical to blobs written before the
+        // field existed.
         let ev = fake_finished(); // validation_reason: None
         let v = serde_json::to_value(&ev).unwrap();
         assert!(

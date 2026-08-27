@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 tars-types = { path = "../tars-types" }
+# The Db handle — the one place that names a driver.
+tars-storage = { path = "../tars-storage" }
 
 # Async
 tokio.workspace = true
@@ -26,8 +28,9 @@ sha2.workspace = true
 # In-process cache
 moka.workspace = true
 
-# Persistent L2 cache (Personal mode)
-rusqlite.workspace = true
+# Persistent L2 cache (Personal mode) — async per-file SqlitePool + versioned
+# sqlx migrations (migrations/cache/).
+sqlx.workspace = true
 
 # XDG cache dir resolution (for `default_personal_cache_path`)
 dirs.workspace = true

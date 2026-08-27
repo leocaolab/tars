@@ -15,20 +15,21 @@ workspace = true
 # because tars-types is the workspace's universal-foundation crate;
 # centralising every env-var read (ARC-L5-COH-18) is worth it.
 tars-types = { path = "../tars-types" }
-# `run_report` replays a trajectory's AgentEvent log into a RunReport.
-# tars-storage does NOT depend on tars-melt, so this stays acyclic.
+# `run_report` reads the trajectory event log (`AgentEventLog` /
+# `EventRecord`) to roll a trajectory up into a `RunReport`. tars-storage
+# does NOT depend on tars-melt, so this stays acyclic.
 tars-storage = { path = "../tars-storage" }
-
-# `agent_event.rs` derives Serialize/Deserialize on the AgentEvent model and
-# hashes the idempotency key + system prompt.
-serde.workspace = true
-sha2.workspace = true
-# PipelineEvent / LlmCallFinished carry generated event ids.
-uuid.workspace = true
 
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
+# `event.rs` derives Serialize/Deserialize on the AgentEvent model.
+serde.workspace = true
+# `event.rs` hashes the idempotency key + system prompt (SHA256);
+# `event/content_ref.rs` hashes record content into a `ContentRef`.
+sha2.workspace = true
+# `event/pipeline_events.rs` — `PipelineEvent`/`LlmCallFinished` event IDs.
+uuid.workspace = true
 
 # `event/` module — the read-able E-pillar stores (PipelineEventLog +
 # LlmRecordStore), moved here from tars-storage (Doc 17 §7). These deps
@@ -36,7 +37,11 @@ thiserror.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
-rusqlite.workspace = true
+# sqlx — both E-pillar stores (LlmRecordStore + PipelineEventLog) are on
+# the async-pool path now (one SqlitePool per DB file, embedded sqlx
+# migrations). The one driver; rusqlite and refinery are gone from the tree.
+sqlx.workspace = true
+# The one pool primitive (Db::open) — stores take an injected pool (connection 下沉).
 # Record bytes for LlmRecordStore.
 bytes.workspace = true
 
@@ -60,7 +65,7 @@ otlp = [
 ]
 
 [dev-dependencies]
-# run_report tests build a real SqliteAgentEventLog in a temp dir.
+# `run_report` tests build a real SqliteAgentEventLog in a temp dir.
 tempfile = "3"
 # The in-memory span/metric exporters used by the otlp bridge tests.
 # Only pulled when the `otlp` feature is active (tests are

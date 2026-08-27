@@ -345,9 +345,11 @@ mod tests {
         let events = SqlitePipelineEventLog::open(SqlitePipelineEventLogConfig::new(
             dir.path().join("ev.db"),
         ))
+        .await
         .unwrap();
         let records =
             SqliteLlmRecordStore::open(SqliteLlmRecordStoreConfig::new(dir.path().join("bd.db")))
+                .await
                 .unwrap();
 
         let mock = MockProvider::new("p", CannedResponse::text("hi"));

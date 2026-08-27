@@ -20,7 +20,7 @@ pub enum StorageError {
     ///
     /// Carries a human-readable `context` describing the operation that
     /// failed plus an optional `source` so the original error chain
-    /// (e.g. the `rusqlite::Error`) is preserved for
+    /// (e.g. the `sqlx::Error`) is preserved for
     /// `std::error::Error::source()` walkers and `{:?}` rendering rather
     /// than being flattened into a string. Build with
     /// [`StorageError::backend`] (context only) or

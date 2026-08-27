@@ -4,7 +4,7 @@
 //! (`NonDeterministic`) which the middleware should treat as benign —
 //! just skip the cache and call the inner provider — and **real failures**
 //! (`Serialize`, `Backend`) which should be surfaced via tracing but
-//! likewise never stop the request (Doc 03 §4.3 "缓存错误绝不传染业务").
+//! likewise never stop the request.
 
 use thiserror::Error;
 

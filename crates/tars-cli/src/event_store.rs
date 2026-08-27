@@ -36,11 +36,12 @@ pub fn resolve_path(explicit: Option<&std::path::Path>) -> Option<PathBuf> {
 /// Failures to open / migrate surface as `Err` rather than `Ok(None)`
 /// because at that point the user did configure a path; failing
 /// silently would mask their misconfiguration.
-pub fn open(explicit: Option<&std::path::Path>) -> Result<Option<Arc<SqliteAgentEventLog>>> {
+pub async fn open(explicit: Option<&std::path::Path>) -> Result<Option<Arc<SqliteAgentEventLog>>> {
     let Some(path) = resolve_path(explicit) else {
         return Ok(None);
     };
     let store = open_agent_event_log_at_path(&path)
+        .await
         .with_context(|| format!("opening event store at {}", path.display()))?;
     Ok(Some(store))
 }

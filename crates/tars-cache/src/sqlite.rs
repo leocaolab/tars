@@ -6,8 +6,8 @@
 //!
 //! ## Why one type that holds both L1 + L2 (instead of composing)
 //!
-//! Doc 03 §4.3's lookup flow is "L1 → L2 → fill L1 on L2 hit". A
-//! standalone `LayeredCacheRegistry<L1, L2>` adapter would express
+//! The lookup flow is "L1 → L2 → fill L1 on L2 hit". A standalone
+//! `LayeredCacheRegistry<L1, L2>` adapter would express
 //! that, but for personal mode there's only one process, so L1 and L2
 //! are always paired with a fixed lifetime relationship. Collapsing
 //! them avoids two layers of `Arc<dyn CacheRegistry>` indirection on
@@ -17,11 +17,11 @@
 //!
 //! ## Concurrency model
 //!
-//! `rusqlite::Connection` is `Send` but not `Sync`. We hold a single
-//! connection inside `Arc<Mutex<...>>` and run every SQLite call inside
-//! `tokio::task::spawn_blocking` so we never block the runtime. SQLite
-//! WAL allows concurrent readers but our serialised access doesn't
-//! exploit that — fine for cache workloads, where L1 absorbs the
+//! L2 is a [`tars_storage::Db`] over this cache's own DB file.
+//! Every L2 call `.await`s the pool directly — no `spawn_blocking`, no
+//! shared `Mutex<Connection>` — so we never block the runtime. SQLite
+//! WAL allows concurrent readers; the pool doesn't specifically exploit
+//! that, but that's fine for cache workloads where L1 absorbs the
 //! contention.
 //!
 //! ## TTL handling
@@ -29,16 +29,15 @@
 //! Each row carries `expires_at_ms`. Lookups filter expired rows;
 //! writes also do a best-effort sweep of expired rows to keep the file
 //! from growing unboundedly under pure-write workloads. No background
-//! janitor task — Doc 14 M3 will introduce a real one when AgentEventLog
-//! lands.
+//! janitor task.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use moka::future::Cache as MokaCache;
-use rusqlite::{Connection, OptionalExtension, params};
+use tars_storage::Db;
 
 use crate::clock::{Clock, system_clock};
 use crate::error::CacheError;
@@ -46,18 +45,16 @@ use crate::key::CacheKey;
 use crate::policy::CachePolicy;
 use crate::registry::{CacheRegistry, CachedResponse};
 
+/// Embedded versioned schema (`migrations/cache/`). Applied once at open
+/// on the cache's own pool; `_sqlx_migrations` is the version-of-record.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("migrations/cache");
+
 /// Every-N-writes interval at which we sweep expired rows. Cheap (a
 /// single indexed DELETE) but we don't need it on every write.
 const SWEEP_EVERY_N_WRITES: u64 = 64;
 
-/// The on-disk schema version. Bump on incompatible changes; we
-/// migrate forward by REPLACE-ing the schema and clearing the file
-/// (this is a *cache* — wiping it is a free operation).
-const SCHEMA_VERSION: i64 = 1;
-
-/// Per-row default TTL when [`CachePolicy::l1_ttl`] is `None`. M1's L1
-/// has 5 min as its in-memory TTL; the persistent layer is fine with
-/// 24h since the file lives across runs.
+/// Per-row default L2 TTL when the policy carries no override. The
+/// persistent layer is fine with 24h since the file lives across runs.
 const DEFAULT_L2_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Per-row default TTL for the in-process moka L1 mirror.
@@ -85,7 +82,8 @@ impl SqliteCacheRegistryConfig {
 #[derive(Clone)]
 pub struct SqliteCacheRegistry {
     l1: MokaCache<[u8; 32], Arc<CachedResponse>>,
-    l2: Arc<Mutex<Connection>>,
+    /// The database backing L2. Cheap to clone.
+    l2: Db,
     l2_ttl: Duration,
     write_count: Arc<std::sync::atomic::AtomicU64>,
     /// Injected wall-clock used for every TTL-expiry decision, so
@@ -93,68 +91,103 @@ pub struct SqliteCacheRegistry {
     clock: Arc<dyn Clock>,
 }
 
+/// Default L1 max entries when constructing on an injected [`Db`] without a
+/// tuning config (the value `SqliteCacheRegistryConfig::new` also uses).
+const DEFAULT_L1_MAX_ENTRIES: u64 = 10_000;
+
 impl SqliteCacheRegistry {
-    /// Open (creating if needed) the cache file at `path`. The parent
-    /// directory must exist. Uses the real [`SystemClock`]; call
-    /// [`Self::open_with_clock`] to inject a clock (e.g. in tests).
-    pub fn open(config: SqliteCacheRegistryConfig) -> Result<Arc<Self>, CacheError> {
-        Self::open_with_clock(config, system_clock())
+    /// Construct on an **injected** [`Db`] — the composition root opens it once
+    /// and hands it in; the cache carries a handle, never a path. Runs this
+    /// cache's migrator on it and builds the L1 moka mirror. Uses the real
+    /// [`SystemClock`] and the default tuning knobs; call
+    /// [`Self::new_with_clock`] to inject a clock and tuning.
+    pub async fn new(db: Db) -> Result<Arc<Self>, CacheError> {
+        Self::new_with_clock(
+            db,
+            system_clock(),
+            DEFAULT_L1_MAX_ENTRIES,
+            DEFAULT_L1_TTL,
+            DEFAULT_L2_TTL,
+        )
+        .await
     }
 
-    /// Like [`Self::open`], but with an injected [`Clock`] driving all
-    /// TTL-expiry decisions.
-    pub fn open_with_clock(
-        config: SqliteCacheRegistryConfig,
+    /// Like [`Self::new`], but with an injected [`Clock`] driving all
+    /// TTL-expiry decisions and explicit L1/L2 tuning knobs.
+    pub async fn new_with_clock(
+        db: Db,
         clock: Arc<dyn Clock>,
+        l1_max_entries: u64,
+        l1_ttl: Duration,
+        l2_ttl: Duration,
     ) -> Result<Arc<Self>, CacheError> {
-        let conn = Connection::open(&config.path).map_err(|e| {
-            CacheError::Backend(format!("opening sqlite cache at {:?}: {e}", config.path))
-        })?;
-        Self::pragma_setup(&conn)?;
-        Self::migrate(&conn)?;
+        db.migrate(&MIGRATOR)
+            .await
+            .map_err(|e| CacheError::Backend(format!("schema migration: {e}")))?;
 
         let l1 = MokaCache::builder()
-            .max_capacity(config.l1_max_entries)
-            .time_to_live(config.l1_ttl)
+            .max_capacity(l1_max_entries)
+            .time_to_live(l1_ttl)
             .build();
 
         Ok(Arc::new(Self {
             l1,
-            l2: Arc::new(Mutex::new(conn)),
-            l2_ttl: config.l2_ttl,
+            l2: db,
+            l2_ttl,
             write_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             clock,
         }))
+    }
+
+    /// Open (creating if needed) the cache file at `config.path`. The parent
+    /// directory must exist. Thin wrapper over the DI seam: open the file pool
+    /// via [`Db::open_sqlite`] + [`new_with_clock`](Self::new_with_clock). Uses the
+    /// real [`SystemClock`]; call [`Self::open_with_clock`] to inject a clock.
+    pub async fn open(config: SqliteCacheRegistryConfig) -> Result<Arc<Self>, CacheError> {
+        Self::open_with_clock(config, system_clock()).await
+    }
+
+    /// Like [`Self::open`], but with an injected [`Clock`] driving all
+    /// TTL-expiry decisions.
+    pub async fn open_with_clock(
+        config: SqliteCacheRegistryConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Arc<Self>, CacheError> {
+        let pool = Db::open_sqlite(&config.path).await.map_err(|e| {
+            CacheError::Backend(format!("opening sqlite cache at {:?}: {e}", config.path))
+        })?;
+        Self::new_with_clock(
+            pool,
+            clock,
+            config.l1_max_entries,
+            config.l1_ttl,
+            config.l2_ttl,
+        )
+        .await
     }
 
     /// Open an in-memory SQLite cache — useful for tests that want
     /// L2 semantics without touching the filesystem. Uses the real
     /// [`SystemClock`]; call [`Self::in_memory_with_clock`] to inject one.
-    pub fn in_memory() -> Result<Arc<Self>, CacheError> {
-        Self::in_memory_with_clock(system_clock())
+    pub async fn in_memory() -> Result<Arc<Self>, CacheError> {
+        Self::in_memory_with_clock(system_clock()).await
     }
 
     /// Like [`Self::in_memory`], but with an injected [`Clock`] driving
     /// all TTL-expiry decisions — lets a test advance time and assert
     /// expiry without sleeping.
-    pub fn in_memory_with_clock(clock: Arc<dyn Clock>) -> Result<Arc<Self>, CacheError> {
-        let conn = Connection::open_in_memory()
+    pub async fn in_memory_with_clock(clock: Arc<dyn Clock>) -> Result<Arc<Self>, CacheError> {
+        let pool = Db::sqlite_in_memory()
+            .await
             .map_err(|e| CacheError::Backend(format!("opening in-memory sqlite: {e}")))?;
-        Self::pragma_setup(&conn)?;
-        Self::migrate(&conn)?;
-
-        let l1 = MokaCache::builder()
-            .max_capacity(10_000)
-            .time_to_live(DEFAULT_L1_TTL)
-            .build();
-
-        Ok(Arc::new(Self {
-            l1,
-            l2: Arc::new(Mutex::new(conn)),
-            l2_ttl: DEFAULT_L2_TTL,
-            write_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        Self::new_with_clock(
+            pool,
             clock,
-        }))
+            DEFAULT_L1_MAX_ENTRIES,
+            DEFAULT_L1_TTL,
+            DEFAULT_L2_TTL,
+        )
+        .await
     }
 
     /// Current time in epoch-ms according to the injected clock.
@@ -162,54 +195,6 @@ impl SqliteCacheRegistry {
         self.clock.now_ms()
     }
 
-    fn pragma_setup(conn: &Connection) -> Result<(), CacheError> {
-        // Concurrent readers + single writer + crash-safe (Doc 09 §4.2).
-        // `query_row` for pragmas that return a value (journal_mode);
-        // execute_batch for pure side-effect ones.
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| CacheError::Backend(format!("pragma journal_mode: {e}")))?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
-            .map_err(|e| CacheError::Backend(format!("pragma synchronous: {e}")))?;
-        conn.pragma_update(None, "temp_store", "MEMORY")
-            .map_err(|e| CacheError::Backend(format!("pragma temp_store: {e}")))?;
-        Ok(())
-    }
-
-    fn migrate(conn: &Connection) -> Result<(), CacheError> {
-        // user_version is the canonical SQLite-builtin migration marker.
-        let current: i64 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(|e| CacheError::Backend(format!("read user_version: {e}")))?;
-
-        if current == SCHEMA_VERSION {
-            return Ok(());
-        }
-        if current != 0 {
-            // Existing schema we don't know about — wipe (cache is
-            // ephemeral; correctness > preservation).
-            conn.execute("DROP TABLE IF EXISTS cache_entries", [])
-                .map_err(|e| CacheError::Backend(format!("drop old schema: {e}")))?;
-        }
-
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS cache_entries (
-                fingerprint   BLOB    PRIMARY KEY,
-                value         BLOB    NOT NULL,
-                created_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
-            ) STRICT;
-
-            CREATE INDEX IF NOT EXISTS idx_cache_expires
-                ON cache_entries(expires_at_ms);
-            "#,
-        )
-        .map_err(|e| CacheError::Backend(format!("create schema: {e}")))?;
-
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(|e| CacheError::Backend(format!("set user_version: {e}")))?;
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -223,35 +208,25 @@ impl CacheRegistry for SqliteCacheRegistry {
             return Ok(None);
         }
 
-        // L1 fast path.
         if policy.l1.is_enabled() {
             if let Some(arc) = self.l1.get(&key.fingerprint).await {
                 return Ok(Some((*arc).clone()));
             }
         }
 
-        // L2 fall-through.
         if !policy.l2.is_enabled() {
             return Ok(None);
         }
-        let l2 = self.l2.clone();
         let fp = key.fingerprint;
         let now = self.now_ms();
-        let blob: Option<Vec<u8>> =
-            tokio::task::spawn_blocking(move || -> Result<_, CacheError> {
-                let conn = l2
-                    .lock()
-                    .map_err(|_| CacheError::Backend("l2 mutex poisoned".into()))?;
-                conn.query_row(
-                    "SELECT value FROM cache_entries WHERE fingerprint = ? AND expires_at_ms > ?",
-                    params![fp.as_slice(), now],
-                    |r| r.get::<_, Vec<u8>>(0),
-                )
-                .optional()
-                .map_err(|e| CacheError::Backend(format!("l2 lookup: {e}")))
-            })
-            .await
-            .map_err(|e| CacheError::Backend(format!("spawn_blocking: {e}")))??;
+        let blob: Option<Vec<u8>> = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT value FROM cache_entries WHERE fingerprint = ? AND expires_at_ms > ?",
+        )
+        .bind(fp.to_vec())
+        .bind(now)
+        .fetch_optional(self.l2.sqlite())
+        .await
+        .map_err(|e| CacheError::Backend(format!("l2 lookup: {e}")))?;
 
         let Some(blob) = blob else {
             return Ok(None);
@@ -302,42 +277,40 @@ impl CacheRegistry for SqliteCacheRegistry {
             .min(i64::MAX as u128) as i64;
         let expires_at = now.saturating_add(ttl_ms);
 
-        let l2 = self.l2.clone();
         let fp = key.fingerprint;
         let writes_so_far = self
             .write_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tokio::task::spawn_blocking(move || -> Result<(), CacheError> {
-            let conn = l2
-                .lock()
-                .map_err(|_| CacheError::Backend("l2 mutex poisoned".into()))?;
-            conn.execute(
-                "INSERT OR REPLACE INTO cache_entries
-                   (fingerprint, value, created_at_ms, expires_at_ms)
-                   VALUES (?, ?, ?, ?)",
-                params![fp.as_slice(), blob, now, expires_at],
-            )
-            .map_err(|e| CacheError::Backend(format!("l2 write: {e}")))?;
 
-            // Cheap janitor: every Nth write, sweep expired rows.
-            if writes_so_far % SWEEP_EVERY_N_WRITES == 0 {
-                // [arc:intentional-handle] reason: the sweep is opportunistic
-                // GC, not part of the write's correctness contract — the row
-                // we just inserted is durable regardless. A failed sweep must
-                // not fail the caller's write, but it can be the first sign of
-                // disk-full / IO trouble, so surface it via a warn carrying the
-                // error object instead of dropping it silently.
-                if let Err(e) = conn.execute(
-                    "DELETE FROM cache_entries WHERE expires_at_ms <= ?",
-                    params![now],
-                ) {
-                    tracing::warn!(error = %e, "cache: l2 expired-row sweep failed (non-fatal)");
-                }
-            }
-            Ok(())
-        })
+        sqlx::query(
+            "INSERT OR REPLACE INTO cache_entries
+               (fingerprint, value, created_at_ms, expires_at_ms)
+               VALUES (?, ?, ?, ?)",
+        )
+        .bind(fp.to_vec())
+        .bind(blob)
+        .bind(now)
+        .bind(expires_at)
+        .execute(self.l2.sqlite())
         .await
-        .map_err(|e| CacheError::Backend(format!("spawn_blocking: {e}")))??;
+        .map_err(|e| CacheError::Backend(format!("l2 write: {e}")))?;
+
+        // Cheap janitor: every Nth write, sweep expired rows.
+        if writes_so_far % SWEEP_EVERY_N_WRITES == 0 {
+            // [arc:intentional-handle] reason: the sweep is opportunistic
+            // GC, not part of the write's correctness contract — the row
+            // we just inserted is durable regardless. A failed sweep must
+            // not fail the caller's write, but it can be the first sign of
+            // disk-full / IO trouble, so surface it via a warn carrying the
+            // error object instead of dropping it silently.
+            if let Err(e) = sqlx::query("DELETE FROM cache_entries WHERE expires_at_ms <= ?")
+                .bind(now)
+                .execute(self.l2.sqlite())
+                .await
+            {
+                tracing::warn!(error = %e, "cache: l2 expired-row sweep failed (non-fatal)");
+            }
+        }
 
         Ok(())
     }
@@ -345,21 +318,12 @@ impl CacheRegistry for SqliteCacheRegistry {
     async fn invalidate(&self, key: &CacheKey) -> Result<(), CacheError> {
         self.l1.invalidate(&key.fingerprint).await;
 
-        let l2 = self.l2.clone();
         let fp = key.fingerprint;
-        tokio::task::spawn_blocking(move || -> Result<(), CacheError> {
-            let conn = l2
-                .lock()
-                .map_err(|_| CacheError::Backend("l2 mutex poisoned".into()))?;
-            conn.execute(
-                "DELETE FROM cache_entries WHERE fingerprint = ?",
-                params![fp.as_slice()],
-            )
+        sqlx::query("DELETE FROM cache_entries WHERE fingerprint = ?")
+            .bind(fp.to_vec())
+            .execute(self.l2.sqlite())
+            .await
             .map_err(|e| CacheError::Backend(format!("l2 invalidate: {e}")))?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| CacheError::Backend(format!("spawn_blocking: {e}")))??;
         Ok(())
     }
 
@@ -381,12 +345,12 @@ pub fn default_personal_cache_path() -> Option<PathBuf> {
 /// Open the cache at `path`, creating the parent directory if needed.
 /// Convenience wrapper for callers that just want "give me a working
 /// cache, you handle the housekeeping".
-pub fn open_at_path(path: &Path) -> Result<Arc<SqliteCacheRegistry>, CacheError> {
+pub async fn open_at_path(path: &Path) -> Result<Arc<SqliteCacheRegistry>, CacheError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| CacheError::Backend(format!("create cache dir {parent:?}: {e}")))?;
     }
-    SqliteCacheRegistry::open(SqliteCacheRegistryConfig::new(path))
+    SqliteCacheRegistry::open(SqliteCacheRegistryConfig::new(path)).await
 }
 
 #[cfg(test)]
@@ -418,24 +382,18 @@ mod tests {
 
     /// L2-only count of non-expired rows. Test-only assertion helper,
     /// scoped to this `mod tests` so it doesn't appear as a `pub(crate)`
-    /// fn in the production source surface (`arc scan --judge` finding
-    /// `ARC-L5-DEAD-13`). Production callers should observe L2 through
-    /// the cache's `lookup` / `insert` surface and let metrics flow
-    /// through the telemetry middleware.
+    /// fn in the production source surface. Production callers should
+    /// observe L2 through the cache's `lookup` / `insert` surface and
+    /// let metrics flow through the telemetry middleware.
     impl SqliteCacheRegistry {
-        pub(super) fn l2_entry_count(&self) -> Result<u64, CacheError> {
+        pub(super) async fn l2_entry_count(&self) -> Result<u64, CacheError> {
             let now = self.now_ms();
-            let conn = self
-                .l2
-                .lock()
-                .map_err(|_| CacheError::Backend("l2 mutex poisoned".into()))?;
-            let n: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM cache_entries WHERE expires_at_ms > ?",
-                    params![now],
-                    |r| r.get(0),
-                )
-                .map_err(|e| CacheError::Backend(format!("count rows: {e}")))?;
+            let n: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM cache_entries WHERE expires_at_ms > ?")
+                    .bind(now)
+                    .fetch_one(self.l2.sqlite())
+                    .await
+                    .map_err(|e| CacheError::Backend(format!("count rows: {e}")))?;
             Ok(n as u64)
         }
     }
@@ -474,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_then_lookup_round_trips_in_memory() {
-        let r = SqliteCacheRegistry::in_memory().unwrap();
+        let r = SqliteCacheRegistry::in_memory().await.unwrap();
         let k = key(1);
         let policy = CachePolicy {
             l1: CacheLayerPolicy::Default,
@@ -492,23 +450,23 @@ mod tests {
     #[tokio::test]
     async fn write_survives_close_and_reopen() {
         // The point of L2: a fresh process opens the same file and
-        // sees the entry. This is the test that proves Doc 14 §7.2's
-        // "second `tars run` hits cache" works in personal mode.
+        // sees the entry — a second `tars run` hits cache in personal
+        // mode.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache.sqlite");
 
         {
-            let r = open_at_path(&path).unwrap();
+            let r = open_at_path(&path).await.unwrap();
             let policy = CachePolicy {
                 l1: CacheLayerPolicy::Default,
                 l2: CacheLayerPolicy::Default,
                 l3: CacheLayerPolicy::Disabled,
             };
             r.write(key(7), value("persisted"), &policy).await.unwrap();
-            // Drop r → close connection → flush WAL on next open.
+            // Drop r → close pool → flush WAL on next open.
         }
 
-        let r2 = open_at_path(&path).unwrap();
+        let r2 = open_at_path(&path).await.unwrap();
         let policy = CachePolicy {
             l1: CacheLayerPolicy::Default,
             l2: CacheLayerPolicy::Default,
@@ -520,7 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn l1_disabled_still_uses_l2() {
-        let r = SqliteCacheRegistry::in_memory().unwrap();
+        let r = SqliteCacheRegistry::in_memory().await.unwrap();
         let policy_l2_only = CachePolicy {
             l1: CacheLayerPolicy::Disabled,
             l2: CacheLayerPolicy::Default,
@@ -541,7 +499,7 @@ mod tests {
 
     #[tokio::test]
     async fn fully_disabled_policy_writes_and_reads_nothing() {
-        let r = SqliteCacheRegistry::in_memory().unwrap();
+        let r = SqliteCacheRegistry::in_memory().await.unwrap();
         let off = CachePolicy::off();
         r.write(key(1), value("x"), &off).await.unwrap();
         // And verify with default (l1) policy: nothing got persisted.
@@ -551,12 +509,12 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(r.l2_entry_count().unwrap(), 0);
+        assert_eq!(r.l2_entry_count().await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn invalidate_removes_from_both_layers() {
-        let r = SqliteCacheRegistry::in_memory().unwrap();
+        let r = SqliteCacheRegistry::in_memory().await.unwrap();
         let policy = CachePolicy {
             l1: CacheLayerPolicy::Default,
             l2: CacheLayerPolicy::Default,
@@ -566,15 +524,15 @@ mod tests {
         assert!(r.lookup(&key(1), &policy).await.unwrap().is_some());
         r.invalidate(&key(1)).await.unwrap();
         assert!(r.lookup(&key(1), &policy).await.unwrap().is_none());
-        assert_eq!(r.l2_entry_count().unwrap(), 0);
+        assert_eq!(r.l2_entry_count().await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn expired_l2_rows_are_filtered_at_lookup() {
         // TTL of 0 → row expires "immediately" (any time after the
-        // insert qualifies). We can't time-pause across spawn_blocking
-        // boundaries cleanly, so use the policy's explicit TTL.
-        let r = SqliteCacheRegistry::in_memory().unwrap();
+        // insert qualifies). Use the policy's explicit TTL and let a
+        // short real-time sleep advance the wall clock past it.
+        let r = SqliteCacheRegistry::in_memory().await.unwrap();
         let policy_short = CachePolicy {
             l1: CacheLayerPolicy::Disabled,
             l2: CacheLayerPolicy::Override {
@@ -592,7 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn distinct_keys_dont_collide() {
-        let r = SqliteCacheRegistry::in_memory().unwrap();
+        let r = SqliteCacheRegistry::in_memory().await.unwrap();
         let policy = CachePolicy {
             l1: CacheLayerPolicy::Default,
             l2: CacheLayerPolicy::Default,
@@ -618,7 +576,7 @@ mod tests {
                 .text,
             "b"
         );
-        assert_eq!(r.l2_entry_count().unwrap(), 2);
+        assert_eq!(r.l2_entry_count().await.unwrap(), 2);
     }
 
     #[tokio::test]
@@ -628,7 +586,9 @@ mod tests {
         // fixed instant, write an L2 row with a 1s TTL, then jump the
         // clock past it and assert the lookup filters the expired row.
         let clock = FakeClock::new(1_000_000);
-        let r = SqliteCacheRegistry::in_memory_with_clock(clock.clone()).unwrap();
+        let r = SqliteCacheRegistry::in_memory_with_clock(clock.clone())
+            .await
+            .unwrap();
         // L1 off so the lookup exercises L2's clock-driven TTL filter,
         // not moka's own (real-time) expiry.
         let policy = CachePolicy {
@@ -653,23 +613,24 @@ mod tests {
                 .text,
             "soon-expires"
         );
-        assert_eq!(r.l2_entry_count().unwrap(), 1);
+        assert_eq!(r.l2_entry_count().await.unwrap(), 1);
 
         // Advance the fake clock past the TTL — no sleeping.
         clock.advance(1_500);
 
         assert!(r.lookup(&key(9), &policy).await.unwrap().is_none());
-        assert_eq!(r.l2_entry_count().unwrap(), 0);
+        assert_eq!(r.l2_entry_count().await.unwrap(), 0);
     }
 
     #[tokio::test]
-    async fn schema_version_marker_is_set() {
-        // Fresh DB should land at SCHEMA_VERSION.
-        let r = SqliteCacheRegistry::in_memory().unwrap();
-        let conn = r.l2.lock().unwrap();
-        let v: i64 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
+    async fn baseline_migration_is_applied() {
+        // Fresh DB should have sqlx's baseline migration recorded as
+        // applied — `_sqlx_migrations` is the version-of-record.
+        let r = SqliteCacheRegistry::in_memory().await.unwrap();
+        let max_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(r.l2.sqlite())
+            .await
             .unwrap();
-        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(max_version, 1);
     }
 }

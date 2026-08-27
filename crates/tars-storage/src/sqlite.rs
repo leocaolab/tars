@@ -1,34 +1,34 @@
 //! SQLite-backed [`AgentEventLog`] — Personal-mode persistence.
 //!
-//! Same scaffolding pattern as `tars-cache::SqliteCacheRegistry`:
-//! single connection in `Arc<Mutex>`, blocking calls inside
-//! `tokio::task::spawn_blocking`, WAL + `synchronous=NORMAL` +
-//! `temp_store=MEMORY` pragmas, schema version pinned via SQLite's
-//! `user_version` PRAGMA. A future helper extraction makes sense
-//! when there's a 3rd SQLite-backed crate; today the duplication is
-//! 100 lines of pure plumbing and the abstraction would be its own
-//! design problem.
+//! Same scaffolding pattern as `tars_melt::event::SqliteLlmRecordStore`:
+//! one `sqlx::SqlitePool` per DB file, WAL + `synchronous=NORMAL` +
+//! `busy_timeout`, schema applied once at open through an embedded
+//! `sqlx::migrate!` set (`_sqlx_migrations` is the version-of-record).
 //!
-//! Concurrency: all writes serialise on the single connection's
-//! mutex so per-trajectory `sequence_no` stays gap-free. SQLite WAL
-//! lets concurrent **readers** proceed even while a writer holds the
-//! mutex inside `spawn_blocking`. For Personal-mode workloads this
-//! is more than enough; Team mode (Postgres) gets per-row locking
-//! via `SELECT ... FOR UPDATE`.
+//! Concurrency: `append` computes the next per-trajectory `sequence_no`
+//! inside a `sqlx::Transaction` (SELECT COALESCE(MAX)+INSERT), so a
+//! concurrent writer to the same trajectory can't race the seq. SQLite
+//! WAL lets concurrent readers proceed while a writer holds its
+//! transaction. Team mode (Postgres) gets per-row locking via
+//! `SELECT ... FOR UPDATE`.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use rusqlite::{Connection, params};
+use sqlx::Row;
+use crate::db::Db;
 
 use tars_types::TrajectoryId;
 
-use crate::agent_event_log::{AgentEventLog, EventRecord};
 use crate::error::StorageError;
+use crate::agent_event_log::{EventRecord, AgentEventLog};
 
-const SCHEMA_VERSION: i64 = 1;
+/// Embedded versioned schema (`migrations/agent_event_log/`). Applied once at
+/// open on the store's own pool; `_sqlx_migrations` is the version-of-record
+/// (replaces the old refinery `refinery_schema_history` / `user_version` gate).
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("migrations/agent_event_log");
 
 #[derive(Clone, Debug)]
 pub struct SqliteAgentEventLogConfig {
@@ -43,86 +43,37 @@ impl SqliteAgentEventLogConfig {
 
 #[derive(Clone)]
 pub struct SqliteAgentEventLog {
-    conn: Arc<Mutex<Connection>>,
+    /// The database this store reads and writes. Cheap to clone.
+    db: Db,
 }
 
 impl SqliteAgentEventLog {
-    pub fn open(config: SqliteAgentEventLogConfig) -> Result<Arc<Self>, StorageError> {
-        let conn = Connection::open(&config.path).map_err(|e| {
+    /// Construct on an **injected** [`Db`] — the composition root opens it once
+    /// and hands it in; the store carries a handle, never a path. Runs this
+    /// store's migrator on it.
+    pub async fn new(db: Db) -> Result<Arc<Self>, StorageError> {
+        db.migrate(&MIGRATOR)
+            .await
+            .map_err(|e| StorageError::backend_source("schema migration", e))?;
+        Ok(Arc::new(Self { db }))
+    }
+
+    /// Thin convenience over the DI seam: open the file + [`new`](Self::new).
+    /// Prefer `Db::open_sqlite(path)` + `new(db)` at the composition root.
+    pub async fn open(config: SqliteAgentEventLogConfig) -> Result<Arc<Self>, StorageError> {
+        let db = Db::open_sqlite(&config.path).await.map_err(|e| {
             StorageError::backend_source(format!("opening event store at {:?}", config.path), e)
         })?;
-        Self::pragma_setup(&conn)?;
-        Self::migrate(&conn)?;
-        Ok(Arc::new(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        }))
+        Self::new(db).await
     }
 
-    /// In-memory store for tests. Each call returns a fresh empty
-    /// store; the database disappears with the connection.
-    pub fn in_memory() -> Result<Arc<Self>, StorageError> {
-        let conn = Connection::open_in_memory()
+    /// In-memory store for tests. Each call returns a fresh empty store; the
+    /// database disappears with the handle.
+    pub async fn in_memory() -> Result<Arc<Self>, StorageError> {
+        let db = Db::sqlite_in_memory()
+            .await
             .map_err(|e| StorageError::backend_source("opening in-memory event store", e))?;
-        Self::pragma_setup(&conn)?;
-        Self::migrate(&conn)?;
-        Ok(Arc::new(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        }))
-    }
-
-    fn pragma_setup(conn: &Connection) -> Result<(), StorageError> {
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|e| StorageError::backend_source("pragma journal_mode", e))?;
-        conn.pragma_update(None, "synchronous", "NORMAL")
-            .map_err(|e| StorageError::backend_source("pragma synchronous", e))?;
-        conn.pragma_update(None, "temp_store", "MEMORY")
-            .map_err(|e| StorageError::backend_source("pragma temp_store", e))?;
-        // foreign_keys is off by default in SQLite; we don't have FKs in
-        // the M3 schema but turning it on is the right hygiene for
-        // future schema additions (trajectory parent links, etc.).
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .map_err(|e| StorageError::backend_source("pragma foreign_keys", e))?;
-        Ok(())
-    }
-
-    fn migrate(conn: &Connection) -> Result<(), StorageError> {
-        let current: i64 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(|e| StorageError::backend_source("read user_version", e))?;
-        if current == SCHEMA_VERSION {
-            return Ok(());
-        }
-        if current != 0 {
-            // Unknown prior schema — events are durable user data, so
-            // unlike the cache we DO NOT wipe. Surface the version
-            // mismatch and let the operator decide.
-            return Err(StorageError::backend(format!(
-                "incompatible event store schema (file version {current}, code version {SCHEMA_VERSION}). \
-                 Refusing to migrate automatically — back up the file and run a manual migration.",
-            )));
-        }
-
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS events (
-                trajectory_id   TEXT    NOT NULL,
-                sequence_no     INTEGER NOT NULL,
-                timestamp_ms    INTEGER NOT NULL,
-                payload_json    BLOB    NOT NULL,
-                PRIMARY KEY (trajectory_id, sequence_no)
-            ) STRICT;
-
-            -- The PK already covers (trajectory_id, sequence_no) lookups;
-            -- a separate index for "list trajectories" is cheaper than a
-            -- DISTINCT scan over the PK.
-            CREATE INDEX IF NOT EXISTS idx_events_trajectory
-                ON events(trajectory_id);
-            "#,
-        )
-        .map_err(|e| StorageError::backend_source("create schema", e))?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(|e| StorageError::backend_source("set user_version", e))?;
-        Ok(())
+        Self::new(db).await
     }
 }
 
@@ -133,8 +84,7 @@ impl AgentEventLog for SqliteAgentEventLog {
         trajectory_id: &TrajectoryId,
         payloads: &[serde_json::Value],
     ) -> Result<u64, StorageError> {
-        // Pre-encode to bytes outside the lock so the spawn_blocking
-        // body holds the connection for as little time as possible.
+        // Pre-encode to bytes before touching the DB.
         let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(payloads.len());
         for v in payloads {
             encoded.push(serde_json::to_vec(v)?);
@@ -143,50 +93,44 @@ impl AgentEventLog for SqliteAgentEventLog {
             return self.high_water(trajectory_id).await;
         }
 
-        let conn = self.conn.clone();
-        let traj = trajectory_id.clone();
+        let traj = trajectory_id.as_ref();
         let now = now_ms()?;
 
-        let last_seq = tokio::task::spawn_blocking(move || -> Result<u64, StorageError> {
-            let mut conn = lock_conn(&conn);
-            let tx = conn
-                .transaction()
-                .map_err(|e| StorageError::backend_source("begin transaction", e))?;
+        // Compute the next sequence_no inside the transaction so a concurrent
+        // writer to the same trajectory can't race us.
+        let mut tx = self.db.sqlite().begin()
+            .await
+            .map_err(|e| StorageError::backend_source("begin transaction", e))?;
 
-            // Compute the next sequence_no inside the transaction so a
-            // concurrent writer to the same trajectory can't race us.
-            let current_high: i64 = tx
-                .query_row(
-                    "SELECT COALESCE(MAX(sequence_no), 0) FROM events WHERE trajectory_id = ?",
-                    params![traj.as_ref()],
-                    |r| r.get(0),
-                )
-                .map_err(|e| StorageError::backend_source("query max seq", e))?;
-            let mut next_seq = (current_high as u64).saturating_add(1);
-
-            {
-                let mut stmt = tx
-                    .prepare(
-                        "INSERT INTO events (trajectory_id, sequence_no, timestamp_ms, payload_json) \
-                         VALUES (?, ?, ?, ?)",
-                    )
-                    .map_err(|e| StorageError::backend_source("prepare insert", e))?;
-                for blob in &encoded {
-                    stmt.execute(params![traj.as_ref(), next_seq as i64, now, blob])
-                        .map_err(|e| StorageError::backend_source("insert event", e))?;
-                    next_seq = next_seq.saturating_add(1);
-                }
-            }
-
-            tx.commit()
-                .map_err(|e| StorageError::backend_source("commit", e))?;
-            // `next_seq` is one past the last written.
-            Ok(next_seq.saturating_sub(1))
-        })
+        let current_high: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sequence_no), 0) FROM events WHERE trajectory_id = ?",
+        )
+        .bind(traj)
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
+        .map_err(|e| StorageError::backend_source("query max seq", e))?;
 
-        Ok(last_seq)
+        let mut next_seq = (current_high as u64).saturating_add(1);
+        for blob in &encoded {
+            sqlx::query(
+                "INSERT INTO events (trajectory_id, sequence_no, timestamp_ms, payload_json) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(traj)
+            .bind(next_seq as i64)
+            .bind(now)
+            .bind(blob)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::backend_source("insert event", e))?;
+            next_seq = next_seq.saturating_add(1);
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::backend_source("commit", e))?;
+        // `next_seq` is one past the last written.
+        Ok(next_seq.saturating_sub(1))
     }
 
     async fn read_all(
@@ -201,88 +145,56 @@ impl AgentEventLog for SqliteAgentEventLog {
         trajectory_id: &TrajectoryId,
         since: u64,
     ) -> Result<Vec<EventRecord>, StorageError> {
-        let conn = self.conn.clone();
-        let traj = trajectory_id.clone();
-        let rows =
-            tokio::task::spawn_blocking(move || -> Result<Vec<EventRecord>, StorageError> {
-                let conn = lock_conn(&conn);
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT sequence_no, timestamp_ms, payload_json \
-                     FROM events \
-                     WHERE trajectory_id = ? AND sequence_no > ? \
-                     ORDER BY sequence_no ASC",
-                    )
-                    .map_err(|e| StorageError::backend_source("prepare select", e))?;
-                let iter = stmt
-                    .query_map(params![traj.as_ref(), since as i64], |r| {
-                        let seq: i64 = r.get(0)?;
-                        let ts: i64 = r.get(1)?;
-                        let blob: Vec<u8> = r.get(2)?;
-                        Ok((seq as u64, ts, blob))
-                    })
-                    .map_err(|e| StorageError::backend_source("query select", e))?;
+        let rows = sqlx::query(
+            "SELECT sequence_no, timestamp_ms, payload_json \
+             FROM events \
+             WHERE trajectory_id = ? AND sequence_no > ? \
+             ORDER BY sequence_no ASC",
+        )
+        .bind(trajectory_id.as_ref())
+        .bind(since as i64)
+        .fetch_all(self.db.sqlite())
+        .await
+        .map_err(|e| StorageError::backend_source("query select", e))?;
 
-                let mut out = Vec::new();
-                for row in iter {
-                    let (seq, ts, blob) =
-                        row.map_err(|e| StorageError::backend_source("row", e))?;
-                    let payload: serde_json::Value = serde_json::from_slice(&blob)?;
-                    out.push(EventRecord {
-                        trajectory_id: traj.clone(),
-                        sequence_no: seq,
-                        timestamp_ms: ts,
-                        payload,
-                    });
-                }
-                Ok(out)
-            })
-            .await
-            .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
-
-        Ok(rows)
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let seq: i64 = row.try_get("sequence_no").map_err(row_err)?;
+            let ts: i64 = row.try_get("timestamp_ms").map_err(row_err)?;
+            let blob: Vec<u8> = row.try_get("payload_json").map_err(row_err)?;
+            let payload: serde_json::Value = serde_json::from_slice(&blob)?;
+            out.push(EventRecord {
+                trajectory_id: trajectory_id.clone(),
+                sequence_no: seq as u64,
+                timestamp_ms: ts,
+                payload,
+            });
+        }
+        Ok(out)
     }
 
     async fn high_water(&self, trajectory_id: &TrajectoryId) -> Result<u64, StorageError> {
-        let conn = self.conn.clone();
-        let traj = trajectory_id.clone();
-        let high = tokio::task::spawn_blocking(move || -> Result<u64, StorageError> {
-            let conn = lock_conn(&conn);
-            let max: i64 = conn
-                .query_row(
-                    "SELECT COALESCE(MAX(sequence_no), 0) FROM events WHERE trajectory_id = ?",
-                    params![traj.as_ref()],
-                    |r| r.get(0),
-                )
-                .map_err(|e| StorageError::backend_source("query high water", e))?;
-            Ok(max as u64)
-        })
+        let max: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sequence_no), 0) FROM events WHERE trajectory_id = ?",
+        )
+        .bind(trajectory_id.as_ref())
+        .fetch_one(self.db.sqlite())
         .await
-        .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
-        Ok(high)
+        .map_err(|e| StorageError::backend_source("query high water", e))?;
+        Ok(max as u64)
     }
 
     async fn list_trajectories(&self) -> Result<Vec<TrajectoryId>, StorageError> {
-        let conn = self.conn.clone();
-        let ids =
-            tokio::task::spawn_blocking(move || -> Result<Vec<TrajectoryId>, StorageError> {
-                let conn = lock_conn(&conn);
-                let mut stmt = conn
-                    .prepare("SELECT DISTINCT trajectory_id FROM events")
-                    .map_err(|e| StorageError::backend_source("prepare list", e))?;
-                let iter = stmt
-                    .query_map([], |r| r.get::<_, String>(0))
-                    .map_err(|e| StorageError::backend_source("query list", e))?;
-                let mut out = Vec::new();
-                for row in iter {
-                    let s = row.map_err(|e| StorageError::backend_source("row", e))?;
-                    out.push(TrajectoryId::new(s));
-                }
-                Ok(out)
-            })
+        let rows = sqlx::query("SELECT DISTINCT trajectory_id FROM events")
+            .fetch_all(self.db.sqlite())
             .await
-            .map_err(|e| StorageError::backend_source("spawn_blocking", e))??;
-        Ok(ids)
+            .map_err(|e| StorageError::backend_source("query list", e))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let s: String = row.try_get("trajectory_id").map_err(row_err)?;
+            out.push(TrajectoryId::new(s));
+        }
+        Ok(out)
     }
 }
 
@@ -297,23 +209,20 @@ pub fn default_personal_agent_event_log_path() -> Option<PathBuf> {
 }
 
 /// Open at `path`, creating the parent directory if needed.
-pub fn open_agent_event_log_at_path(path: &Path) -> Result<Arc<SqliteAgentEventLog>, StorageError> {
+pub async fn open_agent_event_log_at_path(
+    path: &Path,
+) -> Result<Arc<SqliteAgentEventLog>, StorageError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             StorageError::backend_source(format!("create event store dir {parent:?}"), e)
         })?;
     }
-    SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(path))
+    SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(path)).await
 }
 
-/// Lock the connection mutex, recovering rather than panicking if a
-/// previous `spawn_blocking` writer panicked and poisoned it. SQLite's
-/// own transaction rollback keeps on-disk state consistent across a
-/// panicking writer, so the recovered guard is safe to reuse; panicking
-/// here would instead collapse into an opaque `spawn_blocking` join
-/// error and take down the whole store.
-fn lock_conn(conn: &Mutex<Connection>) -> std::sync::MutexGuard<'_, Connection> {
-    conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Decode failure on a fetched row → a `Backend` error preserving the source.
+fn row_err(e: sqlx::Error) -> StorageError {
+    StorageError::backend_source("decode row", e)
 }
 
 /// Current wall-clock time as milliseconds since the Unix epoch.
@@ -335,6 +244,8 @@ fn now_ms() -> Result<i64, StorageError> {
 mod tests {
     use super::*;
     use serde_json::json;
+    // Legacy-DB fixtures below build a pre-sqlx pool by hand to prove
+    // non-destructive adoption; the store's own pool comes from `crate::pool`.
 
     fn traj(id: &str) -> TrajectoryId {
         TrajectoryId::new(id)
@@ -342,7 +253,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_then_read_all_round_trips() {
-        let store = SqliteAgentEventLog::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().await.unwrap();
         let t = traj("t1");
         let payloads = vec![
             json!({"kind": "start", "task": "summarise"}),
@@ -363,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_increments_across_calls() {
-        let store = SqliteAgentEventLog::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().await.unwrap();
         let t = traj("t");
         store.append(&t, &[json!({"a": 1})]).await.unwrap();
         store.append(&t, &[json!({"a": 2})]).await.unwrap();
@@ -375,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_payloads_is_no_op_returning_high_water() {
-        let store = SqliteAgentEventLog::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().await.unwrap();
         let t = traj("t");
         // Empty append on empty trajectory.
         let r = store.append(&t, &[]).await.unwrap();
@@ -391,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn distinct_trajectories_are_isolated() {
-        let store = SqliteAgentEventLog::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().await.unwrap();
         store
             .append(&traj("a"), &[json!({"k": "a1"})])
             .await
@@ -420,7 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_since_filters_by_sequence_no() {
-        let store = SqliteAgentEventLog::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().await.unwrap();
         let t = traj("t");
         for i in 1..=5 {
             store.append(&t, &[json!({"i": i})]).await.unwrap();
@@ -433,13 +344,13 @@ mod tests {
 
     #[tokio::test]
     async fn high_water_returns_zero_for_unknown_trajectory() {
-        let store = SqliteAgentEventLog::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().await.unwrap();
         assert_eq!(store.high_water(&traj("never_used")).await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn read_all_returns_empty_for_unknown_trajectory() {
-        let store = SqliteAgentEventLog::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().await.unwrap();
         assert!(
             store
                 .read_all(&traj("never_used"))
@@ -451,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_trajectories_enumerates_distinct_ids() {
-        let store = SqliteAgentEventLog::in_memory().unwrap();
+        let store = SqliteAgentEventLog::in_memory().await.unwrap();
         store.append(&traj("a"), &[json!({})]).await.unwrap();
         store.append(&traj("b"), &[json!({})]).await.unwrap();
         store.append(&traj("a"), &[json!({})]).await.unwrap();
@@ -473,7 +384,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.sqlite");
         {
-            let store = open_agent_event_log_at_path(&path).unwrap();
+            let store = open_agent_event_log_at_path(&path).await.unwrap();
             store
                 .append(
                     &traj("crash_test"),
@@ -481,9 +392,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            // Drop store → connection closes → WAL flushes on next open.
+            // Drop store → pool closes → WAL flushes on next open.
         }
-        let store = open_agent_event_log_at_path(&path).unwrap();
+        let store = open_agent_event_log_at_path(&path).await.unwrap();
         let read = store.read_all(&traj("crash_test")).await.unwrap();
         assert_eq!(read.len(), 2);
         assert_eq!(read[0].payload, json!({"phase": "before"}));
@@ -491,47 +402,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schema_version_marker_is_set_on_fresh_db() {
-        let store = SqliteAgentEventLog::in_memory().unwrap();
-        let conn = store.conn.lock().unwrap();
-        let v: i64 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
+    async fn sqlx_history_stamps_baseline_on_fresh_db() {
+        // E2E-1 (was `refinery_history_stamps_v1_on_fresh_db`): a fresh DB gets
+        // `_sqlx_migrations` with the baseline (version 1) applied — sqlx is the
+        // version-of-record now (the old `user_version=1` / refinery history is
+        // gone). Same intent, new mechanism.
+        let store = SqliteAgentEventLog::in_memory().await.unwrap();
+        let v: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(store.db.sqlite())
+            .await
             .unwrap();
-        assert_eq!(v, SCHEMA_VERSION);
+        assert_eq!(v, 1, "baseline (0001_) stamped in _sqlx_migrations");
     }
 
     #[tokio::test]
-    async fn reopen_with_unknown_schema_version_errors_does_not_wipe() {
-        // Events are durable user data — unlike the cache, an unknown
-        // schema version refuses to migrate rather than silently
-        // dropping rows.
+    async fn adopts_pre_sqlx_db_preserving_rows() {
+        // E2E-2 (the "好用" gate, was `adopts_pre_refinery_db_preserving_rows`):
+        // open a DB created by the OLD inline-DDL code (tables present, a row,
+        // NO `_sqlx_migrations`) and confirm baseline adoption is non-destructive
+        // — the pre-existing row survives, sqlx stamps the baseline, and new
+        // appends still work. `IF NOT EXISTS` makes the baseline a no-op.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.sqlite");
-        // Open at version 1 + populate.
         {
-            let store = open_agent_event_log_at_path(&path).unwrap();
-            store
-                .append(&traj("durable"), &[json!({"x": 1})])
-                .await
-                .unwrap();
+            let legacy = Db::open_sqlite(&path).await.unwrap();
+            let pool = legacy.sqlite().clone();
+            sqlx::raw_sql(
+                "CREATE TABLE events (
+                     trajectory_id TEXT    NOT NULL,
+                     sequence_no   INTEGER NOT NULL,
+                     timestamp_ms  INTEGER NOT NULL,
+                     payload_json  BLOB    NOT NULL,
+                     PRIMARY KEY (trajectory_id, sequence_no)
+                 ) STRICT;
+                 CREATE INDEX idx_events_trajectory ON events(trajectory_id);",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let payload = serde_json::to_vec(&json!({"old": 1})).unwrap();
+            sqlx::query(
+                "INSERT INTO events (trajectory_id, sequence_no, timestamp_ms, payload_json) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind("legacy")
+            .bind(1_i64)
+            .bind(123_i64)
+            .bind(payload)
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
         }
-        // Forge a future schema version so the next open thinks we're behind.
+
+        // Re-open through the migrating path.
+        let store = open_agent_event_log_at_path(&path).await.unwrap();
+
+        // The pre-existing row is intact (no re-create / no wipe).
+        let read = store.read_all(&traj("legacy")).await.unwrap();
+        assert_eq!(read.len(), 1, "pre-sqlx row survived adoption");
+        assert_eq!(read[0].payload, json!({"old": 1}));
+
+        // sqlx now owns the version-of-record.
+        let v: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(store.db.sqlite())
+            .await
+            .unwrap();
+        assert_eq!(v, 1, "baseline stamped in _sqlx_migrations");
+
+        // And the adopted store is fully live.
+        store.append(&traj("legacy"), &[json!({"new": 2})]).await.unwrap();
+        assert_eq!(store.read_all(&traj("legacy")).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rejects_db_with_unknown_applied_migration() {
+        // E2E-3: fail-closed forward-version protection. A DB whose history
+        // claims an applied migration this binary doesn't have (a newer writer
+        // touched it) must refuse to open — never silently proceed. sqlx's
+        // migrator returns `MigrateError::VersionMissing` for an applied
+        // version absent from the embedded set (fail-closed, like refinery's
+        // `abort_missing`).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.sqlite");
+        // Normal open creates `_sqlx_migrations` with the baseline (v1).
+        drop(open_agent_event_log_at_path(&path).await.unwrap());
+        // Forge a ghost v2 the embedded set doesn't contain.
         {
-            let conn = Connection::open(&path).unwrap();
-            conn.pragma_update(None, "user_version", 999_i64).unwrap();
+            let existing = Db::open_sqlite(&path).await.unwrap();
+            let pool = existing.sqlite().clone();
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations \
+                 (version, description, success, checksum, execution_time) \
+                 VALUES (2, 'ghost', 1, ?, 0)",
+            )
+            .bind(vec![0u8; 32])
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
         }
-        // Reopen should error.
-        let result = open_agent_event_log_at_path(&path);
-        match result {
-            Err(StorageError::Backend { context, .. }) => {
-                assert!(
-                    context.contains("incompatible") && context.contains("999"),
-                    "error must call out the version mismatch: {context}",
-                );
-            }
-            Err(other) => panic!("expected Backend error, got {other:?}"),
-            // SqliteAgentEventLog isn't Debug; can't print on success.
-            Ok(_) => panic!("expected migration error, got Ok"),
+        match open_agent_event_log_at_path(&path).await {
+            Err(_) => {} // sqlx VersionMissing — fail-closed, as required.
+            Ok(_) => panic!("expected fail-closed on unknown applied migration, got Ok"),
         }
     }
 }

@@ -1,9 +1,9 @@
 //! Cache key — the SHA-256 fingerprint of every input that can
 //! possibly affect the LLM response.
 //!
-//! See Doc 03 §3 for the full security rationale. The TL;DR: tenant id
-//! and IAM scopes **must** participate in the hash; otherwise principals
-//! with overlapping prompts but different read-rights will collide.
+//! Tenant id and IAM scopes **must** participate in the hash; otherwise
+//! principals with overlapping prompts but different read-rights will
+//! collide.
 
 use std::fmt;
 
@@ -72,10 +72,7 @@ impl CacheKeyFactory {
         model: &str,
         ctx: &RequestContext,
     ) -> Result<CacheKey, CacheError> {
-        // Reject early: stochastic outputs aren't cacheable. The model is
-        // passed explicitly (bound at service construction) and is always
-        // a concrete name by the time a request is served, so there is no
-        // unresolved-tier / ensemble case to guard here anymore.
+        // Reject early: stochastic outputs aren't cacheable.
         match req.temperature {
             None => return Err(CacheError::NonDeterministic),
             Some(t) if t != 0.0 => return Err(CacheError::NonDeterministic),
@@ -179,12 +176,11 @@ fn thinking_tag(t: &tars_types::ThinkingMode) -> String {
 /// Read IAM scopes from `ctx.attributes` under [`IAM_SCOPES_ATTR`].
 /// Missing or malformed → empty list.
 ///
-/// **Production requirement** (Doc 10): an IAM middleware sitting
-/// before Cache populates this attribute. M1 has no IAM middleware;
-/// missing scopes are silently treated as "no restrictions" because
-/// Personal mode is single-tenant. Multi-tenant deployments without
-/// IAM = bug — this is documented in `tars-cache::lib` and will be
-/// hardened to fail-closed when `tars-security` lands (TODO D-2).
+/// An upstream IAM middleware is expected to populate this attribute.
+/// Without one, missing scopes are treated as "no restrictions" — sound
+/// only for single-tenant (Personal) mode; a multi-tenant deployment
+/// without IAM is a fail-open bug, to be hardened to fail-closed when
+/// `tars-security` lands.
 fn read_iam_scopes(ctx: &RequestContext) -> Vec<String> {
     // [arc:intentional-handle] reason: a poisoned lock means *another*
     // thread panicked while holding the write guard; the attribute map
@@ -192,8 +188,8 @@ fn read_iam_scopes(ctx: &RequestContext) -> Vec<String> {
     // so recovering the inner guard is sound. We must NOT silently fall
     // through to `Vec::new()` here: an empty scope set means "no
     // restriction", and treating a poison as unrestricted access would
-    // be fail-OPEN (Doc 03 §3 IDOR risk). Recover + read the real
-    // scopes, and warn so the upstream panic is visible.
+    // be fail-OPEN (an IDOR risk). Recover + read the real scopes, and
+    // warn so the upstream panic is visible.
     let attrs = match ctx.attributes.read() {
         Ok(g) => g,
         Err(poisoned) => {
@@ -284,10 +280,10 @@ fn hash_content_block(h: &mut Sha256, block: &ContentBlock) {
             h.update(mime.as_bytes());
             h.update(b"\0");
             // Image bytes can be MB-scale; hash the descriptor only.
-            // For URL data this means "two distinct images at the same
-            // URL collide" — that's the documented limitation of
-            // `ImageData::descriptor_hash` (chat-15) and the right
-            // tradeoff at this layer.
+            // For URL data this means two distinct images at the same
+            // URL collide — the documented limitation of
+            // `ImageData::descriptor_hash`, and the right tradeoff at
+            // this layer.
             let _ = ImageData::Url; // keep the import live
             let descriptor = data.descriptor_hash();
             h.update(descriptor.as_bytes());
@@ -298,13 +294,11 @@ fn hash_content_block(h: &mut Sha256, block: &ContentBlock) {
 /// Stable JSON encoding. We rely on serde_json's default
 /// (BTreeMap-backed) `Map`, which sorts keys alphabetically. If the
 /// workspace ever turns on the `preserve_order` feature this becomes
-/// non-deterministic — guard with the test in `tests::sorted_object_keys`.
+/// non-deterministic.
 ///
-/// Generic over `T: Serialize` so call sites with typed values
-/// (`ToolCall::arguments`, request bodies, etc.) skip the
-/// intermediate `Value` allocation — `arc scan --judge` finding
-/// `ARC-L5-O-3` was precisely that the previous `&Value` signature
-/// forced callers into double-serialization at the hot path.
+/// Generic over `T: Serialize` so typed call sites
+/// (`ToolCall::arguments`, request bodies) skip the intermediate
+/// `Value` allocation.
 fn canonical_json<T: Serialize>(v: &T) -> Result<Vec<u8>, CacheError> {
     serde_json::to_vec(v).map_err(CacheError::Serialize)
 }
@@ -357,41 +351,24 @@ mod tests {
     fn different_tenants_never_collide_even_with_same_prompt() {
         let f = CacheKeyFactory::new(1);
         let a = f
-            .compute(
-                &det_req("hi"),
-                "gpt-4o",
-                &ctx_with_scopes("tenantA", &["read"]),
-            )
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("tenantA", &["read"]))
             .unwrap();
         let b = f
-            .compute(
-                &det_req("hi"),
-                "gpt-4o",
-                &ctx_with_scopes("tenantB", &["read"]),
-            )
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("tenantB", &["read"]))
             .unwrap();
         assert_ne!(a.fingerprint, b.fingerprint, "tenant must be in the hash");
     }
 
     #[test]
     fn different_scopes_never_collide() {
-        // The IDOR scenario from Doc 03 §3.1 — two principals with
-        // different read-rights against overlapping data must not
-        // share a cache slot.
+        // The IDOR scenario — two principals with different read-rights
+        // against overlapping data must not share a cache slot.
         let f = CacheKeyFactory::new(1);
         let a = f
-            .compute(
-                &det_req("hi"),
-                "gpt-4o",
-                &ctx_with_scopes("t1", &["scope:a"]),
-            )
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["scope:a"]))
             .unwrap();
         let b = f
-            .compute(
-                &det_req("hi"),
-                "gpt-4o",
-                &ctx_with_scopes("t1", &["scope:b"]),
-            )
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["scope:b"]))
             .unwrap();
         assert_ne!(a.fingerprint, b.fingerprint);
     }
@@ -401,18 +378,10 @@ mod tests {
         // Sorted before hashing → ["a","b"] and ["b","a"] should collide.
         let f = CacheKeyFactory::new(1);
         let a = f
-            .compute(
-                &det_req("hi"),
-                "gpt-4o",
-                &ctx_with_scopes("t1", &["a", "b"]),
-            )
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["a", "b"]))
             .unwrap();
         let b = f
-            .compute(
-                &det_req("hi"),
-                "gpt-4o",
-                &ctx_with_scopes("t1", &["b", "a"]),
-            )
+            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["b", "a"]))
             .unwrap();
         assert_eq!(a.fingerprint, b.fingerprint);
     }
@@ -422,18 +391,14 @@ mod tests {
         let f = CacheKeyFactory::new(1);
         let mut r = det_req("hi");
         r.temperature = Some(0.7);
-        let err = f
-            .compute(&r, "gpt-4o", &ctx_with_scopes("t", &[]))
-            .unwrap_err();
+        let err = f.compute(&r, "gpt-4o", &ctx_with_scopes("t", &[])).unwrap_err();
         assert!(matches!(err, CacheError::NonDeterministic));
 
         // Default (None) is also non-cacheable — the provider's default
         // temperature is unknown.
         let mut r = det_req("hi");
         r.temperature = None;
-        let err = f
-            .compute(&r, "gpt-4o", &ctx_with_scopes("t", &[]))
-            .unwrap_err();
+        let err = f.compute(&r, "gpt-4o", &ctx_with_scopes("t", &[])).unwrap_err();
         assert!(matches!(err, CacheError::NonDeterministic));
     }
 
@@ -443,12 +408,8 @@ mod tests {
         let f2 = CacheKeyFactory::new(2);
         let ctx = ctx_with_scopes("t", &[]);
         assert_ne!(
-            f1.compute(&det_req("hi"), "gpt-4o", &ctx)
-                .unwrap()
-                .fingerprint,
-            f2.compute(&det_req("hi"), "gpt-4o", &ctx)
-                .unwrap()
-                .fingerprint,
+            f1.compute(&det_req("hi"), "gpt-4o", &ctx).unwrap().fingerprint,
+            f2.compute(&det_req("hi"), "gpt-4o", &ctx).unwrap().fingerprint,
         );
     }
 
@@ -457,12 +418,8 @@ mod tests {
         let f = CacheKeyFactory::new(1);
         let ctx = ctx_with_scopes("t", &[]);
         assert_ne!(
-            f.compute(&det_req("hi"), "gpt-4o", &ctx)
-                .unwrap()
-                .fingerprint,
-            f.compute(&det_req("ho"), "gpt-4o", &ctx)
-                .unwrap()
-                .fingerprint,
+            f.compute(&det_req("hi"), "gpt-4o", &ctx).unwrap().fingerprint,
+            f.compute(&det_req("ho"), "gpt-4o", &ctx).unwrap().fingerprint,
         );
     }
 

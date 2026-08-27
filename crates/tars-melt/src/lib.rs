@@ -2,7 +2,7 @@
 //!
 //! M1 scope (this crate): one-line `tracing` subscriber install with a
 //! pretty / JSON formatter switch and an `EnvFilter`. Just enough for
-//! every `tars-*` binary (`tars-cli` today) to
+//! every `tars-*` binary (`tars-cli`) to
 //! emit consistent structured logs to stderr without each binary
 //! re-implementing the same `tracing_subscriber::fmt()` boilerplate.
 //!
@@ -33,13 +33,15 @@ use tracing_subscriber::fmt::format::FmtSpan;
 /// `tars_melt::event::{...}`.
 pub mod event;
 
-/// The append-only trajectory **event model** (`AgentEvent` + the idempotency /
-/// prompt-hash helpers). It lives with telemetry because its one roll-up
-/// consumer, [`run_report`], is observability — not runtime.
+/// The append-only trajectory **event model** (`AgentEvent` + the
+/// idempotency / prompt-hash helpers). Lives with telemetry because
+/// its sole roll-up consumer, [`run_report`], is observability — not
+/// runtime. Public as `tars_melt::agent_event::{...}`.
 pub mod agent_event;
 
-/// `build_run_report` — replay a trajectory's [`agent_event`] log and roll it
-/// up into a `RunReport`.
+/// `build_run_report` — replay a trajectory's [`agent_event`] log and
+/// roll it into a [`tars_types::run_report::RunReport`]. Telemetry /
+/// observability, joined to the E-pillar stores above.
 pub mod run_report;
 
 #[cfg(feature = "otlp")]
@@ -478,3 +480,4 @@ mod tests {
         assert!(EnvFilter::try_new("=== not a directive ===").is_err());
     }
 }
+

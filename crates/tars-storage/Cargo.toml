@@ -19,9 +19,12 @@ async-trait.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
+# Stream combinators for the read-only reader, which streams rows to a ceiling
+# rather than collecting a whole table.
+futures.workspace = true
 
 # Persistence
-rusqlite.workspace = true
+sqlx.workspace = true
 
 # XDG path resolution for default file locations
 dirs.workspace = true

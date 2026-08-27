@@ -14,20 +14,20 @@
 //! scans.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use rusqlite::{Connection, OptionalExtension, params};
+use tars_storage::Db;
 
 use tars_types::TenantId;
 
-use crate::event::ContentRef;
+use super::{ContentRef, StoreError};
 
-use super::StoreError;
-
-const SCHEMA_VERSION: i64 = 1;
+/// Embedded versioned schema (`migrations/llm_record_store/`). Applied once at
+/// open on the store's own pool; `_sqlx_migrations` is the version-of-record.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("migrations/llm_record_store");
 
 #[async_trait]
 pub trait LlmRecordStore: Send + Sync + 'static {
@@ -63,74 +63,36 @@ impl SqliteLlmRecordStoreConfig {
 
 #[derive(Clone)]
 pub struct SqliteLlmRecordStore {
-    conn: Arc<Mutex<Connection>>,
+    /// The one pool for this store's DB file. Cheap to clone (Arc inside sqlx).
+    db: Db,
 }
 
 impl SqliteLlmRecordStore {
-    pub fn open(config: SqliteLlmRecordStoreConfig) -> Result<Arc<Self>, StoreError> {
-        let conn = Connection::open(&config.path).map_err(|e| {
+    /// Construct on an **injected** pool (connection 下沉) — the composition
+    /// root opens it once via [`crate::pool::open`] and hands it in; the store
+    /// carries a pool, never a path. Runs this store's migrator on the pool.
+    pub async fn new(db: Db) -> Result<Arc<Self>, StoreError> {
+        db.migrate(&MIGRATOR).await.map_err(|e| StoreError::backend_source("schema migration", e))?;
+        Ok(Arc::new(Self { db }))
+    }
+
+    /// Thin convenience over the DI seam: open the file pool + [`new`](Self::new).
+    /// Prefer `Db::open_sqlite(path)` + `new(pool)` at the composition root.
+    pub async fn open(config: SqliteLlmRecordStoreConfig) -> Result<Arc<Self>, StoreError> {
+        let db = Db::open_sqlite(&config.path).await.map_err(|e| {
             StoreError::backend_source(format!("opening llm record store at {:?}", config.path), e)
         })?;
-        Self::pragma_setup(&conn)?;
-        Self::migrate(&conn)?;
-        Ok(Arc::new(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        }))
+        Self::new(db).await
     }
 
-    pub fn in_memory() -> Result<Arc<Self>, StoreError> {
-        let conn = Connection::open_in_memory()
+    /// In-memory store for tests (its own single-connection in-memory pool).
+    pub async fn in_memory() -> Result<Arc<Self>, StoreError> {
+        let db = Db::sqlite_in_memory()
+            .await
             .map_err(|e| StoreError::backend_source("opening in-memory llm record store", e))?;
-        Self::pragma_setup(&conn)?;
-        Self::migrate(&conn)?;
-        Ok(Arc::new(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        }))
+        Self::new(db).await
     }
 
-    fn pragma_setup(conn: &Connection) -> Result<(), StoreError> {
-        for (name, value) in [
-            ("journal_mode", "WAL"),
-            ("synchronous", "NORMAL"),
-            ("temp_store", "MEMORY"),
-        ] {
-            conn.pragma_update(None, name, value)
-                .map_err(|e| StoreError::backend_source("pragma {name}", e))?;
-        }
-        Ok(())
-    }
-
-    fn migrate(conn: &Connection) -> Result<(), StoreError> {
-        let current: i64 = conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .map_err(|e| StoreError::backend_source("read user_version", e))?;
-        if current == SCHEMA_VERSION {
-            return Ok(());
-        }
-        if current != 0 {
-            return Err(StoreError::backend(format!(
-                "incompatible llm record store schema (file v{current}, code v{SCHEMA_VERSION})"
-            )));
-        }
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS llm_records (
-                tenant_id   TEXT    NOT NULL,
-                content_hash   BLOB    NOT NULL,
-                content     BLOB    NOT NULL,
-                created_at  INTEGER NOT NULL,
-                PRIMARY KEY (tenant_id, content_hash)
-            ) STRICT;
-
-            CREATE INDEX IF NOT EXISTS idx_llm_records_created_at
-                ON llm_records(created_at);
-            "#,
-        )
-        .map_err(|e| StoreError::backend_source("create llm record schema", e))?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(|e| StoreError::backend_source("set user_version", e))?;
-        Ok(())
-    }
 }
 
 /// Current wall-clock time as milliseconds since the Unix epoch, for
@@ -170,94 +132,69 @@ fn cutoff_to_ms(t: SystemTime) -> Result<i64, StoreError> {
 #[async_trait]
 impl LlmRecordStore for SqliteLlmRecordStore {
     async fn put(&self, r: &ContentRef, bytes: Bytes) -> Result<(), StoreError> {
-        let conn = self.conn.clone();
+        // Stamp `created_at` at the actual write moment (not when `put` was
+        // called) so a delayed write under load can't be stamped as already
+        // eligible for a concurrent `purge_before`.
+        let now = now_ms()?;
         let tenant = r.tenant_id().as_ref().to_string();
         let hash = r.content_hash().to_vec();
         let content = bytes.to_vec();
 
-        tokio::task::spawn_blocking(move || -> Result<(), StoreError> {
-            // Capture the timestamp inside the blocking closure so it
-            // reflects the moment the row is actually written, not the
-            // (possibly much earlier, under load) moment `put` was
-            // called — otherwise a delayed write could race a concurrent
-            // `purge_before` and be stamped as already-purgeable.
-            let now = now_ms()?;
-            let conn = conn.lock().expect("llm record store mutex poisoned");
-            // INSERT OR IGNORE — idempotent CAS write. Re-storing
-            // identical bytes for the same (tenant, hash) is a no-op.
-            conn.execute(
-                "INSERT OR IGNORE INTO llm_records (tenant_id, content_hash, content, created_at) \
-                 VALUES (?, ?, ?, ?)",
-                params![tenant, hash, content, now],
-            )
-            .map_err(|e| StoreError::backend_source("insert llm record", e))?;
-            Ok(())
-        })
+        // INSERT OR IGNORE — idempotent CAS write. Re-storing identical bytes
+        // for the same (tenant, hash) is a no-op.
+        sqlx::query(
+            "INSERT OR IGNORE INTO llm_records (tenant_id, content_hash, content, created_at) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(tenant)
+        .bind(hash)
+        .bind(content)
+        .bind(now)
+        .execute(self.db.sqlite())
         .await
-        .map_err(|e| StoreError::backend_source("spawn_blocking", e))??;
+        .map_err(|e| StoreError::backend_source("insert llm record", e))?;
 
         Ok(())
     }
 
     async fn fetch(&self, r: &ContentRef) -> Result<Option<Bytes>, StoreError> {
-        let conn = self.conn.clone();
         let tenant = r.tenant_id().as_ref().to_string();
         let hash = r.content_hash().to_vec();
 
-        let bytes = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, StoreError> {
-            let conn = conn.lock().expect("llm record store mutex poisoned");
-            conn.query_row(
-                "SELECT content FROM llm_records WHERE tenant_id = ? AND content_hash = ?",
-                params![tenant, hash],
-                |row| row.get::<_, Vec<u8>>(0),
-            )
-            .optional()
-            .map_err(|e| StoreError::backend_source("fetch llm record", e))
-        })
+        let bytes = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT content FROM llm_records WHERE tenant_id = ? AND content_hash = ?",
+        )
+        .bind(tenant)
+        .bind(hash)
+        .fetch_optional(self.db.sqlite())
         .await
-        .map_err(|e| StoreError::backend_source("spawn_blocking", e))??;
+        .map_err(|e| StoreError::backend_source("fetch llm record", e))?;
 
         Ok(bytes.map(Bytes::from))
     }
 
     async fn purge_before(&self, cutoff: SystemTime) -> Result<u64, StoreError> {
-        let conn = self.conn.clone();
         let cutoff_ms = cutoff_to_ms(cutoff)?;
 
-        let n = tokio::task::spawn_blocking(move || -> Result<u64, StoreError> {
-            let conn = conn.lock().expect("llm record store mutex poisoned");
-            let n = conn
-                .execute(
-                    "DELETE FROM llm_records WHERE created_at < ?",
-                    params![cutoff_ms],
-                )
-                .map_err(|e| StoreError::backend_source("purge_before", e))?;
-            Ok(n as u64)
-        })
-        .await
-        .map_err(|e| StoreError::backend_source("spawn_blocking", e))??;
+        let res = sqlx::query("DELETE FROM llm_records WHERE created_at < ?")
+            .bind(cutoff_ms)
+            .execute(self.db.sqlite())
+            .await
+            .map_err(|e| StoreError::backend_source("purge_before", e))?;
 
-        Ok(n)
+        Ok(res.rows_affected())
     }
 
     async fn purge_tenant(&self, tenant_id: &TenantId) -> Result<u64, StoreError> {
-        let conn = self.conn.clone();
         let tenant = tenant_id.as_ref().to_string();
 
-        let n = tokio::task::spawn_blocking(move || -> Result<u64, StoreError> {
-            let conn = conn.lock().expect("llm record store mutex poisoned");
-            let n = conn
-                .execute(
-                    "DELETE FROM llm_records WHERE tenant_id = ?",
-                    params![tenant],
-                )
-                .map_err(|e| StoreError::backend_source("purge_tenant", e))?;
-            Ok(n as u64)
-        })
-        .await
-        .map_err(|e| StoreError::backend_source("spawn_blocking", e))??;
+        let res = sqlx::query("DELETE FROM llm_records WHERE tenant_id = ?")
+            .bind(tenant)
+            .execute(self.db.sqlite())
+            .await
+            .map_err(|e| StoreError::backend_source("purge_tenant", e))?;
 
-        Ok(n)
+        Ok(res.rows_affected())
     }
 }
 
@@ -267,7 +204,9 @@ mod tests {
     use std::time::Duration;
 
     async fn store() -> Arc<SqliteLlmRecordStore> {
-        SqliteLlmRecordStore::in_memory().expect("open in-memory store")
+        SqliteLlmRecordStore::in_memory()
+            .await
+            .expect("open in-memory store")
     }
 
     fn cref(tenant: &str, body: &[u8]) -> ContentRef {

@@ -514,8 +514,8 @@ mod tests {
 
     #[tokio::test]
     async fn happy_path_emits_one_event_with_bodies() {
-        let events: Arc<dyn PipelineEventLog> = SqlitePipelineEventLog::in_memory().unwrap();
-        let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().unwrap();
+        let events: Arc<dyn PipelineEventLog> = SqlitePipelineEventLog::in_memory().await.unwrap();
+        let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().await.unwrap();
 
         let provider = MockProvider::new("p1", CannedResponse::text("hello"));
         let svc = LlmService::builder(provider, "m")
@@ -551,8 +551,8 @@ mod tests {
             OutputValidator, ValidationMiddleware, builtin::MaxLengthValidator,
         };
 
-        let events: Arc<dyn PipelineEventLog> = SqlitePipelineEventLog::in_memory().unwrap();
-        let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().unwrap();
+        let events: Arc<dyn PipelineEventLog> = SqlitePipelineEventLog::in_memory().await.unwrap();
+        let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().await.unwrap();
 
         let provider = MockProvider::new("p1", CannedResponse::text("hello world"));
         // Onion: EventEmitter (outer) → Validation (inner) → Provider.
@@ -590,8 +590,8 @@ mod tests {
         };
         use tars_types::ValidationReason;
 
-        let events: Arc<dyn PipelineEventLog> = SqlitePipelineEventLog::in_memory().unwrap();
-        let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().unwrap();
+        let events: Arc<dyn PipelineEventLog> = SqlitePipelineEventLog::in_memory().await.unwrap();
+        let records: Arc<dyn LlmRecordStore> = SqliteLlmRecordStore::in_memory().await.unwrap();
 
         // Empty text → NotEmpty rejects.
         let provider = MockProvider::new("p1", CannedResponse::text(""));

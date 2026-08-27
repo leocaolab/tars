@@ -79,7 +79,7 @@ pub enum TrajectoryCommand {
 }
 
 pub async fn execute(args: TrajectoryArgs) -> Result<()> {
-    let store_arc = event_store_path::open(args.events_path.as_deref())?.context(
+    let store_arc = event_store_path::open(args.events_path.as_deref()).await?.context(
         "no event store available — pass --events-path or run on a platform with an XDG data dir",
     )?;
     let store: Arc<dyn AgentEventLog> = store_arc;
@@ -369,7 +369,7 @@ mod tests {
 
     async fn fixture(dir: &TempDir) -> Arc<dyn AgentEventLog> {
         let path = dir.path().join("events.sqlite");
-        tars_storage::open_agent_event_log_at_path(&path).unwrap()
+        tars_storage::open_agent_event_log_at_path(&path).await.unwrap()
     }
 
     /// Mint a trajectory by writing its `TrajectoryStarted` event — the
