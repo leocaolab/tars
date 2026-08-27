@@ -693,12 +693,12 @@ mod tests {
         assert!(matches!(err, ToolError::Cancelled));
     }
 
-    // ── registration + spec projection + name-based approval gate ─────
+    // ── registration + spec projection ────────────────────────────────
 
     #[tokio::test]
-    async fn both_web_tools_register_expose_specs_and_gate_by_name() {
-        use crate::{PermissionView, ToolDecision, ToolRegistry};
-        use tars_types::{Message, ToolCall};
+    async fn both_web_tools_register_and_expose_specs() {
+        use crate::ToolRegistry;
+
 
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(WebFetchTool::new())).unwrap();
@@ -713,29 +713,5 @@ mod tests {
             "specs: {names:?}"
         );
 
-        // The dispatch gate keys on the tool NAME (no per-tool plumbing): a Deny
-        // policy stops `web.fetch` *before* execute — so it never touches the
-        // network — and yields an is_error tool message the model can adapt to.
-        let deny: Arc<dyn PermissionView> = Arc::new(|_name: &str| ToolDecision::Deny);
-        let ctx = ToolContext {
-            permission: Some(deny),
-            ..Default::default()
-        };
-        let msg = reg
-            .dispatch(
-                &ToolCall::new("c1", "web.fetch", json!({"url": "https://example.com"})),
-                ctx,
-            )
-            .await;
-        match msg {
-            Message::Tool {
-                is_error, content, ..
-            } => {
-                assert!(is_error, "denied web.fetch must be an error result");
-                let text = content[0].as_text().unwrap_or_default();
-                assert!(text.contains("web.fetch"), "names the gated tool: {text}");
-            }
-            other => panic!("expected Tool message, got {other:?}"),
-        }
     }
 }

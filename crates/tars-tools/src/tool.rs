@@ -1,7 +1,6 @@
 //! [`Tool`] trait + supporting types.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -10,13 +9,9 @@ use tokio_util::sync::CancellationToken;
 use tars_types::JsonSchema;
 
 use crate::SandboxPolicy;
-use crate::approval::ApprovalSink;
-use crate::permission::PermissionView;
 
-/// Per-call environment a [`Tool`] receives. The `cancel`/`cwd` fields are the
-/// historical core; `permission`/`approval`/`sandbox` are the gate + seams
-/// added by Doc 23 — all default to inert, so a `ToolContext::default()`
-/// behaves exactly as before (allow-all, no approval, unrestricted).
+/// Per-call environment a [`Tool`] receives. Everything here defaults to
+/// inert, so a `ToolContext::default()` is unrestricted.
 #[derive(Clone, Default)]
 pub struct ToolContext {
     /// Cooperative cancellation. Tools that do anything expensive
@@ -28,13 +23,6 @@ pub struct ToolContext {
     /// relative paths. `None` falls back to whatever the tool
     /// considers the default (usually `std::env::current_dir`).
     pub cwd: Option<PathBuf>,
-    /// Permission decision source the dispatch gate consults by tool name.
-    /// `None` = allow-all (historical behaviour). The runtime adapts its
-    /// `tars_agent::Permissions` into a [`PermissionView`] closure here.
-    pub permission: Option<Arc<dyn PermissionView>>,
-    /// Human-approval channel for `Ask` decisions. `None` = fail closed
-    /// (`Ask` treated as `Deny`, Doc 23 NFR-2).
-    pub approval: Option<Arc<dyn ApprovalSink>>,
     /// OS-confinement policy a sandboxed tool reads. Default = unrestricted
     /// (seam only today; the lift is Doc 22 T2).
     pub sandbox: SandboxPolicy,
@@ -54,8 +42,6 @@ impl std::fmt::Debug for ToolContext {
         f.debug_struct("ToolContext")
             .field("cancel", &self.cancel)
             .field("cwd", &self.cwd)
-            .field("permission", &self.permission.as_ref().map(|_| "<view>"))
-            .field("approval", &self.approval.as_ref().map(|_| "<sink>"))
             .field("sandbox", &self.sandbox)
             .field("readable_roots", &self.readable_roots)
             .finish()
@@ -210,7 +196,7 @@ pub trait Tool: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-
+    
     use super::*;
     use serde_json::json;
 
