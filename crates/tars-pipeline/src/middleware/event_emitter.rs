@@ -22,11 +22,12 @@ use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use tars_melt::event::{LlmRecordStore, PipelineEventLog};
+use tars_melt::event::{
+    CallResult, ContentRef, LlmCallFinished, LlmRecordStore, PipelineEvent, PipelineEventLog,
+};
 use tars_provider::LlmEventStream;
 use tars_types::{
-    CallResult, ChatEvent, ChatRequest, ChatResponseBuilder, ContentRef, LlmCallFinished,
-    PipelineEvent, ProviderError, RequestContext, ValidationReason,
+    ChatEvent, ChatRequest, ChatResponseBuilder, ProviderError, RequestContext, ValidationReason,
 };
 
 use crate::middleware::Middleware;

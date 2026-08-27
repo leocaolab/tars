@@ -24,10 +24,8 @@
 //! See `docs/architecture/01-llm-provider.md` for the full design rationale.
 
 pub mod bless;
-pub mod content_ref;
 pub mod env;
 pub mod ids;
-pub mod pipeline_events;
 pub mod principal;
 pub mod providers;
 pub mod runtime;
@@ -36,13 +34,9 @@ pub mod telemetry;
 pub mod validation;
 
 pub use bless::{Assert, Bless, BlessError, BlessOutcome, Codec, Drift, MatchTier};
-pub use content_ref::ContentRef;
 pub use ids::{
     AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId,
     TenantId, TraceId, TrajectoryId,
-};
-pub use pipeline_events::{
-    CallResult, EvaluationScored, LlmCallFinished, PersistenceMode, PipelineEvent,
 };
 pub use principal::{Principal, PrincipalKind, Scope};
 pub use providers::auth::Auth;

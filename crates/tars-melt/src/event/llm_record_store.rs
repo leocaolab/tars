@@ -21,7 +21,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use tars_types::{ContentRef, TenantId};
+use tars_types::TenantId;
+
+use crate::event::ContentRef;
 
 use super::StoreError;
 

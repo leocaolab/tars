@@ -28,11 +28,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
+use tars_melt::event::{ContentRef, PipelineEvent};
 use tars_melt::event::{
     LlmRecordStore, PipelineEventLog, PipelineEventQuery, SqliteLlmRecordStore,
     SqliteLlmRecordStoreConfig, SqlitePipelineEventLog, SqlitePipelineEventLogConfig,
 };
-use tars_types::{ContentRef, PipelineEvent, TenantId};
+use tars_types::TenantId;
 
 #[derive(Args, Debug)]
 pub struct EventsArgs {
@@ -223,8 +224,8 @@ async fn list(store: &dyn PipelineEventLog, args: ListArgs) -> Result<()> {
                 let ts = format_ts(e.timestamp);
                 let model = truncate(&e.actual_model, 28);
                 let result = match &e.result {
-                    tars_types::CallResult::Ok => "ok".to_string(),
-                    tars_types::CallResult::Error { kind } => format!("err:{kind}"),
+                    tars_melt::event::CallResult::Ok => "ok".to_string(),
+                    tars_melt::event::CallResult::Error { kind } => format!("err:{kind}"),
                     _ => "?".to_string(),
                 };
                 let tags = if e.tags.is_empty() {
@@ -500,9 +501,9 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tars_melt::event::{CallResult, LlmCallFinished};
     use tars_types::{
-        CallResult, LlmCallFinished, ProviderErrorKind, TelemetryAccumulator, Usage,
-        ValidationReason, ValidationSummary,
+        ProviderErrorKind, TelemetryAccumulator, Usage, ValidationReason, ValidationSummary,
     };
     use uuid::Uuid;
 

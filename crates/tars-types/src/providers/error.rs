@@ -113,7 +113,8 @@ pub enum ProviderError {
     Internal(String),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ErrorClass {
     /// Try again with backoff. May succeed.
     Retriable,

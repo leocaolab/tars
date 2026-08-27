@@ -23,6 +23,8 @@ tars-storage = { path = "../tars-storage" }
 # hashes the idempotency key + system prompt.
 serde.workspace = true
 sha2.workspace = true
+# PipelineEvent / LlmCallFinished carry generated event ids.
+uuid.workspace = true
 
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -60,8 +62,6 @@ otlp = [
 [dev-dependencies]
 # run_report tests build a real SqliteAgentEventLog in a temp dir.
 tempfile = "3"
-# UUIDs in the pipeline_event_log store tests.
-uuid = { workspace = true }
 # The in-memory span/metric exporters used by the otlp bridge tests.
 # Only pulled when the `otlp` feature is active (tests are
 # `#[cfg(feature = "otlp")]`). tokio drives the metrics PeriodicReader.

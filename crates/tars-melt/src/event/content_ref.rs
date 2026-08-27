@@ -19,7 +19,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::ids::TenantId;
+use tars_types::TenantId;
 
 /// Opaque handle to content in an `LlmRecordStore`. Constructed at write
 /// time from the content bytes + the tenant context; resolved at read

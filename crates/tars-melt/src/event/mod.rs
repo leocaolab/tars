@@ -2,23 +2,29 @@
 //! §3, Doc 17). Two durable, full-fidelity, never-sampled stores read
 //! back by eval / `tars events` / debug / replay:
 //!
-//! - [`PipelineEventLog`] — one [`tars_types::PipelineEvent`] per
+//! - [`PipelineEventLog`] — one [`pipeline_events::PipelineEvent`] per
 //!   `Pipeline.call` boundary. Distinct from recovery's `AgentEventLog`
 //!   (trajectory truth, tars-storage) — there is no shared generic
 //!   `EventStore<E>` (Doc 09 §2.2, Doc 17 Q1).
 //! - [`LlmRecordStore`] — tenant-scoped CAS holding the per-call
 //!   `LlmRecord` (`ChatRequest` + `ChatResponse`) referenced from a
-//!   [`tars_types::PipelineEvent`] via [`tars_types::ContentRef`].
+//!   [`pipeline_events::PipelineEvent`] via [`ContentRef`].
 //!
 //! The producing pipeline emits once into melt and never reads these
 //! back; the M/L/T egress is fired independently (Doc 08 §3).
 
+pub mod content_ref;
 mod llm_record_store;
 mod pipeline_event_log;
+pub mod pipeline_events;
 
+pub use content_ref::ContentRef;
 pub use llm_record_store::{LlmRecordStore, SqliteLlmRecordStore, SqliteLlmRecordStoreConfig};
 pub use pipeline_event_log::{
     PipelineEventLog, PipelineEventQuery, SqlitePipelineEventLog, SqlitePipelineEventLogConfig,
+};
+pub use pipeline_events::{
+    CallResult, EvaluationScored, LlmCallFinished, PersistenceMode, PipelineEvent,
 };
 
 use thiserror::Error;

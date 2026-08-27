@@ -1,7 +1,7 @@
 //! Pipeline-level event types — one event per `Pipeline.call` boundary.
 //! See [Doc 17](../../../docs/architecture/17-pipeline-event-store.md).
 //!
-//! Distinct from `crate::providers::events::ChatEvent` (streaming-token contract,
+//! Distinct from `tars_types::ChatEvent` (streaming-token contract,
 //! per-token granularity) and from `tars-runtime`'s `AgentEvent`
 //! (agent-decision granularity). This stream sits at the LLM-call
 //! boundary: one entry per completed `Pipeline.call`, regardless of
@@ -15,13 +15,13 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::content_ref::ContentRef;
-use crate::ids::{ProviderId, SessionId, TenantId, TraceId};
-use crate::providers::error::ProviderErrorKind;
-use crate::providers::events::StopReason;
-use crate::providers::usage::Usage;
-use crate::telemetry::TelemetryAccumulator;
-use crate::validation::{ValidationReason, ValidationSummary};
+use super::ContentRef;
+use tars_types::ProviderErrorKind;
+use tars_types::StopReason;
+use tars_types::TelemetryAccumulator;
+use tars_types::Usage;
+use tars_types::{ProviderId, SessionId, TenantId, TraceId};
+use tars_types::{ValidationReason, ValidationSummary};
 
 /// Top-level event variant. `#[non_exhaustive]` plus a catchall
 /// `Other` variant give two layers of forward-compat: old readers
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn validation_reason_round_trips_on_event() {
         let mut ev = fake_finished();
-        ev.validation_reason = Some(crate::ValidationReason::NotEmpty {
+        ev.validation_reason = Some(tars_types::ValidationReason::NotEmpty {
             field: "text".into(),
         });
         ev.result = CallResult::Error {

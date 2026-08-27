@@ -20,7 +20,9 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use rusqlite::{Connection, params};
 
-use tars_types::{PipelineEvent, TenantId};
+use tars_types::TenantId;
+
+use crate::event::PipelineEvent;
 
 use super::StoreError;
 
@@ -352,11 +354,11 @@ fn inline_columns(ev: &PipelineEvent) -> Result<(String, &'static str, i64, Stri
             "cannot append PipelineEvent::Other: it has no event_id/timestamp, so it \
              cannot satisfy the idempotency-on-event_id contract",
         )),
-        // `#[non_exhaustive]` — a future variant we have no matcher for.
-        // Same reasoning as `Other`.
-        _ => Err(StoreError::backend(
-            "cannot append unknown PipelineEvent variant: no stable event_id to key on",
-        )),
+        // No catch-all: `PipelineEvent` is `#[non_exhaustive]`, but that only
+        // binds matches OUTSIDE the defining crate, and it now lives in this
+        // one. Adding a variant is a compile error here rather than a silent
+        // fall-through into a runtime "unknown variant" — which is the outcome
+        // worth having, since every variant needs an event_id to key on.
     }
 }
 
@@ -510,11 +512,9 @@ impl PipelineEventLog for SqlitePipelineEventLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{CallResult, ContentRef, LlmCallFinished};
     use std::time::Duration;
-    use tars_types::{
-        CallResult, ContentRef, LlmCallFinished, ProviderId, TelemetryAccumulator, Usage,
-        ValidationSummary,
-    };
+    use tars_types::{ProviderId, TelemetryAccumulator, Usage, ValidationSummary};
     use uuid::Uuid;
 
     async fn store() -> Arc<SqlitePipelineEventLog> {
