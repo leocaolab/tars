@@ -41,7 +41,7 @@ use tars_types::{
 };
 
 /// Optional live-stream callbacks for agent-layer LLM drains (Concer gutter,
-/// tars-desktop chat). The pipeline still owns retry/breaker; hooks fire on
+/// a chat frontend). The pipeline still owns retry/breaker; hooks fire on
 /// each streamed [`ChatEvent`] as the agent loop drains one call.
 #[derive(Default)]
 pub struct LlmStreamHooks {

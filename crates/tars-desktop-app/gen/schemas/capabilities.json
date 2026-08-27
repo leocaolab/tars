@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"Default capability for the main window — core commands only (our own invoke handlers need no extra permissions).","local":true,"windows":["main"],"permissions":["core:default"]}}

@@ -344,7 +344,7 @@ fn is_cacheable_outcome(response: &ChatResponse) -> bool {
     )
 }
 
-/// Helper for callers (tars-cli, future tars-server) — sets the
+/// Helper for callers (tars-cli, and any HTTP frontend) — sets the
 /// `cache.policy` attribute on a context. Saves them from importing
 /// the constant.
 ///

@@ -2,7 +2,7 @@
 //!
 //! M1 scope (this crate): one-line `tracing` subscriber install with a
 //! pretty / JSON formatter switch and an `EnvFilter`. Just enough for
-//! every `tars-*` binary (`tars-cli` today, `tars-server` later) to
+//! every `tars-*` binary (`tars-cli` today) to
 //! emit consistent structured logs to stderr without each binary
 //! re-implementing the same `tracing_subscriber::fmt()` boilerplate.
 //!
