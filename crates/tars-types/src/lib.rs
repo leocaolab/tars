@@ -76,4 +76,5 @@ pub use validation::{
 // Re-exporting the module — not just its items — keeps `tars_types::error::…`
 // resolving after the move.
 pub use providers::error;
+pub use providers::provider_profile;
 pub use providers::provider_profile as capabilities;
