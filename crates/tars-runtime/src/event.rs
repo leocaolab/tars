@@ -86,6 +86,7 @@ impl StepIdempotencyKey {
 /// Returns `None` when `system` is `None`. Distinct from
 /// `Some(sha256(""))` — the absence of a system prompt is a
 /// different audit fact than "the system prompt was empty".
+#[cfg(test)]
 pub fn hash_system_prompt(system: Option<&str>) -> Option<String> {
     use sha2::{Digest, Sha256};
     let s = system?;

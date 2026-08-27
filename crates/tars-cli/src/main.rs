@@ -26,12 +26,9 @@ mod init;
 mod model_library;
 mod model_query;
 mod models;
-mod plan;
 mod probe;
 mod providers_cmd;
-mod run;
 mod run_report;
-mod run_task;
 mod trajectory;
 
 #[derive(Parser, Debug)]
@@ -114,12 +111,6 @@ impl From<LogFormat> for TelemetryFormat {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Send a single prompt to a provider and stream the response.
-    Run(run::RunArgs),
-    /// Drive an OrchestratorAgent: turn a goal into a typed Plan.
-    Plan(plan::PlanArgs),
-    /// Drive the multi-step Orchestrator → Worker → Critic loop end-to-end.
-    RunTask(run_task::RunTaskArgs),
     /// Sanity-check a CLI provider (`claude_cli` / `gemini_cli` / `codex_cli`) — sends
     /// a fixed "say hi" prompt and dumps every event so you can see what the
     /// subprocess actually returns.
@@ -186,9 +177,6 @@ async fn main() -> ExitCode {
     };
 
     let cmd_name = match &cli.command {
-        Command::Run(_) => "run",
-        Command::Plan(_) => "plan",
-        Command::RunTask(_) => "run-task",
         Command::Probe(_) => "probe",
         Command::Bench(_) => "bench",
         Command::Trajectory(_) => "trajectory",
@@ -201,11 +189,6 @@ async fn main() -> ExitCode {
     };
 
     let result: Result<()> = match cli.command {
-        Command::Run(args) => run::execute(args, cli.config).await,
-        Command::Plan(args) => plan::execute(args, cli.config).await,
-        Command::RunTask(args) => {
-            run_task::execute(args, cli.config, cli.sandbox.map(Into::into)).await
-        }
         Command::Probe(args) => probe::execute(args, cli.config).await,
         Command::Bench(args) => bench::execute(args, cli.config).await,
         Command::Trajectory(args) => {

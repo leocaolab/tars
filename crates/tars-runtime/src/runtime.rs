@@ -5,19 +5,17 @@
 //! execution loop (Doc 04 §4) lives in a follow-on commit alongside
 //! the actual `Agent` trait, prompt builder, tool registry, etc.
 
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use tars_pipeline::LlmService;
 use tars_storage::AgentEventLog;
-use tars_types::{ChatRequest, TrajectoryId};
-use tokio_util::sync::CancellationToken;
+use tars_types::TrajectoryId;
 use uuid::Uuid;
 
-use crate::agent::{Agent, AgentContext, StepError, AgentStepResult};
 use crate::error::RuntimeError;
-use crate::event::{AgentEvent, StepIdempotencyKey};
+use crate::event::AgentEvent;
 
 /// Top-level runtime facade. Implementors decide how to back the
 /// event store (SQLite for personal mode, Postgres for team mode);
@@ -241,207 +239,6 @@ impl Runtime for LocalRuntime {
         *entry = next;
         Ok(next)
     }
-}
-
-/// Drive `agent.execute()` through one trajectory step, with full
-/// event-log wrapping. The pattern is the same one `tars-cli`'s
-/// `run.rs` builds inline today; this function is the
-/// reusable-by-future-orchestrators version.
-///
-/// Lifecycle on the trajectory:
-/// 1. Compute `step_seq = high_water + 1`.
-/// 2. Append `AgentEvent::StepStarted` with idempotency key.
-/// 3. Build `AgentContext`; call `agent.execute(ctx, input)`.
-/// 4. On Ok: append `LlmCallCaptured` (one per step — multi-call
-///    agents come later) + `StepCompleted`, return the result.
-/// 5. On Err: append `StepFailed` with classification, return error.
-///
-/// **Does not** write `TrajectoryStarted` / `TrajectoryCompleted` /
-/// `TrajectoryAbandoned` — those are the orchestrator's concern
-/// (one trajectory may run many steps before completing). Caller is
-/// responsible for closing the trajectory when its work is done.
-///
-/// Trajectory writes that fail get propagated as
-/// [`RuntimeError::Storage`] — unlike the CLI's "best-effort,
-/// degrade silently" pattern, here we're an internal building block
-/// where storage failures matter (the next step's `step_seq` would
-/// be wrong if a `StepStarted` write silently dropped).
-///
-/// ## Crash / recovery contract (NOT exactly-once)
-///
-/// This function is **at-most-once-effect, at-least-once-attempt**, not
-/// exactly-once. A crash between step 2 (`StepStarted`) and the
-/// terminal event (step 4 `StepCompleted` / step 5 `StepFailed`) leaves
-/// a `StepStarted` with no terminal — an *orphan*. Recovery is the
-/// caller's job and works as follows:
-///
-/// - Each step carries a [`StepIdempotencyKey`] = hash of
-///   `(traj, step_seq, input_summary)`. On retry, the recomputed key
-///   for the same logical step is identical, so a recovery pass can
-///   detect "I already started step N" by scanning for a `StepStarted`
-///   whose key matches and which lacks a terminal event.
-/// - This function does **not** itself dedupe on that key — appending
-///   is unconditional. An orphaned `StepStarted` followed by a fresh
-///   call to `execute_agent_step` will allocate `step_seq = orphan + 1`
-///   (the orphan still counts), so the orphan is left in place as an
-///   audit record and the retry runs as a new step. Callers that want
-///   true exactly-once must check `count_started_steps` against an
-///   expected value (or scan for a key match) before re-invoking.
-///
-/// In short: side effects inside `agent.execute` (the LLM call) may run
-/// more than once across a crash+retry; the event log is the source of
-/// truth for what actually completed.
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_agent_step(
-    runtime: &dyn Runtime,
-    traj: &TrajectoryId,
-    llm: LlmService,
-    agent: Arc<dyn Agent>,
-    input: ChatRequest,
-    cancel: CancellationToken,
-    // OS-confinement policy for this step's tools (D5/D6). The caller
-    // (executor via `WorkerContext`/`CriticContext`) sets it per role from the
-    // resolved `[sandbox]` config + `--sandbox` flag. `SandboxPolicy::default()`
-    // = `DangerFullAccess` = today's unconfined behaviour.
-    sandbox: tars_tools::SandboxPolicy,
-) -> Result<AgentStepResult, AgentExecutionError> {
-    // 1. step_seq = (count of existing StepStarted events) + 1.
-    //    NOT event high-water + 1 — that conflates "trajectory's
-    //    Nth event" with "trajectory's Nth step", off-by-one'ing the
-    //    very first step (TrajectoryStarted occupies event_seq=1, so
-    //    a fresh trajectory's first step would otherwise come out
-    //    as step_seq=2). Doc 04 §3.2 invariant 3 makes step_seq the
-    //    LOGICAL step identifier; event sequencing is orthogonal.
-    // Parallel-safe allocation: under a DAG executor with concurrent
-    // step calls, the bare `count + 1` shape would race (two callers
-    // both read N, both append step_seq=N+1). `next_step_seq` is the
-    // serialised entry point — production runtimes (LocalRuntime)
-    // override it with a mutex-protected counter; test stubs default
-    // to the historical race-prone shape, which is fine when calls
-    // are serial.
-    let step_seq: u32 = runtime.next_step_seq(traj).await?;
-
-    // 2. StepStarted
-    let input_summary = format!(
-        "agent={} model={} messages={}",
-        agent.id(),
-        llm.model(),
-        input.messages.len()
-    );
-    let idempotency_key = StepIdempotencyKey::compute(traj, step_seq, &input_summary);
-    runtime
-        .append(
-            traj,
-            AgentEvent::StepStarted {
-                traj: traj.clone(),
-                step_seq,
-                agent: agent.id().to_string(),
-                idempotency_key,
-                input_summary,
-            },
-        )
-        .await
-        .map_err(AgentExecutionError::Runtime)?;
-
-    // 3. agent.execute()
-    // Snapshot the system-prompt hash BEFORE moving `input` into the
-    // agent — Doc 04 §3.2's audit pin. (Was tagged "TODO L-1
-    // enterprise follow-on" against a roadmap entry that's since
-    // been retired; the hash itself ships here, the broader SOC2 /
-    // ISO surface around it remains future work without a tracking id.)
-    // Plain SHA256 of the bytes so an external auditor can verify with
-    // `sha256sum read_file.txt`.
-    //
-    // No TOCTOU: `input` is MOVED into `execute` below, so the agent
-    // gets its own owned copy. Anything it mutates is private and
-    // cannot retroactively change the bytes hashed here. The contract
-    // this hash records is "the system prompt as handed to the agent",
-    // which is the audit fact we pin. (An agent that rewrites
-    // `input.system` before its own LLM call would send a different
-    // prompt than this hash; today's agents — SingleShot / Critic /
-    // Worker — pass `input` through unchanged, so the two coincide.)
-    let provider_for_log = tars_types::ProviderId::new(llm.model());
-    let system_prompt_hash = crate::event::hash_system_prompt(input.system.as_deref());
-    let ctx = AgentContext {
-        trajectory_id: traj.clone(),
-        step_seq,
-        llm,
-        cancel,
-        // run_plan agents act on the process cwd; a per-step worktree
-        // would flow in here once PlanStep carries one.
-        cwd: None,
-        permissions: Default::default(),
-        readable_roots: Vec::new(),
-        // Per-role confinement (D5), passed through from the executor's
-        // WorkerContext/CriticContext. Default = DangerFullAccess (unconfined).
-        sandbox,
-        llm_request_ctx: None,
-        stream_hooks: None,
-    };
-    let result = agent.clone().execute(ctx, input).await;
-
-    // 4 / 5. log outcome
-    match result {
-        Ok(step_result) => {
-            runtime
-                .append(
-                    traj,
-                    AgentEvent::LlmCallCaptured {
-                        traj: traj.clone(),
-                        step_seq,
-                        provider: provider_for_log.clone(),
-                        prompt_summary: format!("agent={}", agent.id()),
-                        response_summary: step_result.output.summary(200),
-                        usage: step_result.usage,
-                        system_prompt_hash,
-                        tool_calls: step_result.tool_calls.clone(),
-                        tool_call_args: step_result.tool_call_args.clone(),
-                    },
-                )
-                .await
-                .map_err(AgentExecutionError::Runtime)?;
-            runtime
-                .append(
-                    traj,
-                    AgentEvent::StepCompleted {
-                        traj: traj.clone(),
-                        step_seq,
-                        output_summary: step_result.output.summary(200),
-                        usage: step_result.usage,
-                    },
-                )
-                .await
-                .map_err(AgentExecutionError::Runtime)?;
-            Ok(step_result)
-        }
-        Err(agent_err) => {
-            let classification = agent_err.classification().to_string();
-            runtime
-                .append(
-                    traj,
-                    AgentEvent::StepFailed {
-                        traj: traj.clone(),
-                        step_seq,
-                        error: format!("{agent_err}"),
-                        classification,
-                    },
-                )
-                .await
-                .map_err(AgentExecutionError::Runtime)?;
-            Err(AgentExecutionError::Agent(agent_err))
-        }
-    }
-}
-
-/// Errors that escape from [`execute_agent_step`]. Splits Agent
-/// failures (the model said no, the prompt was malformed) from
-/// Runtime failures (the event store is down).
-#[derive(Debug, thiserror::Error)]
-pub enum AgentExecutionError {
-    #[error("agent: {0}")]
-    Agent(#[from] StepError),
-    #[error("runtime: {0}")]
-    Runtime(#[from] RuntimeError),
 }
 
 #[cfg(test)]
