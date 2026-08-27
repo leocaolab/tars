@@ -1,40 +1,29 @@
 # tars documentation
 
-Three subtrees, three audiences:
+Everything here is written for someone **using** tars. Design rationale,
+architecture rewrites, roadmaps and internal audits are not published — they live
+in the private working repo, and they change faster than anything you should
+build against.
 
-| Path | What's inside | Who reads it |
-|------|---------------|--------------|
-| [`USER-GUIDE.md`](./USER-GUIDE.md) | 5-minute getting-started, the three call shapes, when not to use TARS | Developers integrating tars into their app |
-| [`architecture/`](./architecture/) | 26 design docs (00–25). Per-layer rationale, trade-offs, milestone plan, the agent abstraction, the Codex-TUI port + tool layer, the blackboard pipeline + its investigation/testing duals, audit pins. | Maintainers, contributors, peer reviewers, architects evaluating the design |
-| Operational guides — [`observability.md`](./observability.md), [`testing-agents.md`](./testing-agents.md), [`blackboard-investigation.md`](./blackboard-investigation.md) | How to *see* what a run did (3 grains), *test* an agent/DAG offline (mock + golden LLM), and *debug* the durable state a pipeline wrote. | Developers building & debugging pipelines on tars |
-| [`audit-stories/`](./audit-stories/) | Field notes — moments where the system caught itself being wrong. Time-stamped, citation-heavy, written while context was fresh. | Engineers learning from concrete pre/post estimate-revision cases |
-| [`comparison.md`](./comparison.md) | Head-to-head positioning vs LangChain, LiteLLM, Letta, AutoGen, NVIDIA NIM | Anyone deciding "do I want this or X?" |
+| Path | What's inside |
+|------|---------------|
+| [`USER-GUIDE.md`](./USER-GUIDE.md) | Start here. Five-minute getting started, the three call shapes, and when *not* to reach for tars. |
+| [`providers/`](./providers/) | One page per provider — [anthropic](./providers/anthropic.md), [bedrock](./providers/bedrock.md), [claude-cli](./providers/claude-cli.md), [antigravity](./providers/antigravity.md), [opencode](./providers/opencode.md). Auth, models, and the quirks each one actually has. |
+| [`recipes/`](./recipes/) | Task-shaped: [batch](./recipes/batch.md), [cost and reliability](./recipes/cost-and-reliability.md). |
+| [`observability.md`](./observability.md) | How to see what a run did, at three grains. |
 
 ## Reading order
 
-**If you want to use tars** — start with `USER-GUIDE.md`. Most consumers
-never need to leave it.
+**Using tars** — `USER-GUIDE.md`, then the page for your provider. Most people
+never need to leave those two.
 
-**If you want to understand why tars is shaped this way** — start with
-[`architecture/00-overview.md`](./architecture/00-overview.md), then
-follow the role-based reading paths it suggests. Doc 00 is the map;
-each per-layer doc covers one concern in depth.
+**Something cost more than you expected, or failed in a way you cannot see** —
+[`observability.md`](./observability.md).
 
-**If you're evaluating tars vs alternatives** — start with
-[`comparison.md`](./comparison.md), then dip into the architecture
-doc for whichever specific concern is the deciding factor.
+**Batching, retries, budgets** — [`recipes/`](./recipes/).
 
-**If you found something surprising in the code** — check
-[`audit-stories/`](./audit-stories/) first. The deliberate weirdness
-usually has a story attached.
+## What is authoritative
 
-## Status notes
-
-Documentation is **design-ahead** in places. The architecture corpus
-describes the full target shape; not every layer is shipped.
-[CHANGELOG.md](../CHANGELOG.md) is authoritative for shipped state;
-[TODO.md](../TODO.md) tracks what's deferred and the trigger
-conditions to revisit.
-
-If you spot a doc that describes a layer not yet in `crates/`, that's
-expected — design first, then build.
+[CHANGELOG.md](../CHANGELOG.md) is the record of what actually shipped. If a doc
+here disagrees with the code, the code is right and the doc is a bug — please
+open an issue.
