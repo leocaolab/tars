@@ -14,5 +14,5 @@ pub mod json_decode;
 
 pub use json_decode::{
     DecodeOpts, JsonAgentResponse, JsonValueType, ResponseJsonExt, TarsJsonError, decode,
-    decode_json,
+    decode_json, find_json_array_start, salvage_json_array,
 };

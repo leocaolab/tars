@@ -76,6 +76,14 @@ pub struct Config {
     /// Skipped in serialization — it's an internal post-load annotation.
     #[serde(skip)]
     pub user_provider_ids: HashSet<ProviderId>,
+    /// The workspace store dir the **consumer** resolved and set on the `Config`
+    /// it hands to [`Config::set`](crate::Config::set) — typically
+    /// `<repo_root>/.<tool>/tars/`. It is the base every `get_*db_path` accessor
+    /// joins onto; a store reads its own db path from here and opens its own
+    /// pool. `#[serde(skip)]`: a runtime path, never a config-file field. `None`
+    /// until the consumer sets it.
+    #[serde(skip)]
+    pub store_dir: Option<PathBuf>,
 }
 
 impl Config {

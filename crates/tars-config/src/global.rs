@@ -137,3 +137,48 @@ mod tests {
         }
     }
 }
+
+// ─── per-db path accessors ─────────────────────────────────────────────────
+//
+// The db location is the CONSUMER's: it resolves its workspace store dir and
+// sets it on [`Config::store_dir`](crate::Config) before install. Each store
+// reads its own db path here + opens its OWN pool (SQLite WAL is fine with a
+// pool per connection — no shared-connection registry). config stays pure:
+// these return `PathBuf`, no backend. A name appears here whether or not this
+// repo ships the store that reads it; the layout is the contract, and a
+// consumer that has the store needs the same name this one would use.
+
+/// The consumer-set workspace store dir. Panics if the consumer never set
+/// `Config.store_dir` before install (a startup-contract violation, like
+/// [`Config::get`]).
+fn store_dir() -> &'static std::path::Path {
+    Config::get()
+        .store_dir
+        .as_deref()
+        .expect("Config.store_dir must be set by the consumer before a db path is requested")
+}
+
+/// `<store_dir>/events.sqlite` — the trajectory / agent event log.
+pub fn get_eventdb_path() -> PathBuf {
+    store_dir().join("events.sqlite")
+}
+/// `<store_dir>/llm_records.db` — raw LLM request/response bodies.
+pub fn get_bodydb_path() -> PathBuf {
+    store_dir().join("llm_records.db")
+}
+/// `<store_dir>/pipeline_events.db` — pipeline observability events.
+pub fn get_pipelinedb_path() -> PathBuf {
+    store_dir().join("pipeline_events.db")
+}
+/// `<store_dir>/cache.sqlite` — the LLM response cache.
+pub fn get_cachedb_path() -> PathBuf {
+    store_dir().join("cache.sqlite")
+}
+/// `<store_dir>/durable.sqlite` — durable job/step store + blackboard.
+pub fn get_durabledb_path() -> PathBuf {
+    store_dir().join("durable.sqlite")
+}
+/// `<store_dir>/board.sqlite` — task queue + trajectory board.
+pub fn get_boarddb_path() -> PathBuf {
+    store_dir().join("board.sqlite")
+}
