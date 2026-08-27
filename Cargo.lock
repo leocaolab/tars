@@ -4873,6 +4873,7 @@ version = "1.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "clap",
  "futures",
  "serde",
  "serde_json",

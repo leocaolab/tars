@@ -19,7 +19,6 @@ use tars_melt::{TelemetryConfig, TelemetryFormat};
 mod bench;
 mod config_loader;
 mod dispatch;
-mod harness;
 mod event_store;
 mod events;
 mod init;
@@ -131,7 +130,7 @@ enum Command {
     /// Testing + scoring: corpus replay, judge, diff, bless.
     /// See `docs/eval-and-arc-llm-roadmap.md §1.3`.
     #[command(subcommand_value_name = "COMMAND")]
-    Harness(harness::HarnessArgs),
+    Harness(tars_harness::cli::HarnessArgs),
     /// Discover provider models over a persisted model library.
     /// `tars models` reads the library (fast/offline); `tars models update`
     /// refreshes it from the live provider APIs and flags stale defaults.
@@ -216,7 +215,7 @@ async fn main() -> ExitCode {
             }
             run_report::execute(args).await
         }
-        Command::Harness(args) => harness::execute(args, cli.config).await,
+        Command::Harness(args) => run_harness(args, cli.config).await,
         Command::Models(args) => models::execute(args, cli.config).await,
         Command::Providers(args) => providers_cmd::execute(args, cli.config).await,
         Command::Init(args) => {
@@ -290,4 +289,19 @@ mod tests {
         let err = Cli::try_parse_from(["tars", "--log-format", "yaml", "events", "list"]);
         assert!(err.is_err(), "clap must reject unsupported values");
     }
+}
+
+/// `tars harness` — the harness owns its flags and its dispatch; this binary
+/// owns the one thing that is a binary's job, which is where `--config` points.
+async fn run_harness(
+    args: tars_harness::cli::HarnessArgs,
+    config: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    let cfg = config_loader::load(config)?;
+    let resolve = |requested: Option<&str>| {
+        let registry = dispatch::build_registry_with_breaker(&cfg, /* breaker */ true)?;
+        let pid = dispatch::pick_provider(&cfg, requested)?;
+        Ok((registry, pid))
+    };
+    tars_harness::cli::execute(args, &resolve).await
 }

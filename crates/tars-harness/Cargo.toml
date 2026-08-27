@@ -20,6 +20,8 @@ tars-utils = { path = "../tars-utils" }
 # Async
 async-trait.workspace = true
 anyhow.workspace = true
+# The crate carries its own `tars harness` arg definitions (src/cli.rs).
+clap = { workspace = true, features = ["derive"] }
 tokio-util.workspace = true
 futures.workspace = true
 

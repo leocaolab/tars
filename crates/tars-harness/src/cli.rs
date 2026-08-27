@@ -1,8 +1,11 @@
-//! `tars harness` — the CLI surface over the testing + scoring crate.
+//! `tars harness` — this crate's own command-line surface.
 //!
-//! The machinery lives in `tars-harness`; this module is only the clap arg
-//! definitions plus a thin dispatch that resolves config → registry → provider
-//! and maps the parsed flags onto the engine's plain config structs.
+//! The arg definitions live next to the machinery they drive, so adding a flag
+//! is one file, not two crates. What stays with the binary is the part that is
+//! genuinely a binary's job: finding the config file and building a registry
+//! from it. That arrives as the `resolve` closure, because "where is the config"
+//! is a question about how the program was invoked, and this crate has no
+//! opinion on it.
 //!
 //! The group is `harness`, not `eval`, because replaying a corpus is one of the
 //! things under it — `bless`, `diff` and `migrate-checks` are testing commands
@@ -15,13 +18,21 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use tars_harness::eval::{
-    EvalBlessConfig, EvalDiffConfig, EvalJudgeConfig, EvalRunConfig, run_bless, run_diff,
-    run_eval, run_judge, run_migrate_checks,
+
+use std::sync::Arc;
+
+use tars_provider::registry::ProviderRegistry;
+use tars_types::ProviderId;
+
+use crate::eval::{
+    EvalBlessConfig, EvalDiffConfig, EvalJudgeConfig, EvalRunConfig, run_bless, run_diff, run_eval,
+    run_judge, run_migrate_checks,
 };
 
-use crate::config_loader;
-use crate::dispatch::{build_registry_with_breaker, pick_provider};
+/// How the caller turns an optional `--provider` into a registry and a provider
+/// id. The binary owns this because it owns `--config`.
+pub type ResolveProvider<'a> =
+    &'a dyn Fn(Option<&str>) -> Result<(Arc<ProviderRegistry>, ProviderId)>;
 
 #[derive(Args, Debug)]
 pub struct HarnessArgs {
@@ -173,14 +184,12 @@ pub struct EvalRunArgs {
     pub judge_model: Option<String>,
 }
 
-pub async fn execute(args: HarnessArgs, config_path: Option<PathBuf>) -> Result<()> {
+pub async fn execute(args: HarnessArgs, resolve: ResolveProvider<'_>) -> Result<()> {
     match args.command {
         HarnessCommand::Eval(a) => {
             // Resolve config → registry → provider (same path `tars run` uses),
             // then hand the engine plain values.
-            let cfg = config_loader::load(config_path)?;
-            let registry = build_registry_with_breaker(&cfg, /* breaker */ true)?;
-            let provider_id = pick_provider(&cfg, a.provider.as_deref())?;
+            let (registry, provider_id) = resolve(a.provider.as_deref())?;
             run_eval(EvalRunConfig {
                 registry,
                 provider_id,
@@ -206,8 +215,7 @@ pub async fn execute(args: HarnessArgs, config_path: Option<PathBuf>) -> Result<
         }),
         HarnessCommand::MigrateChecks(a) => run_migrate_checks(&a.dir),
         HarnessCommand::Judge(a) => {
-            let cfg = config_loader::load(config_path)?;
-            let registry = build_registry_with_breaker(&cfg, /* breaker */ true)?;
+            let (registry, _) = resolve(None)?;
             run_judge(EvalJudgeConfig {
                 registry,
                 run: a.run,

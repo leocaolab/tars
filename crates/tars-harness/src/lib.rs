@@ -31,6 +31,7 @@
 //! half of what is in this crate is testing machinery that no eval run touches.
 
 pub mod arg_judge;
+pub mod cli;
 pub mod bless;
 pub mod cassette_diff;
 pub mod eval;
