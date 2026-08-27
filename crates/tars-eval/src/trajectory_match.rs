@@ -178,61 +178,32 @@ mod tests {
     // disjoint, empty pairs → expected fractions.
     #[test]
     fn exact_is_all_or_nothing() {
-        assert_eq!(
-            score(&steps(&["a", "b"]), &steps(&["a", "b"]), MatchMode::Exact),
-            1.0
-        );
-        assert_eq!(
-            score(&steps(&["a", "b"]), &steps(&["b", "a"]), MatchMode::Exact),
-            0.0
-        );
-        assert_eq!(
-            score(&steps(&["a"]), &steps(&["a", "b"]), MatchMode::Exact),
-            0.0
-        );
+        assert_eq!(score(&steps(&["a", "b"]), &steps(&["a", "b"]), MatchMode::Exact), 1.0);
+        assert_eq!(score(&steps(&["a", "b"]), &steps(&["b", "a"]), MatchMode::Exact), 0.0);
+        assert_eq!(score(&steps(&["a"]), &steps(&["a", "b"]), MatchMode::Exact), 0.0);
     }
 
     #[test]
     fn ordered_gives_partial_credit_via_lcs() {
         // identical → 1.0
-        assert_eq!(
-            score(
-                &steps(&["a", "b", "c"]),
-                &steps(&["a", "b", "c"]),
-                MatchMode::Ordered
-            ),
-            1.0
-        );
+        assert_eq!(score(&steps(&["a", "b", "c"]), &steps(&["a", "b", "c"]), MatchMode::Ordered), 1.0);
         // one of two shared in order: LCS=1, 2*1/(2+2)=0.5
-        assert_eq!(
-            score(&steps(&["a", "x"]), &steps(&["a", "y"]), MatchMode::Ordered),
-            0.5
-        );
+        assert_eq!(score(&steps(&["a", "x"]), &steps(&["a", "y"]), MatchMode::Ordered), 0.5);
         // subset prefix: actual [a], expected [a,b]: LCS=1, 2/(1+2)=0.666..
         let s = score(&steps(&["a"]), &steps(&["a", "b"]), MatchMode::Ordered);
         assert!((s - 2.0 / 3.0).abs() < 1e-9);
         // reorder costs in ordered: [a,b] vs [b,a]: LCS=1, 2/4=0.5
-        assert_eq!(
-            score(&steps(&["a", "b"]), &steps(&["b", "a"]), MatchMode::Ordered),
-            0.5
-        );
+        assert_eq!(score(&steps(&["a", "b"]), &steps(&["b", "a"]), MatchMode::Ordered), 0.5);
     }
 
     #[test]
     fn set_is_order_insensitive_multiset() {
         // reorder → perfect under Set
-        assert_eq!(
-            score(&steps(&["a", "b"]), &steps(&["b", "a"]), MatchMode::Set),
-            1.0
-        );
+        assert_eq!(score(&steps(&["a", "b"]), &steps(&["b", "a"]), MatchMode::Set), 1.0);
         // disjoint → 0
         assert_eq!(score(&steps(&["a"]), &steps(&["b"]), MatchMode::Set), 0.0);
         // {a,a,b} vs {a,b}: inter=min(2,1)+min(1,1)=2, uni=max+max=3 → 0.666..
-        let s = score(
-            &steps(&["a", "a", "b"]),
-            &steps(&["a", "b"]),
-            MatchMode::Set,
-        );
+        let s = score(&steps(&["a", "a", "b"]), &steps(&["a", "b"]), MatchMode::Set);
         assert!((s - 2.0 / 3.0).abs() < 1e-9);
     }
 

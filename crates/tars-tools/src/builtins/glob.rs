@@ -82,6 +82,14 @@ impl GlobTool {
             raw.to_path_buf()
         } else if let Some(cwd) = cwd {
             cwd.join(raw)
+        } else if let Some(root) = &self.root {
+            // With a jail and no per-call cwd, the jail IS the frame of reference. It
+            // used to fall through to the process's working directory, so a relative
+            // path was resolved against one directory and then checked against a
+            // different one. Best case that is a guaranteed "outside the allowed root"
+            // on every relative path; worst case — a jail that happens to contain the
+            // process cwd — it silently reads and writes the wrong tree.
+            root.join(raw)
         } else {
             raw.to_path_buf()
         };
@@ -185,14 +193,8 @@ impl Tool for GlobTool {
         let outcome = match joined {
             Ok(Ok(o)) => o,
             Ok(Err(GlobError::Cancelled)) => return Err(ToolError::Cancelled),
-            Ok(Err(GlobError::BadInput(msg))) => {
-                return Ok(ToolResult::titled_error("invalid glob", msg));
-            }
-            Err(join_err) => {
-                return Err(ToolError::Execute(format!(
-                    "glob task panicked: {join_err}"
-                )));
-            }
+            Ok(Err(GlobError::BadInput(msg))) => return Ok(ToolResult::titled_error("invalid glob", msg)),
+            Err(join_err) => return Err(ToolError::Execute(format!("glob task panicked: {join_err}"))),
         };
 
         if outcome.paths.is_empty() {
@@ -204,9 +206,7 @@ impl Tool for GlobTool {
         let n = outcome.paths.len();
         let mut body = outcome.paths.join("\n");
         let title = if outcome.truncated {
-            body.push_str(&format!(
-                "\n\n(truncated at {cap} files — narrow the pattern or path)"
-            ));
+            body.push_str(&format!("\n\n(truncated at {cap} files — narrow the pattern or path)"));
             format!("{n}+ files (truncated)")
         } else {
             format!("{n} file{}", if n == 1 { "" } else { "s" })
@@ -358,11 +358,7 @@ mod tests {
             .await
             .unwrap();
         assert!(r.content.contains("src/keep.rs"));
-        assert!(
-            !r.content.contains("target/gen.rs"),
-            "gitignore'd: {}",
-            r.content
-        );
+        assert!(!r.content.contains("target/gen.rs"), "gitignore'd: {}", r.content);
     }
 
     #[tokio::test]

@@ -259,11 +259,9 @@ impl Drop for ProviderLatencyGuard {
         t.provider_latency_ms = Some(prev.saturating_add(elapsed));
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LlmService;
     use futures::StreamExt;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
     use tars_types::ChatEvent;

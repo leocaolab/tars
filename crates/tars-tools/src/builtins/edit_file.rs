@@ -58,6 +58,14 @@ impl EditFileTool {
             raw.to_path_buf()
         } else if let Some(cwd) = cwd {
             cwd.join(raw)
+        } else if let Some(root) = &self.root {
+            // With a jail and no per-call cwd, the jail IS the frame of reference. It
+            // used to fall through to the process's working directory, so a relative
+            // path was resolved against one directory and then checked against a
+            // different one. Best case that is a guaranteed "outside the allowed root"
+            // on every relative path; worst case — a jail that happens to contain the
+            // process cwd — it silently reads and writes the wrong tree.
+            root.join(raw)
         } else {
             raw.to_path_buf()
         };

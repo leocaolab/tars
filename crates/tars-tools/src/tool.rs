@@ -196,7 +196,7 @@ pub trait Tool: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    
+
     use super::*;
     use serde_json::json;
 

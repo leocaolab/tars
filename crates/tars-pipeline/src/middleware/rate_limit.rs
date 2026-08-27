@@ -43,7 +43,7 @@ use futures::StreamExt;
 use tokio::sync::Semaphore;
 
 use tars_provider::LlmEventStream;
-use tars_types::{ChatEvent, ChatRequest, ProviderError, ProviderProfile, RequestContext};
+use tars_types::{ChatEvent, ChatRequest, ProviderError, RequestContext};
 
 use crate::middleware::Middleware;
 use crate::service::Next;
@@ -237,17 +237,6 @@ impl TpmRateLimiter {
         }
     }
 
-    /// Build (private bucket) from a provider's capability snapshot — the output
-    /// reserve comes from the provider's `max_output_tokens` (worst case), like the
-    /// budget middleware. For a shared account bucket, use [`Self::shared`].
-    pub fn from_capabilities(tokens_per_minute: u32, caps: &ProviderProfile) -> Self {
-        Self::new(TpmRateLimitConfig {
-            tokens_per_minute,
-            burst_tokens: None,
-            reserved_output_tokens: caps.max_output_tokens.unwrap_or(4_096),
-        })
-    }
-
     /// The reserve (upper bound) charged before the call: input estimate + the
     /// output reserve, clamped to the bucket so one call can't exceed total
     /// capacity (which would park it forever — the refiller caps at `capacity`).
@@ -286,8 +275,10 @@ impl Middleware for TpmRateLimiter {
                 return;
             }
             if let Ok(ChatEvent::Finished { usage, .. }) = ev {
-                let actual = u32::try_from(usage.input_tokens.saturating_add(usage.output_tokens))
-                    .unwrap_or(u32::MAX);
+                let actual = u32::try_from(
+                    usage.input_tokens.saturating_add(usage.output_tokens),
+                )
+                .unwrap_or(u32::MAX);
                 bucket.settle(reserve, actual);
                 reconciled = true;
             }
@@ -355,17 +346,8 @@ mod tests {
         let c = TpmRateLimiter::shared("acct-test-B", cfg());
         let d = TpmRateLimiter::new(cfg());
         let e = TpmRateLimiter::new(cfg());
-        assert!(
-            Arc::ptr_eq(&a.bucket, &b.bucket),
-            "same key must share one bucket"
-        );
-        assert!(
-            !Arc::ptr_eq(&a.bucket, &c.bucket),
-            "different key → different bucket"
-        );
-        assert!(
-            !Arc::ptr_eq(&d.bucket, &e.bucket),
-            "new() always builds a private bucket"
-        );
+        assert!(Arc::ptr_eq(&a.bucket, &b.bucket), "same key must share one bucket");
+        assert!(!Arc::ptr_eq(&a.bucket, &c.bucket), "different key → different bucket");
+        assert!(!Arc::ptr_eq(&d.bucket, &e.bucket), "new() always builds a private bucket");
     }
 }

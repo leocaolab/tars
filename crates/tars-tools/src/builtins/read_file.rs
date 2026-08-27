@@ -37,8 +37,8 @@ use serde_json::json;
 
 use tars_types::JsonSchema;
 
-use crate::SandboxMode;
 use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
+use crate::SandboxMode;
 
 /// Default max bytes read by `fs.read_file`. ~256 KiB.
 pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024;
@@ -63,11 +63,53 @@ pub struct ReadFileTool {
     max_bytes: u64,
 }
 
+/// Cut `content` down to lines `start..=end`, 1-based and inclusive.
+///
+/// Returns the slice and a note naming what was returned out of what — a window
+/// that does not say it is a window reads as the whole file, and an agent that
+/// believes it has seen a file it has not will edit against context that is not
+/// there. `None` for a range that is not a range.
+///
+/// This exists because the alternative is what an agent actually did without it:
+/// `grep` for the line number, then pull the entire 33 KB file to look at ten lines
+/// around it, and carry those 33 KB in every later prompt.
+fn window(content: &str, start: Option<u32>, end: Option<u32>) -> Option<(String, String)> {
+    if start.is_none() && end.is_none() {
+        return Some((content.to_string(), String::new()));
+    }
+    let start = start.unwrap_or(1);
+    if start == 0 {
+        return None;
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len() as u32;
+    let end = end.unwrap_or(total).min(total);
+    if end < start {
+        return None;
+    }
+    // Past the end of the file is an empty window, not an error: a caller asking for
+    // lines 900-910 of a 500-line file has learned something true.
+    let body: Vec<&str> = lines
+        .iter()
+        .skip(start.saturating_sub(1) as usize)
+        .take((end - start + 1) as usize)
+        .copied()
+        .collect();
+    let note = format!(" lines {start}-{end} of {total}");
+    Some((body.join("\n") + if body.is_empty() { "" } else { "\n" }, note))
+}
+
 #[derive(Debug, Deserialize)]
 struct ReadFileArgs {
     /// File path. Absolute or relative to [`ToolContext::cwd`] (or
     /// the process cwd when context's cwd is unset).
     path: String,
+    /// First line to return, 1-based and inclusive. Omit for the whole file.
+    #[serde(default)]
+    start: Option<u32>,
+    /// Last line to return, 1-based and inclusive. Omit to read to the end.
+    #[serde(default)]
+    end: Option<u32>,
 }
 
 impl ReadFileTool {
@@ -116,13 +158,25 @@ impl ReadFileTool {
     ///   (the default) adds nothing, so default behaviour is unchanged.
     ///
     /// Returns the canonicalized path to actually open.
-    fn resolve(&self, input: &str, ctx: &ToolContext) -> Result<PathBuf, ToolResult> {
+    fn resolve(
+        &self,
+        input: &str,
+        ctx: &ToolContext,
+    ) -> Result<PathBuf, ToolResult> {
         let cwd = ctx.cwd.as_deref();
         let raw = Path::new(input);
         let combined = if raw.is_absolute() {
             raw.to_path_buf()
         } else if let Some(cwd) = cwd {
             cwd.join(raw)
+        } else if let Some(root) = &self.root {
+            // With a jail and no per-call cwd, the jail IS the frame of reference. It
+            // used to fall through to the process's working directory, so a relative
+            // path was resolved against one directory and then checked against a
+            // different one. Best case that is a guaranteed "outside the allowed root"
+            // on every relative path; worst case — a jail that happens to contain the
+            // process cwd — it silently reads and writes the wrong tree.
+            root.join(raw)
         } else {
             raw.to_path_buf()
         };
@@ -209,6 +263,14 @@ impl Tool for ReadFileTool {
                         "path": {
                             "type": "string",
                             "description": "File path. Absolute or relative to the working directory."
+                        },
+                        "start": {
+                            "type": "integer",
+                            "description": "First line to return, 1-based and inclusive. Omit for the whole file. Use with `grep`, which reports line numbers: read a window around the hit rather than the whole file."
+                        },
+                        "end": {
+                            "type": "integer",
+                            "description": "Last line to return, 1-based and inclusive. Omit to read to the end."
                         }
                     },
                     "required": ["path"]
@@ -247,8 +309,17 @@ impl Tool for ReadFileTool {
 
         match bytes {
             Ok(ReadOutcome::Ok(content)) => {
-                let title = format!("Read {basename} ({} bytes)", content.len());
-                Ok(ToolResult::titled_success(title, content))
+                let Some((body, note)) = window(&content, parsed.start, parsed.end) else {
+                    return Ok(ToolResult::titled_error(
+                        format!("{basename}: bad line range"),
+                        format!(
+                            "lines are 1-based and `end` must not precede `start`; got {:?}..{:?}",
+                            parsed.start, parsed.end
+                        ),
+                    ));
+                };
+                let title = format!("Read {basename} ({} bytes){note}", body.len());
+                Ok(ToolResult::titled_success(title, body))
             }
             Ok(ReadOutcome::TooLarge { size }) => Ok(ToolResult::titled_error(
                 format!("{basename} too large ({size} bytes)"),
@@ -512,11 +583,7 @@ mod tests {
             .execute(json!({"path": inside.to_str().unwrap()}), ctx.clone())
             .await
             .unwrap();
-        assert!(
-            !r.is_error,
-            "read inside readable_root must succeed: {}",
-            r.content
-        );
+        assert!(!r.is_error, "read inside readable_root must succeed: {}", r.content);
         assert_eq!(r.content, "inside");
 
         // Outside every read root: rejected.
@@ -551,11 +618,7 @@ mod tests {
             .execute(json!({"path": path.to_str().unwrap()}), ctx)
             .await
             .unwrap();
-        assert!(
-            !r.is_error,
-            "default policy must not restrict reads: {}",
-            r.content
-        );
+        assert!(!r.is_error, "default policy must not restrict reads: {}", r.content);
         assert_eq!(r.content, "free");
     }
 
@@ -590,4 +653,25 @@ mod tests {
             .expect_err("pre-cancelled should fast-fail");
         assert!(matches!(err, ToolError::Cancelled));
     }
+    /// A cap jailed to a worktree is asked for `src/lib.rs` and must get the
+    /// worktree's copy. Resolving it against the process's working directory instead
+    /// is only ever caught by the jail when the two are unrelated — and when the jail
+    /// contains the process cwd, nothing catches it and the wrong file comes back.
+    #[tokio::test]
+    async fn a_relative_path_resolves_inside_the_jail_not_the_process_cwd() {
+        let jail = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(jail.path()).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "// the worktree copy\n").unwrap();
+
+        let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::with_root(&root).unwrap());
+        let r = tool
+            .execute(json!({ "path": "src/lib.rs" }), ToolContext::default())
+            .await
+            .unwrap();
+
+        assert!(!r.is_error, "relative path inside the jail must resolve: {}", r.content);
+        assert!(r.content.contains("the worktree copy"), "{}", r.content);
+    }
 }
+

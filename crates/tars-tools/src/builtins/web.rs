@@ -321,9 +321,7 @@ fn web_error_result(tool: &str, err: WebError) -> ToolResult {
         ),
         WebError::SearchParse { backend, detail } => (
             format!("{tool}: could not parse {backend} results"),
-            format!(
-                "The {backend} search page was fetched but no results could be parsed: {detail}"
-            ),
+            format!("The {backend} search page was fetched but no results could be parsed: {detail}"),
         ),
         WebError::MissingApiKey(backend) => (
             format!("{tool}: {backend} API key missing"),
@@ -487,7 +485,10 @@ mod tests {
     fn error_mapping_branches_per_variant() {
         // Distinct variants ⇒ distinct legible messages (we branch on the
         // typed variant, we don't stringify one blob).
-        let no_browser = web_error_result("web.fetch", WebError::NoBrowser { hint: "x".into() });
+        let no_browser = web_error_result(
+            "web.fetch",
+            WebError::NoBrowser { hint: "x".into() },
+        );
         let http = web_error_result(
             "web.fetch",
             WebError::Http {
@@ -495,7 +496,10 @@ mod tests {
                 status: 404,
             },
         );
-        let invalid = web_error_result("web.fetch", WebError::InvalidUrl { url: "nope".into() });
+        let invalid = web_error_result(
+            "web.fetch",
+            WebError::InvalidUrl { url: "nope".into() },
+        );
         assert!(no_browser.title.contains("no browser"));
         assert!(http.title.contains("404"));
         assert!(invalid.title.contains("invalid URL"));
@@ -515,11 +519,7 @@ mod tests {
         let r = web_error_result("web.fetch", err);
         assert!(r.is_error);
         assert!(r.content.contains("Static fetch failed"));
-        assert!(
-            r.content.contains("503"),
-            "real status preserved: {}",
-            r.content
-        );
+        assert!(r.content.contains("503"), "real status preserved: {}", r.content);
     }
 
     #[test]
@@ -573,11 +573,7 @@ mod tests {
         assert!(missing.is_error);
         assert!(missing.content.contains("google_cse"));
         assert!(missing.content.contains("API key is empty"));
-        assert!(
-            missing.content.contains("GOOGLE_CSE_KEY"),
-            "names the env var: {}",
-            missing.content
-        );
+        assert!(missing.content.contains("GOOGLE_CSE_KEY"), "names the env var: {}", missing.content);
         assert!(!missing.content.contains("MissingApiKey"), "no debug blob");
 
         let misconfig = web_error_result(
@@ -699,7 +695,6 @@ mod tests {
     async fn both_web_tools_register_and_expose_specs() {
         use crate::ToolRegistry;
 
-
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(WebFetchTool::new())).unwrap();
         reg.register(Arc::new(WebSearchTool::new())).unwrap();
@@ -708,10 +703,7 @@ mod tests {
         // sees them in its tool set.
         let names: Vec<String> = reg.to_tool_specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"web.fetch".to_string()), "specs: {names:?}");
-        assert!(
-            names.contains(&"web.search".to_string()),
-            "specs: {names:?}"
-        );
+        assert!(names.contains(&"web.search".to_string()), "specs: {names:?}");
 
     }
 }

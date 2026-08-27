@@ -38,6 +38,10 @@ pub const DEFAULT_MAX_MATCHES: usize = 200;
 /// can be tens of KB — one such line would blow the context).
 const MAX_LINE_CHARS: usize = 400;
 
+/// The widest window a single hit may carry. A search that returns whole files is a
+/// read with extra steps.
+const MAX_CONTEXT: usize = 40;
+
 pub struct GrepTool {
     /// Optional jail root. Same semantics as [`super::ReadFileTool::with_root`]:
     /// a resolved search path must stay inside it.
@@ -59,6 +63,14 @@ struct GrepArgs {
     /// Case-insensitive match (default false).
     #[serde(default)]
     case_insensitive: Option<bool>,
+    /// Lines of surrounding source to return with each hit.
+    ///
+    /// `0` gives `path:line: text` and nothing else — a pointer, which then costs
+    /// another turn to follow. Measured on one run: `grep "enum EventKind"` returned
+    /// 117 bytes naming `task.rs:252`, and reading it took two further turns because
+    /// the first guessed the wrong file. With a window the answer arrives once.
+    #[serde(default)]
+    context: Option<usize>,
 }
 
 struct SearchOutcome {
@@ -109,6 +121,13 @@ impl GrepTool {
             raw.to_path_buf()
         } else if let Some(cwd) = cwd {
             cwd.join(raw)
+        } else if let Some(root) = &self.root {
+            // With a jail and no per-call cwd, the jail IS the frame of reference. It
+            // used to fall through to the process cwd, which made the documented
+            // default (`path` omitted → ".") resolve outside the jail and fail every
+            // time the agent's root was not also the process's working directory —
+            // so the tool's own default argument was guaranteed to error.
+            root.join(raw)
         } else {
             raw.to_path_buf()
         };
@@ -189,18 +208,16 @@ impl Tool for GrepTool {
         let parsed: GrepArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        let search_root = match self.resolve(
-            parsed.path.as_deref(),
-            ctx.cwd.as_deref(),
-            &ctx.readable_roots,
-        ) {
-            Ok(p) => p,
-            Err(result) => return Ok(result),
-        };
+        let search_root =
+            match self.resolve(parsed.path.as_deref(), ctx.cwd.as_deref(), &ctx.readable_roots) {
+                Ok(p) => p,
+                Err(result) => return Ok(result),
+            };
 
         let pattern = parsed.pattern.clone();
         let glob = parsed.glob.clone();
         let ci = parsed.case_insensitive.unwrap_or(false);
+        let ctxn = parsed.context.unwrap_or(0).min(MAX_CONTEXT);
         let cap = self.max_matches;
         let cancel = ctx.cancel.clone();
         let root_for_blocking = search_root.clone();
@@ -209,14 +226,7 @@ impl Tool for GrepTool {
         // runtime, and race it against cancellation so a dropped turn returns
         // promptly (the blocking task also checks `cancel` cooperatively).
         let handle = tokio::task::spawn_blocking(move || {
-            run_search(
-                root_for_blocking,
-                &pattern,
-                glob.as_deref(),
-                ci,
-                cap,
-                &cancel,
-            )
+            run_search(root_for_blocking, &pattern, glob.as_deref(), ci, cap, ctxn, &cancel)
         });
         let joined = tokio::select! {
             biased;
@@ -227,14 +237,8 @@ impl Tool for GrepTool {
         let outcome = match joined {
             Ok(Ok(o)) => o,
             Ok(Err(SearchError::Cancelled)) => return Err(ToolError::Cancelled),
-            Ok(Err(SearchError::BadInput(msg))) => {
-                return Ok(ToolResult::titled_error("invalid search", msg));
-            }
-            Err(join_err) => {
-                return Err(ToolError::Execute(format!(
-                    "grep task panicked: {join_err}"
-                )));
-            }
+            Ok(Err(SearchError::BadInput(msg))) => return Ok(ToolResult::titled_error("invalid search", msg)),
+            Err(join_err) => return Err(ToolError::Execute(format!("grep task panicked: {join_err}"))),
         };
 
         if outcome.matches.is_empty() {
@@ -273,11 +277,12 @@ fn run_search(
     glob: Option<&str>,
     case_insensitive: bool,
     max_matches: usize,
+    context: usize,
     cancel: &CancellationToken,
 ) -> Result<SearchOutcome, SearchError> {
     use grep::regex::RegexMatcherBuilder;
-    use grep::searcher::SearcherBuilder;
     use grep::searcher::sinks::UTF8;
+    use grep::searcher::SearcherBuilder;
 
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(case_insensitive)
@@ -337,15 +342,43 @@ fn run_search(
                     .unwrap_or_else(|| path.display().to_string())
             });
 
+        let mut hits: Vec<(u64, String)> = Vec::new();
         let sink = UTF8(|lnum, line| {
             let trimmed = line.trim_end_matches(['\n', '\r']);
             let text: String = trimmed.chars().take(MAX_LINE_CHARS).collect();
-            matches.push(format!("{display}:{lnum}: {text}"));
+            hits.push((lnum, text));
             // Returning false stops searching THIS file once the cap is hit.
-            Ok(matches.len() < max_matches)
+            Ok(matches.len() + hits.len() < max_matches)
         });
         // Per-file IO/binary errors are non-fatal — skip the file.
         let _ = searcher.search_path(&matcher, path, sink);
+
+        // The window, read once per file that actually hit. A hit with no surrounding
+        // source is a pointer, and following a pointer costs a turn.
+        let lines: Vec<String> = if context > 0 && !hits.is_empty() {
+            std::fs::read_to_string(path)
+                .map(|t| t.lines().map(str::to_string).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for (lnum, text) in hits {
+            if context == 0 || lines.is_empty() {
+                matches.push(format!("{display}:{lnum}: {text}"));
+                continue;
+            }
+            let i = lnum.saturating_sub(1) as usize;
+            let from = i.saturating_sub(context);
+            let to = (i + context + 1).min(lines.len());
+            let mut block = format!("{display}:{lnum}:\n");
+            for (n, l) in lines[from..to].iter().enumerate() {
+                let ln = from + n + 1;
+                let mark = if ln == lnum as usize { ">" } else { " " };
+                let cut: String = l.chars().take(MAX_LINE_CHARS).collect();
+                block.push_str(&format!("{mark}{ln:>5} {cut}\n"));
+            }
+            matches.push(block);
+        }
         if matches.len() >= max_matches {
             truncated = true;
             break;
@@ -396,11 +429,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!r.is_error);
-        assert!(
-            r.content.contains("a.rs:2: let x = TARGET;"),
-            "got: {}",
-            r.content
-        );
+        assert!(r.content.contains("a.rs:2: let x = TARGET;"), "got: {}", r.content);
         assert!(!r.content.contains("b.rs"));
     }
 
@@ -444,8 +473,7 @@ mod tests {
             .unwrap();
         assert!(!r.is_error, "got: {}", r.content);
         assert!(
-            r.content
-                .contains("static_layer.rs:1: fn parse_ruff_output() {}"),
+            r.content.contains("static_layer.rs:1: fn parse_ruff_output() {}"),
             "parent .gitignore must NOT blind a search of the requested root; got: {}",
             r.content
         );
@@ -465,11 +493,62 @@ mod tests {
             .await
             .unwrap();
         assert!(r.content.contains("keep.rs"));
-        assert!(
-            !r.content.contains("skip.txt"),
-            "glob should exclude .txt: {}",
-            r.content
-        );
+        assert!(!r.content.contains("skip.txt"), "glob should exclude .txt: {}", r.content);
+    }
+
+    /// The same glob, one directory down.
+    ///
+    /// `glob_filters_files` writes both files at the search root, which is the one
+    /// shape where a whitelist override cannot prune anything. A real repository is
+    /// nested — `crates/tars-runtime/src/lib.rs` — and that is the shape a live run
+    /// searched. Measured on one: `{"pattern":"trajectory","glob":"*.rs"}` came back
+    /// `0 result(s) in 0 file(s)` against a tree with the word in hundreds of `.rs`
+    /// files, and the agent went and read whole files instead — twenty-one `read`s in
+    /// fifty turns. A search that finds nothing and says so calmly is worse than one
+    /// that errors: the agent believes it.
+    #[tokio::test]
+    async fn a_glob_still_finds_files_below_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "crates/one/src/keep.rs", "needle\n");
+        write(dir.path(), "crates/one/src/skip.txt", "needle\n");
+        let tool: Arc<dyn Tool> = Arc::new(GrepTool::new());
+        let r = tool
+            .execute(
+                json!({"pattern": "needle", "path": dir.path().to_str().unwrap(), "glob": "*.rs"}),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!r.is_error, "got: {}", r.content);
+        assert!(r.content.contains("keep.rs"), "nested .rs must be found; got: {}", r.content);
+        assert!(!r.content.contains("skip.txt"), "glob should exclude .txt: {}", r.content);
+    }
+
+    /// An alternation is an ordinary regex and must match like one.
+    ///
+    /// Measured on the same run: `render_note|RenderNote|kind.*delta` returned zero
+    /// against a tree where `render_note` is a module name, and
+    /// `tars-trace|TraceError|bodies_shown_whole|to_text` returned zero while the
+    /// agent was actively writing `tars-trace`. Two of the nine searches in that run
+    /// were plain literals and both found what they were looking for; every
+    /// alternation found nothing.
+    #[tokio::test]
+    async fn an_alternation_matches_either_side() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "crates/one/src/a.rs", "fn render_note() {}\n");
+        write(dir.path(), "crates/one/src/b.rs", "struct TraceError;\n");
+        let tool: Arc<dyn Tool> = Arc::new(GrepTool::new());
+        let r = tool
+            .execute(
+                json!({"pattern": "render_note|TraceError|nothing_here",
+                       "path": dir.path().to_str().unwrap()}),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        assert!(!r.is_error, "got: {}", r.content);
+        assert!(r.content.contains("a.rs"), "left side: {}", r.content);
+        assert!(r.content.contains("b.rs"), "right side: {}", r.content);
     }
 
     #[tokio::test]
@@ -503,11 +582,7 @@ mod tests {
             .await
             .unwrap();
         assert!(r.content.contains("tracked.rs"));
-        assert!(
-            !r.content.contains("ignored.rs"),
-            "gitignore'd file must be skipped: {}",
-            r.content
-        );
+        assert!(!r.content.contains("ignored.rs"), "gitignore'd file must be skipped: {}", r.content);
     }
 
     #[tokio::test]
@@ -609,11 +684,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
-            !r.is_error,
-            "granted readable_root must be searchable: {}",
-            r.content
-        );
+        assert!(!r.is_error, "granted readable_root must be searchable: {}", r.content);
         assert!(r.content.contains("config.rs"));
     }
 
@@ -626,4 +697,73 @@ mod tests {
             .expect_err("should reject malformed args");
         assert!(matches!(err, ToolError::InvalidArguments(_)));
     }
+    /// The default argument has to work. `path` is documented as optional, and with a
+    /// jail set and no per-call cwd it used to resolve against the process's working
+    /// directory — so omitting it failed with "outside the allowed root" whenever the
+    /// agent's root was somewhere else, which for an agent working in a worktree is
+    /// always.
+    /// A hit with no surrounding source is a pointer, and a pointer costs a turn to
+    /// follow. Measured: `grep "enum EventKind"` returned 117 bytes naming
+    /// `task.rs:252`, and getting the definition took two further turns because the
+    /// first one guessed the wrong file.
+    #[tokio::test]
+    async fn a_window_makes_the_hit_answerable_without_a_second_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=40)
+            .map(|i| if i == 20 { "pub enum EventKind {\n".to_string() } else { format!("line {i}\n") })
+            .collect();
+        std::fs::write(dir.path().join("t.rs"), body).unwrap();
+
+        let tool: Arc<dyn Tool> = Arc::new(GrepTool::new());
+        let out = tool
+            .execute(
+                json!({
+                    "pattern": "enum EventKind",
+                    "path": dir.path().to_str().unwrap(),
+                    "context": 3
+                }),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        let text = out.content;
+        assert!(text.contains(">   20 pub enum EventKind {"), "the hit is marked: {text}");
+        assert!(text.contains("   17 line 17"), "and three lines before it: {text}");
+        assert!(text.contains("   23 line 23"), "and three after: {text}");
+        assert!(!text.contains("line 16"), "and no more than asked: {text}");
+    }
+
+    /// …and asking for none still gives the locate-only shape, because that is a
+    /// different question and a much cheaper answer.
+    #[tokio::test]
+    async fn no_context_is_still_just_the_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("t.rs"), "a\nneedle\nb\n").unwrap();
+        let tool: Arc<dyn Tool> = Arc::new(GrepTool::new());
+        let out = tool
+            .execute(
+                json!({ "pattern": "needle", "path": dir.path().to_str().unwrap() }),
+                ToolContext::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.content.trim(), "t.rs:2: needle");
+    }
+
+    #[tokio::test]
+    async fn omitting_the_path_searches_the_jail_not_the_process_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(root.join("hit.rs"), "fn NEEDLE() {}\n").unwrap();
+
+        let tool: Arc<dyn Tool> = Arc::new(GrepTool::with_root(&root).unwrap());
+        let r = tool
+            .execute(json!({ "pattern": "NEEDLE" }), ToolContext::default())
+            .await
+            .unwrap();
+
+        assert!(!r.is_error, "default path must not escape its own jail: {}", r.content);
+        assert!(r.content.contains("hit.rs"), "it searched the jail: {}", r.content);
+    }
 }
+

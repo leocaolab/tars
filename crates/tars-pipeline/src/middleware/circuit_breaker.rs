@@ -47,7 +47,7 @@ use async_trait::async_trait;
 
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_types::{
-    ChatRequest, ChatResponse, CostUsd, ProviderError, ProviderId, ProviderProfile, RequestContext,
+    ProviderProfile, ChatRequest, ChatResponse, CostUsd, ProviderError, ProviderId, RequestContext,
     Usage,
 };
 
@@ -499,7 +499,7 @@ mod tests {
             self: Arc<Self>,
             req: ChatRequest,
             _model: &str,
-            ctx: RequestContext,
+        ctx: RequestContext,
         ) -> Result<LlmEventStream, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match &self.outcome {
@@ -592,7 +592,7 @@ mod tests {
                 self: Arc<Self>,
                 req: ChatRequest,
                 _model: &str,
-                ctx: RequestContext,
+        ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 let next = self.sequence.lock().unwrap().remove(0);
                 if next {
@@ -660,7 +660,7 @@ mod tests {
                 self: Arc<Self>,
                 req: ChatRequest,
                 _model: &str,
-                ctx: RequestContext,
+        ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 let next = self.sequence.lock().unwrap().remove(0);
                 if next {
@@ -763,7 +763,7 @@ mod tests {
                 self: Arc<Self>,
                 req: ChatRequest,
                 _model: &str,
-                ctx: RequestContext,
+        ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 let next = self.sequence.lock().unwrap().remove(0);
                 if next {

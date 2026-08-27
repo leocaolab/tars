@@ -57,7 +57,9 @@ mod handle;
 // live). The `#[napi]` registration is unaffected — it fires at the definition
 // site, not this re-export.
 pub use ctx::JsContext;
-pub use handle::{Provider, init, is_initialized, pipeline, provider, tars_home};
+pub use handle::{
+    Provider, init, is_initialized, pipeline, provider, tars_home,
+};
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -74,8 +76,8 @@ use tars_config::ConfigManager;
 use tars_pipeline::{ChainOpts, LlmService};
 use tars_provider::{LlmProvider, registry::ProviderRegistry};
 use tars_types::{
-    ChatRequest, ChatResponseBuilder, ContentBlock, JsonSchema, Message, RUN_CONTEXT,
-    RequestContext, ThinkingMode, ids::ProviderId,
+    ChatRequest, ChatResponseBuilder, ContentBlock, JsonSchema, Message, ProviderId, RUN_CONTEXT,
+    RequestContext, ThinkingMode,
 };
 
 /// Process-wide tokio runtime shared by all `complete()` calls. Lazy
@@ -363,14 +365,11 @@ fn build_provider_from_cfg(
     })?;
     // The model is bound on the service now (the request is model-agnostic),
     // so a provider without a `default_model` can't yield a callable pipeline.
-    let model = registry
-        .default_model(&pid)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            Error::from_reason(format!(
-                "provider {provider_id:?} has no `default_model` — set one in config"
-            ))
-        })?;
+    let model = registry.default_model(&pid).map(str::to_string).ok_or_else(|| {
+        Error::from_reason(format!(
+            "provider {provider_id:?} has no `default_model` — set one in config"
+        ))
+    })?;
     Ok((provider, model))
 }
 

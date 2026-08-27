@@ -124,20 +124,15 @@ impl LlmService {
 
         let mut builder = Self::builder_with_inner(inner);
 
-        if let Some(EventStores {
-            events: ev,
-            records,
-        }) = events
-        {
-            builder = builder
-                .layer(crate::middleware::event_emitter::EventEmitterMiddleware::new(ev, records));
+        if let Some(EventStores { events: ev, records }) = events {
+            builder = builder.layer(crate::middleware::event_emitter::EventEmitterMiddleware::new(
+                ev, records,
+            ));
         }
         builder = builder.layer(crate::middleware::telemetry::TelemetryMiddleware::new());
 
         if !validators.is_empty() {
-            builder = builder.layer(crate::middleware::validation::ValidationMiddleware::new(
-                validators,
-            ));
+            builder = builder.layer(crate::middleware::validation::ValidationMiddleware::new(validators));
         }
 
         if cache {
@@ -313,7 +308,10 @@ mod tests {
 
         let ctx = RequestContext::test_default();
         let mut s = Arc::new(pipeline)
-            .call(ChatRequest::user("x"), ctx.clone())
+            .call(
+                ChatRequest::user("x"),
+                ctx.clone(),
+            )
             .await
             .unwrap();
         while let Some(ev) = s.next().await {
@@ -405,7 +403,7 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::time::Duration;
         use tars_provider::{LlmEventStream, LlmProvider};
-        use tars_types::{Pricing, ProviderError, ProviderId, ProviderProfile};
+        use tars_types::{ProviderProfile, Pricing, ProviderError, ProviderId};
 
         struct AlwaysErr {
             id: ProviderId,
@@ -424,7 +422,7 @@ mod tests {
                 self: Arc<Self>,
                 _req: ChatRequest,
                 _model: &str,
-                _ctx: RequestContext,
+        _ctx: RequestContext,
             ) -> Result<LlmEventStream, ProviderError> {
                 self.hits.fetch_add(1, Ordering::SeqCst);
                 Err(ProviderError::ModelOverloaded)
@@ -462,31 +460,17 @@ mod tests {
         let req = || ChatRequest::user("x");
         // Two failures trip the breaker (both reach the provider).
         for _ in 0..2 {
-            let e = pipeline
-                .clone()
-                .call(req(), RequestContext::test_default())
-                .await;
+            let e = pipeline.clone().call(req(), RequestContext::test_default()).await;
             assert!(matches!(e, Err(ProviderError::ModelOverloaded)));
         }
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            2,
-            "both failures hit the provider"
-        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "both failures hit the provider");
         // Third call: breaker is Open → reject without touching the provider.
-        let e = pipeline
-            .clone()
-            .call(req(), RequestContext::test_default())
-            .await;
+        let e = pipeline.clone().call(req(), RequestContext::test_default()).await;
         assert!(
             matches!(e, Err(ProviderError::CircuitOpen { .. })),
             "breaker must reject the 3rd call as CircuitOpen",
         );
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            2,
-            "open breaker spared the provider"
-        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "open breaker spared the provider");
     }
 
     #[tokio::test]
@@ -496,7 +480,10 @@ mod tests {
         assert!(pipeline.layer_names().is_empty());
 
         let mut s = Arc::new(pipeline)
-            .call(ChatRequest::user("x"), RequestContext::test_default())
+            .call(
+                ChatRequest::user("x"),
+                RequestContext::test_default(),
+            )
             .await
             .unwrap();
         let mut got = 0;

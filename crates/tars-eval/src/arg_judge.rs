@@ -91,13 +91,7 @@ impl ArgEquivalenceJudge {
         } else {
             (tool.to_string(), cb.clone(), ca.clone())
         };
-        if let Some(v) = self
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .copied()
-        {
+        if let Some(v) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key).copied() {
             return Ok(v);
         }
 
@@ -193,7 +187,10 @@ mod tests {
         let mock = MockProvider::new("judge_mock", CannedResponse::text(reply));
         let inner = LlmService::of(mock.clone(), "gpt-4o");
         let svc = LlmService::builder_with_inner(inner).build();
-        (ArgEquivalenceJudge::new(svc, "judge_mock:m"), mock)
+        (
+            ArgEquivalenceJudge::new(svc, "judge_mock:m"),
+            mock,
+        )
     }
 
     #[test]
@@ -228,31 +225,17 @@ mod tests {
     #[tokio::test]
     async fn args_match_judged_is_all_or_nothing() {
         let (judge, _m) = judge_with("YES");
-        let step = |n: &str, a: Value| ToolStep {
-            name: n.into(),
-            args: a,
-        };
+        let step = |n: &str, a: Value| ToolStep { name: n.into(), args: a };
         // names align, args differ but judge says YES → 1.0
         let actual = vec![step("search", json!({"q": "duck"}))];
         let expected = vec![step("search", json!({"q": "ducks"}))];
-        assert_eq!(
-            args_match_judged(&actual, &expected, &judge).await.unwrap(),
-            1.0
-        );
+        assert_eq!(args_match_judged(&actual, &expected, &judge).await.unwrap(), 1.0);
         // name mismatch → 0.0 regardless of judge
         let wrong = vec![step("fetch", json!({"q": "duck"}))];
-        assert_eq!(
-            args_match_judged(&wrong, &expected, &judge).await.unwrap(),
-            0.0
-        );
+        assert_eq!(args_match_judged(&wrong, &expected, &judge).await.unwrap(), 0.0);
 
         // judge says NO → 0.0
         let (judge_no, _m2) = judge_with("NO");
-        assert_eq!(
-            args_match_judged(&actual, &expected, &judge_no)
-                .await
-                .unwrap(),
-            0.0
-        );
+        assert_eq!(args_match_judged(&actual, &expected, &judge_no).await.unwrap(), 0.0);
     }
 }
