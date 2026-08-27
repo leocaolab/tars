@@ -5,25 +5,22 @@
 //! has no business logic — only types, conversions, and pure helpers.
 //!
 //! Module map:
-//! - [`ids`]            — strongly typed IDs (TenantId, SessionId, …)
-//! - [`principal`]      — caller identity (Principal, Scope)
-//! - [`model`]          — ModelHint / ModelTier / ThinkingMode
-//! - [`chat`]           — ChatRequest / Message / ContentBlock
-//! - [`tools`]          — ToolSpec / ToolCall as seen by Provider layer
-//! - [`schema`]         — JsonSchema wrapper
-//! - [`cache`]          — CacheDirective / ProviderCacheHandle / CacheHitInfo
-//! - [`events`]         — ChatEvent / StopReason for streaming responses
-//! - [`response`]       — ChatResponse + builder for non-streaming consumers
-//! - [`usage`]          — Usage / CostUsd / Pricing
-//! - [`capabilities`]   — ProviderProfile / StructuredOutputMode / PromptCacheKind
-//! - [`error`]          — ProviderError + ErrorClass
-//! - [`context`]        — RequestContext for cross-layer plumbing
-//! - [`secret`]         — SecretRef + SecretString (redacting wrapper)
-//! - [`auth`]           — Auth specification (None / Delegate / Secret)
+//! - [`ids`]        — strongly typed IDs (TenantId, SessionId, …)
+//! - [`principal`]  — caller identity (Principal, Scope)
+//! - [`secret`]     — SecretRef + SecretString (redacting wrapper)
+//! - [`env`]        — process-environment reads, in one place
+//! - [`telemetry`]  — the span/metric vocabulary
+//! - [`validation`] — the typed reasons a response is rejected
+//! - [`providers`]  — everything the provider layer speaks: chat, tools,
+//!   schema, cache, events, response, usage, model, provider_profile, error,
+//!   context, auth, http_extras
+//! - [`runtime`]    — batch, run_context, run_report
+//!
+//! Items are named flat (`tars_types::ChatRequest`); the modules above are the
+//! filing system, not the address.
 //!
 //! See `docs/architecture/01-llm-provider.md` for the full design rationale.
 
-pub mod bless;
 pub mod env;
 pub mod ids;
 pub mod principal;
@@ -33,7 +30,6 @@ pub mod secret;
 pub mod telemetry;
 pub mod validation;
 
-pub use bless::{Assert, Bless, BlessError, BlessOutcome, Codec, Drift, MatchTier};
 pub use ids::{
     AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId,
     TenantId, TraceId, TrajectoryId,
@@ -68,13 +64,3 @@ pub use validation::{
     OutcomeSummary, SharedValidationOutcome, ValidationOutcome, ValidationOutcomeRecord,
     ValidationReason, ValidationSummary, new_shared_validation_outcome,
 };
-
-// ── Module paths kept reachable ────────────────────────────────────────────
-//
-// Consumers name almost everything flat (`tars_types::ChatRequest`), but three
-// module paths appear in the tree and one of them is now a directory down.
-// Re-exporting the module — not just its items — keeps `tars_types::error::…`
-// resolving after the move.
-pub use providers::error;
-pub use providers::provider_profile;
-pub use providers::provider_profile as capabilities;

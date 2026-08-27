@@ -32,7 +32,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use tars_types::ChatResponse;
-use tars_types::capabilities::StructuredOutputMode;
+use tars_types::StructuredOutputMode;
 
 /// Typed failure of the decode family ([`decode_json`] / [`decode`] /
 /// [`ResponseJsonExt::json`]).
@@ -427,7 +427,7 @@ pub trait ResponseJsonExt {
     /// [`decode_json`]; see it for the mode semantics.
     ///
     /// `mode` is the [`StructuredOutputMode`] the request/provider used
-    /// (from the provider's [`ProviderProfile`](tars_types::capabilities::ProviderProfile)),
+    /// (from the provider's [`ProviderProfile`](tars_types::ProviderProfile)),
     /// so the caller — which knows how the response was produced — tells
     /// the decoder whether `text` is clean JSON or chatty prose.
     fn json<T: DeserializeOwned>(&self, mode: StructuredOutputMode) -> Result<T, TarsJsonError>;

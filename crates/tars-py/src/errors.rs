@@ -34,7 +34,7 @@ use pyo3::types::PyDict;
 
 use tars_config::ConfigError;
 use tars_types::ValidationReason;
-use tars_types::error::{ErrorClass, ProviderError};
+use tars_types::{ErrorClass, ProviderError};
 
 create_exception!(tars._tars_py, TarsError, PyException);
 create_exception!(tars._tars_py, TarsConfigError, TarsError);

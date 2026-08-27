@@ -108,7 +108,7 @@ async fn pinned_value() -> serde_json::Value {
 #[tokio::test]
 async fn bless_load_and_check_passes_on_pinned_reply() {
     // CUJ-2: load the committed bless, check the (pinned) decoded reply → pass.
-    let bless = tars_types::Bless::load(&bless_path()).expect("committed bless loads");
+    let bless = tars_eval::Bless::load(&bless_path()).expect("committed bless loads");
     let outcome = bless.check(&pinned_value().await).expect("check runs");
     assert!(outcome.is_pass(), "unexpected drift: {:?}", outcome.drifts);
 }
@@ -120,7 +120,7 @@ async fn bless_reports_drift_when_a_field_changes() {
     // change; the LLM stays pinned.)
     let mut value = pinned_value().await;
     value["severity"] = serde_json::json!(9);
-    let bless = tars_types::Bless::load(&bless_path()).unwrap();
+    let bless = tars_eval::Bless::load(&bless_path()).unwrap();
     let outcome = bless.check(&value).unwrap();
     assert_eq!(outcome.drifts.len(), 1);
     assert_eq!(outcome.drifts[0].selector, "$.severity");
@@ -137,10 +137,10 @@ async fn bless_check_or_bless_round_trips_in_a_tempdir() {
     let v = pinned_value().await;
 
     // create
-    tars_types::Bless::check_or_bless(&path, &v, &["$.severity"], None, true).unwrap();
+    tars_eval::Bless::check_or_bless(&path, &v, &["$.severity"], None, true).unwrap();
     // load + check passes
     assert!(
-        tars_types::Bless::check_or_bless(&path, &v, &["$.severity"], None, false)
+        tars_eval::Bless::check_or_bless(&path, &v, &["$.severity"], None, false)
             .unwrap()
             .is_pass()
     );

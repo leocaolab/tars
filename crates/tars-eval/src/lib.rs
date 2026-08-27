@@ -17,6 +17,7 @@
 //! - [`trajectory_match`]: pure tool-trajectory scoring (names / args).
 
 pub mod arg_judge;
+pub mod bless;
 pub mod check;
 pub mod judge;
 pub mod judge_stats;
@@ -34,3 +35,5 @@ pub use metamorphic::{
     MetamorphicRelation, Mutation, MutationVerdict, mutation_caught,
 };
 pub use trajectory_match::{MatchMode, ToolStep};
+
+pub use bless::{Assert, Bless, BlessError, BlessOutcome, Codec, Drift, MatchTier};

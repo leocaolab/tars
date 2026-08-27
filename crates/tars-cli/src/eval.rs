@@ -717,7 +717,7 @@ fn run_bless(args: EvalBlessArgs) -> Result<()> {
         let bless_path = case_dir.join("output.bless.json");
 
         if recording {
-            let bless = tars_types::Bless::capture(&value, &selectors, None)
+            let bless = tars_eval::Bless::capture(&value, &selectors, None)
                 .with_context(|| format!("capturing bless for case {}", case.case_id))?;
             if args.accept {
                 bless
@@ -739,7 +739,7 @@ fn run_bless(args: EvalBlessArgs) -> Result<()> {
                 );
             }
         } else if bless_path.exists() {
-            let bless = tars_types::Bless::load(&bless_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let bless = tars_eval::Bless::load(&bless_path).map_err(|e| anyhow::anyhow!("{e}"))?;
             let outcome = bless.check(&value).map_err(|e| anyhow::anyhow!("{e}"))?;
             if outcome.is_pass() {
                 println!("  {} … ok", case.case_id);

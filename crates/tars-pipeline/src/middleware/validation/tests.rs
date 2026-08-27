@@ -217,7 +217,7 @@ async fn validation_reject_surfaces_validation_failed_error() {
                     field: "text".into(),
                 },
             };
-            assert_eq!(err.class(), tars_types::error::ErrorClass::Permanent);
+            assert_eq!(err.class(), tars_types::ErrorClass::Permanent);
         }
         Err(e) => panic!("expected ValidationFailed, got: {e:?}"),
     }

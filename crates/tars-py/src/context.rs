@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use pyo3::prelude::*;
 
 use tars_types::RequestContext;
-use tars_types::ids::{SessionId, TenantId, TraceId};
+use tars_types::{SessionId, TenantId, TraceId};
 
 thread_local! {
     /// Stack of active contexts for the calling thread. Empty ⇒ no active

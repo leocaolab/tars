@@ -56,6 +56,8 @@ tracing.workspace = true
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
+# The bless (golden-file approval) loop lives in the testing crate.
+tars-eval = { path = "../tars-eval" }
 tars-utils = { path = "../tars-utils" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 wiremock.workspace = true
