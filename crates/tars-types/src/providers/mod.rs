@@ -4,6 +4,7 @@
 //! consumer names it; the module path exists so a reader can see the grouping.
 
 pub mod auth;
+pub mod batch;
 pub mod cache;
 pub mod chat;
 pub mod context; // RequestContext — the LLM-call one

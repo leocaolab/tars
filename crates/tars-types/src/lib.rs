@@ -13,8 +13,9 @@
 //! - [`validation`] — the typed reasons a response is rejected
 //! - [`providers`]  — everything the provider layer speaks: chat, tools,
 //!   schema, cache, events, response, usage, model, provider_profile, error,
-//!   context, auth, http_extras
-//! - [`runtime`]    — batch, run_context, run_report
+//!   context, auth, http_extras, batch
+//! - [`run_context`] — the ambient RequestContext a run carries
+//! - [`run_report`]  — the roll-up a finished run produces
 //!
 //! Items are named flat (`tars_types::ChatRequest`); the modules above are the
 //! filing system, not the address.
@@ -25,7 +26,8 @@ pub mod env;
 pub mod ids;
 pub mod principal;
 pub mod providers;
-pub mod runtime;
+pub mod run_context;
+pub mod run_report;
 pub mod secret;
 pub mod telemetry;
 pub mod validation;
@@ -53,9 +55,9 @@ pub use providers::response::{ChatResponse, ChatResponseBuilder};
 pub use providers::schema::JsonSchema;
 pub use providers::tools::{ToolCall, ToolChoice, ToolSpec};
 pub use providers::usage::{CostUsd, Pricing, Usage};
-pub use runtime::batch::{BatchResultItem, BatchStatus};
-pub use runtime::run_context::{RUN_CONTEXT, spawn_with_context};
-pub use runtime::run_report::{
+pub use providers::batch::{BatchResultItem, BatchStatus};
+pub use run_context::{RUN_CONTEXT, spawn_with_context};
+pub use run_report::{
     AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus,
 };
 pub use secret::{SecretRef, SecretString};
