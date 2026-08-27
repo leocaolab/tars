@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tars_types::{Capabilities, ProviderId};
+use tars_types::{ProviderId, ProviderProfile};
 
 use crate::backends::cli::{
     AgentCliBackend, ClaudeCliDialect, ClaudeCliEffort, ClaudeCliTools, RealSubprocessRunner,
@@ -29,7 +29,7 @@ pub struct ClaudeCliProviderBuilder {
     id: ProviderId,
     executable: String,
     timeout: Duration,
-    capabilities: Option<Capabilities>,
+    capabilities: Option<ProviderProfile>,
     tools: ClaudeCliTools,
     bare: bool,
     effort: Option<ClaudeCliEffort>,
@@ -58,7 +58,7 @@ impl ClaudeCliProviderBuilder {
         executable: into String
     }
     builder_setter!(timeout: Duration);
-    builder_setter!(capabilities: opt Capabilities);
+    builder_setter!(capabilities: opt ProviderProfile);
     builder_setter! {
         /// Configure `--tools`. Default: [`ClaudeCliTools::Disabled`] — kills
         /// the CLI's internal agent loop without affecting auth. Use
@@ -115,7 +115,7 @@ impl ClaudeCliProviderBuilder {
 }
 
 /// Assembled from the provider DB (`data/provider.toml`) `claude_cli` block.
-fn default_capabilities() -> Capabilities {
+fn default_capabilities() -> ProviderProfile {
     tars_config::capabilities_for("claude_cli", "")
 }
 

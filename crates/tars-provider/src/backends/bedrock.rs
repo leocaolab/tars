@@ -19,7 +19,7 @@ use async_trait::async_trait;
 
 use tars_bedrock::BedrockClient;
 use tars_types::{
-    Capabilities, ChatRequest, ChatResponse, ProviderError, ProviderId, RequestContext,
+    ChatRequest, ChatResponse, ProviderError, ProviderId, ProviderProfile, RequestContext,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
@@ -33,7 +33,7 @@ pub struct BedrockProviderBuilder {
     region: String,
     model: String,
     profile: Option<String>,
-    capabilities: Option<Capabilities>,
+    capabilities: Option<ProviderProfile>,
 }
 
 impl BedrockProviderBuilder {
@@ -54,7 +54,7 @@ impl BedrockProviderBuilder {
         self
     }
 
-    pub fn capabilities(mut self, c: Capabilities) -> Self {
+    pub fn capabilities(mut self, c: ProviderProfile) -> Self {
         self.capabilities = Some(c);
         self
     }
@@ -73,7 +73,7 @@ impl BedrockProviderBuilder {
 
 pub struct BedrockProvider {
     id: ProviderId,
-    capabilities: Capabilities,
+    capabilities: ProviderProfile,
     client: BedrockClient,
 }
 
@@ -83,7 +83,7 @@ impl LlmProvider for BedrockProvider {
         &self.id
     }
 
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
     }
 

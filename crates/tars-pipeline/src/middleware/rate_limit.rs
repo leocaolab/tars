@@ -43,7 +43,7 @@ use futures::StreamExt;
 use tokio::sync::Semaphore;
 
 use tars_provider::LlmEventStream;
-use tars_types::{Capabilities, ChatEvent, ChatRequest, ProviderError, RequestContext};
+use tars_types::{ChatEvent, ChatRequest, ProviderError, ProviderProfile, RequestContext};
 
 use crate::middleware::Middleware;
 use crate::service::Next;
@@ -240,7 +240,7 @@ impl TpmRateLimiter {
     /// Build (private bucket) from a provider's capability snapshot — the output
     /// reserve comes from the provider's `max_output_tokens` (worst case), like the
     /// budget middleware. For a shared account bucket, use [`Self::shared`].
-    pub fn from_capabilities(tokens_per_minute: u32, caps: &Capabilities) -> Self {
+    pub fn from_capabilities(tokens_per_minute: u32, caps: &ProviderProfile) -> Self {
         Self::new(TpmRateLimitConfig {
             tokens_per_minute,
             burst_tokens: None,

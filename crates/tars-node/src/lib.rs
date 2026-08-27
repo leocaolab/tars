@@ -74,12 +74,8 @@ use tars_config::ConfigManager;
 use tars_pipeline::{ChainOpts, LlmService};
 use tars_provider::{LlmProvider, registry::ProviderRegistry};
 use tars_types::{
-    Message, RUN_CONTEXT, RequestContext,
-    chat::{ChatRequest, ContentBlock},
-    ids::ProviderId,
-    model::ThinkingMode,
-    response::ChatResponseBuilder,
-    schema::JsonSchema,
+    ChatRequest, ChatResponseBuilder, ContentBlock, JsonSchema, Message, RUN_CONTEXT,
+    RequestContext, ThinkingMode, ids::ProviderId,
 };
 
 /// Process-wide tokio runtime shared by all `complete()` calls. Lazy

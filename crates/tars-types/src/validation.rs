@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use crate::response::ChatResponse;
+use crate::providers::response::ChatResponse;
 
 /// Typed, machine-matchable reason a validator rejected a response.
 ///

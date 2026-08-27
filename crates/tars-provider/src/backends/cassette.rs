@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use futures::{StreamExt, stream};
 
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, RequestContext,
+    ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, ProviderProfile, RequestContext,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
@@ -113,12 +113,12 @@ enum Mode {
 
 pub struct CassetteProvider {
     id: ProviderId,
-    capabilities: Capabilities,
+    capabilities: ProviderProfile,
     mode: Mode,
 }
 
 /// On-disk cassette: the recordings PLUS the recorded provider's capabilities.
-/// Capabilities matter because arc builds a DIFFERENT request depending on
+/// ProviderProfile matter because arc builds a DIFFERENT request depending on
 /// whether the provider advertises tool support (a fixer's request carries tool
 /// defs); a replay that advertised a bare `text_only_baseline` produced a
 /// tool-less request → a fingerprint MISS. Storing + replaying the recorded caps
@@ -127,7 +127,7 @@ pub struct CassetteProvider {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CassetteFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    capabilities: Option<Capabilities>,
+    capabilities: Option<ProviderProfile>,
     // No `#[serde(default)]` — a legacy bare-map cassette has no `recordings`
     // key, so it fails to parse as `CassetteFile` and falls back below.
     recordings: std::collections::BTreeMap<String, Recording>,
@@ -145,14 +145,14 @@ impl CassetteProvider {
     pub fn replay_with_caps(
         id: impl Into<ProviderId>,
         cassette: HashMap<String, Recording>,
-        caps: Option<Capabilities>,
+        caps: Option<ProviderProfile>,
     ) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
             capabilities: caps.unwrap_or_else(|| {
                 // Legacy cassette with no recorded caps: text-only baseline
                 // stamped Mock — cassette places no real call.
-                let mut c = Capabilities::text_only_baseline(Pricing::default());
+                let mut c = ProviderProfile::text_only_baseline(Pricing::default());
                 c.interface = tars_types::InterfaceKind::Mock;
                 c
             }),
@@ -226,7 +226,11 @@ impl CassetteProvider {
 /// Serialize a captured map + the recorded provider's capabilities to a cassette
 /// file (sorted keys → stable, diff-friendly). Best-effort: a write failure is
 /// logged, never panics.
-fn write_cassette(map: &HashMap<String, Recording>, caps: &Capabilities, path: &std::path::Path) {
+fn write_cassette(
+    map: &HashMap<String, Recording>,
+    caps: &ProviderProfile,
+    path: &std::path::Path,
+) {
     if map.is_empty() {
         return;
     }
@@ -256,7 +260,7 @@ impl LlmProvider for CassetteProvider {
     fn id(&self) -> &ProviderId {
         &self.id
     }
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
     }
 
@@ -509,7 +513,7 @@ mod tests {
     fn cassette_file_round_trips_capabilities() {
         // A recording stores the provider's caps; replay advertises them (so arc
         // rebuilds the identical, tool-carrying request). Legacy bare maps still load.
-        let mut caps = Capabilities::text_only_baseline(Pricing::default());
+        let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
         caps.supports_tool_use = true;
         let file = CassetteFile {
             capabilities: Some(caps.clone()),

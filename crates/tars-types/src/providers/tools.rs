@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::schema::JsonSchema;
+use crate::providers::schema::JsonSchema;
 
 /// A tool *definition* we present to the model.
 #[derive(Clone, Debug, Serialize, Deserialize)]

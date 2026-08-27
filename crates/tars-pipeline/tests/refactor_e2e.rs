@@ -38,13 +38,13 @@ fn retry_attempt_construction_carries_typed_kind() {
 
 #[test]
 fn try_new_propagates_bad_pricing_from_capabilities() {
-    use tars_types::Capabilities;
+    use tars_types::ProviderProfile;
     let bad_pricing = Pricing {
         input_per_million: f64::NAN,
         output_per_million: 15.0,
         ..Pricing::default()
     };
-    let caps = Capabilities::text_only_baseline(bad_pricing);
+    let caps = ProviderProfile::text_only_baseline(bad_pricing);
     let err = PerCallBudgetMiddleware::try_new(0.05, &caps).unwrap_err();
     assert!(matches!(
         err,
@@ -59,8 +59,8 @@ fn try_new_propagates_bad_pricing_from_capabilities() {
 fn try_new_with_valid_capabilities_round_trips_through_wrap() {
     // The fallible constructor returns Ok with a real middleware that
     // can then be layered onto a service and used normally.
-    use tars_types::Capabilities;
-    let caps = Capabilities::text_only_baseline(Pricing {
+    use tars_types::ProviderProfile;
+    let caps = ProviderProfile::text_only_baseline(Pricing {
         input_per_million: 3.0,
         output_per_million: 15.0,
         ..Pricing::default()

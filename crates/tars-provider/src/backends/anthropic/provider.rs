@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest,
-    ProviderError, ProviderId, RequestContext,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ChatRequest, ProviderError, ProviderId,
+    ProviderProfile, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver};
@@ -32,7 +32,7 @@ pub struct AnthropicProviderBuilder {
     base_url: String,
     api_version: String,
     auth: Auth,
-    capabilities: Option<Capabilities>,
+    capabilities: Option<ProviderProfile>,
     extras: HttpProviderExtras,
 }
 
@@ -50,7 +50,7 @@ impl AnthropicProviderBuilder {
 
     builder_setter!(base_url: into String);
     builder_setter!(api_version: into String);
-    builder_setter!(capabilities: opt Capabilities);
+    builder_setter!(capabilities: opt ProviderProfile);
     builder_setter!(extras: HttpProviderExtras);
 
     pub fn build(
@@ -77,7 +77,7 @@ impl AnthropicProviderBuilder {
 
 /// Assembled from the provider DB (`data/provider.toml`) for Anthropic's
 /// default model. The builder fallback; not a hand-written literal.
-fn default_capabilities() -> Capabilities {
+fn default_capabilities() -> ProviderProfile {
     tars_config::capabilities_for("anthropic", "")
 }
 
@@ -87,7 +87,7 @@ pub struct AnthropicProvider {
     auth_resolver: Arc<dyn AuthResolver>,
     auth: Auth,
     adapter: Arc<AnthropicAdapter>,
-    capabilities: Capabilities,
+    capabilities: ProviderProfile,
 }
 
 #[async_trait]
@@ -95,7 +95,7 @@ impl LlmProvider for AnthropicProvider {
     fn id(&self) -> &ProviderId {
         &self.id
     }
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
     }
     // `#[instrument(err(Display))]` is the boundary log: any Err

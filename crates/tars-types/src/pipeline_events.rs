@@ -1,7 +1,7 @@
 //! Pipeline-level event types — one event per `Pipeline.call` boundary.
 //! See [Doc 17](../../../docs/architecture/17-pipeline-event-store.md).
 //!
-//! Distinct from `crate::events::ChatEvent` (streaming-token contract,
+//! Distinct from `crate::providers::events::ChatEvent` (streaming-token contract,
 //! per-token granularity) and from `tars-runtime`'s `AgentEvent`
 //! (agent-decision granularity). This stream sits at the LLM-call
 //! boundary: one entry per completed `Pipeline.call`, regardless of
@@ -16,11 +16,11 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::content_ref::ContentRef;
-use crate::error::ProviderErrorKind;
-use crate::events::StopReason;
 use crate::ids::{ProviderId, SessionId, TenantId, TraceId};
+use crate::providers::error::ProviderErrorKind;
+use crate::providers::events::StopReason;
+use crate::providers::usage::Usage;
 use crate::telemetry::TelemetryAccumulator;
-use crate::usage::Usage;
 use crate::validation::{ValidationReason, ValidationSummary};
 
 /// Top-level event variant. `#[non_exhaustive]` plus a catchall

@@ -18,9 +18,9 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::ProviderError;
 use crate::ids::BatchItemId;
-use crate::response::ChatResponse;
+use crate::providers::error::ProviderError;
+use crate::providers::response::ChatResponse;
 
 /// Terminal and in-flight states a batch job can be in. Mirrors the
 /// union of Anthropic + OpenAI vendor-reported statuses, collapsed

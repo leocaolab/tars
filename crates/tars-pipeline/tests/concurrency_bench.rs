@@ -18,7 +18,7 @@ use futures::{StreamExt, stream};
 use tars_pipeline::{ChainOpts, LlmService};
 use tars_provider::provider::{LlmEventStream, LlmProvider};
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, RequestContext,
+    ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, ProviderProfile, RequestContext,
     StopReason, Usage,
 };
 
@@ -28,13 +28,13 @@ use tars_types::{
 /// global `Mutex` per call, which would serialize 10k callers on the mock itself).
 struct LatencyMock {
     id: ProviderId,
-    caps: Capabilities,
+    caps: ProviderProfile,
     latency: Duration,
 }
 
 impl LatencyMock {
     fn new(latency: Duration) -> Arc<Self> {
-        let mut caps = Capabilities::text_only_baseline(Pricing::default());
+        let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
         caps.interface = tars_types::InterfaceKind::Mock;
         Arc::new(Self {
             id: "latency-mock".into(),
@@ -49,7 +49,7 @@ impl LlmProvider for LatencyMock {
     fn id(&self) -> &ProviderId {
         &self.id
     }
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ProviderProfile {
         &self.caps
     }
     async fn stream(

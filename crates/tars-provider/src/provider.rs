@@ -16,8 +16,8 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, Stream, StreamExt};
 
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, CostUsd,
-    ProviderError, ProviderId, RequestContext, Usage,
+    ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, CostUsd, ProviderError, ProviderId,
+    ProviderProfile, RequestContext, Usage,
 };
 
 /// Convenience alias for the streaming return type. `'static` because
@@ -31,7 +31,7 @@ pub trait LlmProvider: Send + Sync + 'static {
     fn id(&self) -> &ProviderId;
 
     /// Static capability descriptor — what this Provider can do.
-    fn capabilities(&self) -> &Capabilities;
+    fn capabilities(&self) -> &ProviderProfile;
 
     /// Open a streaming chat against the concrete `model`. Adapter
     /// clones `self` internally.

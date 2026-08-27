@@ -47,7 +47,7 @@ use async_trait::async_trait;
 
 use tars_provider::{LlmEventStream, LlmProvider};
 use tars_types::{
-    Capabilities, ChatRequest, ChatResponse, CostUsd, ProviderError, ProviderId, RequestContext,
+    ChatRequest, ChatResponse, CostUsd, ProviderError, ProviderId, ProviderProfile, RequestContext,
     Usage,
 };
 
@@ -382,7 +382,7 @@ impl LlmProvider for CircuitBreaker {
     fn id(&self) -> &ProviderId {
         &self.id
     }
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ProviderProfile {
         self.inner.capabilities()
     }
 
@@ -481,7 +481,7 @@ mod tests {
         id: ProviderId,
         outcome: ScriptedOutcome,
         calls: Arc<AtomicU32>,
-        capabilities: Capabilities,
+        capabilities: ProviderProfile,
     }
     enum ScriptedOutcome {
         Ok,
@@ -492,7 +492,7 @@ mod tests {
         fn id(&self) -> &ProviderId {
             &self.id
         }
-        fn capabilities(&self) -> &Capabilities {
+        fn capabilities(&self) -> &ProviderProfile {
             &self.capabilities
         }
         async fn stream(
@@ -518,7 +518,7 @@ mod tests {
             id: ProviderId::new(id),
             outcome,
             calls: calls.clone(),
-            capabilities: Capabilities::text_only_baseline(tars_types::Pricing::default()),
+            capabilities: ProviderProfile::text_only_baseline(tars_types::Pricing::default()),
         });
         (p, calls)
     }
@@ -578,14 +578,14 @@ mod tests {
         struct Flaky {
             id: ProviderId,
             sequence: Mutex<Vec<bool>>, // true = ok, false = err
-            capabilities: Capabilities,
+            capabilities: ProviderProfile,
         }
         #[async_trait]
         impl LlmProvider for Flaky {
             fn id(&self) -> &ProviderId {
                 &self.id
             }
-            fn capabilities(&self) -> &Capabilities {
+            fn capabilities(&self) -> &ProviderProfile {
                 &self.capabilities
             }
             async fn stream(
@@ -606,7 +606,7 @@ mod tests {
         let flaky: Arc<dyn LlmProvider> = Arc::new(Flaky {
             id: ProviderId::new("p"),
             sequence: Mutex::new(vec![false, false, true, false, false]),
-            capabilities: Capabilities::text_only_baseline(tars_types::Pricing::default()),
+            capabilities: ProviderProfile::text_only_baseline(tars_types::Pricing::default()),
         });
         let breaker = CircuitBreaker::wrap(flaky, config_open_after(3));
 
@@ -646,14 +646,14 @@ mod tests {
         struct Flaky {
             id: ProviderId,
             sequence: Mutex<Vec<bool>>,
-            capabilities: Capabilities,
+            capabilities: ProviderProfile,
         }
         #[async_trait]
         impl LlmProvider for Flaky {
             fn id(&self) -> &ProviderId {
                 &self.id
             }
-            fn capabilities(&self) -> &Capabilities {
+            fn capabilities(&self) -> &ProviderProfile {
                 &self.capabilities
             }
             async fn stream(
@@ -674,7 +674,7 @@ mod tests {
         let flaky: Arc<dyn LlmProvider> = Arc::new(Flaky {
             id: ProviderId::new("p"),
             sequence: Mutex::new(vec![false, false, true, false, false]),
-            capabilities: Capabilities::text_only_baseline(tars_types::Pricing::default()),
+            capabilities: ProviderProfile::text_only_baseline(tars_types::Pricing::default()),
         });
         // Build the CircuitBreaker directly so we can introspect.
         let id = flaky.id().clone();
@@ -749,14 +749,14 @@ mod tests {
         struct Flaky {
             id: ProviderId,
             sequence: Mutex<Vec<bool>>,
-            capabilities: Capabilities,
+            capabilities: ProviderProfile,
         }
         #[async_trait]
         impl LlmProvider for Flaky {
             fn id(&self) -> &ProviderId {
                 &self.id
             }
-            fn capabilities(&self) -> &Capabilities {
+            fn capabilities(&self) -> &ProviderProfile {
                 &self.capabilities
             }
             async fn stream(
@@ -778,7 +778,7 @@ mod tests {
         let flaky: Arc<dyn LlmProvider> = Arc::new(Flaky {
             id: ProviderId::new("p"),
             sequence: Mutex::new(vec![false, true, true]),
-            capabilities: Capabilities::text_only_baseline(tars_types::Pricing::default()),
+            capabilities: ProviderProfile::text_only_baseline(tars_types::Pricing::default()),
         });
         let id = flaky.id().clone();
         let cb = Arc::new(CircuitBreaker {

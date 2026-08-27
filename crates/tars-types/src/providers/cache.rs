@@ -111,7 +111,7 @@ impl std::fmt::Debug for ProviderCacheHandle {
     }
 }
 
-/// Diagnostic info about a cache hit, surfaced through [`crate::events::ChatEvent::Started`].
+/// Diagnostic info about a cache hit, surfaced through [`crate::providers::events::ChatEvent::Started`].
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CacheHitInfo {
     /// Tokens served from prefix cache (Provider-implicit or explicit).

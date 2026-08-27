@@ -19,7 +19,7 @@ use std::sync::LazyLock;
 use serde::Deserialize;
 
 use tars_types::{
-    Capabilities, InterfaceKind, Modality, Pricing, PromptCacheKind, StructuredOutputMode,
+    InterfaceKind, Modality, Pricing, PromptCacheKind, ProviderProfile, StructuredOutputMode,
 };
 
 /// Whether a model reasons, and whether "off" is a legal request.
@@ -266,13 +266,13 @@ impl ProviderDef {
             .find(|m| m.id == model_id || m.aliases.iter().any(|a| a == model_id))
     }
 
-    /// Assemble the runtime [`Capabilities`] for `model_id` on this provider:
+    /// Assemble the runtime [`ProviderProfile`] for `model_id` on this provider:
     /// provider-level fields from the block ∪ per-model fields from the row
     /// (falling back to the provider's default model, then to a text-only
     /// shape when the DB carries no row at all — a local provider with an
     /// empty model list). This generalizes what the gemini backend used to do
     /// by hand.
-    pub fn capabilities_for(&self, model_id: &str) -> Capabilities {
+    pub fn capabilities_for(&self, model_id: &str) -> ProviderProfile {
         let cap = &self.capabilities;
         // Resolve the model row: exact/alias match, else the provider default.
         let model = self
@@ -290,7 +290,7 @@ impl ProviderDef {
             Some(m) => {
                 let mut mods_in: HashSet<Modality> =
                     m.modalities.iter().filter_map(kb_to_modality).collect();
-                // modalities_in must be non-empty (Capabilities::validate).
+                // modalities_in must be non-empty (ProviderProfile::validate).
                 if mods_in.is_empty() {
                     mods_in.insert(Modality::Text);
                 }
@@ -326,7 +326,7 @@ impl ProviderDef {
             }
         };
 
-        Capabilities {
+        ProviderProfile {
             interface: self.interface,
             max_context_tokens,
             max_output_tokens,
@@ -414,22 +414,22 @@ impl ModelKb {
         self.find(model_id).map(ModelEntry::pricing)
     }
 
-    /// Assemble runtime [`Capabilities`] for `provider` + `model_id`. If the
+    /// Assemble runtime [`ProviderProfile`] for `provider` + `model_id`. If the
     /// provider isn't a named definition (an anonymous `openai_compat` a user
     /// pointed at a local server), fall back to a text-only baseline — the
     /// per-instance `CapabilitiesOverrides` correct it from there.
-    pub fn capabilities_for(&self, provider: &str, model_id: &str) -> Capabilities {
+    pub fn capabilities_for(&self, provider: &str, model_id: &str) -> ProviderProfile {
         match self.providers.get(provider) {
             Some(def) => def.capabilities_for(model_id),
-            None => Capabilities::text_only_baseline(Pricing::default()),
+            None => ProviderProfile::text_only_baseline(Pricing::default()),
         }
     }
 }
 
-/// Assemble runtime [`Capabilities`] for `provider` + `model_id` from the
+/// Assemble runtime [`ProviderProfile`] for `provider` + `model_id` from the
 /// shipped provider DB. The one assembler that replaces the 15 hand-written
 /// backend constructors (design §5).
-pub fn capabilities_for(provider: &str, model_id: &str) -> Capabilities {
+pub fn capabilities_for(provider: &str, model_id: &str) -> ProviderProfile {
     MODEL_KB.capabilities_for(provider, model_id)
 }
 

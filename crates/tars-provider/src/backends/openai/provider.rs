@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest,
-    ProviderError, ProviderId, RequestContext,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ChatRequest, ProviderError, ProviderId,
+    ProviderProfile, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver};
@@ -35,7 +35,7 @@ pub struct OpenAiProviderBuilder {
     id: ProviderId,
     base_url: String,
     auth: Auth,
-    capabilities: Option<Capabilities>,
+    capabilities: Option<ProviderProfile>,
     extras: HttpProviderExtras,
     /// The behavior seam (Doc 30). `None` = no explicit dialect; `build()` then
     /// infers one from `base_url` (a `deepseek` host → [`DeepSeekDialect`],
@@ -73,7 +73,7 @@ impl OpenAiProviderBuilder {
         /// Override capability descriptor. Default is a vanilla
         /// GPT-4o-style profile; OpenAI-compatible local backends
         /// should set their own.
-        capabilities: opt Capabilities
+        capabilities: opt ProviderProfile
     }
 
     builder_setter! {
@@ -122,7 +122,7 @@ impl OpenAiProviderBuilder {
 /// (`data/provider.toml`) for OpenAI's default model — no longer a
 /// hand-written literal. Used as the builder fallback when the registry
 /// doesn't pass an explicit descriptor.
-pub fn default_openai_capabilities() -> Capabilities {
+pub fn default_openai_capabilities() -> ProviderProfile {
     tars_config::capabilities_for("openai", "")
 }
 
@@ -134,7 +134,7 @@ pub struct OpenAiProvider {
     auth_resolver: Arc<dyn AuthResolver>,
     auth: Auth,
     adapter: Arc<OpenAiAdapter>,
-    capabilities: Capabilities,
+    capabilities: ProviderProfile,
     /// The behavior seam (Doc 30). Held here so the non-streaming batch
     /// results path decodes through the same dialect as streaming. Defaults
     /// to [`StandardDialect`] and is shared (same `Arc`) with `adapter`.
@@ -147,7 +147,7 @@ impl LlmProvider for OpenAiProvider {
         &self.id
     }
 
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
     }
 

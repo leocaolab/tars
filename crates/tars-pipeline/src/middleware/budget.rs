@@ -15,7 +15,7 @@
 //! - **Input tokens** ≈ `chars / 4` over `system` + all `Message::Text`
 //!   content blocks.
 //! - **Output tokens** = `req.max_output_tokens` if set, else the
-//!   provider's `Capabilities.max_output_tokens` as a worst-case bound.
+//!   provider's `ProviderProfile.max_output_tokens` as a worst-case bound.
 //! - **Thinking tokens** — Anthropic bundles thinking into output and
 //!   prices it at the output rate, so the worst-case output bound
 //!   already covers it. Providers that bill thinking separately
@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 
 use tars_provider::LlmEventStream;
-use tars_types::{Capabilities, ChatRequest, Pricing, ProviderError, RequestContext};
+use tars_types::{ChatRequest, Pricing, ProviderError, ProviderProfile, RequestContext};
 
 use crate::middleware::Middleware;
 use crate::service::Next;
@@ -78,18 +78,21 @@ pub enum BudgetConfigError {
 
 impl PerCallBudgetMiddleware {
     /// Construct from a provider's capability snapshot — the natural
-    /// caller path is `provider.capabilities()`. Capabilities-sourced
+    /// caller path is `provider.capabilities()`. ProviderProfile-sourced
     /// pricing should already be valid, so `expect` is fine here; the
     /// fallible flavour lives below as [`Self::try_new`].
-    pub fn new(cap_usd: f64, capabilities: &Capabilities) -> Self {
+    pub fn new(cap_usd: f64, capabilities: &ProviderProfile) -> Self {
         Self::try_new(cap_usd, capabilities)
-            .expect("Capabilities.pricing should be pre-validated; use try_new to handle errors")
+            .expect("ProviderProfile.pricing should be pre-validated; use try_new to handle errors")
     }
 
     /// Fallible construction from a provider's capability snapshot.
     /// Returns [`BudgetConfigError`] when `cap_usd` or
     /// `capabilities.pricing` would silently break budgeting.
-    pub fn try_new(cap_usd: f64, capabilities: &Capabilities) -> Result<Self, BudgetConfigError> {
+    pub fn try_new(
+        cap_usd: f64,
+        capabilities: &ProviderProfile,
+    ) -> Result<Self, BudgetConfigError> {
         validate_cap(cap_usd)?;
         validate_pricing(&capabilities.pricing)?;
         Ok(Self {
@@ -104,7 +107,7 @@ impl PerCallBudgetMiddleware {
     }
 
     /// Construct from explicit pricing + worst-case output bound. Use
-    /// when you don't have a `Capabilities` handy (tests, hand-rolled
+    /// when you don't have a `ProviderProfile` handy (tests, hand-rolled
     /// services). Panics on invalid input; the fallible flavour is
     /// [`Self::try_from_parts`].
     pub fn from_parts(cap_usd: f64, pricing: Pricing, default_max_output_tokens: u32) -> Self {
@@ -278,7 +281,7 @@ mod tests {
         let observed = Arc::new(AtomicU32::new(0));
         struct Count {
             id: ProviderId,
-            caps: Capabilities,
+            caps: ProviderProfile,
             inner: Arc<dyn LlmProvider>,
             observed: Arc<AtomicU32>,
         }
@@ -287,7 +290,7 @@ mod tests {
             fn id(&self) -> &ProviderId {
                 &self.id
             }
-            fn capabilities(&self) -> &Capabilities {
+            fn capabilities(&self) -> &ProviderProfile {
                 &self.caps
             }
             async fn stream(
@@ -304,7 +307,7 @@ mod tests {
         (
             Arc::new(Count {
                 id: ProviderId::new("count"),
-                caps: Capabilities::text_only_baseline(Pricing::default()),
+                caps: ProviderProfile::text_only_baseline(Pricing::default()),
                 inner: mock,
                 observed: observed.clone(),
             }) as Arc<dyn LlmProvider>,
@@ -436,7 +439,7 @@ mod tests {
     #[test]
     fn pricing_new_from_capabilities() {
         // Sanity: the canonical caller path works without explicit field tunes.
-        let mut caps = Capabilities::text_only_baseline(priced(3.0, 15.0));
+        let mut caps = ProviderProfile::text_only_baseline(priced(3.0, 15.0));
         caps.max_output_tokens = Some(4096);
         let mw = PerCallBudgetMiddleware::new(0.10, &caps);
         // Pulled out the pricing and the default_max_output_tokens.

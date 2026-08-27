@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::TrajectoryId;
-use crate::usage::Usage;
+use crate::providers::usage::Usage;
 
 /// Terminal disposition of the run. `Active` means the trajectory has
 /// no terminal event yet (still running, or crashed mid-run).

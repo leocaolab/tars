@@ -15,7 +15,7 @@
 //! - [`events`]         — ChatEvent / StopReason for streaming responses
 //! - [`response`]       — ChatResponse + builder for non-streaming consumers
 //! - [`usage`]          — Usage / CostUsd / Pricing
-//! - [`capabilities`]   — Capabilities / StructuredOutputMode / PromptCacheKind
+//! - [`capabilities`]   — ProviderProfile / StructuredOutputMode / PromptCacheKind
 //! - [`error`]          — ProviderError + ErrorClass
 //! - [`context`]        — RequestContext for cross-layer plumbing
 //! - [`secret`]         — SecretRef + SecretString (redacting wrapper)
@@ -23,66 +23,63 @@
 //!
 //! See `docs/architecture/01-llm-provider.md` for the full design rationale.
 
-pub mod auth;
-pub mod batch;
 pub mod bless;
-pub mod cache;
-pub mod capabilities;
-pub mod chat;
 pub mod content_ref;
-pub mod context;
 pub mod env;
-pub mod error;
-pub mod events;
-pub mod http_extras;
 pub mod ids;
-pub mod model;
 pub mod pipeline_events;
 pub mod principal;
-pub mod response;
-pub mod run_context;
-pub mod run_report;
-pub mod schema;
+pub mod providers;
+pub mod runtime;
 pub mod secret;
 pub mod telemetry;
-pub mod tools;
-pub mod usage;
 pub mod validation;
 
-pub use auth::Auth;
-pub use batch::{BatchResultItem, BatchStatus};
 pub use bless::{Assert, Bless, BlessError, BlessOutcome, Codec, Drift, MatchTier};
-pub use cache::{CacheDirective, CacheHitInfo, ProviderCacheHandle, systemtime_millis};
-pub use capabilities::{
-    Capabilities, InterfaceKind, Modality, PromptCacheKind, StructuredOutputMode,
-};
-pub use chat::{
-    CapabilityRequirements, ChatRequest, CompatibilityCheck, CompatibilityReason, ContentBlock,
-    ImageData, Message,
-};
 pub use content_ref::ContentRef;
-pub use context::{CancellationToken, RequestContext};
-pub use error::{ErrorClass, ProviderError, ProviderErrorKind};
-pub use events::{ChatChunk, ChatEvent, PartialUsage, StopReason};
-pub use http_extras::HttpProviderExtras;
 pub use ids::{
     AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId,
     TenantId, TraceId, TrajectoryId,
 };
-pub use model::{ModelHint, ModelTier, ThinkingMode};
 pub use pipeline_events::{
     CallResult, EvaluationScored, LlmCallFinished, PersistenceMode, PipelineEvent,
 };
 pub use principal::{Principal, PrincipalKind, Scope};
-pub use response::{ChatResponse, ChatResponseBuilder};
-pub use run_context::{RUN_CONTEXT, spawn_with_context};
-pub use run_report::{AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus};
-pub use schema::JsonSchema;
+pub use providers::auth::Auth;
+pub use providers::cache::{CacheDirective, CacheHitInfo, ProviderCacheHandle, systemtime_millis};
+pub use providers::chat::{
+    CapabilityRequirements, ChatRequest, CompatibilityCheck, CompatibilityReason, ContentBlock,
+    ImageData, Message,
+};
+pub use providers::context::{CancellationToken, RequestContext};
+pub use providers::error::{ErrorClass, ProviderError, ProviderErrorKind};
+pub use providers::events::{ChatChunk, ChatEvent, PartialUsage, StopReason};
+pub use providers::http_extras::HttpProviderExtras;
+pub use providers::model::{ModelHint, ModelTier, ThinkingMode};
+pub use providers::provider_profile::{
+    InterfaceKind, Modality, PromptCacheKind, ProviderProfile, StructuredOutputMode,
+};
+pub use providers::response::{ChatResponse, ChatResponseBuilder};
+pub use providers::schema::JsonSchema;
+pub use providers::tools::{ToolCall, ToolChoice, ToolSpec};
+pub use providers::usage::{CostUsd, Pricing, Usage};
+pub use runtime::batch::{BatchResultItem, BatchStatus};
+pub use runtime::run_context::{RUN_CONTEXT, spawn_with_context};
+pub use runtime::run_report::{
+    AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus,
+};
 pub use secret::{SecretRef, SecretString};
 pub use telemetry::{RetryAttempt, SharedTelemetry, TelemetryAccumulator, new_shared_telemetry};
-pub use tools::{ToolCall, ToolChoice, ToolSpec};
-pub use usage::{CostUsd, Pricing, Usage};
 pub use validation::{
     OutcomeSummary, SharedValidationOutcome, ValidationOutcome, ValidationOutcomeRecord,
     ValidationReason, ValidationSummary, new_shared_validation_outcome,
 };
+
+// ── Module paths kept reachable ────────────────────────────────────────────
+//
+// Consumers name almost everything flat (`tars_types::ChatRequest`), but three
+// module paths appear in the tree and one of them is now a directory down.
+// Re-exporting the module — not just its items — keeps `tars_types::error::…`
+// resolving after the move.
+pub use providers::error;
+pub use providers::provider_profile as capabilities;

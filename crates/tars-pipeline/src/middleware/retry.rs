@@ -340,13 +340,13 @@ mod tests {
     use futures::StreamExt;
     use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{Capabilities, ChatEvent, Pricing, ProviderId};
+    use tars_types::{ChatEvent, Pricing, ProviderId, ProviderProfile};
 
     /// A fake `LlmProvider` whose first N calls return an error of the
     /// caller's choosing; subsequent calls delegate to a Mock provider.
     struct FailNTimes {
         id: ProviderId,
-        caps: Capabilities,
+        caps: ProviderProfile,
         remaining: AtomicU32,
         error_factory: Box<dyn Fn() -> ProviderError + Send + Sync>,
         ok_inner: Arc<dyn LlmProvider>,
@@ -358,7 +358,7 @@ mod tests {
         fn id(&self) -> &ProviderId {
             &self.id
         }
-        fn capabilities(&self) -> &Capabilities {
+        fn capabilities(&self) -> &ProviderProfile {
             &self.caps
         }
         async fn stream(
@@ -393,7 +393,7 @@ mod tests {
         let observed = Arc::new(AtomicU32::new(0));
         let failer: Arc<dyn LlmProvider> = Arc::new(FailNTimes {
             id: ProviderId::new("failer"),
-            caps: Capabilities::text_only_baseline(Pricing::default()),
+            caps: ProviderProfile::text_only_baseline(Pricing::default()),
             remaining: AtomicU32::new(fails),
             error_factory: Box::new(err),
             ok_inner: mock,

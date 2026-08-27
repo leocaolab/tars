@@ -409,13 +409,13 @@ mod tests {
     use tars_cache::MemoryCacheRegistry;
     use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{Capabilities, Pricing, Usage};
+    use tars_types::{Pricing, ProviderProfile, Usage};
 
     /// A counting wrapper around a MockProvider so we can assert the
     /// inner provider was (or wasn't) called.
     struct CountingProvider {
         id: ProviderId,
-        caps: Capabilities,
+        caps: ProviderProfile,
         inner: Arc<dyn LlmProvider>,
         calls: Arc<AtomicU32>,
     }
@@ -425,7 +425,7 @@ mod tests {
         fn id(&self) -> &ProviderId {
             &self.id
         }
-        fn capabilities(&self) -> &Capabilities {
+        fn capabilities(&self) -> &ProviderProfile {
             &self.caps
         }
         async fn stream(
@@ -456,7 +456,7 @@ mod tests {
         let counter = Arc::new(AtomicU32::new(0));
         let counting: Arc<dyn LlmProvider> = Arc::new(CountingProvider {
             id: ProviderId::new("counting"),
-            caps: Capabilities::text_only_baseline(Pricing::default()),
+            caps: ProviderProfile::text_only_baseline(Pricing::default()),
             inner: provider,
             calls: counter.clone(),
         });

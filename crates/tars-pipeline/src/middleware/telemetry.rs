@@ -213,7 +213,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{Capabilities, Pricing, ProviderId, StopReason, Usage};
+    use tars_types::{Pricing, ProviderId, ProviderProfile, StopReason, Usage};
     use tracing::Subscriber;
     use tracing::field::{Field, Visit};
     use tracing_subscriber::Registry;
@@ -426,7 +426,7 @@ mod tests {
     /// opens successfully, yields a few events, then errors).
     struct ScriptedProvider {
         id: ProviderId,
-        caps: Capabilities,
+        caps: ProviderProfile,
         events: Mutex<Option<Vec<Result<ChatEvent, ProviderError>>>>,
     }
 
@@ -434,7 +434,7 @@ mod tests {
         fn new(events: Vec<Result<ChatEvent, ProviderError>>) -> Arc<Self> {
             Arc::new(Self {
                 id: ProviderId::new("scripted"),
-                caps: Capabilities::text_only_baseline(Pricing::default()),
+                caps: ProviderProfile::text_only_baseline(Pricing::default()),
                 events: Mutex::new(Some(events)),
             })
         }
@@ -445,7 +445,7 @@ mod tests {
         fn id(&self) -> &ProviderId {
             &self.id
         }
-        fn capabilities(&self) -> &Capabilities {
+        fn capabilities(&self) -> &ProviderProfile {
             &self.caps
         }
         async fn stream(

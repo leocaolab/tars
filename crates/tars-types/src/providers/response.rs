@@ -3,10 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cache::CacheHitInfo;
-use crate::events::{ChatEvent, StopReason};
-use crate::tools::ToolCall;
-use crate::usage::Usage;
+use crate::providers::cache::CacheHitInfo;
+use crate::providers::events::{ChatEvent, StopReason};
+use crate::providers::tools::ToolCall;
+use crate::providers::usage::Usage;
 use crate::validation::ValidationSummary;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

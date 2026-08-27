@@ -427,7 +427,7 @@ pub trait ResponseJsonExt {
     /// [`decode_json`]; see it for the mode semantics.
     ///
     /// `mode` is the [`StructuredOutputMode`] the request/provider used
-    /// (from the provider's [`Capabilities`](tars_types::capabilities::Capabilities)),
+    /// (from the provider's [`ProviderProfile`](tars_types::capabilities::ProviderProfile)),
     /// so the caller — which knows how the response was produced — tells
     /// the decoder whether `text` is clean JSON or chatty prose.
     fn json<T: DeserializeOwned>(&self, mode: StructuredOutputMode) -> Result<T, TarsJsonError>;

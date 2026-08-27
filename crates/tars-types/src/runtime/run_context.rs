@@ -31,7 +31,7 @@
 
 use tokio::task::JoinHandle;
 
-use crate::context::RequestContext;
+use crate::providers::context::RequestContext;
 
 tokio::task_local! {
     /// The current operation's [`RequestContext`] — ids only (tenant /

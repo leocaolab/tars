@@ -31,8 +31,8 @@ use futures::Stream;
 use tokio::sync::OnceCell;
 
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, ChatResponse, Modality, PromptCacheKind, ProviderError,
-    StructuredOutputMode,
+    ChatEvent, ChatRequest, ChatResponse, Modality, PromptCacheKind, ProviderError,
+    ProviderProfile, StructuredOutputMode,
 };
 
 use crate::error::{classify_sdk_error, classify_stream_event_error, classify_stream_send_error};
@@ -170,11 +170,11 @@ impl BedrockClient {
 /// Conservative default capability descriptor. Bedrock hosts many model
 /// families; these defaults suit the common Claude/Nova chat case and can
 /// be overridden per-provider by the caller.
-pub fn default_capabilities() -> Capabilities {
+pub fn default_capabilities() -> ProviderProfile {
     let mut modalities_in = HashSet::new();
     modalities_in.insert(Modality::Text);
     modalities_in.insert(Modality::Image);
-    Capabilities {
+    ProviderProfile {
         interface: tars_types::InterfaceKind::Api,
         max_context_tokens: Some(200_000),
         max_output_tokens: Some(8_192),

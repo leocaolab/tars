@@ -87,7 +87,7 @@ pub fn llamacpp_local(
 /// Provider-level caps from the DB (`data/provider.toml`) `llamacpp` block. No
 /// model rows (the user loads the GGUF), so context/output come out `None`;
 /// `CapabilitiesOverrides` set the real window per deployment.
-fn llamacpp_default_capabilities() -> tars_types::Capabilities {
+fn llamacpp_default_capabilities() -> tars_types::ProviderProfile {
     tars_config::capabilities_for("llamacpp", "")
 }
 

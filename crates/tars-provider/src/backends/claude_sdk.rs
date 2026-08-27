@@ -51,7 +51,7 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
 
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, ProviderId,
+    ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, ProviderId, ProviderProfile,
     RequestContext, StopReason, Usage,
 };
 
@@ -84,7 +84,7 @@ pub struct ClaudeSdkProviderBuilder {
     script_path: Option<String>,
     default_model: Option<String>,
     timeout: Duration,
-    capabilities: Option<Capabilities>,
+    capabilities: Option<ProviderProfile>,
 }
 
 impl ClaudeSdkProviderBuilder {
@@ -103,7 +103,7 @@ impl ClaudeSdkProviderBuilder {
     builder_setter!(script_path: into_opt String);
     builder_setter!(default_model: into_opt String);
     builder_setter!(timeout: Duration);
-    builder_setter!(capabilities: opt Capabilities);
+    builder_setter!(capabilities: opt ProviderProfile);
 
     pub fn build(self) -> Arc<ClaudeSdkProvider> {
         // Builders for the other CLI-shaped backends (ClaudeCli, GeminiCli)
@@ -125,7 +125,7 @@ impl ClaudeSdkProviderBuilder {
 }
 
 /// Assembled from the provider DB (`data/provider.toml`) `claude_sdk` block.
-fn default_capabilities() -> Capabilities {
+fn default_capabilities() -> ProviderProfile {
     tars_config::capabilities_for("claude_sdk", "")
 }
 
@@ -135,7 +135,7 @@ pub struct ClaudeSdkProvider {
     script_path: Option<String>,
     default_model: Option<String>,
     timeout: Duration,
-    capabilities: Capabilities,
+    capabilities: ProviderProfile,
     /// Lazily-initialized child session. `None` until the first
     /// `stream()` call (or after a child crash that the reader task
     /// noticed and cleared).
@@ -148,7 +148,7 @@ impl LlmProvider for ClaudeSdkProvider {
         &self.id
     }
 
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
     }
 

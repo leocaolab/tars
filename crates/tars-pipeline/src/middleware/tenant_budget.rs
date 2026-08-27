@@ -44,7 +44,7 @@ use tokio::sync::Mutex;
 
 use tars_provider::LlmEventStream;
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, RequestContext, TenantId,
+    ChatEvent, ChatRequest, Pricing, ProviderError, ProviderProfile, RequestContext, TenantId,
 };
 
 use crate::middleware::Middleware;
@@ -188,7 +188,7 @@ pub struct TenantBudgetMiddleware {
 
 impl TenantBudgetMiddleware {
     /// Construct with provider capability snapshot — canonical caller path.
-    pub fn new(store: Arc<dyn BudgetStore>, capabilities: &Capabilities) -> Self {
+    pub fn new(store: Arc<dyn BudgetStore>, capabilities: &ProviderProfile) -> Self {
         Self {
             store,
             pricing: capabilities.pricing,
@@ -421,7 +421,7 @@ mod tests {
 
     use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{Capabilities, ProviderId, StopReason, Usage};
+    use tars_types::{ProviderId, ProviderProfile, StopReason, Usage};
 
     fn priced(input: f64, output: f64) -> Pricing {
         Pricing {
@@ -437,7 +437,7 @@ mod tests {
         let observed = Arc::new(AtomicU32::new(0));
         struct Count {
             id: ProviderId,
-            caps: Capabilities,
+            caps: ProviderProfile,
             inner: Arc<dyn LlmProvider>,
             observed: Arc<AtomicU32>,
         }
@@ -446,7 +446,7 @@ mod tests {
             fn id(&self) -> &ProviderId {
                 &self.id
             }
-            fn capabilities(&self) -> &Capabilities {
+            fn capabilities(&self) -> &ProviderProfile {
                 &self.caps
             }
             async fn stream(
@@ -473,7 +473,7 @@ mod tests {
         (
             Arc::new(Count {
                 id: ProviderId::new("count"),
-                caps: Capabilities::text_only_baseline(Pricing::default()),
+                caps: ProviderProfile::text_only_baseline(Pricing::default()),
                 inner: mock,
                 observed: observed.clone(),
             }) as Arc<dyn LlmProvider>,
@@ -597,9 +597,9 @@ mod tests {
                 static ID: std::sync::OnceLock<ProviderId> = std::sync::OnceLock::new();
                 ID.get_or_init(|| ProviderId::new("immediate-error"))
             }
-            fn capabilities(&self) -> &Capabilities {
-                static CAPS: std::sync::OnceLock<Capabilities> = std::sync::OnceLock::new();
-                CAPS.get_or_init(|| Capabilities::text_only_baseline(Pricing::default()))
+            fn capabilities(&self) -> &ProviderProfile {
+                static CAPS: std::sync::OnceLock<ProviderProfile> = std::sync::OnceLock::new();
+                CAPS.get_or_init(|| ProviderProfile::text_only_baseline(Pricing::default()))
             }
             async fn stream(
                 self: Arc<Self>,

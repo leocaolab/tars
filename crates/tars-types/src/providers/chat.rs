@@ -2,11 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cache::CacheDirective;
-use crate::capabilities::{Capabilities, StructuredOutputMode};
-use crate::model::ThinkingMode;
-use crate::schema::JsonSchema;
-use crate::tools::{ToolChoice, ToolSpec};
+use crate::providers::cache::CacheDirective;
+use crate::providers::model::ThinkingMode;
+use crate::providers::provider_profile::{ProviderProfile, StructuredOutputMode};
+use crate::providers::schema::JsonSchema;
+use crate::providers::tools::{ToolChoice, ToolSpec};
 
 /// A complete chat request. Provider-agnostic **and model-agnostic**:
 /// the concrete model is provider-specific, so it does NOT live on the
@@ -97,7 +97,7 @@ impl ChatRequest {
         self
     }
 
-    /// Check whether a provider with the given [`Capabilities`] can serve
+    /// Check whether a provider with the given [`ProviderProfile`] can serve
     /// this request. Used by routing's pre-flight check (B-31) to skip
     /// fallback candidates that can't honour the request's feature
     /// requirements (tools / vision / thinking / structured output /
@@ -120,7 +120,7 @@ impl ChatRequest {
     /// the routing layer to skip a candidate that *would* have
     /// worked, which is worse than letting the provider return its
     /// own permanent error.
-    pub fn compatibility_check(&self, caps: &Capabilities) -> CompatibilityCheck {
+    pub fn compatibility_check(&self, caps: &ProviderProfile) -> CompatibilityCheck {
         let mut reasons = Vec::new();
 
         // Tools — non-empty tool list requires tool_use support.
@@ -135,7 +135,7 @@ impl ChatRequest {
 
         // Structured output — schema enforcement of any kind requires
         // a non-None mode. ToolUseEmulation also implicitly needs
-        // tool_use; that constraint is enforced by Capabilities::validate
+        // tool_use; that constraint is enforced by ProviderProfile::validate
         // at construction time, so we don't double-check here.
         if self.structured_output.is_some()
             && matches!(caps.supports_structured_output, StructuredOutputMode::None)
@@ -252,7 +252,7 @@ pub enum CompatibilityCheck {
     Incompatible { reasons: Vec<CompatibilityReason> },
 }
 
-/// Specific reason a provider's [`Capabilities`] don't cover a
+/// Specific reason a provider's [`ProviderProfile`] don't cover a
 /// [`ChatRequest`]'s feature requirements. Each variant is
 /// independently match-able so callers can branch programmatically
 /// (e.g., "drop tools and retry" vs "fail hard on context overflow")
@@ -349,7 +349,7 @@ impl CompatibilityReason {
 }
 
 /// Declarative requirements describing what features a caller needs
-/// from a provider. Used by [`Capabilities::check_requirements`] for
+/// from a provider. Used by [`ProviderProfile::check_requirements`] for
 /// **config-time** capability checks — e.g. "at startup, before any
 /// request is built, verify that the provider configured for the
 /// `critic` role supports tools + thinking".
@@ -379,7 +379,7 @@ pub struct CapabilityRequirements {
     pub estimated_max_output_tokens: u32,
 }
 
-impl Capabilities {
+impl ProviderProfile {
     /// Check whether these capabilities satisfy a set of caller-declared
     /// [`CapabilityRequirements`]. Returns the same
     /// [`CompatibilityCheck`] verdict as
@@ -461,7 +461,7 @@ pub enum Message {
         #[serde(default)]
         content: Vec<ContentBlock>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tool_calls: Vec<crate::tools::ToolCall>,
+        tool_calls: Vec<crate::providers::tools::ToolCall>,
     },
     Tool {
         tool_call_id: String,
@@ -593,15 +593,15 @@ mod tests {
 
     // ── compatibility_check tests (B-31) ────────────────────────────
 
-    use crate::capabilities::{Capabilities, Modality, PromptCacheKind};
-    use crate::schema::JsonSchema;
-    use crate::usage::Pricing;
+    use crate::providers::provider_profile::{Modality, PromptCacheKind, ProviderProfile};
+    use crate::providers::schema::JsonSchema;
+    use crate::providers::usage::Pricing;
     use std::collections::HashSet;
 
-    fn caps_minimal() -> Capabilities {
+    fn caps_minimal() -> ProviderProfile {
         let mut text_only = HashSet::new();
         text_only.insert(Modality::Text);
-        Capabilities {
+        ProviderProfile {
             interface: crate::InterfaceKind::Http,
             max_context_tokens: Some(32_768),
             max_output_tokens: Some(4096),
@@ -619,11 +619,11 @@ mod tests {
         }
     }
 
-    fn caps_full() -> Capabilities {
+    fn caps_full() -> ProviderProfile {
         let mut both = HashSet::new();
         both.insert(Modality::Text);
         both.insert(Modality::Image);
-        Capabilities {
+        ProviderProfile {
             interface: crate::InterfaceKind::Http,
             max_context_tokens: Some(200_000),
             max_output_tokens: Some(8192),
@@ -652,7 +652,7 @@ mod tests {
 
     #[test]
     fn compat_tools_blocked_by_no_tool_support() {
-        use crate::tools::ToolSpec;
+        use crate::providers::tools::ToolSpec;
         let mut req = ChatRequest::user("hi");
         req.tools.push(ToolSpec {
             name: "x".into(),
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn compat_tools_pass_when_provider_supports() {
-        use crate::tools::ToolSpec;
+        use crate::providers::tools::ToolSpec;
         let mut req = ChatRequest::user("hi");
         req.tools.push(ToolSpec {
             name: "x".into(),
@@ -776,7 +776,7 @@ mod tests {
     #[test]
     fn compat_aggregates_multiple_reasons() {
         // Tools + thinking + structured + vision all rejected at once.
-        use crate::tools::ToolSpec;
+        use crate::providers::tools::ToolSpec;
         let mut req = ChatRequest {
             system: None,
             messages: vec![Message::User {
@@ -881,11 +881,11 @@ mod tests {
     // ── Boundary cases ─────────────────────────────────────────────
 
     /// All-zeroed capabilities for boundary testing — represents
-    /// "the most-restricted possible provider". Capabilities itself
+    /// "the most-restricted possible provider". ProviderProfile itself
     /// doesn't impl `Default` (would let invalid configs through), so
     /// build via `text_only_baseline` then zero out supports_* fields.
-    fn caps_zero() -> Capabilities {
-        let mut c = Capabilities::text_only_baseline(Pricing::default());
+    fn caps_zero() -> ProviderProfile {
+        let mut c = ProviderProfile::text_only_baseline(Pricing::default());
         c.max_context_tokens = Some(0);
         c.max_output_tokens = Some(0);
         c.supports_tool_use = false;
@@ -901,7 +901,7 @@ mod tests {
     fn compat_baseline_capabilities_text_only_request_passes() {
         // `text_only_baseline()` provides 32k context + 4k output +
         // text-only modalities. A trivial text request should pass.
-        let caps = Capabilities::text_only_baseline(Pricing::default());
+        let caps = ProviderProfile::text_only_baseline(Pricing::default());
         let req = ChatRequest::user("hi");
         match req.compatibility_check(&caps) {
             CompatibilityCheck::Compatible => {}
@@ -916,7 +916,7 @@ mod tests {
         // Hard adversarial case: provider with everything OFF, request
         // with everything ON. Want: ALL reasons aggregated, no early-
         // exit on first failure. Use 6 features simultaneously.
-        use crate::tools::ToolSpec;
+        use crate::providers::tools::ToolSpec;
         let zero_caps = caps_zero(); // everything off, max_*_tokens = 0
         let req = ChatRequest {
             system: Some("x".repeat(200_000)), // overflow context window

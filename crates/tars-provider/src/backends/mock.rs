@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use futures::stream;
 
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, RequestContext,
+    ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, ProviderProfile, RequestContext,
     StopReason, Usage,
 };
 
@@ -61,15 +61,15 @@ struct MockState {
 
 pub struct MockProvider {
     id: ProviderId,
-    capabilities: Capabilities,
+    capabilities: ProviderProfile,
     state: Mutex<MockState>,
 }
 
 /// The mock's code-defined capabilities: a text-only baseline stamped with
 /// `InterfaceKind::Mock` (no real call is ever placed). Mock/cassette keep
 /// code-defined caps — they are NOT in `data/provider.toml`.
-fn mock_capabilities() -> Capabilities {
-    let mut c = Capabilities::text_only_baseline(Pricing::default());
+fn mock_capabilities() -> ProviderProfile {
+    let mut c = ProviderProfile::text_only_baseline(Pricing::default());
     c.interface = tars_types::InterfaceKind::Mock;
     c
 }
@@ -154,7 +154,7 @@ impl LlmProvider for MockProvider {
         &self.id
     }
 
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
     }
 

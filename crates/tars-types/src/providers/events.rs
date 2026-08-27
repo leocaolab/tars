@@ -3,8 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cache::CacheHitInfo;
-use crate::usage::Usage;
+use crate::providers::cache::CacheHitInfo;
+use crate::providers::usage::Usage;
 
 pub type ChatChunk = ChatEvent; // legacy alias; some tests prefer this name
 

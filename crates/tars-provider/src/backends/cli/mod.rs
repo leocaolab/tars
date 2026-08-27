@@ -46,7 +46,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, ProviderError, ProviderId, RequestContext, StopReason,
+    ChatEvent, ChatRequest, ProviderError, ProviderId, ProviderProfile, RequestContext, StopReason,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
@@ -65,7 +65,7 @@ pub use subprocess::{RealSubprocessRunner, SharedCliRunner};
 /// everything CLI-specific is behind the dialect.
 pub struct AgentCliBackend {
     id: ProviderId,
-    capabilities: Capabilities,
+    capabilities: ProviderProfile,
     dialect: Arc<dyn CliDialect>,
     runner: Arc<dyn SubprocessRunner>,
 }
@@ -73,7 +73,7 @@ pub struct AgentCliBackend {
 impl AgentCliBackend {
     pub fn new(
         id: ProviderId,
-        capabilities: Capabilities,
+        capabilities: ProviderProfile,
         dialect: Arc<dyn CliDialect>,
         runner: Arc<dyn SubprocessRunner>,
     ) -> Self {
@@ -92,7 +92,7 @@ impl LlmProvider for AgentCliBackend {
         &self.id
     }
 
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
     }
 
@@ -226,7 +226,7 @@ mod tests {
             true,
             Vec::new(),
         ));
-        let caps = Capabilities::text_only_baseline(tars_types::Pricing::default());
+        let caps = ProviderProfile::text_only_baseline(tars_types::Pricing::default());
         let backend = Arc::new(AgentCliBackend::new(
             "agent_cli_test".into(),
             caps,
@@ -325,7 +325,7 @@ mod tests {
         ));
         let backend = Arc::new(AgentCliBackend::new(
             "c".into(),
-            Capabilities::text_only_baseline(tars_types::Pricing::default()),
+            ProviderProfile::text_only_baseline(tars_types::Pricing::default()),
             dialect,
             Arc::new(ErrRunner),
         ));
@@ -355,7 +355,7 @@ mod tests {
             "agy".into(),
             std::time::Duration::from_secs(300),
         ));
-        let caps = Capabilities::text_only_baseline(tars_types::Pricing::default());
+        let caps = ProviderProfile::text_only_baseline(tars_types::Pricing::default());
         let backend = Arc::new(AgentCliBackend::new(
             "agy_test".into(),
             caps,

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, Capabilities, ChatRequest,
-    ProviderError, ProviderId, RequestContext,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ChatRequest, ProviderError, ProviderId,
+    ProviderProfile, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};
@@ -26,7 +26,7 @@ pub struct GeminiProviderBuilder {
     id: ProviderId,
     base_url: String,
     auth: Auth,
-    capabilities: Option<Capabilities>,
+    capabilities: Option<ProviderProfile>,
     extras: HttpProviderExtras,
 }
 
@@ -42,7 +42,7 @@ impl GeminiProviderBuilder {
     }
 
     builder_setter!(base_url: into String);
-    builder_setter!(capabilities: opt Capabilities);
+    builder_setter!(capabilities: opt ProviderProfile);
     builder_setter!(extras: HttpProviderExtras);
 
     pub fn build(
@@ -67,7 +67,7 @@ impl GeminiProviderBuilder {
 /// model. Gemini was the ONE backend that already read the KB by hand
 /// (`data/models.toml`); that bespoke read collapses into the shared
 /// `capabilities_for` assembler.
-fn default_capabilities() -> Capabilities {
+fn default_capabilities() -> ProviderProfile {
     tars_config::capabilities_for("gemini", "")
 }
 
@@ -77,7 +77,7 @@ pub struct GeminiProvider {
     auth_resolver: Arc<dyn AuthResolver>,
     auth: Auth,
     adapter: Arc<GeminiAdapter>,
-    capabilities: Capabilities,
+    capabilities: ProviderProfile,
 }
 
 #[async_trait]
@@ -85,7 +85,7 @@ impl LlmProvider for GeminiProvider {
     fn id(&self) -> &ProviderId {
         &self.id
     }
-    fn capabilities(&self) -> &Capabilities {
+    fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
     }
     // Boundary log — any Err exit auto-emits with provider/model

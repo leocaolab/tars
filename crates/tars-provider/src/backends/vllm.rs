@@ -101,7 +101,7 @@ pub fn vllm_local(
 /// block carries no model rows (the user picks the served model), so the
 /// per-model facts (context/output window) come out `None` — no ceiling to
 /// enforce — and the user's `CapabilitiesOverrides` correct them.
-fn local_openai_compat_capabilities() -> tars_types::Capabilities {
+fn local_openai_compat_capabilities() -> tars_types::ProviderProfile {
     tars_config::capabilities_for("vllm", "")
 }
 

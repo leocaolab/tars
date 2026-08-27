@@ -366,9 +366,9 @@ struct CapabilitiesSummary {
 }
 
 impl CapabilitiesSummary {
-    fn from(caps: &tars_types::Capabilities) -> Self {
+    fn from(caps: &tars_types::ProviderProfile) -> Self {
         Self {
-            // Capabilities uses u32 for token limits; widen to u64 for
+            // ProviderProfile uses u32 for token limits; widen to u64 for
             // Python-friendly large-number arithmetic (Python ints are
             // arbitrary-precision but other Usage fields are u64, so
             // staying consistent avoids type-juggling on the Python side).
@@ -512,7 +512,7 @@ pub(crate) struct Pipeline {
     /// chain is (re)assembled per call — the leaf binds the model.
     factory: Arc<dyn Fn(&str) -> LlmService + Send + Sync>,
     capabilities_summary: CapabilitiesSummary,
-    capabilities_full: tars_types::Capabilities,
+    capabilities_full: tars_types::ProviderProfile,
     layer_names: Vec<String>,
 }
 

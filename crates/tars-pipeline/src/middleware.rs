@@ -403,11 +403,11 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         use std::time::Duration;
         use tars_provider::{LlmEventStream, LlmProvider};
-        use tars_types::{Capabilities, Pricing, ProviderError, ProviderId};
+        use tars_types::{Pricing, ProviderError, ProviderId, ProviderProfile};
 
         struct AlwaysErr {
             id: ProviderId,
-            caps: Capabilities,
+            caps: ProviderProfile,
             hits: Arc<AtomicU32>,
         }
         #[async_trait]
@@ -415,7 +415,7 @@ mod tests {
             fn id(&self) -> &ProviderId {
                 &self.id
             }
-            fn capabilities(&self) -> &Capabilities {
+            fn capabilities(&self) -> &ProviderProfile {
                 &self.caps
             }
             async fn stream(
@@ -432,7 +432,7 @@ mod tests {
         let hits = Arc::new(AtomicU32::new(0));
         let provider: Arc<dyn LlmProvider> = Arc::new(AlwaysErr {
             id: ProviderId::new("p"),
-            caps: Capabilities::text_only_baseline(Pricing::default()),
+            caps: ProviderProfile::text_only_baseline(Pricing::default()),
             hits: hits.clone(),
         });
         let provider = crate::middleware::circuit_breaker::CircuitBreaker::wrap(

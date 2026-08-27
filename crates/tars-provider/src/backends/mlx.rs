@@ -90,7 +90,7 @@ fn normalize_auth(auth: Auth) -> Auth {
 /// Provider-level caps from the DB (`data/provider.toml`) `mlx` block. No model
 /// rows (the user picks the loaded model), so context/output come out `None`;
 /// `CapabilitiesOverrides` set the real window per deployment.
-fn mlx_default_capabilities() -> tars_types::Capabilities {
+fn mlx_default_capabilities() -> tars_types::ProviderProfile {
     tars_config::capabilities_for("mlx", "")
 }
 

@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::usage::Pricing;
+use crate::providers::usage::Pricing;
 
 /// How tars reaches and DRIVES a provider — the interface, not the wire dialect.
 ///
@@ -47,7 +47,7 @@ fn default_interface() -> InterfaceKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Capabilities {
+pub struct ProviderProfile {
     /// How tars reaches and drives this provider (declared, never detected).
     ///
     /// Defaults to `Http` when absent so serialized descriptors predating this
@@ -81,9 +81,9 @@ pub struct Capabilities {
     pub pricing: Pricing,
 }
 
-/// Validation error for `Capabilities::validate`.
+/// Validation error for `ProviderProfile::validate`.
 #[derive(Debug, thiserror::Error)]
-pub enum CapabilityError {
+pub enum ProviderProfileError {
     #[error("modalities_in must be non-empty")]
     EmptyModalitiesIn,
     #[error("modalities_out must be non-empty")]
@@ -94,26 +94,26 @@ pub enum CapabilityError {
     ParallelToolCallsNeedsToolUse,
 }
 
-impl Capabilities {
+impl ProviderProfile {
     /// Reject internally inconsistent capability descriptors. Cheap;
     /// call once when a Provider is constructed. Audit findings
     /// `tars-types-src-capabilities-{9,14}`.
-    pub fn validate(&self) -> Result<(), CapabilityError> {
+    pub fn validate(&self) -> Result<(), ProviderProfileError> {
         if self.modalities_in.is_empty() {
-            return Err(CapabilityError::EmptyModalitiesIn);
+            return Err(ProviderProfileError::EmptyModalitiesIn);
         }
         if self.modalities_out.is_empty() {
-            return Err(CapabilityError::EmptyModalitiesOut);
+            return Err(ProviderProfileError::EmptyModalitiesOut);
         }
         if matches!(
             self.supports_structured_output,
             StructuredOutputMode::ToolUseEmulation
         ) && !self.supports_tool_use
         {
-            return Err(CapabilityError::ToolUseEmulationNeedsToolUse);
+            return Err(ProviderProfileError::ToolUseEmulationNeedsToolUse);
         }
         if self.supports_parallel_tool_calls && !self.supports_tool_use {
-            return Err(CapabilityError::ParallelToolCallsNeedsToolUse);
+            return Err(ProviderProfileError::ParallelToolCallsNeedsToolUse);
         }
         Ok(())
     }
@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn text_baseline_has_text_modalities() {
-        let caps = Capabilities::text_only_baseline(Pricing::default());
+        let caps = ProviderProfile::text_only_baseline(Pricing::default());
         assert!(caps.modalities_in.contains(&Modality::Text));
         assert!(caps.modalities_out.contains(&Modality::Text));
         assert_eq!(caps.modalities_in.len(), 1);
@@ -199,29 +199,29 @@ mod tests {
 
     #[test]
     fn validate_rejects_empty_modalities() {
-        let mut caps = Capabilities::text_only_baseline(Pricing::default());
+        let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
         caps.modalities_in.clear();
         assert!(matches!(
             caps.validate(),
-            Err(CapabilityError::EmptyModalitiesIn)
+            Err(ProviderProfileError::EmptyModalitiesIn)
         ));
 
-        let mut caps = Capabilities::text_only_baseline(Pricing::default());
+        let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
         caps.modalities_out.clear();
         assert!(matches!(
             caps.validate(),
-            Err(CapabilityError::EmptyModalitiesOut)
+            Err(ProviderProfileError::EmptyModalitiesOut)
         ));
     }
 
     #[test]
     fn validate_rejects_tool_use_emulation_without_tool_use() {
-        let mut caps = Capabilities::text_only_baseline(Pricing::default());
+        let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
         caps.supports_structured_output = StructuredOutputMode::ToolUseEmulation;
         // supports_tool_use is false from the baseline.
         assert!(matches!(
             caps.validate(),
-            Err(CapabilityError::ToolUseEmulationNeedsToolUse)
+            Err(ProviderProfileError::ToolUseEmulationNeedsToolUse)
         ));
 
         caps.supports_tool_use = true;
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn baseline_validates_clean() {
         assert!(
-            Capabilities::text_only_baseline(Pricing::default())
+            ProviderProfile::text_only_baseline(Pricing::default())
                 .validate()
                 .is_ok()
         );

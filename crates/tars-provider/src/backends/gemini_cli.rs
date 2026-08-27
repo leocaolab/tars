@@ -22,7 +22,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tars_types::{Capabilities, ProviderId};
+use tars_types::{ProviderId, ProviderProfile};
 
 use crate::backends::cli::{AgentCliBackend, GeminiCliDialect, SharedCliRunner};
 
@@ -40,7 +40,7 @@ pub struct GeminiCliProviderBuilder {
     id: ProviderId,
     executable: String,
     timeout: Duration,
-    capabilities: Option<Capabilities>,
+    capabilities: Option<ProviderProfile>,
 }
 
 impl GeminiCliProviderBuilder {
@@ -55,7 +55,7 @@ impl GeminiCliProviderBuilder {
 
     builder_setter!(executable: into String);
     builder_setter!(timeout: Duration);
-    builder_setter!(capabilities: opt Capabilities);
+    builder_setter!(capabilities: opt ProviderProfile);
 
     /// Build with the shared buffered runner
     /// ([`SharedCliRunner`](crate::backends::cli::SharedCliRunner)) — spawns
@@ -76,7 +76,7 @@ impl GeminiCliProviderBuilder {
 }
 
 /// Assembled from the provider DB (`data/provider.toml`) `gemini_cli` block.
-fn default_capabilities() -> Capabilities {
+fn default_capabilities() -> ProviderProfile {
     tars_config::capabilities_for("gemini_cli", "")
 }
 

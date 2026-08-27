@@ -526,7 +526,7 @@ fn default_mock_response() -> String {
 }
 
 /// Optional per-provider overrides for the backend's hardcoded
-/// [`tars_types::Capabilities`]. Today fields are limited to the
+/// [`tars_types::ProviderProfile`]. Today fields are limited to the
 /// two numbers users actually need to tune (context + output cap);
 /// the boolean `supports_*` flags can be added later when a real
 /// consumer needs to flip them via TOML (e.g. "this self-hosted
@@ -567,7 +567,7 @@ impl CapabilitiesOverrides {
     /// Apply overrides onto an assembled backend default. A set override wins
     /// over whatever the data file / baseline produced (including `None` = no
     /// ceiling — a user correcting a local model's real window).
-    pub fn apply_to(&self, base: &mut tars_types::Capabilities) {
+    pub fn apply_to(&self, base: &mut tars_types::ProviderProfile) {
         if let Some(n) = self.max_context_tokens {
             base.max_context_tokens = Some(n);
         }
@@ -709,7 +709,7 @@ impl ProviderConfig {
         };
         // Reject explicitly-set zero token caps: a model can't have a
         // zero context window or zero output budget, and a `Some(0)`
-        // would silently corrupt the runtime `Capabilities` via
+        // would silently corrupt the runtime `ProviderProfile` via
         // `apply_to`. `None` (no override) stays valid.
         let check_capabilities = |caps: &CapabilitiesOverrides, sink: &mut Vec<ValidationError>| {
             if matches!(caps.max_context_tokens, Some(0)) {
@@ -1115,7 +1115,8 @@ mod tests {
 
     #[test]
     fn capabilities_overrides_apply_to_replaces_only_set_fields() {
-        let mut base = tars_types::Capabilities::text_only_baseline(tars_types::Pricing::default());
+        let mut base =
+            tars_types::ProviderProfile::text_only_baseline(tars_types::Pricing::default());
         base.max_context_tokens = Some(4096);
         base.max_output_tokens = Some(1024);
 
