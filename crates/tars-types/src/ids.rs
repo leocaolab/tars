@@ -112,7 +112,6 @@ string_id!(
     TraceId,
     "Distributed trace identifier; propagated through all layers."
 );
-string_id!(TaskId, "Task identifier (Doc 04 submit handle).");
 string_id!(TrajectoryId, "Trajectory node identifier (Doc 04 §3.1).");
 string_id!(PrincipalId, "Principal (caller identity) identifier.");
 string_id!(

@@ -35,7 +35,7 @@ pub mod validation;
 
 pub use bless::{Assert, Bless, BlessError, BlessOutcome, Codec, Drift, MatchTier};
 pub use ids::{
-    AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId, TaskId,
+    AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId,
     TenantId, TraceId, TrajectoryId,
 };
 pub use principal::{Principal, PrincipalKind, Scope};
