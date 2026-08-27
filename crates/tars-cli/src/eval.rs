@@ -106,8 +106,8 @@ fn list_dir(path: &Path) -> Result<fs::ReadDir> {
 use tars_pipeline::{
     ChainOpts, JsonShapeValidator, LlmService, MaxLengthValidator, NotEmptyValidator,
 };
-use tars_runtime::trajectory_match::{self, MatchMode, ToolStep};
-use tars_runtime::{
+use tars_eval::trajectory_match::{self, MatchMode, ToolStep};
+use tars_eval::{
     ArgEquivalenceJudge, CheckRunner, Invariant, ValidatorInvariant, args_match_judged,
     ensure_anti_incest,
 };
@@ -758,7 +758,7 @@ fn run_bless(args: EvalBlessArgs) -> Result<()> {
 // ─── eval judge ───────────────────────────────────────────────────────
 
 async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<()> {
-    use tars_runtime::{JudgeItem, LlmJudge, ensure_anti_incest, run_judge_pass};
+    use tars_eval::{JudgeItem, LlmJudge, ensure_anti_incest, run_judge_pass};
     use tars_types::{ProviderId};
 
     let manifest = load_manifest(&args.run)?;
@@ -894,7 +894,7 @@ struct TrajDiff {
     mean_similarity: f64,
     diverging_ids: Vec<String>,
     /// McNemar per `trajectory-match*` check both runs ran.
-    mcnemar: Vec<(String, tars_runtime::McNemarResult)>,
+    mcnemar: Vec<(String, tars_eval::McNemarResult)>,
 }
 
 /// case_id → did this run's `check_name` pass? (only cases that ran it).
@@ -956,7 +956,7 @@ fn compute_traj_diff(a: &EvalRunManifest, b: &EvalRunManifest, mode: MatchMode) 
         .into_iter()
         .map(|name| {
             let r =
-                tars_runtime::mcnemar(&case_check_passmap(a, &name), &case_check_passmap(b, &name));
+                tars_eval::mcnemar(&case_check_passmap(a, &name), &case_check_passmap(b, &name));
             (name, r)
         })
         .collect();
@@ -1188,7 +1188,7 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
         load_judge_report(&args.baseline),
         load_judge_report(&args.candidate),
     ) {
-        use tars_runtime::{JudgeVerdict, mcnemar};
+        use tars_eval::{JudgeVerdict, mcnemar};
         println!();
         println!("quality (judge: {} → {}):", ja.judge_id, jb.judge_id);
         let pa = ja.precision().map(|p| p * 100.0);
@@ -1204,7 +1204,7 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
         }
 
         // Paired McNemar over shared item ids.
-        let to_map = |r: &tars_runtime::JudgeReport| {
+        let to_map = |r: &tars_eval::JudgeReport| {
             r.verdicts
                 .iter()
                 .map(|v| {
@@ -1236,7 +1236,7 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
     Ok(())
 }
 
-fn load_judge_report(dir: &Path) -> Option<tars_runtime::JudgeReport> {
+fn load_judge_report(dir: &Path) -> Option<tars_eval::JudgeReport> {
     let path = dir.join("judge_report.json");
     let body = read_optional_text(&path).ok().flatten()?;
     serde_json::from_str(&body).ok()

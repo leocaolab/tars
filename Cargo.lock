@@ -4417,6 +4417,7 @@ dependencies = [
  "serde_json",
  "tars-cache",
  "tars-config",
+ "tars-eval",
  "tars-melt",
  "tars-pipeline",
  "tars-provider",
@@ -4446,6 +4447,22 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "tars-eval"
+version = "1.9.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "tars-pipeline",
+ "tars-provider",
+ "tars-types",
+ "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 

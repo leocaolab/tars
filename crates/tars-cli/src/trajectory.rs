@@ -26,7 +26,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use tars_runtime::{LocalRuntime, MatchMode, Runtime, ToolStep};
+use tars_eval::{MatchMode, ToolStep};
+use tars_runtime::{AgentEvent, LocalRuntime, Runtime};
 use tars_storage::AgentEventLog;
 use tars_types::TrajectoryId;
 
@@ -196,8 +197,8 @@ async fn score(
             id,
         );
     }
-    let actual = tars_runtime::tool_step_sequence(&events);
-    let s = tars_runtime::trajectory_match::score(&actual, expected, mode);
+    let actual = tool_step_sequence(&events);
+    let s = tars_eval::trajectory_match::score(&actual, expected, mode);
     let passed = s >= threshold;
 
     let actual_names: Vec<&str> = actual.iter().map(|t| t.name.as_str()).collect();
@@ -308,6 +309,32 @@ async fn show(runtime: &LocalRuntime, id: &TrajectoryId, out: &mut dyn Write) ->
         writeln!(out, "{json}").with_context(|| format!("stdout write for event #{i}"))?;
     }
     Ok(())
+}
+
+/// Like [`tool_sequence`] but pairs each tool name with its recorded
+/// arguments (Doc 26 M3'), so `trajectory_match`'s `Args` mode can compare
+/// arguments off a recorded trajectory. A call whose args weren't recorded
+/// (older rows, or a name without a positionally-aligned arg) gets
+/// `Value::Null`.
+fn tool_step_sequence(events: &[AgentEvent]) -> Vec<ToolStep> {
+    use ToolStep;
+    let mut out = Vec::new();
+    for ev in events {
+        if let AgentEvent::LlmCallCaptured {
+            tool_calls,
+            tool_call_args,
+            ..
+        } = ev
+        {
+            for (i, name) in tool_calls.iter().enumerate() {
+                out.push(ToolStep {
+                    name: name.clone(),
+                    args: tool_call_args.get(i).cloned().unwrap_or(serde_json::Value::Null),
+                });
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

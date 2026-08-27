@@ -15,6 +15,7 @@ members = [
     "crates/tars-runtime",
     "crates/tars-tools",
     "crates/tars-cli",
+    "crates/tars-eval",
     "crates/tars-py",
     "crates/tars-node",
     "examples",

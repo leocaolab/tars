@@ -1,0 +1,30 @@
+[package]
+name = "tars-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Eval / quality machinery — judge, checks, metamorphic relations, trajectory scoring (over tars-types + tars-pipeline, no runtime)."
+
+[lints]
+workspace = true
+
+[dependencies]
+tars-types = { path = "../tars-types" }
+tars-pipeline = { path = "../tars-pipeline" }
+
+# Async
+async-trait.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Errors / tracing
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tars-provider = { path = "../tars-provider" }

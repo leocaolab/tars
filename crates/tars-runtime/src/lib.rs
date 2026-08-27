@@ -10,48 +10,26 @@
 //! - [`Session`] — a stateful multi-turn conversation over `LlmService`,
 //!   enforcing role alternation and carrying a budget. The Python and Node
 //!   bindings are its consumers.
-//! - The eval primitives ([`judge`], [`judge_stats`], [`check`],
-//!   [`metamorphic`], [`arg_judge`], [`trajectory_match`]) — scoring that sits
-//!   over the transport and has nothing to do with an agent loop.
 //! - Small helpers with their own reason to exist: [`bind`] (a skill set to
 //!   the tools that back it), [`PromptBuilder`], and [`sync`] wrappers.
 
-pub mod arg_judge;
 mod bind;
-pub mod check;
 mod error;
 mod event;
-pub mod judge;
-pub mod judge_stats;
-pub mod metamorphic;
 mod prompt;
 mod runtime;
 pub mod run_report;
 mod session;
 pub mod sync;
-pub mod trajectory_match;
 
-pub use arg_judge::{ArgEquivalenceJudge, args_match_judged};
 pub use bind::{BindError, bind};
-pub use check::{CheckResult, CheckRunner, Invariant, MembershipInvariant, ValidatorInvariant};
 pub use error::RuntimeError;
-pub use event::{AgentEvent, StepIdempotencyKey, tool_sequence, tool_step_sequence};
-pub use judge::{
-    DEFAULT_JUDGE_PROMPT, Judge, JudgeError, LlmJudge, ensure_anti_incest, run_judge_pass,
-};
-pub use judge_stats::{
-    JudgeItem, JudgeReport, JudgeVerdict, JudgedItem, McNemarResult, mcnemar,
-};
-pub use metamorphic::{
-    DeleteSubstringMutation, DirectionalRelation, GoldenMatch, InvarianceRelation,
-    MetamorphicRelation, Mutation, MutationVerdict, mutation_caught,
-};
+pub use event::{AgentEvent, StepIdempotencyKey, tool_sequence};
 pub use prompt::PromptBuilder;
 pub use runtime::{LocalRuntime, Runtime};
 pub use run_report::build_run_report;
 pub use session::{Budget, Session, SessionError, SessionOptions, Tokenizer, Turn};
 pub use sync::{complete_async, complete_sync, shared_runtime};
-pub use trajectory_match::{MatchMode, ToolStep};
 // Tools live in `tars-tools` now (Doc 23). Re-export the whole contract —
 // including the gate/approval/sandbox seams — so callers that build gated
 // Sessions name it from one place.
