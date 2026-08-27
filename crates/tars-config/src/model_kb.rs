@@ -279,39 +279,52 @@ impl ProviderDef {
             .find_model(model_id)
             .or_else(|| self.default.as_deref().and_then(|d| self.find_model(d)));
 
-        let (max_context_tokens, max_output_tokens, supports_vision, supports_thinking, mods_in, pricing) =
-            match model {
-                Some(m) => {
-                    let mut mods_in: HashSet<Modality> =
-                        m.modalities.iter().filter_map(kb_to_modality).collect();
-                    // modalities_in must be non-empty (Capabilities::validate).
-                    if mods_in.is_empty() {
-                        mods_in.insert(Modality::Text);
-                    }
-                    let mut pricing = m.pricing();
-                    pricing.cache_creation_per_million =
-                        cap.cache_creation_per_million.unwrap_or(0.0);
-                    pricing.thinking_per_million = cap.thinking_per_million.unwrap_or(0.0);
-                    (
-                        m.context.map(|c| c as u32),
-                        m.max_output.map(|o| o as u32),
-                        mods_in.contains(&Modality::Image),
-                        !matches!(m.thinking, Thinking::None),
-                        mods_in,
-                        pricing,
-                    )
+        let (
+            max_context_tokens,
+            max_output_tokens,
+            supports_vision,
+            supports_thinking,
+            mods_in,
+            pricing,
+        ) = match model {
+            Some(m) => {
+                let mut mods_in: HashSet<Modality> =
+                    m.modalities.iter().filter_map(kb_to_modality).collect();
+                // modalities_in must be non-empty (Capabilities::validate).
+                if mods_in.is_empty() {
+                    mods_in.insert(Modality::Text);
                 }
-                None => {
-                    // No model row (local provider, empty model list). No
-                    // per-model facts to enforce; keep the provider-behavioral
-                    // pricing so a block that declares it isn't dropped.
-                    let mut pricing = Pricing::default();
-                    pricing.cache_creation_per_million =
-                        cap.cache_creation_per_million.unwrap_or(0.0);
-                    pricing.thinking_per_million = cap.thinking_per_million.unwrap_or(0.0);
-                    (None, None, false, false, HashSet::from([Modality::Text]), pricing)
-                }
-            };
+                let mut pricing = m.pricing();
+                pricing.cache_creation_per_million = cap.cache_creation_per_million.unwrap_or(0.0);
+                pricing.thinking_per_million = cap.thinking_per_million.unwrap_or(0.0);
+                (
+                    m.context.map(|c| c as u32),
+                    m.max_output.map(|o| o as u32),
+                    mods_in.contains(&Modality::Image),
+                    !matches!(m.thinking, Thinking::None),
+                    mods_in,
+                    pricing,
+                )
+            }
+            None => {
+                // No model row (local provider, empty model list). No
+                // per-model facts to enforce; keep the provider-behavioral
+                // pricing so a block that declares it isn't dropped.
+                let pricing = Pricing {
+                    cache_creation_per_million: cap.cache_creation_per_million.unwrap_or(0.0),
+                    thinking_per_million: cap.thinking_per_million.unwrap_or(0.0),
+                    ..Default::default()
+                };
+                (
+                    None,
+                    None,
+                    false,
+                    false,
+                    HashSet::from([Modality::Text]),
+                    pricing,
+                )
+            }
+        };
 
         Capabilities {
             interface: self.interface,
@@ -362,7 +375,9 @@ impl ModelKb {
     /// in the KB, or is a local provider with no fixed default (the user
     /// picks — mlx/vllm/llamacpp).
     pub fn default_model(&self, provider: &str) -> Option<&str> {
-        self.providers.get(provider).and_then(|p| p.default.as_deref())
+        self.providers
+            .get(provider)
+            .and_then(|p| p.default.as_deref())
     }
 
     /// Coding-tuned default model id for `provider`, if one is declared.
@@ -461,14 +476,8 @@ mod tests {
     #[test]
     fn default_model_resolves_for_api_providers() {
         assert_eq!(MODEL_KB.default_model("openai"), Some("gpt-5.4"));
-        assert_eq!(
-            MODEL_KB.default_model("anthropic"),
-            Some("claude-opus-4-8")
-        );
-        assert_eq!(
-            MODEL_KB.default_model("gemini"),
-            Some("gemini-3.5-flash")
-        );
+        assert_eq!(MODEL_KB.default_model("anthropic"), Some("claude-opus-4-8"));
+        assert_eq!(MODEL_KB.default_model("gemini"), Some("gemini-3.5-flash"));
         assert_eq!(
             MODEL_KB.default_model("deepseek"),
             Some("deepseek-v4-flash")
@@ -480,7 +489,10 @@ mod tests {
     #[test]
     fn find_matches_id_and_aliases() {
         // Exact id.
-        assert_eq!(MODEL_KB.find("gemini-3.5-flash").unwrap().id, "gemini-3.5-flash");
+        assert_eq!(
+            MODEL_KB.find("gemini-3.5-flash").unwrap().id,
+            "gemini-3.5-flash"
+        );
         // Alias resolves to the canonical entry.
         let by_alias = MODEL_KB.find("deepseek-reasoner").unwrap();
         assert_eq!(by_alias.id, "deepseek-v4-flash");
@@ -498,8 +510,18 @@ mod tests {
                 .is_thinking_only()
         );
         // flash family is optional (can turn thinking off).
-        assert!(!MODEL_KB.find("gemini-3.5-flash").unwrap().is_thinking_only());
-        assert!(!MODEL_KB.find("gemini-2.5-flash").unwrap().is_thinking_only());
+        assert!(
+            !MODEL_KB
+                .find("gemini-3.5-flash")
+                .unwrap()
+                .is_thinking_only()
+        );
+        assert!(
+            !MODEL_KB
+                .find("gemini-2.5-flash")
+                .unwrap()
+                .is_thinking_only()
+        );
     }
 
     #[test]

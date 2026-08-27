@@ -8,8 +8,8 @@
 //! - **`Blackboard`** — coordination substrate (Doc 09 §2.2).
 //! - **`DurableStore`** — durable job/result board.
 //!
-//! The read-able observability/eval E-pillar stores (`PipelineEventLog`
-//! + `LlmRecordStore`) live in `tars_melt::event`, NOT here (Doc 17 §7,
+//! The read-able observability/eval E-pillar stores (`PipelineEventLog` and
+//! `LlmRecordStore`) live in `tars_melt::event`, NOT here (Doc 17 §7,
 //! Doc 08 §3) — they are MELT, not recovery truth.
 //!
 //! Still deferred until they have a concrete consumer:
@@ -31,12 +31,13 @@
 //! read; given that we're already writing JSON to SQLite (debuggable
 //! via `sqlite3 events.db`), the round-trip is a feature.
 
-pub mod blackboard;
 mod agent_event_log;
+pub mod blackboard;
 mod durable_store;
 mod error;
 mod sqlite;
 
+pub use agent_event_log::{AgentEventLog, EventRecord};
 pub use blackboard::{
     BbError, Blackboard, BlackboardDomain, BlackboardStore, InMemoryBlackboard, Scope,
     SqliteBlackboard, Transition,
@@ -47,7 +48,6 @@ pub use durable_store::{
     SqliteDurableStore,
 };
 pub use error::StorageError;
-pub use agent_event_log::{AgentEventLog, EventRecord};
 pub use sqlite::{
     SqliteAgentEventLog, SqliteAgentEventLogConfig, default_personal_agent_event_log_path,
     open_agent_event_log_at_path,
