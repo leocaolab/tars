@@ -1,9 +1,8 @@
 //! In-memory mock provider for testing.
 //!
-//! Mirrors the Python `MockClient` (the equivalent Python mock client) —
-//! records the last request, returns a canned response. Adds streaming
-//! semantics: the canned [`ChatEvent`] sequence is replayed verbatim,
-//! so tests can exercise the streaming path.
+//! Records the last request, returns a canned response. The canned
+//! [`ChatEvent`] sequence is replayed verbatim, so tests can exercise
+//! the streaming path.
 
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +10,7 @@ use async_trait::async_trait;
 use futures::stream;
 
 use tars_types::{
-    ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, ProviderProfile, RequestContext,
+    ProviderProfile, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, RequestContext,
     StopReason, Usage,
 };
 
@@ -45,10 +44,9 @@ pub struct MockHistory {
 
 /// Mutable state held under a single mutex so concurrent stream() calls
 /// see a consistent snapshot of (history-after-this-request,
-/// response-at-this-instant). Audit `tars-provider-src-backends-mock-5`:
-/// previously held two separate locks → another thread could swap the
-/// canned response in between the history append and the response read,
-/// producing test flakiness.
+/// response-at-this-instant). Two separate locks would let another thread
+/// swap the canned response between the history append and the response
+/// read, producing test flakiness.
 #[derive(Debug)]
 struct MockState {
     response: CannedResponse,
@@ -111,9 +109,8 @@ impl MockProvider {
     /// want to vary behavior between invocations.
     ///
     /// Recovers from a poisoned mutex (`into_inner`) rather than
-    /// `unwrap()`-panicking — same rationale as [`Self::stream`]: a
-    /// prior panic while holding the lock shouldn't cascade-panic this
-    /// helper and mask the original test failure.
+    /// `unwrap()`-panicking: a prior panic while holding the lock must not
+    /// cascade-panic this helper and mask the original test failure.
     pub fn set_response(&self, r: CannedResponse) {
         self.state
             .lock()
@@ -121,11 +118,9 @@ impl MockProvider {
             .response = r;
     }
 
-    /// Snapshot of the requests recorded so far. **Used by**
-    /// `examples/examples/testing/main.rs` (deterministic-
-    /// agent-test demo); the production source tree itself doesn't
-    /// call it. `arc scan --judge` doesn't walk the examples build
-    /// targets and flagged this as dead — it isn't.
+    /// Snapshot of the requests recorded so far. Used by
+    /// `examples/examples/testing/main.rs` (deterministic-agent-test demo);
+    /// the production source tree itself doesn't call it.
     pub fn history_snapshot(&self) -> Vec<ChatRequest> {
         self.state
             .lock()
@@ -165,14 +160,9 @@ impl LlmProvider for MockProvider {
         _ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         // Atomic: append-history + read-canned-response under one lock
-        // so concurrent callers can't observe a swap mid-operation.
-        //
-        // Audit `tars-provider-src-backends-mock-8`: the previous
-        // `lock().unwrap()` would panic the MockProvider permanently
-        // if any prior task panicked while holding the mutex (poison).
-        // For a test-only mock the blast radius is limited, but the
-        // method signature is `Result<_, ProviderError>` — using `?`
-        // semantics here mirrors what the real backends do.
+        // so concurrent callers can't observe a swap mid-operation. A
+        // poisoned mutex maps to a ProviderError rather than a panic, so a
+        // prior task's panic doesn't take the MockProvider down permanently.
         let response = {
             let mut state = self
                 .state
@@ -221,8 +211,7 @@ mod tests {
             .clone()
             .stream(
                 ChatRequest::user("ping"),
-                "test-model",
-                RequestContext::test_default(),
+                "test-model", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -248,8 +237,7 @@ mod tests {
             .clone()
             .complete(
                 ChatRequest::user("ping"),
-                "test-model",
-                RequestContext::test_default(),
+                "test-model", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -259,17 +247,15 @@ mod tests {
 
     #[tokio::test]
     async fn records_call_count() {
-        // Audit `tars-provider-src-backends-mock-23`: previously used
-        // `let _ = ...` and only asserted the count, so this passed
-        // even if every call had errored. Assert success per call.
+        // Assert success per call, not just the final count — a per-call
+        // error must not pass silently.
         let p = MockProvider::new("mock", CannedResponse::text("hi"));
         for _ in 0..3 {
             let r = p
                 .clone()
                 .complete(
                     ChatRequest::user("ping"),
-                    "test-model",
-                    RequestContext::test_default(),
+                    "test-model", RequestContext::test_default(),
                 )
                 .await;
             assert!(r.is_ok(), "complete() unexpectedly errored");
@@ -284,8 +270,7 @@ mod tests {
             .clone()
             .complete(
                 ChatRequest::user("ping"),
-                "test-model",
-                RequestContext::test_default(),
+                "test-model", RequestContext::test_default(),
             )
             .await;
         assert!(r.is_err());

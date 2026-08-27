@@ -1,20 +1,14 @@
 //! llama.cpp backend — `llama-server` (the binary built from llama.cpp).
 //!
 //! `llama-server` exposes an OpenAI-compatible chat/completions
-//! endpoint, so this is another thin wrapper over
-//! [`OpenAiProviderBuilder`] with local-server defaults — same shape as
-//! `vllm.rs` and `mlx.rs`.
+//! endpoint, so this is a thin wrapper over [`OpenAiProviderBuilder`]
+//! with local-server defaults.
 //!
-//! Why a dedicated variant instead of `openai_compat`?
-//! - `type = "llamacpp"` in config makes the deployment posture
-//!   ("running on a Ryzen / iGPU box via Vulkan or Metal") legible at
-//!   a glance.
-//! - llama.cpp's tool-call quality varies model-by-model and its
-//!   chat-template handling has edge cases the generic OpenAI adapter
-//!   shouldn't carry assumptions about. A dedicated capability profile
-//!   lets the routing layer treat it differently.
-//! - Future: llama.cpp-specific server fields (`cache_prompt`, `slot_id`,
-//!   `n_predict`) can be plumbed here without polluting OpenAI.
+//! A dedicated variant (rather than `openai_compat`) because llama.cpp's
+//! tool-call quality varies model-by-model and its chat-template handling
+//! has edge cases the generic OpenAI adapter shouldn't carry assumptions
+//! about; a dedicated capability profile lets the routing layer treat it
+//! differently.
 //!
 //! Run a llama-server instance:
 //! ```bash
@@ -29,9 +23,8 @@ use crate::backends::openai::OpenAiProviderBuilder;
 use crate::http_base::{HttpProviderBase, HttpProviderExtras};
 use crate::provider::LlmProvider;
 
-/// Default `llama-server` base URL. The binary's own default is
-/// `127.0.0.1:8080`; we use `localhost` for symmetry with other local
-/// backends ([`crate::backends::vllm`], [`crate::backends::mlx`]).
+/// Default `llama-server` base URL (the binary's own default is
+/// `127.0.0.1:8080`).
 ///
 /// 8080 collides with `mlx-lm.server`'s default — pick one per host or
 /// override `--port` on whichever you launch second.
@@ -105,10 +98,8 @@ mod tests {
             caps.prompt_cache,
             tars_types::PromptCacheKind::None
         ));
-        // The DB `llamacpp` block carries no model rows (the user loads the
-        // GGUF), so there is no fixed context ceiling — `None` = no limit to
-        // enforce (was a hand-written 8_192 guess). A user sets the real
-        // window via CapabilitiesOverrides.
+        // No model rows in the `llamacpp` block (the user loads the GGUF),
+        // so there is no fixed context ceiling — `None` = no limit to enforce.
         assert_eq!(caps.max_context_tokens, None);
     }
 

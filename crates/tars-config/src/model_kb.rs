@@ -158,7 +158,7 @@ pub enum BillingModel {
     /// bedrock). A GA model here MUST carry input+output prices.
     PerToken,
     /// Subscription / session / BYO-key — no per-token price to tars
-    /// (claude_cli, gemini_cli, codex_cli, opencode, antigravity, claude_sdk).
+    /// (claude_cli, codex_cli, opencode, antigravity, claude_sdk).
     /// A blank price is the TRUTH, not missing data.
     Subscription,
     /// Locally hosted, free at the point of use (mlx, vllm, llamacpp).

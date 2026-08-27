@@ -1,7 +1,5 @@
 //! The [`LlmProvider`] trait.
 //!
-//! See Doc 01 §3 for design rationale. Key points:
-//!
 //! - `stream` is the **basic** operation; `complete` is a default-impl
 //!   that consumes the stream and aggregates with [`ChatResponseBuilder`].
 //! - Trait takes `self: Arc<Self>` so streams can outlive the call site
@@ -16,8 +14,8 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, Stream, StreamExt};
 
 use tars_types::{
-    ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, CostUsd, ProviderError, ProviderId,
-    ProviderProfile, RequestContext, Usage,
+    ProviderProfile, ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, CostUsd,
+    ProviderError, ProviderId, RequestContext, Usage,
 };
 
 /// Convenience alias for the streaming return type. `'static` because
@@ -122,7 +120,7 @@ pub trait LlmProvider: Send + Sync + 'static {
     /// }
     /// ```
     fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn crate::batch::BatchSubmitter>> {
-        let _ = self; // suppress unused-self warning
+        let _ = self;
         None
     }
 }

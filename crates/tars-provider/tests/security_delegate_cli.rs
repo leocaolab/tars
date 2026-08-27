@@ -93,13 +93,23 @@ async fn escape_blocked_async() {
     let outside_victim = outside_dir.join("victim.txt"); // pre-existing → delegate tries to rm
     std::fs::write(&outside_victim, b"i must survive").expect("seed outside victim");
 
+    // ── claude state dir: the jail MUST grant `~/.claude` writable so the
+    //    delegate's Bash tool can `mkdir ~/.claude/session-env/<uuid>` on first
+    //    use. Regression guard for the missed grant (claude's RealSubprocessRunner
+    //    passed empty state_dirs while SharedCliRunner got them). Ensure the dir
+    //    EXISTS first — `build_sandboxed_command` filters non-existent state dirs,
+    //    so the grant only applies when `~/.claude` is real. ──
+    let claude_home = PathBuf::from(std::env::var_os("HOME").expect("HOME set")).join(".claude");
+    std::fs::create_dir_all(&claude_home).expect("ensure ~/.claude exists");
+    let claude_probe = claude_home.join("session-env").join(&tag);
+
     // ── mock "claude" CLI: a chmod+x shell script that (a) drains stdin,
     //    (b) ATTEMPTS to escape the worktree (create + delete outside), (c)
     //    writes a legit file INSIDE the worktree, then (d) prints claude-CLI-
     //    shaped JSON so `RealSubprocessRunner::run` parses it. The escape
     //    attempts are `|| :`-guarded so the script still exits 0 and emits its
     //    JSON even when the jail denies the writes (EPERM). ──
-    let script = mock_cli_script(&outside_create, &outside_victim, &inside_file);
+    let script = mock_cli_script(&outside_create, &outside_victim, &inside_file, &claude_probe);
     // The mock lives INSIDE the worktree so the exec'd binary is reachable under
     // BOTH jails: macOS Seatbelt exposes the whole fs (read is broad, so anywhere
     // works), but Linux bubblewrap is a mount namespace whose `--tmpfs /tmp` masks
@@ -177,14 +187,31 @@ async fn escape_blocked_async() {
         "outside victim file was tampered with"
     );
 
+    // 5. claude state dir GRANTED: the delegate's `mkdir ~/.claude/session-env/…`
+    //    (the real Bash-tool bootstrap) must SUCCEED — this is the regression the
+    //    missed-grant bug caused (claude's RealSubprocessRunner spawned with empty
+    //    state_dirs → this EPERM'd → the delegate could not run bash).
+    assert!(
+        claude_probe.exists(),
+        "claude state dir was NOT writable in the jail: `mkdir {}` was denied — \
+         RealSubprocessRunner must grant claude's ~/.claude (session-env) writable",
+        claude_probe.display()
+    );
+
     // cleanup (best-effort)
     let _ = std::fs::remove_dir_all(&worktree);
     let _ = std::fs::remove_dir_all(&outside_dir);
+    let _ = std::fs::remove_dir_all(&claude_probe);
 }
 
 /// Build the mock CLI script body. Absolute paths are baked in so the child
 /// does not depend on cwd/TMPDIR.
-fn mock_cli_script(outside_create: &Path, outside_victim: &Path, inside_file: &Path) -> String {
+fn mock_cli_script(
+    outside_create: &Path,
+    outside_victim: &Path,
+    inside_file: &Path,
+    claude_probe: &Path,
+) -> String {
     format!(
         "#!/bin/sh\n\
          # (a) drain stdin (the prompt) so the parent's stdin write completes\n\
@@ -195,11 +222,16 @@ fn mock_cli_script(outside_create: &Path, outside_victim: &Path, inside_file: &P
          rm -f '{victim}' 2>/dev/null || :\n\
          # (c) legit: write inside the worktree (jail must allow)\n\
          echo done > '{inside}'\n\
+         # (c2) legit: mkdir under ~/.claude/session-env — EXACTLY what claude's\n\
+         #      Bash tool does on first use. The jail MUST grant claude's state\n\
+         #      dir writable, else this EPERMs and the delegate can't run bash.\n\
+         mkdir -p '{claude}' 2>/dev/null || :\n\
          # (d) emit claude-CLI-shaped JSON on stdout for the runner to parse\n\
          printf '{{\"type\":\"result\",\"result\":\"done\",\"is_error\":false}}\\n'\n",
         create = outside_create.display(),
         victim = outside_victim.display(),
         inside = inside_file.display(),
+        claude = claude_probe.display(),
     )
 }
 
@@ -215,8 +247,9 @@ fn fresh_dir(name: &str) -> PathBuf {
 
 /// A fresh dir GUARANTEED outside the delegate's writable set, for the escape
 /// target. The codex-model jail's writable set is: the worktree, real `$TMPDIR`,
-/// `/tmp`, and the CLI's own state dir (none for claude). `$HOME` at large is
-/// denied, so a dir under `$HOME` is a genuine "outside" — UNLIKE `$TMPDIR`,
+/// `/tmp`, and the CLI's own state dir (`~/.claude` for claude). `$HOME` at large
+/// is denied, so a dir under `$HOME` OTHER than the state dir is a genuine
+/// "outside" (`.tars-sandbox-it`, not `.claude`) — UNLIKE `$TMPDIR`,
 /// which this test used to use back when the jail denied tmp (a policy we have
 /// deliberately reversed to match codex, so the target had to move here).
 fn fresh_denied_dir(name: &str) -> PathBuf {

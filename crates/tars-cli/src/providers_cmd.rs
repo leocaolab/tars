@@ -255,10 +255,11 @@ mod tests {
 
     #[test]
     fn cli_provider_has_no_auth_field() {
-        let cfg = ProviderConfig::GeminiCli {
-            executable: "gemini".into(),
+        let cfg = ProviderConfig::Antigravity {
+            executable: "agy".into(),
             timeout_secs: 300,
-            default_model: "gemini-3-flash-preview".into(),
+            default_model: "gemini-3.1-pro".into(),
+            effort: tars_config::AntigravityEffortConfig::High,
         };
         assert!(matches!(key_status(&cfg), KeyStatus::None));
     }

@@ -51,25 +51,18 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
 
 use tars_types::{
-    ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, ProviderId, ProviderProfile,
-    RequestContext, StopReason, Usage,
+    ProviderProfile, ChatEvent, ChatRequest, ContentBlock, Message,
+    ProviderError, ProviderId, RequestContext, StopReason, Usage,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
 
-/// Per-call timeout to the daemon. History: defaulted at 300s (5 min)
-/// which was fine for per-file L4 critic calls (~10-60s typical).
+/// Per-call timeout to the daemon — a ceiling, not a typical wait.
 ///
-/// Bumped to 900s (15 min) after the first end-to-end `arc auto` run
-/// on tars (154 files, 264 findings): the Critic re-review pass after
-/// Round 1 fix is a single batched call that examines every applied
-/// fix at once, and it tripped the 300s ceiling. Without the verify
-/// pass, arc commits Round 1 fixes blind (the [Critic] Verifying
-/// fixes... step is what catches Agent regressions before they land).
-///
-/// 900s is the headroom verify needs at the 200-300 finding scale.
-/// Per-file critic and per-file fix calls still finish well under 300s
-/// in practice, so the bump is a ceiling, not a typical wait.
+/// 900s (15 min) is the headroom the Critic re-review pass needs at the
+/// 200-300 finding scale: it is a single batched call examining every applied
+/// fix at once and trips a 300s ceiling (measured on a 154-file, 264-finding
+/// `arc auto` run). Per-file critic and fix calls still finish well under 300s.
 const DEFAULT_TIMEOUT_SECS: u64 = 900;
 
 /// In-flight requests keyed by their wire `id`. The reader task removes
@@ -106,11 +99,8 @@ impl ClaudeSdkProviderBuilder {
     builder_setter!(capabilities: opt ProviderProfile);
 
     pub fn build(self) -> Arc<ClaudeSdkProvider> {
-        // Builders for the other CLI-shaped backends (ClaudeCli, GeminiCli)
-        // are infallible and accept a missing script_path / executable
-        // by letting validation surface the error at config time. Mirror
-        // that — if script_path is `None` here, fail loudly on the first
-        // call rather than at construction.
+        // A missing `script_path` is allowed at construction; the first
+        // `stream()` call fails loudly instead. Keeps this builder infallible.
         let caps = self.capabilities.unwrap_or_else(default_capabilities);
         Arc::new(ClaudeSdkProvider {
             id: self.id,
@@ -152,14 +142,9 @@ impl LlmProvider for ClaudeSdkProvider {
         &self.capabilities
     }
 
-    // `#[instrument(err(Display))]` is the Pythonic "uncaught exception
-    // prints to stderr" boundary: when this fn returns Err, tracing
-    // automatically emits an error-level event with the error's
-    // Display form *plus* the function's span context (provider id,
-    // model). Zero per-Err-site code, one log line per failed call.
-    // Without it, an `Err(ProviderError::Internal(...))` walks the
-    // stack silently — the operator only learns "something failed" if
-    // some outer caller happens to log it, which today they don't.
+    // `err(Display)` emits one error-level event per failed call, carrying the
+    // error's Display form plus span context (provider id, model). This is the
+    // only place a failed call is logged — no outer caller does.
     #[tracing::instrument(
         name = "claude_sdk.stream",
         skip_all,
@@ -186,13 +171,10 @@ impl LlmProvider for ClaudeSdkProvider {
         // Project the captured reasoning as a ThinkingDelta so the canonical
         // event→ChatResponse fold lands it on `ChatResponse.thinking` — and
         // thus into the bodies/event store alongside the request/response.
-        // Was a black hole before: thinking happened + was billed, never logged.
         let mut events: Vec<Result<ChatEvent, ProviderError>> =
             vec![Ok(ChatEvent::started(actual_model))];
         if !resp.thinking.is_empty() {
-            events.push(Ok(ChatEvent::ThinkingDelta {
-                text: resp.thinking,
-            }));
+            events.push(Ok(ChatEvent::ThinkingDelta { text: resp.thinking }));
         }
         events.push(Ok(ChatEvent::Delta { text: resp.text }));
         events.push(Ok(ChatEvent::Finished { stop_reason, usage }));
@@ -218,13 +200,10 @@ impl ClaudeSdkProvider {
         }
 
         let session = self.ensure_session().await?;
-        // Monotonic per-session request id. `fetch_add` wraps on
-        // overflow, but at u64 that's 2^64 requests on a single warm
-        // child — at even a million calls/sec it would take ~580,000
-        // years to wrap, and the session is respawned (resetting the
-        // counter) long before that on any crash/restart. A collision is
-        // therefore unreachable in practice; u64 is already the widest
-        // sensible counter, so we document rather than widen.
+        // Monotonic per-session request id. `fetch_add` wraps at u64, but a
+        // single warm child never approaches 2^64 calls before it respawns
+        // and resets the counter, so a collision is unreachable — hence no
+        // overflow handling.
         let id = session.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel::<Result<DaemonChatReply, ProviderError>>();
         session.pending.lock().await.insert(id, tx);
@@ -234,18 +213,12 @@ impl ClaudeSdkProvider {
             prompt: &prompt,
             system: req.system.as_deref(),
             model: Some(model),
-            // History: 1 → 3 → 7. The 1→3 bump fit sonnet-4-5
-            // extended thinking (`thinking_block → text_block` is
-            // counted as 2 turns). 3→7 covers heavier
-            // think-iterate-refine patterns the L4 critic exhibits
-            // on dense files: under `arc auto` we saw "Reached
-            // maximum number of turns (3)" on ~3% of 154 files
-            // (validation/builtin.rs, etc.) where the model wants
-            // to think → draft → re-read → refine before emitting
-            // its verdict. 7 covers up to 3 think/refine rounds
-            // plus the final answer; tools are still disabled on
-            // the daemon side so the model can't go agentic
-            // regardless of how high this counter climbs.
+            // 7 covers up to 3 think/refine rounds plus the final answer: the
+            // L4 critic runs think → draft → re-read → refine on dense files,
+            // and a lower ceiling trips "Reached maximum number of turns".
+            // Extended thinking counts `thinking_block → text_block` as 2 turns.
+            // Tools stay disabled daemon-side, so the model can't go agentic
+            // however high this climbs.
             max_turns: 7,
             schema: req.structured_output.as_ref().map(|s| &s.schema),
             // Only an explicit `Off` disables thinking; Auto/Budget leave it
@@ -261,23 +234,25 @@ impl ClaudeSdkProvider {
         // The timeout MUST cover the stdin WRITE, not just the reply wait.
         // The daemon shares ONE stdin pipe across N concurrent requests; when
         // it's busy emitting a dense file's long structured-output reply it
-        // stops draining stdin, the pipe buffer fills, and `write_all` blocks
-        // — and the OLD code only guarded `rx`, so that stuck write hung
-        // forever and the per-call timeout never fired (observed: a claude_sdk
-        // reviewer wedged >40 min on llm_client.rs / validators.rs, far past
-        // the 900 s timeout). Guard the whole request→reply round-trip.
-        // The caller's per-call budget wins over the configured default: a
-        // daemon request is a subprocess round-trip, so nothing but this
-        // timeout bounds it.
+        // stops draining stdin, the pipe buffer fills, and `write_all` blocks.
+        // Guarding only `rx` lets that stuck write hang past the timeout
+        // (observed: a reviewer wedged >40 min), so guard the whole
+        // request→reply round-trip. The caller's per-call budget wins over the
+        // configured default: nothing but this timeout bounds a subprocess
+        // round-trip.
         let budget = ctx.call_budget(self.timeout);
         let outcome = tokio::time::timeout(budget, async {
             {
                 let mut stdin = session.stdin.lock().await;
                 stdin.write_all(line.as_bytes()).await.map_err(|e| {
-                    ProviderError::Internal(format!("claude_sdk: write to child stdin failed: {e}"))
+                    ProviderError::Internal(format!(
+                        "claude_sdk: write to child stdin failed: {e}"
+                    ))
                 })?;
                 stdin.flush().await.map_err(|e| {
-                    ProviderError::Internal(format!("claude_sdk: flush child stdin failed: {e}"))
+                    ProviderError::Internal(format!(
+                        "claude_sdk: flush child stdin failed: {e}"
+                    ))
                 })?;
             }
             // `rx` resolves to the daemon's `Result<reply, ProviderError>`;
@@ -302,9 +277,9 @@ impl ClaudeSdkProvider {
                 Err(e)
             }
             // Timed out ANYWHERE in the round-trip — including a stuck stdin
-            // write. Reclaim the pending slot AND evict the wedged session
-            // (the old code only removed pending; a daemon stuck not-draining
-            // stdin would wedge every subsequent call too).
+            // write. Reclaim the pending slot AND evict the wedged session: a
+            // daemon stuck not-draining stdin would wedge every subsequent call
+            // too.
             Err(_) => {
                 session.pending.lock().await.remove(&id);
                 self.clear_session(&session).await;
@@ -520,7 +495,7 @@ struct Session {
 /// 3. `$HOME/.tars/claude-daemon/server.mjs` — standard per-user
 ///    install. (`tars install-claude-daemon` lays it down here.)
 fn find_default_script_path() -> Option<std::path::PathBuf> {
-    // Both env reads go through tars-types::env (ARC-L5-COH-18). The
+    // Both env reads go through tars-types::env. The
     // `current_dir()` lookup stays inline — it's not a config knob,
     // it's a workspace-discovery probe (where am I running from), so
     // hoisting it would put a non-config lookup in the config module.
@@ -676,6 +651,7 @@ struct RawUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    
 
     #[test]
     fn serialize_single_user_message() {
@@ -757,14 +733,11 @@ mod tests {
         let p = ClaudeSdkProviderBuilder::new("claude_sdk_smoke")
             .default_model("claude-sonnet-4-5")
             .build();
-        let req = ChatRequest::user("Reply with only the literal word: pong");
+        let req = ChatRequest::user("Reply with only the literal word: pong",
+        );
         let resp = p
             .clone()
-            .complete(
-                req,
-                "test-model",
-                tars_types::RequestContext::test_default(),
-            )
+            .complete(req, "test-model", tars_types::RequestContext::test_default())
             .await
             .expect("daemon round-trip");
         let text = resp.text.to_lowercase();
@@ -786,21 +759,15 @@ mod tests {
         let p = ClaudeSdkProviderBuilder::new("claude_sdk_smoke_concurrent")
             .default_model("claude-sonnet-4-5")
             .build();
-        let req_a = ChatRequest::user("Reply with only: alpha");
-        let req_b = ChatRequest::user("Reply with only: beta");
+        let req_a = ChatRequest::user("Reply with only: alpha",
+        );
+        let req_b = ChatRequest::user("Reply with only: beta",
+        );
         let p2 = p.clone();
         let p3 = p.clone();
         let (a, b) = tokio::join!(
-            p2.complete(
-                req_a,
-                "test-model",
-                tars_types::RequestContext::test_default()
-            ),
-            p3.complete(
-                req_b,
-                "test-model",
-                tars_types::RequestContext::test_default()
-            ),
+            p2.complete(req_a, "test-model", tars_types::RequestContext::test_default()),
+            p3.complete(req_b, "test-model", tars_types::RequestContext::test_default()),
         );
         let a = a.expect("alpha");
         let b = b.expect("beta");
@@ -846,11 +813,7 @@ mod tests {
         let req = ChatRequest::user(big_prompt);
         let t0 = std::time::Instant::now();
         let r = p
-            .complete(
-                req,
-                "test-model",
-                tars_types::RequestContext::test_default(),
-            )
+            .complete(req, "test-model", tars_types::RequestContext::test_default())
             .await;
         let elapsed = t0.elapsed();
         let _ = std::fs::remove_file(&script);

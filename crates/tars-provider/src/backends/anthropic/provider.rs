@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ChatRequest, ProviderError, ProviderId,
-    ProviderProfile, RequestContext,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ProviderProfile, ChatRequest,
+    ProviderError, ProviderId, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver};
@@ -25,7 +25,6 @@ use super::mapping::{parse_batch_results, translate_batch_status};
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_API_VERSION: &str = "2023-06-01";
 
-/// Builder.
 #[derive(Clone, Debug)]
 pub struct AnthropicProviderBuilder {
     id: ProviderId,
@@ -98,9 +97,8 @@ impl LlmProvider for AnthropicProvider {
     fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
     }
-    // `#[instrument(err(Display))]` is the boundary log: any Err
-    // returning from `stream()` automatically emits a tracing event
-    // with the error's Display form + the provider/model span fields.
+    // Boundary log: `err(Display)` auto-emits a tracing event with the
+    // error + provider/model span fields on any Err from `stream()`.
     // No per-Err-site logging needed.
     #[tracing::instrument(
         name = "anthropic.stream",
@@ -115,15 +113,7 @@ impl LlmProvider for AnthropicProvider {
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
-        stream_via_adapter(
-            self.http.clone(),
-            self.adapter.clone(),
-            auth,
-            req,
-            model,
-            ctx,
-        )
-        .await
+        stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, model, ctx).await
     }
 
     fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn BatchSubmitter>> {

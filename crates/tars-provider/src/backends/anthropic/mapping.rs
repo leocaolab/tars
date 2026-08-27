@@ -1,10 +1,7 @@
 //! Pure helpers shared by [`super::adapter`] and [`super::provider`]:
 //! stop-reason mapping, usage parsing, body truncation, and the
 //! batch-API JSON converters (`translate_batch_status`,
-//! `parse_batch_results`, `message_to_chat_response`). Stateless, no
-//! I/O — the JSON conversion layer the L5 Tribunal split out of the
-//! original god-module so the adapter and provider can be read
-//! without scrolling through token-level minutiae.
+//! `parse_batch_results`, `message_to_chat_response`). Stateless, no I/O.
 
 use serde_json::{Value, json};
 
@@ -204,10 +201,9 @@ pub(super) fn parse_batch_results(text: &str) -> Result<Vec<BatchResultItem>, Pr
 /// become `Delta` events; we set the terminal `Finished` from
 /// `stop_reason` + `usage`.
 ///
-/// **Known gap (Phase 2)**: `tool_use` content blocks are skipped.
-/// Batch consumers that need tool calls in batch responses can either
-/// (a) parse the raw `message` JSON themselves, or (b) wait for V2
-/// when we extend `ChatEvent::ToolCallStart/Args/End` replay here.
+/// **Known gap**: `tool_use` content blocks are skipped. Batch
+/// consumers needing tool calls must parse the raw `message` JSON
+/// themselves.
 pub(super) fn message_to_chat_response(msg: &Value) -> Result<ChatResponse, ProviderError> {
     let model = msg
         .get("model")
@@ -225,13 +221,11 @@ pub(super) fn message_to_chat_response(msg: &Value) -> Result<ChatResponse, Prov
                     });
                 }
             }
-            // tool_use blocks: see fn doc-comment.
         }
     }
 
     // Reuse map_stop_reason so the unknown-reason fallback (Other) and
-    // the full reason set stay in lockstep with the streaming adapter —
-    // an inline copy here previously defaulted unknowns to EndTurn.
+    // the full reason set stay in lockstep with the streaming adapter.
     let stop_reason = msg
         .get("stop_reason")
         .and_then(|s| s.as_str())

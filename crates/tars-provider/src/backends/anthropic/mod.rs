@@ -15,31 +15,24 @@
 //!   is set.
 //! - **Thinking**: a `thinking` content block + `thinking` config; we
 //!   surface the deltas as [`tars_types::ChatEvent::ThinkingDelta`].
-//! - **Structured output**: emulated via a forced `tool_choice` (Doc
-//!   01 §9). The "tool" is a synthetic schema-only call.
+//! - **Structured output**: emulated via a forced `tool_choice`. The
+//!   "tool" is a synthetic schema-only call.
 //! - **Streaming events**: SSE with named events (`message_start`,
 //!   `content_block_start`, `content_block_delta`, `message_delta`,
 //!   `message_stop`, `ping`, `error`). The named events are key — we
 //!   route on `raw.event`, not just `data`.
 //!
-//! ## Module layout (split per `arc scan --judge` finding `ARC-L5-M-12`)
-//!
-//! Originally a single 1296-line file mixing provider lifecycle,
-//! protocol translation, batch-API plumbing, and pure JSON helpers.
-//! Split into focused sub-modules with the same public surface,
-//! mirroring the Batch 6 `gemini.rs` and the M-13 `claude_cli.rs`
-//! splits:
+//! ## Module layout
 //!
 //! - [`provider`] — `AnthropicProvider`, `AnthropicProviderBuilder`,
 //!   the `LlmProvider` impl, the `BatchSubmitter` impl, default
-//!   capabilities. The orchestration + I/O layer.
+//!   capabilities.
 //! - [`adapter`] — `AnthropicAdapter` (request translation, SSE event
-//!   parsing, error classification, URL construction). Re-usable in
+//!   parsing, error classification, URL construction). Reusable in
 //!   tests without an `HttpProviderBase`.
 //! - [`mapping`] — pure helpers: `translate_batch_status`,
 //!   `parse_batch_results`, `message_to_chat_response`, `map_stop_reason`,
-//!   `parse_usage`, `truncate`. Stateless, no I/O — the JSON conversion
-//!   layer.
+//!   `parse_usage`, `truncate`.
 
 mod adapter;
 mod mapping;

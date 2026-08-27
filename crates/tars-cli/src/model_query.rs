@@ -148,7 +148,6 @@ pub fn plan_for(cfg: &ProviderConfig) -> Plan {
                 .to_string(),
         },
         P::ClaudeCli { .. }
-        | P::GeminiCli { .. }
         | P::ClaudeSdk { .. }
         | P::CodexCli { .. }
         | P::Opencode { .. }
@@ -467,10 +466,11 @@ mod tests {
 
     #[test]
     fn plan_cli_and_bedrock_and_mock_are_skipped() {
-        let cli = ProviderConfig::GeminiCli {
-            executable: "gemini".into(),
+        let cli = ProviderConfig::Antigravity {
+            executable: "agy".into(),
             timeout_secs: 300,
-            default_model: "gemini-3-flash-preview".into(),
+            default_model: "gemini-3.1-pro".into(),
+            effort: tars_config::AntigravityEffortConfig::High,
         };
         assert!(matches!(plan_for(&cli), Plan::Skip { .. }));
 

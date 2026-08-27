@@ -20,7 +20,7 @@ use crate::tool_buffer::ToolCallBuffer;
 
 use super::mapping::{map_stop_reason, parse_usage, truncate};
 
-/// Synthetic tool name used to emulate structured output (Doc 01 §9).
+/// Synthetic tool name used to emulate structured output.
 pub(super) const STRUCTURED_OUTPUT_TOOL: &str = "__respond_with__";
 
 /// Read an SSE event's `index` field as a `usize`. Anthropic's wire
@@ -113,17 +113,14 @@ impl AnthropicAdapter {
                     "content": [result_block],
                 })
             }
-            // Anthropic's `system` is top-level, not a message role.
-            // If a System message arrives here it's typically because
-            // a caller serialized a transcript verbatim — flatten it
-            // into a user-role text block prefixed with "[system]" so
-            // it isn't indistinguishable from a real user turn.
+            // Anthropic's `system` is top-level, not a message role. A
+            // System message arriving here is flattened into a user-role
+            // text block prefixed with "[system]" so it isn't mistaken
+            // for a real user turn.
             Message::System { content } => {
-                // Fold the system text into the marker prefix as a single
-                // block. An empty system message would otherwise yield a
-                // user turn whose only content is the literal "[system]"
-                // marker — confusing and indistinguishable from a real
-                // user message; emit an explicit "(empty)" instead.
+                // An empty system message would yield a user turn whose
+                // only content is the literal "[system]" marker — emit an
+                // explicit "(empty)" instead.
                 let mut blocks: Vec<Value> = content.iter().map(Self::translate_block).collect();
                 if blocks.is_empty() {
                     blocks.push(json!({"type": "text", "text": "[system] (empty)"}));
@@ -234,8 +231,8 @@ impl HttpAdapter for AnthropicAdapter {
             ));
         }
 
-        // Fail fast on an obviously-invalid budget before doing any of
-        // the more expensive per-tool / per-message work below.
+        // Fail fast on an invalid budget before the per-tool/per-message
+        // work below.
         let max_tokens = req.max_output_tokens.unwrap_or(4096);
         if max_tokens == 0 {
             return Err(ProviderError::InvalidRequest(
@@ -286,7 +283,6 @@ impl HttpAdapter for AnthropicAdapter {
             body["stop_sequences"] = json!(req.stop_sequences);
         }
 
-        // Tools.
         let mut tools_to_send: Vec<Value> = req
             .tools
             .iter()
@@ -299,8 +295,8 @@ impl HttpAdapter for AnthropicAdapter {
             })
             .collect();
 
-        // Structured output emulation (Doc 01 §9): inject a hidden tool
-        // and force its use.
+        // Structured output emulation: inject a hidden tool and force its
+        // use.
         if let Some(schema) = &req.structured_output {
             tools_to_send.push(json!({
                 "name": STRUCTURED_OUTPUT_TOOL,
@@ -332,7 +328,6 @@ impl HttpAdapter for AnthropicAdapter {
             body["tools"] = Value::Array(tools_to_send);
         }
 
-        // Thinking.
         match req.thinking {
             tars_types::ThinkingMode::Off => {}
             tars_types::ThinkingMode::Auto => {
@@ -476,7 +471,6 @@ impl HttpAdapter for AnthropicAdapter {
                         }
                     }
                     Some("input_json_delta") => {
-                        // Tool args fragment.
                         if let Some(p) = delta.get("partial_json").and_then(|s| s.as_str()) {
                             out.push(ChatEvent::ToolCallArgsDelta {
                                 index,
@@ -525,7 +519,6 @@ impl HttpAdapter for AnthropicAdapter {
                 }
             }
             "message_delta" => {
-                // Carries `delta.stop_reason` and updated `usage`.
                 let stop = v
                     .pointer("/delta/stop_reason")
                     .and_then(|s| s.as_str())
@@ -674,7 +667,9 @@ mod tests {
     #[test]
     fn translate_request_promotes_system_to_top_level() {
         let a = adapter();
-        let req = ChatRequest::user("hello").with_system("you are concise");
+        let req = ChatRequest::user("hello",
+        )
+        .with_system("you are concise");
         let body = a.translate_request(&req, "claude-opus-4-7").unwrap();
         assert!(body["system"].is_array());
         assert_eq!(body["system"][0]["type"], "text");
@@ -686,7 +681,9 @@ mod tests {
     #[test]
     fn cache_marker_attaches_to_last_message_block() {
         let a = adapter();
-        let mut req = ChatRequest::user("context").with_system("sys");
+        let mut req = ChatRequest::user("context",
+        )
+        .with_system("sys");
         req.cache_directives.push(CacheDirective::MarkBoundary {
             ttl: std::time::Duration::from_secs(300),
         });
@@ -701,7 +698,8 @@ mod tests {
     #[test]
     fn structured_output_injects_forced_tool() {
         let a = adapter();
-        let mut req = ChatRequest::user("give json");
+        let mut req = ChatRequest::user("give json",
+        );
         req.structured_output = Some(tars_types::JsonSchema::strict(
             "Resp",
             serde_json::json!({"type":"object"}),

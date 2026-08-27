@@ -11,8 +11,8 @@ use serde_json::Value;
 use tars_types::{ChatEvent, ChatRequest, ProviderError, RequestContext, StopReason};
 
 use super::super::argv::{
-    ClaudeCliEffort, ClaudeCliTools, STRIPPED_ENV_KEYS_UPPER, SubprocessInvocation,
-    build_argv_with, serialize_messages_for_cli, streaming_enabled,
+    ClaudeCliEffort, ClaudeCliTools, STRIPPED_ENV_KEYS_UPPER, SubprocessInvocation, build_argv_with,
+    serialize_messages_for_cli, streaming_enabled,
 };
 use super::super::dialect::{CliDialect, CliInvocation, OutputMode, PromptChannel};
 use super::super::subprocess::{extract_result_text, extract_usage};
@@ -90,10 +90,10 @@ impl CliDialect for ClaudeCliDialect {
             extra_args: self.extra_args.clone(),
             // When `--tools default` lets claude run its own Read/Edit/Bash,
             // those must operate in the request's working dir (the fix
-            // worktree), not arc's process cwd. `None` → inherit parent cwd.
+            // worktree), not the caller's process cwd. `None` → inherit parent cwd.
             cwd: ctx.cwd.clone(),
-            // OS-confinement policy (G10) — jails claude's spawn under the
-            // resolved `[sandbox]`/`--sandbox` policy (env gate stays a fallback).
+            // OS-confinement policy — jails claude's spawn under the resolved
+            // `[sandbox]`/`--sandbox` policy threaded on the request context.
             sandbox: ctx.sandbox.clone(),
         })
     }
@@ -114,12 +114,9 @@ impl CliDialect for ClaudeCliDialect {
         // directory creation` — the fixer could edit the worktree but not run
         // `cargo build`/`cargo test` to self-verify its own fix. Grant
         // `~/.claude` too (skipped centrally if absent), mirroring codex's
-        // `~/.codex`. The env/home reads live here; the resolution rule is
-        // factored into the pure `resolve_claude_state_dirs` below.
-        resolve_claude_state_dirs(
-            std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
-            tars_types::env::home_dir(),
-        )
+        // `~/.codex`. Shared with `RealSubprocessRunner` (claude's OWN runner) via
+        // [`claude_state_dirs`] so BOTH spawn paths grant it — see that fn.
+        claude_state_dirs()
     }
 
     fn parse_line(&self, raw: &Value) -> Result<Vec<ChatEvent>, ProviderError> {
@@ -157,11 +154,29 @@ fn resolve_claude_state_dirs(
         .collect()
 }
 
+/// claude's writable state dir(s) to grant in the delegate write-jail, read from
+/// the process env (`$CLAUDE_CONFIG_DIR` else `~/.claude`). Used by BOTH
+/// [`ClaudeCliDialect::state_dirs`] AND `RealSubprocessRunner` — claude keeps its
+/// OWN runner (its stream-json / reaper path differs from `SharedCliRunner`), so
+/// the `~/.claude` grant MUST be threaded into that runner too. Granting it only
+/// via `SharedCliRunner` (as the earlier fix did) missed claude entirely: claude
+/// never uses `SharedCliRunner`, so its delegate's Bash tool `mkdir
+/// ~/.claude/session-env/<uuid>` was `EPERM`-denied and the delegate couldn't run
+/// bash at all (fixer got away with edit-only; reconcile, which self-verifies via
+/// the build, could not).
+pub(crate) fn claude_state_dirs() -> Vec<std::path::PathBuf> {
+    resolve_claude_state_dirs(
+        std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
+        tars_types::env::home_dir(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
+    
 
     fn dialect() -> ClaudeCliDialect {
         ClaudeCliDialect::new(
@@ -184,73 +199,15 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("hi"),
-                "test-model",
-                &RequestContext::test_default(),
+                "test-model", &RequestContext::test_default(),
             )
             .unwrap();
         assert_eq!(d.argv(&inv), build_argv_with(&inv, streaming_enabled()));
     }
 
-    /// The caller's `ctx.deadline` is the per-call wall-clock budget and it
-    /// WINS over the provider's configured `timeout_secs`. Config is the
-    /// default used when the caller says nothing — not a ceiling. A subprocess
-    /// outlives its future, so this leaf is the only place that can enforce it.
-    #[test]
-    fn caller_deadline_overrides_the_configured_timeout() {
-        let d = ClaudeCliDialect::new(
-            "claude".into(),
-            Duration::from_secs(42),
-            ClaudeCliTools::Default,
-            false,
-            None,
-            false,
-            vec![],
-        );
-        let mut ctx = RequestContext::test_default();
-        ctx.deadline = Some(std::time::Instant::now() + Duration::from_secs(600));
-        let inv = d
-            .invocation(&ChatRequest::user("x"), "sonnet", &ctx)
-            .unwrap();
-        // A longer deadline buys a longer run (arc's reconcile), not a clamp to 42s.
-        assert!(
-            inv.timeout > Duration::from_secs(500) && inv.timeout <= Duration::from_secs(600),
-            "deadline must set the budget, got {:?}",
-            inv.timeout
-        );
-
-        // And a shorter deadline cuts the call off early.
-        let mut ctx = RequestContext::test_default();
-        ctx.deadline = Some(std::time::Instant::now() + Duration::from_secs(5));
-        let inv = d
-            .invocation(&ChatRequest::user("x"), "sonnet", &ctx)
-            .unwrap();
-        assert!(
-            inv.timeout <= Duration::from_secs(5),
-            "got {:?}",
-            inv.timeout
-        );
-    }
-
-    /// An expired deadline saturates to ZERO, so the subprocess is not spawned
-    /// for a full run it has no time for.
-    #[test]
-    fn expired_deadline_yields_a_zero_budget() {
-        let d = ClaudeCliDialect::new(
-            "claude".into(),
-            Duration::from_secs(42),
-            ClaudeCliTools::Default,
-            false,
-            None,
-            false,
-            vec![],
-        );
-        let mut ctx = RequestContext::test_default();
-        ctx.deadline = Some(std::time::Instant::now() - Duration::from_secs(1));
-        let inv = d
-            .invocation(&ChatRequest::user("x"), "sonnet", &ctx)
-            .unwrap();
-        assert_eq!(inv.timeout, Duration::ZERO);
-    }
+    // Timeout / `ctx.call_budget` (deadline overrides the configured timeout,
+    // expired ⇒ ZERO) is a cross-dialect invariant folded into
+    // `tests/cli_conformance.rs` (D-12).
 
     #[test]
     fn invocation_carries_claude_config_and_context() {
@@ -267,8 +224,7 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("x").with_system("brief"),
-                "sonnet",
-                &RequestContext::test_default().with_cwd(wt.clone()),
+                "sonnet", &RequestContext::test_default().with_cwd(wt.clone()),
             )
             .unwrap();
         assert_eq!(inv.model, "sonnet");
@@ -279,7 +235,7 @@ mod tests {
         assert!(!inv.exclude_dynamic_sections);
         assert_eq!(inv.extra_args, vec!["--debug".to_string()]);
         assert_eq!(inv.cwd, Some(wt));
-        assert!(inv.stripped_env.contains("ANTHROPIC_API_KEY"));
+        // (env-strip is a cross-dialect invariant — see `tests/cli_conformance.rs`.)
     }
 
     // (Deleted `invocation_requires_explicit_model`: the model is now a
@@ -322,9 +278,7 @@ mod tests {
     #[test]
     fn parse_line_null_result_is_empty_delta() {
         let d = dialect();
-        let events = d
-            .parse_line(&json!({"result": null, "is_error": false}))
-            .unwrap();
+        let events = d.parse_line(&json!({"result": null, "is_error": false})).unwrap();
         assert!(matches!(&events[0], ChatEvent::Delta { text } if text.is_empty()));
     }
 
@@ -354,11 +308,6 @@ mod tests {
         assert!(resolve_claude_state_dirs(None, None).is_empty());
     }
 
-    #[test]
-    fn channel_is_stdin_and_mode_is_json_events() {
-        let d = dialect();
-        assert_eq!(d.prompt_channel(), PromptChannel::Stdin);
-        assert_eq!(d.output_mode(), OutputMode::JsonEvents);
-        assert!(d.env().is_empty());
-    }
+    // The (channel, mode, framing) declaration is a cross-dialect invariant
+    // folded into `tests/cli_conformance.rs` (D-12).
 }

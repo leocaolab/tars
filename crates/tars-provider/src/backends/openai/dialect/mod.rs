@@ -5,12 +5,6 @@
 //! quirks. Rather than fragmenting the shared adapter/mapping with
 //! `if provider == deepseek` special-cases, each variant's behavior lives in
 //! its own `impl OpenAiDialect`. See `docs/architecture/30-openai-dialect.md`.
-//!
-//! **M0 (this milestone):** the trait + [`StandardDialect`] only. Every
-//! method has a **default** whose body *delegates* to the existing
-//! adapter/mapping code — no logic is re-implemented, so `StandardDialect`
-//! is byte-for-byte identical to today's behavior. The variant impls
-//! (`DeepSeekDialect`, `LmStudioDialect`) are later milestones.
 
 pub mod deepseek;
 pub use deepseek::DeepSeekDialect;
@@ -27,11 +21,28 @@ use super::mapping::{openai_chat_completion_to_chat_response, parse_openai_usage
 
 /// Behavior-driven per-variant seam for the shared `openai` backend.
 ///
-/// The default methods *are* standard OpenAI — each delegates to the
-/// current adapter/mapping implementation, so a dialect that overrides
-/// nothing behaves exactly like today's code. A variant overrides only the
-/// quirk that differs (Open-Closed: the shared core is never reopened).
+/// The default methods delegate to the standard adapter/mapping
+/// implementation; a variant overrides only the quirk that differs.
 pub trait OpenAiDialect: Send + Sync {
+    /// Whether this dialect's TEXT can only be read once it is whole.
+    ///
+    /// Default false: text goes out as it arrives, which is what streaming is for.
+    ///
+    /// DeepSeek answers true. Its native tool-call markup arrives split across chunks
+    /// and is only recognisable once joined, so a stream that forwards the pieces
+    /// forwards markup and the CALLS inside it are never seen as calls. `finalize`
+    /// existed for exactly this and ran only in `complete()` — which the agent's path
+    /// does not use; it takes `stream()` and assembles the events itself. Measured, a
+    /// 37-turn run: from turn 7 on, every answer was DSML, every `tool_calls` was
+    /// empty, and nothing the model asked for ran. It spent thirty turns re-sending
+    /// the same sentence because it never once got an answer.
+    ///
+    /// A consumer must not have to know any of this. It asks for a stream and gets
+    /// tool calls.
+    fn text_is_only_whole(&self) -> bool {
+        false
+    }
+
     /// Canonical [`ChatRequest`] → provider wire JSON.
     ///
     /// Default = the standard OpenAI chat/completions body built by
@@ -74,12 +85,28 @@ pub trait OpenAiDialect: Send + Sync {
     ///
     /// Default = [`openai_chat_completion_to_chat_response`].
     fn parse_response(&self, raw: &Value) -> Result<ChatResponse, ProviderError> {
-        openai_chat_completion_to_chat_response(raw)
+        let mut r = openai_chat_completion_to_chat_response(raw)?;
+        self.finalize(&mut r);
+        Ok(r)
     }
+
+    /// Last look at a finished response, whichever path assembled it.
+    ///
+    /// A dialect's quirks do not all fit in one SSE event. DeepSeek's native tool-call
+    /// markup arrives in CHUNKS, so nothing per-event can lift it; it can only be
+    /// recognised once the stream has been joined back into text. Overriding
+    /// `parse_response` alone reached the batch path and nothing else — and the batch
+    /// path is not the one real runs take. Measured: one 59-turn run spent eighteen
+    /// CONSECUTIVE turns emitting `<｜｜DSML｜｜invoke name="read">…` and doing nothing,
+    /// with the markup sitting verbatim in the journal, because the lift lived on a
+    /// path that never ran.
+    ///
+    /// Default is a no-op.
+    fn finalize(&self, _r: &mut ChatResponse) {}
 }
 
-/// Standard OpenAI (and every openai_compat endpoint without a quirk).
-/// All-defaults: it is exactly today's shared behavior.
+/// Standard OpenAI (and every openai_compat endpoint without a quirk) —
+/// all trait defaults.
 pub struct StandardDialect;
 
 impl OpenAiDialect for StandardDialect {}
@@ -89,7 +116,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// E2E-2 (CUJ-3): a standard OpenAI chat-completion body parsed through
+    /// A standard OpenAI chat-completion body parsed through
     /// `StandardDialect::parse_response` is byte-for-byte identical to the
     /// direct `openai_chat_completion_to_chat_response` path it delegates to.
     #[test]
@@ -119,10 +146,7 @@ mod tests {
         assert_eq!(via_dialect.stop_reason, direct.stop_reason);
         assert_eq!(via_dialect.usage.input_tokens, direct.usage.input_tokens);
         assert_eq!(via_dialect.usage.output_tokens, direct.usage.output_tokens);
-        assert_eq!(
-            via_dialect.usage.thinking_tokens,
-            direct.usage.thinking_tokens
-        );
+        assert_eq!(via_dialect.usage.thinking_tokens, direct.usage.thinking_tokens);
         assert_eq!(
             via_dialect.usage.cached_input_tokens,
             direct.usage.cached_input_tokens

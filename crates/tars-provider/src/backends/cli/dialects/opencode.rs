@@ -49,6 +49,7 @@ use tars_types::{
 
 use super::super::argv::SubprocessInvocation;
 use super::super::dialect::{CliDialect, CliInvocation, OutputFraming, OutputMode, PromptChannel};
+use super::super::cli_subprocess_died;
 use super::super::subprocess::truncate;
 
 /// Limit on the rendered prompt length passed as the positional `message` arg
@@ -231,10 +232,10 @@ impl CliDialect for OpenCodeDialect {
                         .get("error")
                         .map(|e| e.to_string())
                         .unwrap_or_else(|| line.to_string());
-                    return Err(ProviderError::CliSubprocessDied {
-                        exit_code: None,
-                        stderr: format!("opencode error: {}", truncate(&raw_err, 300)),
-                    });
+                    return Err(cli_subprocess_died(
+                        None,
+                        format!("opencode error: {}", truncate(&raw_err, 300)),
+                    ));
                 }
                 // step_start, tool_use, and any future/unknown type: no
                 // canonical content to surface.
@@ -301,6 +302,7 @@ fn flatten_blocks(blocks: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    
 
     fn dialect() -> OpenCodeDialect {
         OpenCodeDialect::new("opencode".into(), Duration::from_secs(300))
@@ -312,8 +314,7 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("say hi"),
-                "anthropic/claude-sonnet-4-5",
-                &RequestContext::test_default(),
+                "anthropic/claude-sonnet-4-5", &RequestContext::test_default(),
             )
             .unwrap();
         let argv = d.argv(&inv);
@@ -326,12 +327,9 @@ mod tests {
         assert!(argv[5].contains("say hi"));
     }
 
-    #[test]
-    fn channel_is_arg_and_mode_is_json_events() {
-        let d = dialect();
-        assert_eq!(d.prompt_channel(), PromptChannel::Arg);
-        assert_eq!(d.output_mode(), OutputMode::JsonEvents);
-    }
+    // The (channel, mode, framing) declaration and the arg-channel prompt-size
+    // cap are cross-dialect invariants folded into `tests/cli_conformance.rs`
+    // (D-12) — the latter newly covers opencode, which had no oversized test.
 
     /// parse_line over a JSONL array (the runner's reconstructed shape).
     fn parse_line(lines: &[&str]) -> Result<Vec<ChatEvent>, ProviderError> {
@@ -433,9 +431,7 @@ mod tests {
 
     #[test]
     fn parse_line_non_array_payload_is_typed_error() {
-        let err = dialect()
-            .parse_line(&Value::String("not an array".into()))
-            .unwrap_err();
+        let err = dialect().parse_line(&Value::String("not an array".into())).unwrap_err();
         assert!(matches!(err, ProviderError::Parse(_)));
     }
 
@@ -444,8 +440,7 @@ mod tests {
         let inv = dialect()
             .invocation(
                 &ChatRequest::user("x").with_system("be precise"),
-                "anthropic/claude-sonnet-4-5",
-                &RequestContext::test_default(),
+                "anthropic/claude-sonnet-4-5", &RequestContext::test_default(),
             )
             .unwrap();
         assert!(inv.prompt.starts_with("[system]\nbe precise"));

@@ -1,14 +1,13 @@
 //! Shared HTTP infrastructure for HTTP-based Providers.
 //!
-//! Doc 01 §6.1 says all HTTP backends share one reqwest client + a
-//! common retry/timeout/SSE-decoding base, and each Provider is just an
+//! All HTTP backends share one reqwest client + a common
+//! retry/timeout/SSE-decoding base, and each Provider is just an
 //! [`HttpAdapter`] (build_url / build_headers / translate_request /
-//! parse_event / classify_error). This module provides that base.
+//! parse_event / classify_error).
 //!
-//! Approach: the SSE consumption loop wraps every `stream.next()`
-//! with a per-chunk idle timeout. Without that a server that opens
-//! the connection then stalls forever can hang the client
-//! indefinitely.
+//! The SSE consumption loop wraps every `stream.next()` with a per-chunk
+//! idle timeout: without it a server that opens the connection then
+//! stalls forever can hang the client indefinitely.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,9 +34,8 @@ use crate::tool_buffer::ToolCallBuffer;
 pub const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 pub const MAX_STREAM_MAX_RETRIES: u64 = 100;
 
-/// Default idle timeout BETWEEN SSE chunks. The previous name was
-/// `read_timeout` but that was misleading — reqwest's `read_timeout`
-/// is a connection-level setting we don't want for streaming.
+/// Default idle timeout BETWEEN SSE chunks — not reqwest's connection-level
+/// `read_timeout`, which isn't what streaming needs.
 const DEFAULT_STREAM_IDLE_MS: u64 = 300_000;
 
 /// HTTP timeouts.
@@ -190,13 +188,10 @@ where
         .request(Method::POST, url.clone())
         .headers(headers)
         .json(&body);
-    // The caller's per-call budget, when it set one. Unlike a subprocess, an
-    // HTTP request lives inside this future, so there is no configured total
-    // timeout to default to: absent a deadline the transport bounds
-    // (`connect_timeout` + `stream_idle_timeout`) are the only limits, and how
-    // long a slow-but-progressing stream may run is the caller's call. Held in a
-    // local so the timeout arms below can report the ACTUAL budget the request
-    // was given (and so the SSE body-read path can reach it too).
+    // The caller's per-call budget, when set. Absent a deadline the transport
+    // bounds (`connect_timeout` + `stream_idle_timeout`) are the only limits.
+    // Held in a local so the timeout arms below can report the ACTUAL budget
+    // (and the SSE body-read path can reach it too).
     let deadline_budget = ctx.remaining();
     if let Some(left) = deadline_budget {
         rb = rb.timeout(left);
@@ -204,10 +199,9 @@ where
 
     let response = rb.send().await.map_err(|e| match deadline_budget {
         // Our per-request deadline fired: reqwest surfaces it as an `is_timeout`
-        // error. Report the wall-clock abort as `TimedOut` (MaybeRetriable) with
-        // the caller's real budget, not a generic `Network` blip — the caller's
-        // budget, not a transport fault, ended the call. Absent a deadline an
-        // `is_timeout` is a connect-timeout transport fault, so it stays `Network`.
+        // error. Report it as `TimedOut` (MaybeRetriable) with the caller's real
+        // budget, not a generic `Network` blip. Absent a deadline an `is_timeout`
+        // is a connect-timeout transport fault, so it stays `Network`.
         Some(budget) if e.is_timeout() => ProviderError::TimedOut {
             budget,
             detail: format!("HTTP request to {url} timed out (model={model}): {e}"),
@@ -221,14 +215,8 @@ where
         // `classify_error` needs them for Retry-After parsing.
         let headers = response.headers().clone();
         // True bounded read — stream chunks and stop at the cap so a
-        // 1 GB hostile error body can't OOM us. Audit
-        // `tars-provider-src-http-base-1` (round 2): the prior
-        // implementation called `response.text().await`, which reads
-        // the *entire* body before truncating — defeating the whole
-        // point of the cap. Now we bail at `ERROR_BODY_CAP_BYTES` of
-        // bytes received and carry whatever we've got into
-        // `classify_error`. Read errors are surfaced as a marker
-        // (round-1 fix); we keep that.
+        // 1 GB hostile error body can't OOM us. Read errors are surfaced
+        // as a marker string so `classify_error` sees what happened.
         let body = read_bounded_body(response, ERROR_BODY_CAP_BYTES).await;
         let trunc = truncate_utf8(&body, ERROR_BODY_CAP_BYTES);
         return Err(adapter.classify_error(status, &headers, trunc));
@@ -240,10 +228,9 @@ where
 
     let mut buf = ToolCallBuffer::new();
 
-    // Captured into the stream (which is `'static`, so no borrows): reqwest's
-    // per-request timeout also aborts the body stream once headers are in, so an
-    // `is_timeout` error can surface DEEP in the SSE read — not just at `.send()`.
-    // `deadline_budget` is Copy; `model` needs an owned copy to cross the boundary.
+    // reqwest's per-request timeout also aborts the body stream once headers
+    // are in, so an `is_timeout` can surface DEEP in the SSE read, not just at
+    // `.send()`. Captured owned into the `'static` stream.
     let body_budget = deadline_budget;
     let model_owned = model.to_string();
 
@@ -327,15 +314,13 @@ pub(crate) async fn read_bounded_body(response: reqwest::Response, cap: usize) -
 
 /// Truncate `s` to at most `max_bytes` while staying on a UTF-8 boundary.
 ///
-/// `&s[..max_bytes]` is unsafe-by-design: the index must fall on a
-/// codepoint boundary or `str::index` panics. Bug report:
-/// `tars-provider-src-http-base-2` (audit run 3ab2b7fa). Fix lifts the
-/// idiom from std's own `floor_char_boundary` (still unstable as of 1.85).
-pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+/// `&s[..max_bytes]` panics unless the index falls on a codepoint
+/// boundary, so walk back to one first (std's `floor_char_boundary` is
+/// still unstable as of 1.85).
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
-    // Walk back from `max_bytes` to the previous char boundary.
     // is_char_boundary(s.len()) is always true, so this terminates.
     let mut end = max_bytes;
     while end > 0 && !s.is_char_boundary(end) {
@@ -344,10 +329,8 @@ pub(crate) fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-/// UTF-8-safe truncation to `max` bytes; appends an ellipsis if
-/// anything was dropped. Shared by the backend mapping layers (each
-/// previously carried a byte-identical copy) — see `truncate_utf8`
-/// for the boundary-safety guarantee it builds on.
+/// UTF-8-safe truncation to `max` bytes; appends an ellipsis if anything
+/// was dropped. See `truncate_utf8` for the boundary-safety guarantee.
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     let trimmed = truncate_utf8(s, max);
     if trimmed.len() == s.len() {
@@ -435,9 +418,7 @@ mod tests {
     #[test]
     fn truncate_utf8_handles_multibyte_boundary() {
         // Regression: `&s[..n]` panics when `n` lands mid-codepoint.
-        // Audit finding `tars-provider-src-http-base-2`.
-        // 4 bytes per emoji (each is 4-byte UTF-8) — truncate at 3
-        // would split, must round down to 0.
+        // 4 bytes per emoji — truncate at 3 would split, must round down to 0.
         let s = "🦀🦀🦀";
         assert_eq!(truncate_utf8(s, 3), "");
         assert_eq!(truncate_utf8(s, 4), "🦀");
@@ -457,10 +438,8 @@ mod tests {
         assert_eq!(truncate_utf8(&s, 4096).len(), 4096);
     }
 
-    /// Audit `tars-provider-src-http-base-2`: round-1 of this finding
-    /// added a marker string for body-read failures but didn't test
-    /// it. Drive a wiremock 500 response with an oversized body and
-    /// assert (a) we don't OOM, (b) the cap actually bounds memory.
+    /// Drive a wiremock 500 with an oversized body and assert (a) we don't
+    /// OOM, (b) the cap actually bounds memory.
     #[tokio::test]
     async fn error_body_is_capped_at_cap_bytes() {
         use wiremock::matchers::{method, path};

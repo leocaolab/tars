@@ -60,10 +60,15 @@ async fn submit_posts_requests_array_and_returns_job_id() {
     let id = submitter
         .submit(
             vec![
-                (BatchItemId::new("draft-1"), ChatRequest::user("draft one")),
-                (BatchItemId::new("draft-2"), ChatRequest::user("draft two")),
-            ],
-            "test-model",
+                (
+                    BatchItemId::new("draft-1"),
+                    ChatRequest::user("draft one"),
+                ),
+                (
+                    BatchItemId::new("draft-2"),
+                    ChatRequest::user("draft two"),
+                ),
+            ], "test-model",
             &tars_types::RequestContext::test_default(),
         )
         .await
@@ -79,11 +84,7 @@ async fn submit_empty_items_is_invalid_request() {
     let submitter = provider.as_batch_submitter().unwrap();
 
     let err = submitter
-        .submit(
-            vec![],
-            "test-model",
-            &tars_types::RequestContext::test_default(),
-        )
+        .submit(vec![], "test-model", &tars_types::RequestContext::test_default())
         .await
         .expect_err("must reject");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));
@@ -319,8 +320,10 @@ async fn submit_propagates_http_error_via_classifier() {
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
         .submit(
-            vec![(BatchItemId::new("x"), ChatRequest::user("hi"))],
-            "test-model",
+            vec![(
+                BatchItemId::new("x"),
+                ChatRequest::user("hi"),
+            )], "test-model",
             &tars_types::RequestContext::test_default(),
         )
         .await

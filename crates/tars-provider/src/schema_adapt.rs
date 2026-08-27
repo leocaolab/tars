@@ -20,10 +20,6 @@
 //! single-element `allOf` (`anyOf` / `oneOf` likewise) hoists the
 //! `enum`/`type` to the node itself, where gemini *does* enforce it as a
 //! hard constraint.
-//!
-//! The Gemini / OpenAI / Vllm transforms are ported from arc's
-//! `crates/arc_core/src/schema.rs` `sanitize_node` (the source of truth
-//! being migrated here), plus the new single-element `allOf` flatten.
 
 use serde_json::Value;
 
@@ -82,20 +78,17 @@ pub fn adapt_schema(schema: &Value, dialect: SchemaDialect) -> Result<Value, Sch
 }
 
 /// Resolve every `$ref` in `value` against its root `$defs`/`definitions`
-/// bag, inline the target, then drop the bag. Runs for ALL dialects: the
-/// precondition "refs are already inlined" is gone — tars owns it now.
+/// bag, inline the target, then drop the bag. Runs for ALL dialects.
 /// A dangling or cyclic ref is a hard `Err` (carrying the pointer), never
 /// a silent pass-through of an unresolved ref.
 fn inline_refs(value: &mut Value) -> Result<(), SchemaAdaptError> {
     // The definitions bag is `$defs` (2020-12) or `definitions` (draft-07,
     // what the pinned schemars emits). Take ownership once at the root so
     // we can drop it after resolution.
-    let bag = ["$defs", "definitions"]
-        .into_iter()
-        .find_map(|k| match value.get(k) {
-            Some(Value::Object(m)) => Some((k, m.clone())),
-            _ => None,
-        });
+    let bag = ["$defs", "definitions"].into_iter().find_map(|k| match value.get(k) {
+        Some(Value::Object(m)) => Some((k, m.clone())),
+        _ => None,
+    });
     let (key, defs) = match bag {
         Some((k, m)) => (Some(k), m),
         // No bag: there is nothing to inline INTO. But a stray `$ref` could
@@ -181,7 +174,7 @@ fn adapt_node(node: &mut Value, dialect: SchemaDialect) {
     }
     match node {
         Value::Object(map) => {
-            // ── A. Single-element allOf/anyOf/oneOf flatten (the bug fix).
+            // ── A. Single-element allOf/anyOf/oneOf flatten.
             //
             // Apply FIRST, before the dialect-specific rest, so the
             // hoisted `enum`/`type` participate in the subsequent
@@ -192,7 +185,6 @@ fn adapt_node(node: &mut Value, dialect: SchemaDialect) {
             // Multi-element combinators are left untouched (can't flatten
             // a real union/intersection safely).
             for combinator in ["allOf", "anyOf", "oneOf"] {
-                // Only a one-element array of one object is flattenable.
                 let flattenable = matches!(
                     map.get(combinator),
                     Some(Value::Array(arr))
@@ -201,9 +193,6 @@ fn adapt_node(node: &mut Value, dialect: SchemaDialect) {
                 if flattenable {
                     if let Some(Value::Array(arr)) = map.remove(combinator) {
                         if let Some(Value::Object(inner)) = arr.into_iter().next() {
-                            // Inner wins on conflict (it carries the
-                            // constraint); the node keeps any sibling key
-                            // the inner doesn't define.
                             for (k, v) in inner {
                                 map.insert(k, v);
                             }
@@ -285,8 +274,7 @@ fn adapt_node(node: &mut Value, dialect: SchemaDialect) {
                 }
                 SchemaDialect::OpenAi => {
                     // OpenAI strict mode requires additionalProperties:false
-                    // on every object schema. Add it where missing. (arc's
-                    // OpenAI profile does ONLY this — no draft-07 strip.)
+                    // on every object schema. Add it where missing.
                     if matches!(map.get("type"), Some(Value::String(t)) if t == "object")
                         && !map.contains_key("additionalProperties")
                     {
@@ -503,13 +491,12 @@ mod tests {
         );
     }
 
-    // ── $ref inlining (the defect this commit fixes) ──────────────────
+    // ── $ref inlining ─────────────────────────────────────────────────
 
-    /// THE REGRESSION: a schemars-shaped schema whose array items are a
-    /// `$ref` into `definitions`. Before the fix, the gemini branch
-    /// STRIPPED `$ref`, emitting an item with NO `verdict`/`reply` — a
-    /// structurally-valid but silently-wrong schema. Now the ref is
-    /// inlined and the item carries its real properties.
+    /// A schemars-shaped schema whose array items are a `$ref` into
+    /// `definitions`: the ref must be inlined so the item carries its real
+    /// `verdict`/`reply` properties, not stripped to a silently-wrong
+    /// empty schema.
     #[test]
     fn ref_into_definitions_is_inlined_not_stripped() {
         let raw = json!({
@@ -534,21 +521,10 @@ mod tests {
         let out = adapt_schema(&raw, SchemaDialect::Gemini).unwrap();
         let item = &out["properties"]["items"]["items"];
         assert!(item.get("$ref").is_none(), "$ref resolved away: {item}");
-        assert_eq!(
-            item["properties"]["verdict"]["type"],
-            json!("string"),
-            "verdict kept: {item}"
-        );
-        assert_eq!(
-            item["properties"]["reply"]["type"],
-            json!("string"),
-            "reply kept: {item}"
-        );
+        assert_eq!(item["properties"]["verdict"]["type"], json!("string"), "verdict kept: {item}");
+        assert_eq!(item["properties"]["reply"]["type"], json!("string"), "reply kept: {item}");
         // The definitions bag is dropped after inlining.
-        assert!(
-            out.get("definitions").is_none(),
-            "definitions dropped: {out}"
-        );
+        assert!(out.get("definitions").is_none(), "definitions dropped: {out}");
         assert!(!out.to_string().contains("$ref"), "no $ref survives: {out}");
     }
 
@@ -565,15 +541,8 @@ mod tests {
         });
         let out = adapt_schema(&raw, SchemaDialect::Gemini).unwrap();
         let status = &out["properties"]["status"];
-        assert!(
-            status.get("allOf").is_none(),
-            "allOf flattened after inline: {status}"
-        );
-        assert_eq!(
-            status["enum"],
-            json!(["open", "closed"]),
-            "enum hoisted: {status}"
-        );
+        assert!(status.get("allOf").is_none(), "allOf flattened after inline: {status}");
+        assert_eq!(status["enum"], json!(["open", "closed"]), "enum hoisted: {status}");
     }
 
     /// A `$ref` naming no definition is an `Err` carrying the exact
@@ -601,10 +570,7 @@ mod tests {
     fn ref_without_defs_bag_errors() {
         let raw = json!({"$ref": "#/definitions/Nope"});
         let err = adapt_schema(&raw, SchemaDialect::Gemini).unwrap_err();
-        assert!(
-            matches!(err, SchemaAdaptError::DanglingRef { .. }),
-            "got {err:?}"
-        );
+        assert!(matches!(err, SchemaAdaptError::DanglingRef { .. }), "got {err:?}");
     }
 
     /// A recursive schema (`$ref` cycle) cannot be inlined — it is an
@@ -647,8 +613,7 @@ mod tests {
         assert_eq!(out["properties"]["b"]["enum"], json!(["x"]));
     }
 
-    /// Inlining runs for every dialect, including Passthrough/Vllm — the
-    /// "refs already inlined" precondition is gone workspace-wide.
+    /// Inlining runs for every dialect, including Passthrough/Vllm.
     #[test]
     fn refs_inlined_for_passthrough_and_vllm() {
         let raw = json!({
@@ -658,11 +623,7 @@ mod tests {
         });
         for d in [SchemaDialect::Passthrough, SchemaDialect::Vllm] {
             let out = adapt_schema(&raw, d).unwrap();
-            assert_eq!(
-                out["properties"]["x"]["type"],
-                json!("string"),
-                "{d:?}: inlined"
-            );
+            assert_eq!(out["properties"]["x"]["type"], json!("string"), "{d:?}: inlined");
             assert!(!out.to_string().contains("$ref"), "{d:?}: no $ref: {out}");
         }
     }

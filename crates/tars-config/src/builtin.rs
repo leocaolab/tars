@@ -51,7 +51,6 @@ pub fn built_in_provider_defaults() -> HashMap<ProviderId, ProviderConfig> {
         (ProviderId::new("gemini"), default_gemini()),
         (ProviderId::new("deepseek"), default_deepseek()),
         (ProviderId::new("claude_cli"), default_claude_cli()),
-        (ProviderId::new("gemini_cli"), default_gemini_cli()),
         (ProviderId::new("mlx"), default_mlx()),
         (ProviderId::new("llamacpp"), default_llamacpp()),
         (ProviderId::new("vllm"), default_vllm()),
@@ -147,16 +146,6 @@ pub fn default_claude_cli() -> ProviderConfig {
     }
 }
 
-/// Default Gemini CLI: `gemini` binary, 5-min timeout, flash model
-/// (cheaper than pro for the typical CLI use case).
-pub fn default_gemini_cli() -> ProviderConfig {
-    ProviderConfig::GeminiCli {
-        executable: "gemini".into(),
-        timeout_secs: 300,
-        default_model: "gemini-2.5-flash".into(),
-    }
-}
-
 /// Default MLX: `mlx_lm.server` on `localhost:8080`, no auth, a Qwen
 /// 32B 4-bit MLX-converted Coder model. Override `default_model` to
 /// match whatever you've actually loaded into mlx-lm.server.
@@ -207,7 +196,7 @@ pub fn default_llamacpp() -> ProviderConfig {
 /// - User entries with new ids extend the set
 ///
 /// To exclude a built-in from the effective config, the user can set
-/// e.g. `[providers.gemini_cli]` with no body — but that violates serde,
+/// e.g. `[providers.claude_cli]` with no body — but that violates serde,
 /// so the practical pattern is to use distinct ids for everything you
 /// configure (e.g. `openai_main` instead of `openai`) and ignore the
 /// built-ins you don't need.
@@ -257,7 +246,6 @@ mod tests {
             "gemini",
             "deepseek",
             "claude_cli",
-            "gemini_cli",
             "mlx",
             "llamacpp",
             "vllm",
@@ -341,9 +329,9 @@ mod tests {
         .into_iter()
         .collect();
         let merged = merge_builtin_with_user(user);
-        // 9 built-ins (openai, anthropic, gemini, deepseek, claude_cli,
-        // gemini_cli, mlx, llamacpp, vllm) + 1 user-added.
-        assert_eq!(merged.len(), 10);
+        // 8 built-ins (openai, anthropic, gemini, deepseek, claude_cli,
+        // mlx, llamacpp, vllm) + 1 user-added.
+        assert_eq!(merged.len(), 9);
         assert!(merged.contains_key(&ProviderId::new("local_qwen")));
     }
 

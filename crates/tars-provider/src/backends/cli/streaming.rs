@@ -1,7 +1,9 @@
 //! Stream-json mode for the delegate CLI subprocess, gated by
 //! `TARS_CLAUDE_CLI_STREAM`. Owns the NDJSON event reader and the
-//! human-readable per-event summary emitted to stderr for
-//! observability. Lives in its own file because it carries the most
+//! human-readable per-event summary emitted via `tracing` (target
+//! `tars_provider::cli::stream`) for observability — a library owns no
+//! terminal, so the consumer's subscriber controls the sink. Lives in
+//! its own file because it carries the most
 //! complexity (event taxonomy + line-by-line reader + stderr drain)
 //! and isn't on the happy path of the buffered runner.
 //!
@@ -11,12 +13,13 @@
 use serde_json::Value;
 
 use tars_types::ProviderError;
+use super::cli_subprocess_died;
 
 use super::argv::SubprocessInvocation;
 use super::subprocess::truncate;
 
-/// Drive `claude -p --output-format stream-json` and stream events to
-/// stderr while reconstructing the `result` event for the return value.
+/// Drive `claude -p --output-format stream-json` and log events via
+/// `tracing` while reconstructing the `result` event for the return value.
 ///
 /// `claude` emits NDJSON: one JSON object per line, one of:
 ///   - `system/init`, `system/status`               — lifecycle
@@ -39,16 +42,14 @@ pub(crate) async fn run_streaming(
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| ProviderError::CliSubprocessDied {
-            exit_code: None,
-            stderr: "stream-json: stdout pipe missing on spawned child".into(),
+        .ok_or_else(|| {
+            cli_subprocess_died(None, "stream-json: stdout pipe missing on spawned child".into())
         })?;
     let stderr_pipe = child
         .stderr
         .take()
-        .ok_or_else(|| ProviderError::CliSubprocessDied {
-            exit_code: None,
-            stderr: "stream-json: stderr pipe missing on spawned child".into(),
+        .ok_or_else(|| {
+            cli_subprocess_died(None, "stream-json: stderr pipe missing on spawned child".into())
         })?;
 
     // Drain stderr in a separate task so the child can't block on a full
@@ -93,7 +94,8 @@ pub(crate) async fn run_streaming(
                             // emit these in stream-json mode, but if it
                             // does, surface them (with the parse error)
                             // rather than swallowing.
-                            eprintln!(
+                            tracing::debug!(
+                                target: "tars_provider::cli::stream",
                                 "[claude_cli {session_short}] !! non-json stdout line ({e}): {}",
                                 truncate(&line, 200)
                             );
@@ -102,10 +104,7 @@ pub(crate) async fn run_streaming(
                 }
                 Ok(None) => break, // EOF
                 Err(e) => {
-                    return Err(ProviderError::CliSubprocessDied {
-                        exit_code: None,
-                        stderr: format!("stream read failed: {e}"),
-                    });
+                    return Err(cli_subprocess_died(None, format!("stream read failed: {e}")));
                 }
             }
         }
@@ -153,10 +152,10 @@ pub(crate) async fn run_streaming(
         Ok(s) => s,
         Err(e) => {
             let stderr_s = truncate(&String::from_utf8_lossy(&stderr_buf), 500);
-            return Err(ProviderError::CliSubprocessDied {
-                exit_code: None,
-                stderr: format!("wait failed: {e} (stderr: {stderr_s})"),
-            });
+            return Err(cli_subprocess_died(
+                None,
+                format!("wait failed: {e} (stderr: {stderr_s})"),
+            ));
         }
     };
 
@@ -165,10 +164,7 @@ pub(crate) async fn run_streaming(
         // UTF-8-safe truncation — see the buffered path; `[..500]` can
         // panic on a multi-byte boundary.
         let truncated = truncate(&stderr_s, 500);
-        return Err(ProviderError::CliSubprocessDied {
-            exit_code: status.code(),
-            stderr: truncated,
-        });
+        return Err(cli_subprocess_died(status.code(), truncated));
     }
 
     // Strip the `type` wrapper from the result event so callers see the
@@ -198,16 +194,16 @@ pub(crate) async fn run_streaming(
             .get("result")
             .and_then(|r| r.as_str())
             .unwrap_or("(no detail in result event)");
-        return Err(ProviderError::CliSubprocessDied {
-            exit_code: status.code(),
-            stderr: format!("claude reported is_error: {detail}"),
-        });
+        return Err(cli_subprocess_died(
+            status.code(),
+            format!("claude reported is_error: {detail}"),
+        ));
     }
 
     Ok(result)
 }
 
-/// One-line stderr summary for a stream-json event. Mirrors the
+/// One-line `tracing` summary for a stream-json event. Mirrors the
 /// information a user would see watching `claude` interactively (init,
 /// thinking, text generation, result). Designed to be cheap (no
 /// allocation when stdlib formatting suffices) and human-readable.
@@ -219,10 +215,10 @@ fn emit_event_summary(ev: &Value, sid: &str) {
             let sub = ev.get("subtype").and_then(|v| v.as_str()).unwrap_or("?");
             let model = ev.get("model").and_then(|v| v.as_str()).unwrap_or("");
             if sub == "init" {
-                eprintln!("[claude_cli {sid}] init model={model}");
+                tracing::debug!(target: "tars_provider::cli::stream", "[claude_cli {sid}] init model={model}");
             } else {
                 let status = ev.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                eprintln!("[claude_cli {sid}] {sub} {status}");
+                tracing::debug!(target: "tars_provider::cli::stream", "[claude_cli {sid}] {sub} {status}");
             }
         }
         "rate_limit_event" => {
@@ -231,7 +227,7 @@ fn emit_event_summary(ev: &Value, sid: &str) {
                 .and_then(|v| v.get("status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
-            eprintln!("[claude_cli {sid}] rate_limit {status}");
+            tracing::debug!(target: "tars_provider::cli::stream", "[claude_cli {sid}] rate_limit {status}");
         }
         "stream_event" => {
             let inner = ev
@@ -242,7 +238,7 @@ fn emit_event_summary(ev: &Value, sid: &str) {
             match inner {
                 "message_start" => {
                     let ttft = ev.get("ttft_ms").and_then(|v| v.as_i64()).unwrap_or(-1);
-                    eprintln!("[claude_cli {sid}] message_start ttft={ttft}ms");
+                    tracing::debug!(target: "tars_provider::cli::stream", "[claude_cli {sid}] message_start ttft={ttft}ms");
                 }
                 "content_block_start" => {
                     let kind = ev
@@ -251,7 +247,7 @@ fn emit_event_summary(ev: &Value, sid: &str) {
                         .and_then(|v| v.get("type"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("?");
-                    eprintln!("[claude_cli {sid}] block_start kind={kind}");
+                    tracing::debug!(target: "tars_provider::cli::stream", "[claude_cli {sid}] block_start kind={kind}");
                 }
                 "content_block_delta" => {
                     let delta = ev.get("event").and_then(|v| v.get("delta"));
@@ -269,16 +265,16 @@ fn emit_event_summary(ev: &Value, sid: &str) {
                         })
                         .unwrap_or("");
                     if !chunk.is_empty() {
-                        eprintln!("[claude_cli {sid}] {dtype}: {}", truncate(chunk, 200));
+                        tracing::debug!(target: "tars_provider::cli::stream", "[claude_cli {sid}] {dtype}: {}", truncate(chunk, 200));
                     }
                 }
                 "content_block_stop" => { /* low-signal, skip */ }
                 "message_delta" => { /* usage update, low-signal mid-call */ }
                 "message_stop" => {
-                    eprintln!("[claude_cli {sid}] message_stop");
+                    tracing::debug!(target: "tars_provider::cli::stream", "[claude_cli {sid}] message_stop");
                 }
                 other => {
-                    eprintln!("[claude_cli {sid}] stream_event/{other}");
+                    tracing::debug!(target: "tars_provider::cli::stream", "[claude_cli {sid}] stream_event/{other}");
                 }
             }
         }
@@ -303,12 +299,13 @@ fn emit_event_summary(ev: &Value, sid: &str) {
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
             let subtype = ev.get("subtype").and_then(|v| v.as_str()).unwrap_or("?");
-            eprintln!(
+            tracing::info!(
+                target: "tars_provider::cli::stream",
                 "[claude_cli {sid}] result {subtype} dur={dur}ms in={tin} out={tout} cached={tcached} cost=${cost:.4}"
             );
         }
         other => {
-            eprintln!("[claude_cli {sid}] {other}");
+            tracing::debug!(target: "tars_provider::cli::stream", "[claude_cli {sid}] {other}");
         }
     }
 }
@@ -365,10 +362,7 @@ mod tests {
             started.elapsed()
         );
         let msg = err.to_string();
-        assert!(
-            msg.contains("timed out"),
-            "expected a timeout error, got: {msg}"
-        );
+        assert!(msg.contains("timed out"), "expected a timeout error, got: {msg}");
         // We killed the child; it did not die on its own — the abort is a
         // `TimedOut`, NOT a `CliSubprocessDied`, and `budget` is the invocation
         // budget the call was given (200ms here).

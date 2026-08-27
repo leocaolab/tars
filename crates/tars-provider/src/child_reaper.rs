@@ -10,7 +10,7 @@
 //! children — orphan. They then run for days, eating the Max-subscription
 //! concurrency wall.
 //!
-//! This module is the *mechanism* only. A library must not grab the
+//! This crate is the *mechanism* only. A library must not grab the
 //! process's signal handler — the host application installs the handler
 //! and calls [`kill_all_spawned`] from it. Spawn sites register their
 //! child's PID here right after a successful spawn (and deregister when the
@@ -69,10 +69,8 @@ pub fn kill_all_spawned() {
 
     #[cfg(unix)]
     for pid in pids {
-        // `killpg(pgid, SIGKILL)` signals the whole process group led by
-        // `pid` (each child was spawned as its own group leader), so the
-        // SDK daemon's claude children die too. ESRCH (already gone) and
-        // any other error are deliberately ignored — best-effort reaping.
+        // Signal the whole process group (see fn doc). ESRCH (already gone)
+        // and any other error are deliberately ignored — best-effort reaping.
         let pgid = nix::unistd::Pid::from_raw(pid as i32);
         let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
     }

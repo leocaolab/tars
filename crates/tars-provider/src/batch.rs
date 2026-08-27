@@ -5,11 +5,6 @@
 //! `LlmProvider::stream`. This trait is the cross-vendor abstraction;
 //! types ([`BatchStatus`], [`BatchResultItem`]) live in `tars-types`.
 //!
-//! Phase 1 (roadmap §5) ships the trait + a [`MockBatchSubmitter`] for
-//! consumers to test against. Vendor implementations (Anthropic,
-//! OpenAI) follow in Phase 2/3 — see
-//! [`docs/roadmap.md §5`](../../../../docs/roadmap.md).
-//!
 //! # What this trait does *not* do
 //!
 //! - **No scheduling.** Caller polls `status()` on whatever cadence
@@ -215,10 +210,8 @@ impl BatchSubmitter for MockBatchSubmitter {
             )));
         }
         if let Some(custom) = &job.custom_results {
-            // Clone results — BatchResultItem holds a Result<ChatResponse, ...>
-            // which isn't Clone, so we have to fabricate per-item clones via re-marshal.
-            // Tests calling set_results get their results back unchanged here is the contract,
-            // but since Result<ChatResponse, _> isn't Clone we serialize/deserialize.
+            // BatchResultItem's `Result<ChatResponse, _>` isn't Clone, so return
+            // per-item clones via a serialize/deserialize round-trip.
             return custom
                 .iter()
                 .map(|item| {
@@ -293,19 +286,11 @@ mod tests {
     async fn submit_assigns_unique_job_ids() {
         let m = MockBatchSubmitter::new();
         let id1 = m
-            .submit(
-                vec![(BatchItemId::new("a"), req("hello"))],
-                "test-model",
-                &ctx(),
-            )
+            .submit(vec![(BatchItemId::new("a"), req("hello"))], "test-model", &ctx())
             .await
             .unwrap();
         let id2 = m
-            .submit(
-                vec![(BatchItemId::new("b"), req("world"))],
-                "test-model",
-                &ctx(),
-            )
+            .submit(vec![(BatchItemId::new("b"), req("world"))], "test-model", &ctx())
             .await
             .unwrap();
         assert_ne!(id1, id2);
@@ -315,11 +300,7 @@ mod tests {
     async fn status_after_submit_is_completed_by_default() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(
-                vec![(BatchItemId::new("a"), req("x"))],
-                "test-model",
-                &ctx(),
-            )
+            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
             .await
             .unwrap();
         assert_eq!(m.status(&id, &ctx()).await.unwrap(), BatchStatus::Completed);
@@ -356,11 +337,7 @@ mod tests {
     async fn results_non_terminal_status_errors() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(
-                vec![(BatchItemId::new("a"), req("x"))],
-                "test-model",
-                &ctx(),
-            )
+            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
             .await
             .unwrap();
         m.set_status(
@@ -383,11 +360,7 @@ mod tests {
     async fn set_status_drives_polling_simulation() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(
-                vec![(BatchItemId::new("a"), req("x"))],
-                "test-model",
-                &ctx(),
-            )
+            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
             .await
             .unwrap();
         // Simulate progress polling.
@@ -411,11 +384,7 @@ mod tests {
     async fn cancel_default_returns_unsupported() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(
-                vec![(BatchItemId::new("a"), req("x"))],
-                "test-model",
-                &ctx(),
-            )
+            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
             .await
             .unwrap();
         let err = m
@@ -428,7 +397,7 @@ mod tests {
     #[tokio::test]
     async fn provider_default_returns_none_for_batch_submitter() {
         // Default LlmProvider impl returns None — backends that don't
-        // override stay sync-only. (Phase 2/3 will add real overrides.)
+        // override stay sync-only.
         use crate::backends::mock::{CannedResponse, MockProvider};
         use crate::provider::LlmProvider;
 

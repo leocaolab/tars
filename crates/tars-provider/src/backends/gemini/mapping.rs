@@ -1,8 +1,5 @@
 //! Pure helpers shared by [`super::adapter`]: stop-reason mapping,
-//! usage parsing, body truncation, URL encoding. Stateless, no I/O —
-//! the kind of "mechanical conversion" that the L5 Tribunal split out
-//! of the original god-module so the adapter can be read without
-//! scrolling through token-level minutiae.
+//! usage parsing, body truncation, URL encoding. Stateless, no I/O.
 
 use serde_json::Value;
 

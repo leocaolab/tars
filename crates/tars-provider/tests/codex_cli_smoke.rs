@@ -41,7 +41,8 @@ async fn codex_cli_say_hi_against_real_binary() {
     // `gpt-5` / `gpt-5-codex` are gated to API accounts only and 400
     // with `model is not supported when using Codex with a ChatGPT
     // account`. gpt-5.5 works on the test account.
-    let req = ChatRequest::user("Say exactly: hello from codex. Nothing else.");
+    let req = ChatRequest::user("Say exactly: hello from codex. Nothing else.",
+    );
 
     println!("\n── codex_cli smoke: spawning real `codex exec` ──");
     let mut stream = Arc::clone(&provider)

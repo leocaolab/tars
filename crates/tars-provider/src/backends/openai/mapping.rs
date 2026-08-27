@@ -17,11 +17,9 @@ use crate::tool_buffer::ToolCallBuffer;
 
 use super::dialect::OpenAiDialect;
 
-/// Cap for raw payloads embedded in parse-error messages. Enough to see
-/// what actually came back on the wire (CLAUDE.md rule #1: a parse
-/// failure must carry the real data, not a bare sentinel) without
-/// dumping a full multi-KB body into an error string. Mirrors the
-/// claude_cli `truncate(_, 300)` convention.
+/// Cap for raw payloads embedded in parse-error messages: enough to see
+/// what came back on the wire — a parse failure must carry the real data,
+/// not a bare sentinel — without dumping a full multi-KB body.
 const RAW_ERR_CAP: usize = 300;
 
 /// Authorization header only (no `Content-Type: application/json`) —
@@ -51,12 +49,15 @@ pub(super) fn openai_auth_only_headers(auth: &ResolvedAuth) -> Result<HeaderMap,
 ///   cancelling → InProgress
 ///   cancelled → Cancelled
 pub(super) fn translate_openai_batch_status(v: &Value) -> Result<BatchStatus, ProviderError> {
-    let status = v.get("status").and_then(|s| s.as_str()).ok_or_else(|| {
-        ProviderError::Parse(format!(
-            "batch status: missing `status`; raw: {}",
-            crate::http_base::truncate(&v.to_string(), RAW_ERR_CAP)
-        ))
-    })?;
+    let status = v
+        .get("status")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| {
+            ProviderError::Parse(format!(
+                "batch status: missing `status`; raw: {}",
+                crate::http_base::truncate(&v.to_string(), RAW_ERR_CAP)
+            ))
+        })?;
 
     let counts = v
         .get("request_counts")
@@ -192,8 +193,7 @@ pub(super) fn parse_openai_batch_results(
 /// by replaying through [`ChatResponseBuilder`]. Same shape as the
 /// streaming end-state, just delivered all-at-once.
 ///
-/// **Known gap (Phase 3)**: tool_calls in batch responses are skipped.
-/// Same V1 limitation as the Anthropic backend (`anthropic_message_to_chat_response`).
+/// **Known gap**: tool_calls in batch responses are skipped.
 pub(super) fn openai_chat_completion_to_chat_response(
     body: &Value,
 ) -> Result<ChatResponse, ProviderError> {
@@ -253,9 +253,7 @@ pub(super) fn openai_chat_completion_to_chat_response(
         // o1 / DeepSeek-R1 / deepseek-v4 report the reasoning portion under
         // `completion_tokens_details.reasoning_tokens` (a SUBSET of
         // completion_tokens, already billed as output). Surface it so the
-        // thinking channel is instrumented — hardcoding 0 is why a
-        // thinking-mode DeepSeek call showed thinking_tokens=0 despite
-        // returning reasoning_content.
+        // thinking channel is instrumented.
         thinking_tokens: u
             .get("completion_tokens_details")
             .and_then(|d| d.get("reasoning_tokens"))
@@ -297,13 +295,11 @@ pub(super) fn parse_openai_usage(usage: &serde_json::Map<String, Value>) -> Usag
 }
 
 /// Drain whatever indices the buffer has into ToolCallEnd events.
-/// Replaces the broken finalization loop in `parse_event`.
 ///
-/// Audit `tars-provider-src-backends-openai-29`: previously swallowed
-/// finalize errors with `if let Ok(...)`, leaving consumers in an
-/// inconsistent state when args were malformed. Now propagates.
-/// Indices that were never started simply don't show up in the
-/// inflight map and yield a benign `not started` error we filter out.
+/// Propagates finalize errors (malformed args) rather than swallowing them,
+/// so consumers never see an inconsistent state. Indices that were never
+/// started don't show up in the inflight map and yield a benign `not
+/// started` error we filter out.
 pub(super) fn drain_buffer_into(
     buf: &mut ToolCallBuffer,
     out: &mut Vec<ChatEvent>,
@@ -344,14 +340,8 @@ mod usage_tests {
             "prompt_tokens_details": { "cached_tokens": 0 }
         });
         let usage = parse_openai_usage(u.as_object().unwrap());
-        assert_eq!(
-            usage.output_tokens, 224,
-            "output stays the full completion (billed)"
-        );
-        assert_eq!(
-            usage.thinking_tokens, 130,
-            "reasoning surfaced, not hardcoded 0"
-        );
+        assert_eq!(usage.output_tokens, 224, "output stays the full completion (billed)");
+        assert_eq!(usage.thinking_tokens, 130, "reasoning surfaced, not hardcoded 0");
     }
 
     #[test]
@@ -364,12 +354,12 @@ mod usage_tests {
 
 #[cfg(test)]
 mod raw_carry_tests {
-    //! CLAUDE.md rule #1: a parse failure must carry the *real* payload
-    //! that came back — not a bare "not JSON"/sentinel that drops the
-    //! truth. These lock in that the raw response substring survives
-    //! into the error string (truncated, never a naked token).
-    use super::super::dialect::StandardDialect;
+    //! A parse failure must carry the *real* payload that came back — not a
+    //! bare "not JSON"/sentinel that drops the truth. These lock in that the
+    //! raw response substring survives into the error string (truncated,
+    //! never a naked token).
     use super::*;
+    use super::super::dialect::StandardDialect;
 
     #[test]
     fn malformed_batch_line_error_carries_raw() {
@@ -426,9 +416,6 @@ mod raw_carry_tests {
             msg.len(),
             huge.len()
         );
-        assert!(
-            msg.contains('…'),
-            "truncation ellipsis expected, got: {msg}"
-        );
+        assert!(msg.contains('…'), "truncation ellipsis expected, got: {msg}");
     }
 }

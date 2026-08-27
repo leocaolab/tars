@@ -8,8 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ChatRequest, ProviderError, ProviderId,
-    ProviderProfile, RequestContext,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ProviderProfile, ChatRequest,
+    ProviderError, ProviderId, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};
@@ -63,10 +63,8 @@ impl GeminiProviderBuilder {
     }
 }
 
-/// Assembled from the provider DB (`data/provider.toml`) for Gemini's default
-/// model. Gemini was the ONE backend that already read the KB by hand
-/// (`data/models.toml`); that bespoke read collapses into the shared
-/// `capabilities_for` assembler.
+/// Assembled from the provider DB (`data/provider.toml`) for Gemini's
+/// default model.
 fn default_capabilities() -> ProviderProfile {
     tars_config::capabilities_for("gemini", "")
 }
@@ -105,7 +103,6 @@ impl LlmProvider for GeminiProvider {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
         // Gemini puts the key in the query string. We pre-build the URL
         // with the key folded in, and don't set any auth headers.
-        // Adapter handles model-name→URL with the key already present.
         let resolved = match auth {
             ResolvedAuth::ApiKey(k) => {
                 if k.is_empty() {
@@ -131,9 +128,7 @@ impl LlmProvider for GeminiProvider {
                 ResolvedAuthWithKey::Key(k) => k,
             },
         });
-        // Cast through the trait — `stream_via_adapter` takes any HttpAdapter.
-        // We resolve auth to None at the layer below since the key is
-        // already in the URL.
+        // Auth resolves to None below — the key is already in the URL.
         stream_via_adapter(
             self.http.clone(),
             adapter_with_key,
@@ -146,39 +141,30 @@ impl LlmProvider for GeminiProvider {
     }
 
     fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn BatchSubmitter>> {
-        // We expose the surface so callers can `provider.as_batch_submitter()`
-        // and pattern-match uniformly with Anthropic / OpenAI; the impl
-        // itself returns `InvalidRequest` to signal "configured but
-        // unsupported." See the BatchSubmitter impl below.
+        // Expose the surface so callers can pattern-match uniformly with
+        // Anthropic / OpenAI; the impl returns `InvalidRequest` to signal
+        // "configured but unsupported."
         Some(self)
     }
 }
 
 // ─── BatchSubmitter — Gemini (NOT YET SUPPORTED) ────────────────────
 //
-// Gemini's batch API path is **fundamentally different** from
-// Anthropic / OpenAI:
+// Gemini's batch API path differs fundamentally from Anthropic / OpenAI:
 //
 // - The public GenAI API (`generativelanguage.googleapis.com`) batch
 //   endpoint uses Long-Running Operations (LRO) — resource names like
 //   `batches/abc`, polling via `operations` resource — not a direct
-//   status field like Anthropic / OpenAI.
+//   status field.
 //
 // - Vertex AI Batch Prediction is a separate product on
-//   `aiplatform.googleapis.com` that requires service-account auth +
-//   a Google Cloud Storage bucket for input/output files. This tars
-//   backend uses API-key auth against the GenAI API path and **does
-//   not support Vertex AI**.
+//   `aiplatform.googleapis.com` that requires service-account auth + a
+//   Google Cloud Storage bucket. This backend uses API-key auth against
+//   the GenAI API path and does not support Vertex AI.
 //
-// Rather than ship a wrong-shape stub or fake a half-working impl,
-// each method returns a typed `InvalidRequest` with a stable message
-// so callers can pattern-match on the surface AND know batch is not
-// usable on this provider yet.
-//
-// Tracking: `docs/roadmap.md §5 Phase 4`. Re-opening this requires
-// pinning the GenAI batch API spec (its shape has shifted as the API
-// has matured) — kept deferred until a contributor has time to do
-// that work end-to-end.
+// Each method returns a typed `InvalidRequest` with a stable message so
+// callers can pattern-match on the surface and know batch is unusable
+// here. Tracked at `docs/roadmap.md §5 Phase 4`.
 
 const GEMINI_BATCH_NOT_SUPPORTED: &str = "Gemini batch is not yet implemented in this tars backend. \
      Tracked at docs/roadmap.md §5 Phase 4. \

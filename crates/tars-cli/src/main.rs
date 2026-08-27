@@ -111,7 +111,7 @@ impl From<LogFormat> for TelemetryFormat {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Sanity-check a CLI provider (`claude_cli` / `gemini_cli` / `codex_cli`) — sends
+    /// Sanity-check a CLI provider (`claude_cli` / `codex_cli` / `opencode`) — sends
     /// a fixed "say hi" prompt and dumps every event so you can see what the
     /// subprocess actually returns.
     Probe(probe::ProbeArgs),

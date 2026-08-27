@@ -30,7 +30,7 @@
 //! ## Subscription / zero-pricing backends
 //!
 //! `Pricing::default()` is all zeros — what the `claude_cli` /
-//! `gemini_cli` / `codex_cli` backends use because the cost is borne
+//! `claude_cli` / `codex_cli` backends use because the cost is borne
 //! by the user's subscription, not per-call billing. The middleware
 //! detects this, emits one `tracing::warn` (per-service-instance) so
 //! the misconfiguration is observable, and passes through.

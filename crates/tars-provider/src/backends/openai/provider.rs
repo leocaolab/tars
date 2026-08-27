@@ -1,7 +1,6 @@
-//! `OpenAiProvider`, its builder, the `LlmProvider` impl, and the
-//! `BatchSubmitter` implementation (OpenAI Batch API). The default
-//! capability descriptor lives here too — it's only consumed by the
-//! builder fallback, so colocating it avoids a one-item module.
+//! `OpenAiProvider`, its builder, the `LlmProvider` impl, the
+//! `BatchSubmitter` implementation (OpenAI Batch API), and the default
+//! capability descriptor.
 
 use std::sync::Arc;
 
@@ -9,8 +8,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ChatRequest, ProviderError, ProviderId,
-    ProviderProfile, RequestContext,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ProviderProfile, ChatRequest,
+    ProviderError, ProviderId, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver};
@@ -37,11 +36,8 @@ pub struct OpenAiProviderBuilder {
     auth: Auth,
     capabilities: Option<ProviderProfile>,
     extras: HttpProviderExtras,
-    /// The behavior seam (Doc 30). `None` = no explicit dialect; `build()` then
-    /// infers one from `base_url` (a `deepseek` host → [`DeepSeekDialect`],
-    /// else [`StandardDialect`]) so today's base_url-gated behavior is
-    /// preserved byte-for-byte without a config-schema change. Set explicitly
-    /// via [`OpenAiProviderBuilder::dialect`] to override the inference.
+    /// The behavior seam. `None` = infer from `base_url` at `build()`; set
+    /// explicitly via [`OpenAiProviderBuilder::dialect`] to override.
     dialect: Option<Arc<dyn OpenAiDialect>>,
 }
 
@@ -78,7 +74,7 @@ impl OpenAiProviderBuilder {
 
     builder_setter! {
         /// Attach user-config-supplied http_headers / env_http_headers /
-        /// query_params (Doc 01 §6.1).
+        /// query_params.
         extras: HttpProviderExtras
     }
 
@@ -90,11 +86,8 @@ impl OpenAiProviderBuilder {
         let caps = self
             .capabilities
             .unwrap_or_else(default_openai_capabilities);
-        // Resolve the behavior seam. An explicit dialect wins; otherwise infer
-        // from the endpoint. This preserves today's base_url-gated DeepSeek
-        // `thinking` behavior byte-for-byte (the quirk moved into the dialect)
-        // with no config-schema change. An explicit `dialect` config field is a
-        // later, cleaner step (Doc 30 M3).
+        // Resolve the behavior seam: an explicit dialect wins; otherwise infer
+        // from the endpoint (a `deepseek` host → `DeepSeekDialect`).
         let dialect: Arc<dyn OpenAiDialect> = self.dialect.unwrap_or_else(|| {
             if self.base_url.contains("deepseek") {
                 Arc::new(DeepSeekDialect)
@@ -119,15 +112,13 @@ impl OpenAiProviderBuilder {
 }
 
 /// Default OpenAI capabilities, assembled from the provider DB
-/// (`data/provider.toml`) for OpenAI's default model — no longer a
-/// hand-written literal. Used as the builder fallback when the registry
-/// doesn't pass an explicit descriptor.
+/// (`data/provider.toml`) for OpenAI's default model. Used as the builder
+/// fallback when the registry doesn't pass an explicit descriptor.
 pub fn default_openai_capabilities() -> ProviderProfile {
     tars_config::capabilities_for("openai", "")
 }
 
-/// The provider itself. Cheap to clone (`Arc` everywhere), so the
-/// `Arc<Self>` requirement of [`LlmProvider`] is trivial.
+/// The provider itself.
 pub struct OpenAiProvider {
     id: ProviderId,
     http: Arc<HttpProviderBase>,
@@ -135,10 +126,73 @@ pub struct OpenAiProvider {
     auth: Auth,
     adapter: Arc<OpenAiAdapter>,
     capabilities: ProviderProfile,
-    /// The behavior seam (Doc 30). Held here so the non-streaming batch
-    /// results path decodes through the same dialect as streaming. Defaults
-    /// to [`StandardDialect`] and is shared (same `Arc`) with `adapter`.
+    /// The behavior seam, shared (same `Arc`) with `adapter` so the
+    /// non-streaming batch results path decodes through the same dialect as
+    /// streaming.
     dialect: Arc<dyn OpenAiDialect>,
+}
+
+/// The stream the agent actually reads, for a dialect whose text means nothing
+/// until it is whole.
+///
+/// A dialect that answers `false` to [`OpenAiDialect::text_is_only_whole`] gets its
+/// own stream back untouched — deltas go out as they arrive, which is what streaming
+/// is for. One that answers `true` has its text HELD here and read once by the
+/// dialect at the end. What comes out the other side is what every consumer already
+/// understands: text, and tool calls.
+///
+/// Not in the consumer. There are three places that assemble this stream —
+/// the fiber, the session, and `llm_common` — and none of them has the dialect
+/// or any reason to know what DSML is. `finalize` was reachable only through
+/// `complete()`, which none of them calls.
+///
+/// Free function, not a closure inside `stream()`, so a test can drive it with a
+/// hand-built stream and no HTTP: the defect this fixes shipped twice because the
+/// only path with no test was the only path the agent takes.
+fn whole_text(inner: LlmEventStream, dialect: Arc<dyn OpenAiDialect>) -> LlmEventStream {
+    if !dialect.text_is_only_whole() {
+        return inner;
+    }
+    let out = async_stream::stream! {
+        use futures::StreamExt as _;
+        let mut inner = inner;
+        let mut held = String::new();
+        while let Some(ev) = inner.next().await {
+            let ev = match ev {
+                Ok(ev) => ev,
+                Err(e) => { yield Err(e); return; }
+            };
+            match ev {
+                tars_types::ChatEvent::Delta { text } => held.push_str(&text),
+                tars_types::ChatEvent::Finished { .. } => {
+                    let mut r = tars_types::ChatResponse {
+                        text: std::mem::take(&mut held),
+                        ..Default::default()
+                    };
+                    dialect.finalize(&mut r);
+                    if !r.text.is_empty() {
+                        yield Ok(tars_types::ChatEvent::Delta { text: r.text.clone() });
+                    }
+                    for (index, c) in r.tool_calls.into_iter().enumerate() {
+                        yield Ok(tars_types::ChatEvent::ToolCallStart {
+                            index,
+                            id: c.id.clone(),
+                            name: c.name.clone(),
+                        });
+                        yield Ok(tars_types::ChatEvent::ToolCallEnd {
+                            index,
+                            id: c.id,
+                            parsed_args: c.arguments,
+                            thought_signature: None,
+                        });
+                    }
+                    yield Ok(ev);
+                }
+                other => yield Ok(other),
+            }
+        }
+    };
+    Box::pin(out)
 }
 
 #[async_trait]
@@ -166,15 +220,36 @@ impl LlmProvider for OpenAiProvider {
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
-        stream_via_adapter(
-            self.http.clone(),
-            self.adapter.clone(),
-            auth,
-            req,
-            model,
-            ctx,
-        )
-        .await
+        let inner =
+            stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, model, ctx)
+                .await?;
+        Ok(whole_text(inner, self.dialect.clone()))
+    }
+
+    /// The trait default drives the stream and aggregates; this adds the dialect's
+    /// last look at the joined result.
+    ///
+    /// Without it a dialect can only see events, and some of what a dialect must fix
+    /// is not visible in one: DeepSeek's tool-call markup arrives split across chunks
+    /// and is only recognisable once the text is whole again. `parse_response` covers
+    /// the batch path, real runs stream, and for eighteen consecutive turns of one run
+    /// the markup went through untouched and the turns did nothing.
+    async fn complete(
+        self: Arc<Self>,
+        req: ChatRequest,
+        model: &str,
+        ctx: RequestContext,
+    ) -> Result<tars_types::ChatResponse, ProviderError> {
+        use futures::StreamExt as _;
+        let dialect = self.dialect.clone();
+        let mut s = self.stream(req, model, ctx).await?;
+        let mut acc = tars_types::ChatResponseBuilder::new();
+        while let Some(event) = s.next().await {
+            acc.apply(event?);
+        }
+        let mut r = acc.finish();
+        dialect.finalize(&mut r);
+        Ok(r)
     }
 
     fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn BatchSubmitter>> {
@@ -432,7 +507,7 @@ mod dialect_seam_tests {
     use super::*;
     use tars_types::Message;
 
-    /// M0 seam: a provider built without an explicit dialect defaults to
+    /// A provider built without an explicit dialect defaults to
     /// `StandardDialect`, and the public request path routes THROUGH it. The
     /// dialect-routed body must be byte-identical to the adapter's own
     /// standard default body — proving the seam is live and behavior-neutral.
@@ -440,8 +515,8 @@ mod dialect_seam_tests {
     fn provider_defaults_to_standard_dialect_and_routes_through_it() {
         let http =
             HttpProviderBase::default_arc().expect("failed to create default HTTP provider base");
-        let provider =
-            OpenAiProviderBuilder::new("openai", Auth::None).build(http, crate::auth::basic());
+        let provider = OpenAiProviderBuilder::new("openai", Auth::None)
+            .build(http, crate::auth::basic());
 
         let req = ChatRequest {
             system: None,
@@ -459,10 +534,7 @@ mod dialect_seam_tests {
         };
 
         let via_dialect = provider.adapter.translate_request(&req, "gpt-4o").unwrap();
-        let direct = provider
-            .adapter
-            .build_request_default(&req, "gpt-4o")
-            .unwrap();
+        let direct = provider.adapter.build_request_default(&req, "gpt-4o").unwrap();
         assert_eq!(
             via_dialect, direct,
             "default dialect must produce the standard body byte-for-byte",
@@ -488,10 +560,9 @@ mod dialect_seam_tests {
         }
     }
 
-    /// Behavior-preservation (M1): a provider built from a `deepseek` base_url
-    /// with no explicit dialect infers `DeepSeekDialect`, so `req.thinking`
-    /// still maps to the top-level `thinking: {type}` field EXACTLY as the old
-    /// base_url-gated adapter branch did.
+    /// A provider built from a `deepseek` base_url with no explicit dialect
+    /// infers `DeepSeekDialect`, so `req.thinking` maps to the top-level
+    /// `thinking: {type}` field.
     #[test]
     fn deepseek_base_url_infers_dialect_and_emits_thinking() {
         use tars_types::ThinkingMode;
@@ -519,13 +590,234 @@ mod dialect_seam_tests {
     fn non_deepseek_base_url_emits_no_thinking() {
         use tars_types::ThinkingMode;
         let http = HttpProviderBase::default_arc().expect("http base");
-        let provider =
-            OpenAiProviderBuilder::new("openai", Auth::None).build(http, crate::auth::basic());
+        let provider = OpenAiProviderBuilder::new("openai", Auth::None)
+            .build(http, crate::auth::basic());
 
         let body = provider
             .adapter
             .translate_request(&thinking_req(ThinkingMode::Auto), "gpt-4o")
             .unwrap();
         assert!(body.get("thinking").is_none());
+    }
+}
+
+/// The STREAM, driven directly.
+///
+/// `finalize` had unit tests and the batch path had a test; `stream()` — the only
+/// path the agent takes — had none, which is why the DSML lift shipped twice on a
+/// path that never ran. These drive [`whole_text`] with hand-built events, so the
+/// thing under test is the wrapper the agent's stream goes through.
+#[cfg(test)]
+mod whole_text_stream_tests {
+    use super::*;
+    use futures::StreamExt as _;
+    use tars_types::{ChatEvent, ChatResponse, ChatResponseBuilder, StopReason, Usage};
+
+    /// One DeepSeek answer as it comes off the WIRE: the markup arrives in chunks and
+    /// the splits fall inside the markers — `<｜｜D` ends one chunk and `SML｜｜` opens
+    /// the next. This is the reason `finalize` alone was not enough: nothing per-event
+    /// can see a call here.
+    const ONE_CALL: &[&str] = &[
+        "I need the failure shape first.\n\n<｜｜D",
+        "SML｜｜tool_calls>\n<｜｜DSML｜｜inv",
+        "oke name=\"fs_read\">\n<｜｜DSML｜｜parameter name=\"pa",
+        "th\" string=\"true\">crates/tars-git/src/repo.rs</｜｜DSML｜",
+        "｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>",
+    ];
+
+    /// Two calls in one answer, split the same way.
+    const TWO_CALLS: &[&str] = &[
+        "Two things.\n\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"fs_",
+        "read\">\n<｜｜DSML｜｜parameter name=\"path\" string=\"true\">a.rs</｜｜DSML｜｜parameter>\n",
+        "</｜｜DSML｜｜invoke>\n<｜｜DSML｜｜invoke name=\"fs_gr",
+        "ep\">\n<｜｜DSML｜｜parameter name=\"pattern\" string=\"true\">struct Reason</｜",
+        "｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>",
+    ];
+
+    fn deltas(chunks: &[&str]) -> Vec<Result<ChatEvent, ProviderError>> {
+        chunks
+            .iter()
+            .map(|c| {
+                Ok(ChatEvent::Delta {
+                    text: (*c).to_string(),
+                })
+            })
+            .collect()
+    }
+
+    fn finished() -> Result<ChatEvent, ProviderError> {
+        Ok(ChatEvent::Finished {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        })
+    }
+
+    /// Drive the wrapper with a hand-built stream — no HTTP, no adapter.
+    async fn drive(
+        events: Vec<Result<ChatEvent, ProviderError>>,
+        dialect: Arc<dyn OpenAiDialect>,
+    ) -> Vec<Result<ChatEvent, ProviderError>> {
+        let inner: LlmEventStream = Box::pin(futures::stream::iter(events));
+        whole_text(inner, dialect).collect().await
+    }
+
+    /// What a consumer does with the stream: the fiber, the session and `llm_common`
+    /// each assemble it themselves, all of them through this builder.
+    fn assemble(events: Vec<Result<ChatEvent, ProviderError>>) -> ChatResponse {
+        let mut b = ChatResponseBuilder::new();
+        for e in events {
+            b.apply(e.expect("this stream carries no error"));
+        }
+        b.finish()
+    }
+
+    /// No single chunk is a call. The dialect reading any one of them sees nothing —
+    /// which is the whole reason the text has to be held until it is whole.
+    #[test]
+    fn no_single_chunk_carries_a_call() {
+        for chunk in ONE_CALL {
+            let mut r = ChatResponse {
+                text: (*chunk).to_string(),
+                ..Default::default()
+            };
+            DeepSeekDialect.finalize(&mut r);
+            assert!(
+                r.tool_calls.is_empty(),
+                "chunk {chunk:?} yielded {:?}",
+                r.tool_calls
+            );
+        }
+    }
+
+    /// The measured defect, at the layer it was measured in. A 37-turn run had every
+    /// answer from turn 7 on arrive as this and every `tool_calls` empty.
+    #[tokio::test]
+    async fn a_call_split_across_chunks_arrives_as_a_tool_call() {
+        let mut events = deltas(ONE_CALL);
+        events.push(finished());
+        let r = assemble(drive(events, Arc::new(DeepSeekDialect)).await);
+
+        assert_eq!(r.tool_calls.len(), 1, "{:?}", r.tool_calls);
+        assert_eq!(r.tool_calls[0].name, "fs_read");
+        assert_eq!(r.tool_calls[0].arguments["path"], "crates/tars-git/src/repo.rs");
+        assert!(
+            !r.text.contains("DSML"),
+            "markup reached the consumer: {:?}",
+            r.text
+        );
+        assert!(
+            r.text.contains("I need the failure shape first."),
+            "the words the model said did not survive: {:?}",
+            r.text
+        );
+    }
+
+    /// Two calls in one answer are two calls, on distinct indexes. The builder keys
+    /// its Start/End correlation by index, so a shared index would pair the second
+    /// call's arguments with the first call's name.
+    #[tokio::test]
+    async fn two_calls_in_one_answer_get_distinct_indexes() {
+        let mut events = deltas(TWO_CALLS);
+        events.push(finished());
+        let out = drive(events, Arc::new(DeepSeekDialect)).await;
+
+        let starts: Vec<(usize, String)> = out
+            .iter()
+            .filter_map(|e| match e {
+                Ok(ChatEvent::ToolCallStart { index, name, .. }) => Some((*index, name.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            vec![(0, "fs_read".to_string()), (1, "fs_grep".to_string())],
+            "starts: {starts:?}"
+        );
+
+        let r = assemble(out);
+        assert_eq!(r.tool_calls.len(), 2, "{:?}", r.tool_calls);
+        assert_eq!(r.tool_calls[0].arguments["path"], "a.rs");
+        assert_eq!(r.tool_calls[1].arguments["pattern"], "struct Reason");
+    }
+
+    /// A dialect whose text is readable as it arrives is not touched: its deltas go
+    /// out one per chunk, in order. Every other OpenAI-compatible endpoint is this
+    /// one, and holding their text would turn streaming into batching.
+    #[tokio::test]
+    async fn a_streaming_dialect_passes_its_deltas_through_in_order() {
+        assert!(!StandardDialect.text_is_only_whole());
+        let mut events = deltas(&["one ", "two ", "three"]);
+        events.push(finished());
+        let out = drive(events, Arc::new(StandardDialect)).await;
+
+        let texts: Vec<String> = out
+            .iter()
+            .filter_map(|e| match e {
+                Ok(ChatEvent::Delta { text }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["one ", "two ", "three"]);
+        assert_eq!(out.len(), 4, "an event was added or dropped");
+        assert!(matches!(out[3], Ok(ChatEvent::Finished { .. })));
+    }
+
+    /// An ordinary DeepSeek answer — no markup — keeps its text and gains no calls.
+    /// This runs on every DeepSeek response, so it must change nothing when there is
+    /// nothing to lift.
+    #[tokio::test]
+    async fn an_ordinary_deepseek_answer_survives_intact() {
+        let mut events = deltas(&["Let me read ", "the file ", "first."]);
+        events.push(finished());
+        let r = assemble(drive(events, Arc::new(DeepSeekDialect)).await);
+
+        assert_eq!(r.text, "Let me read the file first.");
+        assert!(r.tool_calls.is_empty(), "{:?}", r.tool_calls);
+        assert_eq!(r.stop_reason, Some(StopReason::EndTurn));
+    }
+
+    /// An error mid-stream reaches the consumer. The wrapper sits between the
+    /// provider and everything above it; swallowing the error here would leave the
+    /// caller with a stream that ended for no stated reason.
+    #[tokio::test]
+    async fn an_error_mid_stream_propagates() {
+        let events = vec![
+            Ok(ChatEvent::Delta {
+                text: "I need the".to_string(),
+            }),
+            Err(ProviderError::Parse("connection reset mid-answer".into())),
+            finished(),
+        ];
+        let out = drive(events, Arc::new(DeepSeekDialect)).await;
+
+        let errs: Vec<String> = out
+            .iter()
+            .filter_map(|e| e.as_ref().err().map(|e| e.to_string()))
+            .collect();
+        assert_eq!(
+            errs,
+            vec!["parse: connection reset mid-answer".to_string()],
+            "out: {out:?}"
+        );
+    }
+
+    /// An answer cut off mid-markup does not panic and does not invent a call. A
+    /// response truncated mid-tag happens, and turning it into a call the model never
+    /// finished asking for would be worse than dropping it.
+    #[tokio::test]
+    async fn a_truncated_call_invents_nothing() {
+        let mut events = deltas(&[
+            "thinking\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"fs_gr",
+            "ep\">\n<｜｜DSML｜｜parameter name=\"pattern\" string=\"true\">abc",
+        ]);
+        events.push(finished());
+        let r = assemble(drive(events, Arc::new(DeepSeekDialect)).await);
+
+        assert!(r.tool_calls.is_empty(), "{:?}", r.tool_calls);
+        assert!(
+            !r.text.contains("DSML"),
+            "markup reached the consumer: {:?}",
+            r.text
+        );
     }
 }

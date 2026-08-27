@@ -24,8 +24,8 @@
 //! `--sandbox` `ReadOnly`/`WorkspaceWrite` policy is honored. The legacy
 //! `TARS_CLAUDE_SANDBOX` env gate is no longer needed (nor read).
 //!
-//! The 5 near-duplicate per-CLI runners the earlier as-built gap booked (Doc 32
-//! §9) are **consolidated**: gemini / codex / opencode / antigravity now share
+//! The near-duplicate per-CLI runners the earlier as-built gap booked (Doc 32
+//! §9) are **consolidated**: codex / opencode / antigravity now share
 //! ONE [`SharedCliRunner`](subprocess::SharedCliRunner) — a single
 //! spawn/prompt-channel/drain skeleton parameterized by the dialect's declared
 //! [`OutputFraming`] (single-object / prefix-stripped / JSONL→array / raw-text).
@@ -46,19 +46,25 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use tars_types::{
-    ChatEvent, ChatRequest, ProviderError, ProviderId, ProviderProfile, RequestContext, StopReason,
+    ProviderProfile, ChatEvent, ChatRequest, ProviderError, ProviderId, RequestContext, StopReason,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
 
 pub use argv::{ClaudeCliEffort, ClaudeCliTools, SubprocessInvocation, SubprocessRunner};
 pub use dialect::{CliDialect, CliInvocation, OutputFraming, OutputMode, PromptChannel};
-pub use dialects::antigravity::AntigravityDialect;
+pub use dialects::antigravity::{AntigravityDialect, AntigravityEffort};
 pub use dialects::claude::ClaudeCliDialect;
 pub use dialects::codex::{CodexCliDialect, SandboxMode};
-pub use dialects::gemini::GeminiCliDialect;
 pub use dialects::opencode::OpenCodeDialect;
 pub use subprocess::{RealSubprocessRunner, SharedCliRunner};
+
+/// Construct a [`ProviderError::CliSubprocessDied`] carrying the real exit code
+/// + captured stderr (the truth — never a sentinel). The CLI backends funnel
+/// every dead-subprocess report through here.
+pub(crate) fn cli_subprocess_died(exit_code: Option<i32>, stderr: String) -> ProviderError {
+    ProviderError::CliSubprocessDied { exit_code, stderr }
+}
 
 /// The shared CLI-delegate provider. Holds the per-CLI behavior
 /// ([`CliDialect`]) and the spawn machinery ([`SubprocessRunner`]);
@@ -146,8 +152,7 @@ impl LlmProvider for AgentCliBackend {
         //    WE clipped — otherwise a cut reply looks like a natural end.
         let content = clamp_to_output_budget(content, req.max_output_tokens);
 
-        let mut events: Vec<Result<ChatEvent, ProviderError>> =
-            Vec::with_capacity(content.len() + 1);
+        let mut events: Vec<Result<ChatEvent, ProviderError>> = Vec::with_capacity(content.len() + 1);
         events.push(Ok(ChatEvent::started(model)));
         events.extend(content.into_iter().map(Ok));
 
@@ -252,8 +257,7 @@ mod tests {
         let events: Vec<ChatEvent> = Arc::clone(&backend)
             .stream(
                 ChatRequest::user("hi"),
-                "opus",
-                RequestContext::test_default(),
+                "opus", RequestContext::test_default(),
             )
             .await
             .unwrap()
@@ -261,9 +265,7 @@ mod tests {
             .collect()
             .await;
 
-        assert!(
-            matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "opus")
-        );
+        assert!(matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "opus"));
         assert!(matches!(&events[1], ChatEvent::Delta { text } if text == "hello from claude"));
         match &events[2] {
             ChatEvent::Finished { stop_reason, usage } => {
@@ -302,88 +304,12 @@ mod tests {
         assert_eq!(resp.stop_reason, Some(StopReason::MaxTokens));
     }
 
-    #[tokio::test]
-    async fn runner_error_propagates_through_backend() {
-        struct ErrRunner;
-        #[async_trait]
-        impl SubprocessRunner for ErrRunner {
-            async fn run(&self, _: SubprocessInvocation) -> Result<Value, ProviderError> {
-                Err(ProviderError::CliSubprocessDied {
-                    exit_code: Some(0),
-                    stderr: "claude CLI returned error: rate limited".into(),
-                })
-            }
-        }
-        let dialect = Arc::new(ClaudeCliDialect::new(
-            "claude".into(),
-            std::time::Duration::from_secs(1),
-            ClaudeCliTools::Disabled,
-            false,
-            None,
-            true,
-            Vec::new(),
-        ));
-        let backend = Arc::new(AgentCliBackend::new(
-            "c".into(),
-            ProviderProfile::text_only_baseline(tars_types::Pricing::default()),
-            dialect,
-            Arc::new(ErrRunner),
-        ));
-        let err = backend
-            .complete(
-                ChatRequest::user("x"),
-                "test-model",
-                RequestContext::test_default(),
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ProviderError::CliSubprocessDied { .. }));
-    }
-
-    /// Text-mode wiring (M3): a `Text` dialect (antigravity) whose runner
-    /// returns raw stdout as a `Value::String` flows through the backend's
-    /// `OutputMode::Text` branch → `parse_text` → Started + Delta + Finished.
-    #[tokio::test]
-    async fn text_mode_dialect_through_backend_emits_started_delta_finished() {
-        use dialects::antigravity::AntigravityDialect;
-
-        let runner = Arc::new(FakeRunner {
-            payload: Value::String("plain text answer\n".into()),
-            recorded: std::sync::Mutex::new(None),
-        });
-        let dialect = Arc::new(AntigravityDialect::new(
-            "agy".into(),
-            std::time::Duration::from_secs(300),
-        ));
-        let caps = ProviderProfile::text_only_baseline(tars_types::Pricing::default());
-        let backend = Arc::new(AgentCliBackend::new(
-            "agy_test".into(),
-            caps,
-            dialect,
-            runner,
-        ));
-
-        use futures::StreamExt;
-        let events: Vec<ChatEvent> = Arc::clone(&backend)
-            .stream(
-                ChatRequest::user("hi"),
-                "gemini-2.5-pro",
-                RequestContext::test_default(),
-            )
-            .await
-            .unwrap()
-            .map(|e| e.unwrap())
-            .collect()
-            .await;
-
-        assert!(
-            matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "gemini-2.5-pro")
-        );
-        assert!(matches!(&events[1], ChatEvent::Delta { text } if text == "plain text answer"));
-        assert!(
-            matches!(&events[2], ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn)
-        );
-    }
+    // Dead-subprocess error propagation and the Text-mode (antigravity)
+    // Started→Delta→Finished decode are cross-dialect invariants now driven for
+    // ALL 5 dialects in `tests/cli_conformance.rs` (D-12), so their claude/
+    // antigravity-specific copies are retired from here. The claude success +
+    // argv-recording E2E above and the budget-clamp tests are backend-specific
+    // and stay.
 
     #[test]
     fn clamp_is_noop_without_budget() {
@@ -398,8 +324,6 @@ mod tests {
         ];
         let out = clamp_to_output_budget(content, None);
         assert!(matches!(&out[0], ChatEvent::Delta { text } if text.len() == 100));
-        assert!(
-            matches!(&out[1], ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn)
-        );
+        assert!(matches!(&out[1], ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn));
     }
 }

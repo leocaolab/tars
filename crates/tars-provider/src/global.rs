@@ -1,4 +1,4 @@
-//! Process-global, built-once [`ProviderRegistry`] singleton (Doc 06 §C2).
+//! Process-global, built-once [`ProviderRegistry`] singleton.
 //!
 //! Under process isolation (one tenant per process) a single immutable
 //! registry is *correct*: build every declared provider once from the global
@@ -22,10 +22,9 @@ use tars_config::Config;
 
 use crate::registry::{ProviderRegistry, RegistryError};
 
-/// The one process-global registry cell. This is the single registry global
-/// in the workspace (Doc 06 §C2): [`ProviderRegistry::init`] populates it, and
-/// every consumer reads it via [`ProviderRegistry::global`] /
-/// [`ProviderRegistry::try_global`].
+/// The one process-global registry cell. [`ProviderRegistry::init`]
+/// populates it, and every consumer reads it via
+/// [`ProviderRegistry::global`] / [`ProviderRegistry::try_global`].
 static REGISTRY: OnceLock<Arc<ProviderRegistry>> = OnceLock::new();
 
 impl ProviderRegistry {
@@ -58,7 +57,10 @@ impl ProviderRegistry {
     /// The process-global provider registry. A **pure getter** — it never
     /// builds. [`ProviderRegistry::init`] must have run at the composition root.
     pub fn global() -> Result<Arc<ProviderRegistry>, RegistryError> {
-        REGISTRY.get().cloned().ok_or(RegistryError::NotInitialized)
+        REGISTRY
+            .get()
+            .cloned()
+            .ok_or(RegistryError::NotInitialized)
     }
 
     /// The process-global registry if it has already been built, else `None`.
@@ -88,10 +90,7 @@ mod tests {
             "precondition: nothing may have initialized the registry yet"
         );
         assert!(
-            matches!(
-                ProviderRegistry::global(),
-                Err(RegistryError::NotInitialized)
-            ),
+            matches!(ProviderRegistry::global(), Err(RegistryError::NotInitialized)),
             "an un-initialized registry must report, never lazily build"
         );
         assert!(
@@ -106,10 +105,7 @@ mod tests {
         // 3. A second init is reported, never a silent no-op over a registry
         //    the caller did not build.
         assert!(
-            matches!(
-                ProviderRegistry::init(),
-                Err(RegistryError::AlreadyInitialized)
-            ),
+            matches!(ProviderRegistry::init(), Err(RegistryError::AlreadyInitialized)),
             "a second init must error"
         );
 

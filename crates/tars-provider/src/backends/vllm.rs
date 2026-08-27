@@ -1,8 +1,7 @@
 //! vLLM backend — OpenAI-compatible local inference server.
 //!
-//! Mirrors the Python `VLLMClient` (the equivalent Python vLLM client):
-//! it's just an [`OpenAiProvider`] with a different `base_url` and
-//! sensible defaults for "local server with no auth".
+//! Just an [`OpenAiProvider`] with a different `base_url` and sensible
+//! defaults for "local server with no auth".
 //!
 //! Same wrapper pattern works for llama.cpp server, LM Studio, Ollama's
 //! OpenAI-compatible endpoint, Groq, Together, DeepSeek — anything that
@@ -54,9 +53,7 @@ fn normalize_auth(auth: Auth) -> Auth {
 /// Build a provider configured for a vLLM server.
 ///
 /// `auth` is normalized: an empty / whitespace-only inline string
-/// becomes `Auth::None` (vLLM by default doesn't authenticate). The
-/// Python client sends `api_key="EMPTY"` — same idea, expressed as
-/// the absence of an auth header.
+/// becomes `Auth::None` (vLLM by default doesn't authenticate).
 pub fn vllm(
     id: impl Into<tars_types::ProviderId>,
     base_url: Option<String>,

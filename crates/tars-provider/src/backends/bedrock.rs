@@ -1,14 +1,13 @@
 //! AWS Bedrock provider — the thin `LlmProvider` adapter over the
-//! `tars-bedrock` leaf crate (Doc 31 §6 C3).
+//! `tars-bedrock` leaf crate.
 //!
 //! All the Bedrock-specific work — `ChatRequest` ↔ Converse mapping, the
 //! `serde_json::Value` ↔ `Document` shim, the lazy keyless SigV4 client,
 //! and SDK-error classification — lives in `tars-bedrock`, which depends
-//! only on `tars-types`. This module contributes the one thing that must
-//! live with the trait's owner: the `impl LlmProvider`. Hosting it here
-//! (rather than in `tars-bedrock`) is what keeps the crate graph acyclic —
-//! `tars-bedrock` cannot both provide the trait impl *and* be depended on
-//! by the crate that defines the trait.
+//! only on `tars-types`. The `impl LlmProvider` must live with the trait's
+//! owner: hosting it here (rather than in `tars-bedrock`) keeps the crate
+//! graph acyclic — `tars-bedrock` cannot both provide the trait impl *and*
+//! be depended on by the crate that defines the trait.
 //!
 //! Feature-gated behind `tars-provider/bedrock`; the AWS SDK subtree only
 //! enters a build that asks for Bedrock.
@@ -19,14 +18,14 @@ use async_trait::async_trait;
 
 use tars_bedrock::BedrockClient;
 use tars_types::{
-    ChatRequest, ChatResponse, ProviderError, ProviderId, ProviderProfile, RequestContext,
+    ProviderProfile, ChatRequest, ChatResponse, ProviderError, ProviderId, RequestContext,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
 
 /// Builder for [`BedrockProvider`]. No `HttpProviderBase` / `AuthResolver`
 /// — Bedrock owns its own transport (the AWS SDK) and auth (the credential
-/// chain), so it ignores the shared reqwest/SSE base (Doc 31 §7).
+/// chain), so it ignores the shared reqwest/SSE base.
 #[derive(Clone, Debug)]
 pub struct BedrockProviderBuilder {
     id: ProviderId,
@@ -48,7 +47,7 @@ impl BedrockProviderBuilder {
     }
 
     /// Name a local AWS profile (laptop case). Omit on AWS, where the
-    /// ambient role wins (Doc 31 CUJ-4).
+    /// ambient role wins.
     pub fn profile(mut self, p: Option<String>) -> Self {
         self.profile = p;
         self
@@ -87,8 +86,8 @@ impl LlmProvider for BedrockProvider {
         &self.capabilities
     }
 
-    /// Non-streaming fast path (Doc 31 §6 C3): unary `converse()` via the
-    /// leaf client, strictly cheaper than a stream for the aggregate case.
+    /// Non-streaming fast path: unary `converse()` via the leaf client,
+    /// strictly cheaper than a stream for the aggregate case.
     #[tracing::instrument(
         name = "bedrock.complete",
         skip_all,
@@ -104,11 +103,10 @@ impl LlmProvider for BedrockProvider {
         self.client.complete_response(&req, model).await
     }
 
-    /// M1 streaming (Doc 31 §6 C2): real token-by-token `ConverseStream`.
-    /// The leaf client opens the stream and translates each
-    /// `ConverseStreamOutput` event into a canonical `ChatEvent`
-    /// incrementally; the returned stream is already `'static + Send`, so
-    /// it maps straight onto [`LlmEventStream`].
+    /// Token-by-token `ConverseStream`. The leaf client opens the stream
+    /// and translates each `ConverseStreamOutput` event into a canonical
+    /// `ChatEvent` incrementally; the returned stream is already
+    /// `'static + Send`, so it maps straight onto [`LlmEventStream`].
     #[tracing::instrument(
         name = "bedrock.stream",
         skip_all,

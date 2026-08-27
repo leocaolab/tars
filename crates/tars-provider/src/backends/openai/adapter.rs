@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use url::Url;
 
 use tars_types::{
-    ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason, StructuredOutputMode,
-    Usage,
+    ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason,
+    StructuredOutputMode, Usage,
 };
 
 use crate::auth::ResolvedAuth;
@@ -26,7 +26,6 @@ use super::dialect::{OpenAiDialect, StandardDialect};
 use super::mapping::drain_buffer_into;
 
 /// Models that require `max_completion_tokens` instead of `max_tokens`.
-/// Mirrors the Python `_max_tokens_kwarg` heuristic — gpt-5 / o1 / o3 / o4.
 const NEW_TOKENS_PARAM_PREFIXES: &[&str] = &["gpt-5", "o1", "o3", "o4"];
 
 /// The wire-format adapter — pure functions, no state.
@@ -41,8 +40,8 @@ pub struct OpenAiAdapter {
     structured_mode: StructuredOutputMode,
     /// The behavior seam. Standard OpenAI (and every openai_compat endpoint
     /// without a quirk) uses [`StandardDialect`], whose methods delegate back
-    /// to this adapter's own `*_default` bodies — so routing through the
-    /// dialect is behavior-neutral. Variants override only what differs.
+    /// to this adapter's own `*_default` bodies. Variants override only what
+    /// differs.
     dialect: Arc<dyn OpenAiDialect>,
 }
 
@@ -99,14 +98,12 @@ impl OpenAiAdapter {
                         .iter()
                         .map(|tc| {
                             // OpenAI demands `arguments` as a JSON-encoded
-                            // string. `ToolCall::arguments` is documented
-                            // to always be a `Value::Object` (enforced via
-                            // debug_assert in `ToolCall::new`); serializing
-                            // a Value never fails for valid in-memory
-                            // values, so `expect` here is sound. Audit
-                            // `tars-provider-src-backends-openai-1`:
-                            // previously fell back to "{}" on error,
-                            // silently sending wrong args to the model.
+                            // string. `ToolCall::arguments` is always a
+                            // `Value::Object` (enforced via debug_assert in
+                            // `ToolCall::new`); serializing a Value never
+                            // fails for valid in-memory values, so `expect`
+                            // is sound. Do not fall back to "{}" on error —
+                            // that silently sends wrong args to the model.
                             let args_str = serde_json::to_string(&tc.arguments)
                                 .expect("ToolCall.arguments must serialize");
                             json!({
@@ -131,10 +128,9 @@ impl OpenAiAdapter {
                 is_error,
             } => {
                 // OpenAI's tool-role message has no literal `is_error`
-                // field. The convention is to prefix the content with
-                // a marker so the model sees it as an error semantically.
-                // Audit finding `tars-provider-src-backends-openai-7`:
-                // failed tool execution was being presented as success.
+                // field. Prefix the content with a marker so the model sees
+                // it as an error semantically — otherwise a failed tool
+                // execution reads as success.
                 let mut content_blocks = Self::translate_content(content);
                 if *is_error {
                     if let Value::Array(arr) = &mut content_blocks {
@@ -220,18 +216,16 @@ impl OpenAiAdapter {
             .map_err(|e| ProviderError::Internal(format!("bad openai batches url: {e}")))
     }
 
-    /// Standard OpenAI chat/completions body — the [`OpenAiDialect`]
-    /// default (`StandardDialect`) delegates here, so this is exactly the
-    /// pre-dialect behavior.
+    /// Standard OpenAI chat/completions body; the [`OpenAiDialect`] default
+    /// (`StandardDialect`) delegates here.
     pub(crate) fn build_request_default(
         &self,
         req: &ChatRequest,
         model: &str,
     ) -> Result<Value, ProviderError> {
-        // Audit `tars-provider-src-backends-openai-11`: validate user
-        // messages have non-empty content. OpenAI rejects
-        // `{"role":"user","content":[]}` with a 400 — better to fail
-        // fast with a typed error than waste a round trip.
+
+        // OpenAI rejects `{"role":"user","content":[]}` with a 400 — fail
+        // fast with a typed error rather than waste a round trip.
         for m in &req.messages {
             if let Message::User { content } = m {
                 if content.is_empty() {
@@ -250,11 +244,8 @@ impl OpenAiAdapter {
             }));
         }
         for m in &req.messages {
-            // Audit `tars-provider-src-backends-openai-9`: if the caller
-            // supplied both `req.system` and an inline `Message::System`,
-            // we used to emit two system blocks. The pattern here is
-            // "system field wins" — drop inline System messages when
-            // `req.system` is set.
+            // When `req.system` is set it wins: drop inline `Message::System`
+            // so the caller can't produce two system blocks.
             if req.system.is_some() && matches!(m, Message::System { .. }) {
                 continue;
             }
@@ -269,7 +260,6 @@ impl OpenAiAdapter {
             "stream_options": {"include_usage": true},
         });
 
-        // max_tokens vs max_completion_tokens
         if let Some(max) = req.max_output_tokens {
             let field = Self::max_tokens_field(model);
             body[field] = json!(max);
@@ -304,9 +294,8 @@ impl OpenAiAdapter {
 
         if let Some(schema) = &req.structured_output {
             // Emit the response_format form THIS provider accepts (see
-            // `structured_mode`). Always-json_schema broke every openai_compat
-            // provider (DeepSeek as an arc scan critic: "This response_format
-            // type is unavailable now").
+            // `structured_mode`): openai_compat providers like DeepSeek reject
+            // json_schema with "This response_format type is unavailable now".
             match self.structured_mode {
                 StructuredOutputMode::StrictSchema => {
                     body["response_format"] = json!({
@@ -349,9 +338,9 @@ impl OpenAiAdapter {
         }
 
         // DeepSeek's own thinking toggle (a top-level `thinking: {type}`) is
-        // NOT emitted here: that is a provider quirk, not standard OpenAI, so it
-        // lives in `DeepSeekDialect::build_request` (Doc 30 §6 C2 / FR-1). This
-        // shared builder never inspects a provider name or base_url string.
+        // NOT emitted here: it's a provider quirk, so it lives in
+        // `DeepSeekDialect::build_request`. This shared builder never inspects
+        // a provider name or base_url string.
 
         Ok(body)
     }
@@ -365,11 +354,8 @@ impl OpenAiAdapter {
     ) -> Result<Vec<ChatEvent>, ProviderError> {
         // OpenAI emits `data: [DONE]` as the terminator. Stop quietly.
         if raw.data.trim() == "[DONE]" {
-            // Audit `tars-provider-src-backends-openai-13`: the comment
-            // claimed we discard "defensively" because finish_reason
-            // already finalizes tool calls. But finish_reason is
-            // optional in some streams (proxies, partial server
-            // implementations). Drain into ToolCallEnd events first so
+            // finish_reason is optional in some streams (proxies, partial
+            // server implementations). Drain into ToolCallEnd events first so
             // accumulated tool args aren't silently dropped.
             let mut emitted = Vec::new();
             drain_buffer_into(buf, &mut emitted)?;
@@ -407,11 +393,10 @@ impl OpenAiAdapter {
                 .is_none_or(|a| a.is_empty());
             if choices_empty {
                 let usage_struct = self.dialect.parse_usage(usage);
-                // Audit `tars-provider-src-backends-openai-{7,22}`: use
-                // the stop_reason captured by an earlier finish_reason
-                // chunk (typical OpenAI ordering: finish_reason in
-                // chunk N, usage alone in chunk N+1). Default EndTurn
-                // only when no prior chunk gave us anything.
+                // Use the stop_reason captured by an earlier finish_reason
+                // chunk (typical OpenAI ordering: finish_reason in chunk N,
+                // usage alone in chunk N+1). Default EndTurn only when no
+                // prior chunk gave us anything.
                 let stop_reason = buf.take_pending_stop().unwrap_or(StopReason::EndTurn);
                 out.push(ChatEvent::Finished {
                     stop_reason,
@@ -432,10 +417,8 @@ impl OpenAiAdapter {
             None => return Ok(out),
         };
 
-        // Audit `tars-provider-src-backends-openai-15`: the previous
-        // implementation had an empty `if` block pretending to emit
-        // Started. Now we use ToolCallBuffer.take_started() to fire
-        // exactly once per stream, on the first chunk carrying a model.
+        // Fire Started exactly once per stream, on the first chunk carrying
+        // a model.
         if !model.is_empty() && buf.take_started() {
             out.push(ChatEvent::started(model.clone()));
         }
@@ -475,12 +458,10 @@ impl OpenAiAdapter {
 
             if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                 for (iter_pos, tc) in tcs.iter().enumerate() {
-                    // OpenAI's spec sends `index` for parallel tool
-                    // calls. Audit `tars-provider-src-backends-openai-17`:
-                    // unconditionally defaulting missing index to 0
-                    // collapses parallel calls into one. Fall back to
-                    // the iteration position so distinct tcs in the
-                    // same delta stay distinct even if the spec slips.
+                    // OpenAI's spec sends `index` for parallel tool calls.
+                    // Defaulting a missing index to 0 collapses parallel
+                    // calls into one; fall back to the iteration position so
+                    // distinct calls in the same delta stay distinct.
                     let index = tc
                         .get("index")
                         .and_then(|i| i.as_u64())
@@ -511,10 +492,9 @@ impl OpenAiAdapter {
                     // So an `id`-bearing chunk = start; otherwise it's
                     // an args delta.
                     if !id.is_empty() {
-                        // Audit `tars-provider-src-backends-openai-10`:
-                        // accepting an empty `name` here propagated
-                        // downstream as a tool call we couldn't dispatch.
-                        // Treat it as a parse error per the OpenAI spec.
+                        // An empty `name` on an id-bearing chunk can't be
+                        // dispatched downstream; treat it as a parse error
+                        // per the OpenAI spec.
                         if name.is_empty() {
                             return Err(ProviderError::Parse(format!(
                                 "openai tool_call delta has id `{id}` but missing function.name"
@@ -527,12 +507,9 @@ impl OpenAiAdapter {
                         });
                         buf.on_start(index, id, name);
                     } else if !name.is_empty() {
-                        // Audit `tars-provider-src-backends-openai-17`:
-                        // previously synthesized an id when the provider
-                        // omitted one. The spec mandates a stable id per
-                        // tool call; inventing one breaks correlation
-                        // with downstream consumers and masks the actual
-                        // wire-format violation.
+                        // The spec mandates a stable id per tool call;
+                        // inventing one breaks correlation with downstream
+                        // consumers and masks the wire-format violation.
                         return Err(ProviderError::Parse(format!(
                             "openai tool_call delta has function.name `{name}` but missing id"
                         )));
@@ -623,7 +600,6 @@ impl HttpAdapter for OpenAiAdapter {
         headers: &reqwest::header::HeaderMap,
         body: &str,
     ) -> ProviderError {
-        // Try to parse `error.message` if present.
         let message = serde_json::from_str::<Value>(body)
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.get("message")).cloned())
@@ -640,7 +616,6 @@ impl HttpAdapter for OpenAiAdapter {
                 requested: 0,
             },
             StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => {
-                // Detect context-length errors specifically.
                 if message.to_lowercase().contains("context_length")
                     || message.to_lowercase().contains("maximum context length")
                     || message.to_lowercase().contains("too many tokens")
@@ -695,8 +670,6 @@ mod tests {
 
     #[test]
     fn tool_message_marks_failure_when_is_error_set() {
-        // Audit `tars-provider-src-backends-openai-7`: failed tool
-        // executions used to be silently presented as successful.
         let m = Message::Tool {
             tool_call_id: "tu_1".into(),
             content: vec![tars_types::ContentBlock::text("permission denied")],
@@ -724,10 +697,9 @@ mod tests {
 
     #[test]
     fn structured_output_response_format_follows_provider_mode() {
-        // Regression: the adapter ALWAYS emitted `response_format: json_schema`,
-        // which openai_compat providers (DeepSeek) reject with "This
-        // response_format type is unavailable now" — it broke DeepSeek as an arc
-        // scan critic. It must emit the form THIS provider's mode accepts.
+        // openai_compat providers (DeepSeek) reject `response_format:
+        // json_schema` with "This response_format type is unavailable now",
+        // so the adapter must emit the form THIS provider's mode accepts.
         let schema = tars_types::JsonSchema {
             schema: json!({"type": "object",
                            "properties": {"findings": {"type": "array"}}}),
@@ -748,8 +720,9 @@ mod tests {
             thinking: Default::default(),
             enable_chat_template_thinking: None,
         };
-        let mk =
-            |mode| OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), mode);
+        let mk = |mode| {
+            OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), mode)
+        };
 
         // StrictSchema (OpenAI proper) → json_schema.
         let strict = mk(StructuredOutputMode::StrictSchema)
@@ -782,11 +755,10 @@ mod tests {
         assert!(bare.get("response_format").is_none());
     }
 
-    /// FR-1: the shared body builder (default `StandardDialect`) never emits
-    /// DeepSeek's `thinking` field — not even for a `deepseek` base_url. That
-    /// quirk moved to `DeepSeekDialect`; the shared builder inspects no
-    /// provider name / base_url string. (The DeepSeek-host selection that
-    /// preserves today's behavior is exercised in `provider.rs`.)
+    /// The shared body builder (default `StandardDialect`) never emits
+    /// DeepSeek's `thinking` field — not even for a `deepseek` base_url; the
+    /// quirk lives in `DeepSeekDialect` and the shared builder inspects no
+    /// provider name / base_url string.
     #[test]
     fn shared_builder_never_emits_thinking_field() {
         use tars_types::ThinkingMode;
@@ -805,12 +777,9 @@ mod tests {
             enable_chat_template_thinking: None,
         };
         // Even with a `deepseek` base_url, the default StandardDialect path
-        // emits no `thinking` — the base_url string no longer gates anything.
+        // emits no `thinking` — the base_url string does not gate this.
         for (base, mode) in [
-            (
-                "https://api.deepseek.com",
-                StructuredOutputMode::JsonObjectMode,
-            ),
+            ("https://api.deepseek.com", StructuredOutputMode::JsonObjectMode),
             (DEFAULT_BASE_URL, StructuredOutputMode::StrictSchema),
         ] {
             let body = OpenAiAdapter::new(base.into(), HttpProviderExtras::default(), mode)
@@ -825,14 +794,9 @@ mod tests {
 
     #[test]
     fn translate_request_dedups_system_when_req_system_set() {
-        // Audit `tars-provider-src-backends-openai-9`: caller set
-        // both req.system AND an inline System message → 2 system
-        // blocks were emitted. Now the inline System is skipped.
-        let a = OpenAiAdapter::new(
-            DEFAULT_BASE_URL.into(),
-            HttpProviderExtras::default(),
-            StructuredOutputMode::StrictSchema,
-        );
+        // When the caller sets both req.system and an inline System message,
+        // the inline System is skipped so only one system block is emitted.
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let req = ChatRequest {
             system: Some("explicit system".into()),
             messages: vec![
@@ -865,11 +829,7 @@ mod tests {
 
     #[test]
     fn classify_401_is_auth() {
-        let a = OpenAiAdapter::new(
-            DEFAULT_BASE_URL.into(),
-            HttpProviderExtras::default(),
-            StructuredOutputMode::StrictSchema,
-        );
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let err = a.classify_error(
             StatusCode::UNAUTHORIZED,
             &empty_headers(),
@@ -880,11 +840,7 @@ mod tests {
 
     #[test]
     fn classify_429_is_rate_limited() {
-        let a = OpenAiAdapter::new(
-            DEFAULT_BASE_URL.into(),
-            HttpProviderExtras::default(),
-            StructuredOutputMode::StrictSchema,
-        );
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &empty_headers(), "");
         assert!(matches!(
             err,
@@ -894,11 +850,7 @@ mod tests {
 
     #[test]
     fn classify_429_with_retry_after_seconds_populates_field() {
-        let a = OpenAiAdapter::new(
-            DEFAULT_BASE_URL.into(),
-            HttpProviderExtras::default(),
-            StructuredOutputMode::StrictSchema,
-        );
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::RETRY_AFTER, "42".parse().unwrap());
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &headers, "");
@@ -912,11 +864,7 @@ mod tests {
 
     #[test]
     fn classify_400_context_length_is_typed() {
-        let a = OpenAiAdapter::new(
-            DEFAULT_BASE_URL.into(),
-            HttpProviderExtras::default(),
-            StructuredOutputMode::StrictSchema,
-        );
+        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
         let body = r#"{"error":{"message":"context_length_exceeded: too many tokens"}}"#;
         let err = a.classify_error(StatusCode::BAD_REQUEST, &empty_headers(), body);
         assert!(matches!(err, ProviderError::ContextTooLong { .. }));

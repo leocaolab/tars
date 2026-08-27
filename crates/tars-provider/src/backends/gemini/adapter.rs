@@ -24,17 +24,12 @@ use super::mapping::{map_stop_reason, parse_usage, truncate, urlencoding};
 
 const API_VERSION: &str = "v1beta";
 
-/// Whether a Gemini model can actually turn thinking off (accept
-/// `thinkingBudget: 0`). This is DATA, not a guess: it reads the
-/// `thinking` field of the model row in `data/models.toml` (the model
-/// KB) — a model supports thinking-off iff it is NOT thinking-only.
-///
-/// This replaces the old `model.contains("flash")` substring heuristic,
-/// which both mis-classified a hypothetical thinking-only flash and
-/// couldn't express the real `*-pro` = thinking-only rule without the
-/// name accident. Unknown models fall to `false` (conservative, as
-/// before) so we never emit a budget the API might reject — omitting
-/// `thinkingConfig` is always safe.
+/// Whether a Gemini model can accept `thinkingBudget: 0` (turn thinking
+/// off). Reads the `thinking` field of the model row in the model KB
+/// (`data/models.toml`): a model supports thinking-off iff it is NOT
+/// thinking-only. Unknown models fall to `false` — omitting
+/// `thinkingConfig` is always safe, so we never emit a budget the API
+/// might reject.
 fn model_supports_thinking_off(model: &str) -> bool {
     tars_config::MODEL_KB
         .find(model)
@@ -212,11 +207,10 @@ impl GeminiAdapter {
             Message::System { content: _ } => {
                 // Gemini has no "system" message role — system text belongs
                 // in `systemInstruction`, which `translate_request` builds
-                // from `ChatRequest.system` (see lines below). Silently
-                // relabelling a system message as "user" would change how
-                // the model weights the instruction, so reject with an
-                // actionable error (mirrors the Tool-message handling above)
-                // and steer callers to the dedicated `system` field.
+                // from `ChatRequest.system`. Relabelling a system message as
+                // "user" would change how the model weights the instruction,
+                // so reject with an actionable error steering callers to the
+                // dedicated `system` field.
                 Err(ProviderError::InvalidRequest(
                     "Gemini does not support a `system` message role; \
                      put system text in `ChatRequest.system` instead"
@@ -318,31 +312,24 @@ impl HttpAdapter for GeminiAdapter {
                 &schema.schema,
                 crate::schema_adapt::SchemaDialect::Gemini,
             )
-            .map_err(|e| ProviderError::InvalidRequest(format!("responseSchema: {e}")))?;
+            .map_err(|e| {
+                ProviderError::InvalidRequest(format!("responseSchema: {e}"))
+            })?;
         }
 
-        // Thinking config. Off → 0, Auto → -1 (dynamic), Budget(b) → b.
-        //
         // A `thinkingBudget` of 0 means "no thinking", but a model the KB
         // marks `thinking = "only"` (e.g. gemini-2.5-pro, gemini-3.1-pro)
         // REJECTS it with HTTP 400 "Budget 0 is invalid. This model only
         // works in thinking mode." `model_supports_thinking_off` reads that
-        // flag from `data/models.toml` (not a name heuristic). So when the
-        // requested budget is 0 on a model that can't honor it, we omit
-        // `thinkingConfig` and let the model apply its mandatory thinking —
-        // never sending a value the API rejects. Omitting is crash-safe; a
-        // positive or dynamic (-1) budget is accepted by all models.
+        // flag from `data/models.toml`. So when the requested budget is 0 on
+        // a model that can't honor it, we omit `thinkingConfig` and let the
+        // model apply its mandatory thinking — never sending a value the API
+        // rejects. A positive or dynamic (-1) budget is accepted by all
+        // models.
         //
-        // VERIFY (Gemini 3.x): the documented off-knob for 3.x models is
-        // `thinking_level:"minimal"`, not `thinkingBudget:0`. Empirically
-        // `thinkingBudget:0` still works on gemini-3.5-flash (live: thinking
-        // tokens = 0), so this is correct today; if a future 3.x model
-        // rejects the numeric budget, switch 3.x rows to emit thinking_level
-        // (a KB `thinking_param` field would data-drive that).
         // Which knob this model's generation uses is DATA (models.toml):
         // Gemini 2.5 = numeric `thinkingBudget`, Gemini 3.x = string
-        // `thinkingLevel` (the documented 3.x knob). Default to Budget for
-        // rows that don't declare one (safe for 2.5-era compat endpoints).
+        // `thinkingLevel`. Default to Budget for rows that don't declare one.
         let param = tars_config::MODEL_KB
             .find(model)
             .and_then(|m| m.thinking_param)
@@ -387,9 +374,8 @@ impl HttpAdapter for GeminiAdapter {
         }
 
         if let Some(sys) = &req.system {
-            // Gemini's `systemInstruction` is a Content but role is
-            // implicit ("system") — passing role: "user" here is
-            // misleading and contradicts the file-level header doc.
+            // systemInstruction is a Content with an implicit "system"
+            // role — don't set a role field here.
             body["systemInstruction"] = json!({
                 "parts": [{"text": sys}],
             });
@@ -397,7 +383,6 @@ impl HttpAdapter for GeminiAdapter {
 
         if !req.tools.is_empty() {
             body["tools"] = Self::translate_tools(&req.tools)?;
-            // tool_choice → toolConfig.functionCallingConfig.mode
             let mode = match &req.tool_choice {
                 tars_types::ToolChoice::Auto => json!({"mode": "AUTO"}),
                 tars_types::ToolChoice::None => json!({"mode": "NONE"}),
@@ -422,7 +407,6 @@ impl HttpAdapter for GeminiAdapter {
             body["toolConfig"] = json!({"functionCallingConfig": mode});
         }
 
-        // Cache directive → cachedContent reference.
         for d in &req.cache_directives {
             if let tars_types::CacheDirective::UseExplicit { handle } = d {
                 body["cachedContent"] = json!(handle.external_id);
@@ -468,7 +452,6 @@ impl HttpAdapter for GeminiAdapter {
                         .to_string();
                     return Err(ProviderError::ContentFiltered { category });
                 }
-                // Otherwise nothing to do.
                 return Ok(out);
             }
         };
@@ -492,7 +475,6 @@ impl HttpAdapter for GeminiAdapter {
             // same logical "model wants to call a function" outcome.
             let mut had_function_call = false;
 
-            // Parts inside content.
             let parts = cand
                 .pointer("/content/parts")
                 .and_then(|p| p.as_array())
@@ -579,9 +561,8 @@ impl HttpAdapter for GeminiAdapter {
                     .unwrap_or_default();
                 let mut stop = map_stop_reason(reason_str);
                 if had_function_call && matches!(stop, StopReason::EndTurn) {
-                    // Cross-provider normalization (Doc 01 §8): when the
-                    // model emitted a tool call, the upstream signal is
-                    // "caller, please run this and continue" — same as
+                    // When the model emitted a tool call, the upstream signal
+                    // is "caller, please run this and continue" — same as
                     // OpenAI's `tool_calls` and Anthropic's `tool_use`.
                     // Surface that instead of the wire-level STOP.
                     stop = StopReason::ToolUse;
@@ -669,9 +650,8 @@ mod tests {
     fn assistant_tool_call_echoes_thought_signature_on_replay() {
         // A thinking model's functionCall must carry its thoughtSignature back
         // on the next turn, or Gemini rejects it ("missing a thought_signature").
-        let tc =
-            tars_types::ToolCall::new("id@1", "fs.read_file", serde_json::json!({"path": "a"}))
-                .with_thought_signature(Some("SIG-abc".to_string()));
+        let tc = tars_types::ToolCall::new("id@1", "fs.read_file", serde_json::json!({"path": "a"}))
+            .with_thought_signature(Some("SIG-abc".to_string()));
         let m = tars_types::Message::Assistant {
             content: vec![],
             tool_calls: vec![tc],
@@ -682,8 +662,7 @@ mod tests {
         assert_eq!(part["thoughtSignature"], "SIG-abc");
 
         // A call WITHOUT a signature must not emit the key at all.
-        let plain =
-            tars_types::ToolCall::new("id@2", "fs.read_file", serde_json::json!({"path": "a"}));
+        let plain = tars_types::ToolCall::new("id@2", "fs.read_file", serde_json::json!({"path": "a"}));
         let mv = GeminiAdapter::translate_message(&tars_types::Message::Assistant {
             content: vec![],
             tool_calls: vec![plain],
@@ -727,35 +706,33 @@ mod tests {
 
     #[test]
     fn empty_messages_rejected_early() {
-        let mut req = ChatRequest::user("hi");
+        let mut req = ChatRequest::user("hi",
+        );
         req.messages.clear();
-        let err = adapter()
-            .translate_request(&req, "gemini-2.5-flash")
-            .unwrap_err();
+        let err = adapter().translate_request(&req, "gemini-2.5-flash").unwrap_err();
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
     }
 
     #[test]
     fn tool_choice_specific_unknown_name_rejected() {
-        let mut req = ChatRequest::user("hi");
+        let mut req = ChatRequest::user("hi",
+        );
         req.tools = vec![tars_types::ToolSpec {
             name: "real_tool".into(),
             description: "".into(),
             input_schema: tars_types::JsonSchema::strict("X", serde_json::json!({"type":"object"})),
         }];
         req.tool_choice = tars_types::ToolChoice::Specific("ghost".into());
-        let err = adapter()
-            .translate_request(&req, "gemini-2.5-flash")
-            .unwrap_err();
+        let err = adapter().translate_request(&req, "gemini-2.5-flash").unwrap_err();
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
     }
 
     #[test]
     fn system_instruction_has_no_role_field() {
-        let req = ChatRequest::user("hi").with_system("be brief");
-        let body = adapter()
-            .translate_request(&req, "gemini-2.5-flash")
-            .unwrap();
+        let req = ChatRequest::user("hi",
+        )
+        .with_system("be brief");
+        let body = adapter().translate_request(&req, "gemini-2.5-flash").unwrap();
         assert!(body["systemInstruction"].get("role").is_none());
     }
 
@@ -812,24 +789,23 @@ mod tests {
 
     #[test]
     fn system_promotes_to_system_instruction() {
-        let req = ChatRequest::user("hi").with_system("be brief");
-        let body = adapter()
-            .translate_request(&req, "gemini-2.5-flash")
-            .unwrap();
+        let req = ChatRequest::user("hi",
+        )
+        .with_system("be brief");
+        let body = adapter().translate_request(&req, "gemini-2.5-flash").unwrap();
         assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be brief");
         assert!(body["contents"].is_array());
     }
 
     #[test]
     fn structured_output_sets_response_schema() {
-        let mut req = ChatRequest::user("json please");
+        let mut req = ChatRequest::user("json please",
+        );
         req.structured_output = Some(tars_types::JsonSchema::strict(
             "Resp",
             serde_json::json!({"type":"object"}),
         ));
-        let body = adapter()
-            .translate_request(&req, "gemini-2.5-flash")
-            .unwrap();
+        let body = adapter().translate_request(&req, "gemini-2.5-flash").unwrap();
         assert_eq!(
             body["generationConfig"]["responseMimeType"],
             "application/json"
@@ -842,7 +818,8 @@ mod tests {
     // request must OMIT `thinkingConfig` rather than force a zero budget.
     #[test]
     fn thinking_off_omits_config_for_thinking_only_model() {
-        let req = ChatRequest::user("hi");
+        let req = ChatRequest::user("hi",
+        );
         let body = adapter().translate_request(&req, "gemini-2.5-pro").unwrap();
         assert!(
             body["generationConfig"]["thinkingConfig"].is_null(),
@@ -853,31 +830,28 @@ mod tests {
     // Flash models can honor Off, so a zero budget is sent to disable thinking.
     #[test]
     fn thinking_off_sets_zero_budget_for_flash() {
-        let req = ChatRequest::user("hi");
-        let body = adapter()
-            .translate_request(&req, "gemini-2.5-flash")
-            .unwrap();
+        let req = ChatRequest::user("hi",
+        );
+        let body = adapter().translate_request(&req, "gemini-2.5-flash").unwrap();
         assert_eq!(
             body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
             0
         );
     }
 
-    // Thinking-off support is now DATA-driven from the model KB
-    // (`data/models.toml`), not a `contains("flash")` substring guess.
+    // Thinking-off support is DATA-driven from the model KB
+    // (`data/models.toml`).
     #[test]
     fn model_supports_thinking_off_predicate() {
         // KB `thinking = "optional"` → can turn thinking off.
         assert!(model_supports_thinking_off("gemini-2.5-flash"));
         assert!(model_supports_thinking_off("gemini-3.5-flash"));
         assert!(model_supports_thinking_off("gemini-3.1-flash-lite"));
-        // KB `thinking = "only"` → cannot (the `*-pro` family). This is
-        // now correct because it's DATA, not because "pro" lacks "flash".
+        // KB `thinking = "only"` → cannot (the `*-pro` family).
         assert!(!model_supports_thinking_off("gemini-2.5-pro"));
         assert!(!model_supports_thinking_off("gemini-3.1-pro-preview"));
         // Unknown model → conservative false (never emit a budget the
-        // API might reject). The old heuristic wrongly returned TRUE for
-        // any unknown id containing "flash"; the KB returns false.
+        // API might reject).
         assert!(!model_supports_thinking_off("gemini-flash-latest"));
         assert!(!model_supports_thinking_off("gemini-pro-latest"));
     }
@@ -929,10 +903,9 @@ mod tests {
 
     #[test]
     fn tool_parameters_drop_gemini_unsupported_schema_keys() {
-        // Regression: Gemini's function_declarations[].parameters rejects
-        // `additionalProperties` ("Unknown name additionalProperties") — every
-        // tool-using agent (the fixer) failed against gemini until tool params
-        // went through the Gemini schema transform like responseSchema does.
+        // Gemini's function_declarations[].parameters rejects
+        // `additionalProperties` ("Unknown name additionalProperties"), so
+        // tool params must go through the Gemini schema transform.
         let spec = tars_types::ToolSpec::new(
             "fs.read_file",
             "read a file",
@@ -954,10 +927,7 @@ mod tests {
             !text.contains("additionalProperties"),
             "Gemini rejects additionalProperties in tool params: {text}"
         );
-        assert!(
-            !text.contains("$schema"),
-            "draft meta must be stripped: {text}"
-        );
+        assert!(!text.contains("$schema"), "draft meta must be stripped: {text}");
         // The actual contract survives the transform.
         assert!(text.contains("path"));
     }

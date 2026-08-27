@@ -1,4 +1,4 @@
-//! Streaming tool call accumulator. See Doc 01 §8.1.
+//! Streaming tool call accumulator.
 //!
 //! Critical invariant: **never** attempt to parse the args mid-stream.
 //! Increment buffers only on `args_delta`; parse + repair at `finalize`.
@@ -40,10 +40,10 @@ pub struct ToolCallBuffer {
     /// finish payload, and emit a synthetic Finished as a last resort.
     finished_emitted: bool,
     /// Stop reason captured from a `finish_reason` chunk that didn't
-    /// carry usage data; will be paired with a later usage-only chunk.
-    /// Audit `tars-provider-src-backends-openai-{7,22}` — previously a
-    /// usage-only chunk emitted Finished with a hardcoded EndTurn,
-    /// silently overriding the real reason (ToolUse, MaxTokens, …).
+    /// carry usage data; paired with a later usage-only chunk. A
+    /// usage-only chunk must emit Finished with this reason, not a
+    /// hardcoded EndTurn — that would silently override the real reason
+    /// (ToolUse, MaxTokens, …).
     pending_stop_reason: Option<StopReason>,
     /// Last `stop_reason` / `usage` observed on an intermediate finish
     /// payload (e.g. Anthropic's `message_delta`). Lets an adapter
@@ -124,15 +124,12 @@ impl ToolCallBuffer {
 
     pub fn on_start(&mut self, index: usize, id: String, name: String) {
         let entry = self.inflight.entry(index).or_default();
-        // Audit `tars-provider-src-tool-buffer-{2,17}`: previously this
-        // unconditionally cleared `args`, dropping any deltas that
-        // arrived before the start event (some adapters emit deltas
-        // first) AND silently overwriting an in-flight call if a
-        // provider erroneously sent a duplicate start. Two policies:
-        // 1. If args have already accumulated, KEEP them — the deltas
-        //    belong to this same logical call (id/name catch up later).
-        // 2. If we're seeing a re-start on an already-started entry,
-        //    log a warning and keep existing args (don't lose data).
+        // Never clear `args` on start. Two policies protect accumulated data:
+        // 1. If args already accumulated, KEEP them — deltas that arrived
+        //    before the start event (some adapters emit deltas first) belong
+        //    to this same logical call; id/name catch up later.
+        // 2. A re-start on an already-started entry (a provider erroneously
+        //    sending a duplicate start) logs a warning and keeps existing args.
         if entry.started {
             tracing::warn!(
                 index,
@@ -166,10 +163,9 @@ impl ToolCallBuffer {
     /// 2. fall back to repair for trailing-comma / unclosed-string cases
     /// 3. otherwise propagate `ProviderError::Parse`
     pub fn finalize(&mut self, index: usize) -> Result<(String, String, Value), ProviderError> {
-        // Audit `tars-provider-src-tool-buffer-9`: peek before remove —
-        // if parsing fails, leave the buffer intact so the caller can
-        // wait for more deltas and retry instead of losing accumulated
-        // partial args.
+        // Peek before remove — if parsing fails, leave the buffer intact so
+        // the caller can wait for more deltas and retry instead of losing
+        // accumulated partial args.
         let acc = self
             .inflight
             .get(&index)
@@ -181,10 +177,9 @@ impl ToolCallBuffer {
             )));
         }
 
-        // Audit `tars-provider-src-tool-buffer-7`: a finalized tool call
-        // must have a non-empty id and name. Without them, downstream
-        // (Pipeline, Agent loop) cannot route the result back, and most
-        // providers will reject the follow-up tool result message.
+        // A finalized tool call must have a non-empty id and name. Without
+        // them, downstream (Pipeline, Agent loop) cannot route the result
+        // back, and most providers reject the follow-up tool result message.
         if acc.id.is_empty() || acc.name.is_empty() {
             return Err(ProviderError::Parse(format!(
                 "tool call index {index} finalized with empty id or name (id=`{}`, name=`{}`)",
@@ -205,8 +200,7 @@ impl ToolCallBuffer {
                     // Try wrapping naked key:value into braces (rare).
                     let braced = format!("{{{trimmed}}}");
                     serde_json::from_str::<Value>(&braced).map_err(|repair_err| {
-                        // Audit `tars-provider-src-tool-buffer-1`: keep
-                        // both errors so debugging malformed provider
+                        // Keep both errors so debugging malformed provider
                         // JSON has full context.
                         ProviderError::Parse(format!(
                             "tool call args parse failed (first: {first_err}; repair: {repair_err}; raw: {})",

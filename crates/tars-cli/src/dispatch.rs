@@ -73,7 +73,7 @@ pub fn pick_provider(cfg: &Config, requested: Option<&str>) -> Result<ProviderId
         (None, _) => anyhow::bail!(
             "no providers declared in config; add a `[providers.NAME]` section, \
              or pass `--provider <BUILTIN_ID>` (mlx / vllm / openai / anthropic / \
-             gemini / claude_cli / gemini_cli / llamacpp)"
+             gemini / claude_cli / codex_cli / llamacpp)"
         ),
         (Some(_), Some(_)) => {
             let configured: Vec<String> =

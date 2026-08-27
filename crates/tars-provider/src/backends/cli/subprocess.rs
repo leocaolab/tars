@@ -23,6 +23,7 @@ use serde_json::Value;
 use tokio::process::Command;
 
 use tars_types::{ProviderError, Usage};
+use super::cli_subprocess_died;
 
 use crate::child_reaper::ReaperGuard;
 
@@ -218,9 +219,13 @@ impl SubprocessRunner for RealSubprocessRunner {
             &inv.stripped_env,
             inv.cwd.as_deref(),
             &inv.sandbox,
-            // claude keeps its state under the worktree / `$TMPDIR`; no extra
-            // per-CLI state dir (its dialect's `state_dirs` is empty).
-            &[],
+            // Grant claude's own state dir (`$CLAUDE_CONFIG_DIR` / `~/.claude`)
+            // writable: its Bash tool `mkdir`s `~/.claude/session-env/<uuid>` on
+            // first use, which the jail EPERM-denies without this — killing the
+            // delegate's bash (the reconcile delegate's "cannot run bash" failure).
+            // This runner is claude-only, so it reads the grant directly, mirroring
+            // `SharedCliRunner`'s `self.dialect.state_dirs()`.
+            &super::dialects::claude::claude_state_dirs(),
         )?;
 
         cmd.stdin(std::process::Stdio::piped())
@@ -253,13 +258,10 @@ impl SubprocessRunner for RealSubprocessRunner {
         {
             use tokio::io::AsyncWriteExt;
             stdin.write_all(inv.prompt.as_bytes()).await.map_err(|e| {
-                ProviderError::CliSubprocessDied {
-                    exit_code: None,
-                    stderr: format!(
-                        "stdin write failed after {} prompt bytes: {e}",
-                        inv.prompt.len()
-                    ),
-                }
+                cli_subprocess_died(
+                    None,
+                    format!("stdin write failed after {} prompt bytes: {e}", inv.prompt.len()),
+                )
             })?;
         }
         // dropping `stdin` here closes the pipe so the child sees EOF
@@ -277,10 +279,7 @@ impl SubprocessRunner for RealSubprocessRunner {
         let output = match tokio::time::timeout(inv.timeout, child.wait_with_output()).await {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
-                return Err(ProviderError::CliSubprocessDied {
-                    exit_code: None,
-                    stderr: format!("wait failed: {e}"),
-                });
+                return Err(cli_subprocess_died(None, format!("wait failed: {e}")));
             }
             Err(_) => {
                 // Timed out. `wait_with_output()` owns `child`, so the
@@ -306,10 +305,7 @@ impl SubprocessRunner for RealSubprocessRunner {
             // byte 500 lands mid-codepoint (stderr can carry arbitrary
             // Unicode: paths, user messages).
             let truncated = truncate(&stderr, 500);
-            return Err(ProviderError::CliSubprocessDied {
-                exit_code: output.status.code(),
-                stderr: truncated,
-            });
+            return Err(cli_subprocess_died(output.status.code(), truncated));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -337,10 +333,11 @@ impl SubprocessRunner for RealSubprocessRunner {
                 .and_then(|r| r.as_str())
                 .unwrap_or("<no detail>")
                 .to_string();
-            return Err(ProviderError::CliSubprocessDied {
-                exit_code: Some(0), // CLI signaled error in payload, not via exit code
-                stderr: format!("claude CLI returned error: {}", truncate(&detail, 300)),
-            });
+            // Some(0): CLI signaled error in payload, not via exit code.
+            return Err(cli_subprocess_died(
+                Some(0),
+                format!("claude CLI returned error: {}", truncate(&detail, 300)),
+            ));
         }
 
         Ok(payload)
@@ -384,18 +381,13 @@ fn cli_label(executable: &str) -> String {
 /// cause (CLAUDE.md #1). Shared by both runners.
 fn spawn_error(executable: &str, e: std::io::Error) -> ProviderError {
     match e.kind() {
-        std::io::ErrorKind::NotFound => ProviderError::CliSubprocessDied {
-            exit_code: None,
-            stderr: format!("`{executable}` not found in PATH"),
-        },
-        std::io::ErrorKind::PermissionDenied => ProviderError::CliSubprocessDied {
-            exit_code: None,
-            stderr: format!("`{executable}` not executable: {e}"),
-        },
-        _ => ProviderError::CliSubprocessDied {
-            exit_code: None,
-            stderr: format!("spawn failed: {e}"),
-        },
+        std::io::ErrorKind::NotFound => {
+            cli_subprocess_died(None, format!("`{executable}` not found in PATH"))
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            cli_subprocess_died(None, format!("`{executable}` not executable: {e}"))
+        }
+        _ => cli_subprocess_died(None, format!("spawn failed: {e}")),
     }
 }
 
@@ -441,10 +433,7 @@ impl SubprocessRunner for SharedCliRunner {
                 ProviderError::Internal(format!("{label} child has no stdin pipe (piped above)"))
             })?;
             stdin.write_all(inv.prompt.as_bytes()).await.map_err(|e| {
-                ProviderError::CliSubprocessDied {
-                    exit_code: None,
-                    stderr: format!("stdin write failed: {e}"),
-                }
+                cli_subprocess_died(None, format!("stdin write failed: {e}"))
             })?;
             drop(stdin); // EOF so the child stops reading
         }
@@ -474,10 +463,7 @@ impl SubprocessRunner for SharedCliRunner {
         let status = match tokio::time::timeout(inv.timeout, collect).await {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
-                return Err(ProviderError::CliSubprocessDied {
-                    exit_code: None,
-                    stderr: format!("wait failed: {e}"),
-                });
+                return Err(cli_subprocess_died(None, format!("wait failed: {e}")));
             }
             Err(_) => {
                 // Explicit kill — start_kill signals immediately; reap so we
@@ -488,10 +474,7 @@ impl SubprocessRunner for SharedCliRunner {
                 let _ = child.wait().await;
                 return Err(ProviderError::TimedOut {
                     budget: inv.timeout,
-                    detail: format!(
-                        "{label} killed after wall-clock timeout (model={})",
-                        inv.model
-                    ),
+                    detail: format!("{label} killed after wall-clock timeout (model={})", inv.model),
                 });
             }
         };
@@ -499,10 +482,10 @@ impl SubprocessRunner for SharedCliRunner {
         if !status.success() {
             let stderr_text = String::from_utf8_lossy(&stderr_buf);
             let truncated = truncate(&stderr_text, 500);
-            return Err(ProviderError::CliSubprocessDied {
-                exit_code: status.code(),
-                stderr: format!("{label} exited non-zero: {truncated}"),
-            });
+            return Err(cli_subprocess_died(
+                status.code(),
+                format!("{label} exited non-zero: {truncated}"),
+            ));
         }
 
         // Reconstruct stdout per the dialect's declared framing.
@@ -531,10 +514,8 @@ impl SubprocessRunner for SharedCliRunner {
             OutputFraming::JsonLinesArray => {
                 // Keep each line as a raw string; the dialect's `parse_line`
                 // applies its lenient/critical per-line handling unchanged.
-                let lines: Vec<Value> = stdout
-                    .lines()
-                    .map(|l| Value::String(l.to_string()))
-                    .collect();
+                let lines: Vec<Value> =
+                    stdout.lines().map(|l| Value::String(l.to_string())).collect();
                 Ok(Value::Array(lines))
             }
             OutputFraming::RawText => {
@@ -641,13 +622,11 @@ mod tests {
             thinking_per_million: 0.0,
         };
         let cost = pricing.cost_for(&usage);
-        let expected =
-            10.0 * 3.0 / 1e6 + 42.0 * 15.0 / 1e6 + 23808.0 * 0.3 / 1e6 + 100.0 * 3.75 / 1e6;
-        assert!(
-            (cost.0 - expected).abs() < 1e-12,
-            "cost {} != {expected}",
-            cost.0
-        );
+        let expected = 10.0 * 3.0 / 1e6
+            + 42.0 * 15.0 / 1e6
+            + 23808.0 * 0.3 / 1e6
+            + 100.0 * 3.75 / 1e6;
+        assert!((cost.0 - expected).abs() < 1e-12, "cost {} != {expected}", cost.0);
     }
 
     #[test]
@@ -674,10 +653,7 @@ mod tests {
             network: false,
         };
         let (eff, _root) = resolve_effective_policy(&policy, Some(&cwd)).unwrap();
-        assert_eq!(
-            eff.writable_roots, roots,
-            "configured roots are not overwritten"
-        );
+        assert_eq!(eff.writable_roots, roots, "configured roots are not overwritten");
         assert!(!eff.network, "network toggle carried through");
     }
 
@@ -732,10 +708,7 @@ mod tests {
     fn danger_full_access_carries_network_toggle() {
         // The caller's network toggle survives the downgrade.
         let cwd = PathBuf::from("/repo/wt");
-        let no_net = SandboxPolicy {
-            network: false,
-            ..SandboxPolicy::default()
-        };
+        let no_net = SandboxPolicy { network: false, ..SandboxPolicy::default() };
         let (eff, _) = resolve_effective_policy(&no_net, Some(&cwd)).unwrap();
         assert!(!eff.network, "network=false carried through the downgrade");
     }

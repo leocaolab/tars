@@ -1,11 +1,9 @@
 //! Shared builder-setter macro.
 //!
 //! Every `*ProviderBuilder` in [`crate::backends`] declares the same
-//! `mut self → assign field → return self` setter shape — 31 of them
-//! across the 8+ backends at last count. `arc scan --judge` finding
-//! `ARC-L5-DUP-2` flagged that mechanical repetition; this macro
-//! folds it into one rule with three variants matching the actual
-//! field shapes:
+//! `mut self → assign field → return self` setter shape. This macro
+//! folds that repetition into one rule with three variants matching the
+//! actual field shapes:
 //!
 //! - `builder_setter!(field: T)` — concrete value assignment.
 //! - `builder_setter!(field: into T)` — `impl Into<T>` (for the
@@ -42,6 +40,11 @@
 /// Generate one `pub fn` setter for a `*ProviderBuilder`. See module
 /// docs for the three argument-shape variants and the doc-attribute
 /// forwarding rule.
+///
+/// `#[macro_export]`: the CLI backends in `backends::{claude_cli,codex_cli,…}`
+/// build via this macro, so it is exported at the crate root for
+/// `use tars_provider::builder_setter;`.
+#[macro_export]
 macro_rules! builder_setter {
     // Concrete value: `self.field = v;`
     ($(#[$m:meta])* $name:ident : $ty:ty) => {

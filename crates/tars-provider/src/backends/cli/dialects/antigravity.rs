@@ -2,7 +2,7 @@
 //! a [`CliDialect`] (Doc 32 §5 C3, M3). `agy` is the first **`OutputMode::Text`**
 //! delegate: v1.0.16 has NO `--output-format json`, it just prints the plain
 //! answer to stdout. The dialect therefore builds the `agy -p "<prompt>"
-//! --model <model> --dangerously-skip-permissions --add-dir <cwd>` argv (prompt
+//! --model <model> --effort <level> --dangerously-skip-permissions --add-dir <cwd>` argv (prompt
 //! as the `-p` **arg** value) and maps the drained stdout through
 //! [`CliDialect::parse_text`].
 //!
@@ -36,20 +36,41 @@ pub(crate) const PASSTHROUGH_ENV_KEYS: &[&str] = &["GEMINI_API_KEY", "ANTIGRAVIT
 /// and surface a clean `InvalidRequest` rather than let `execve` fail E2BIG.
 pub(crate) const MAX_PROMPT_BYTES: usize = 256 * 1024;
 
+/// The `agy --effort <level>` knob. Antigravity's `gemini-3.1-pro` REQUIRES it —
+/// agy rejects the call with `--model gemini-3.1-pro requires --effort` when it's
+/// absent — and exposes only `low` / `high`. TOML-mirrored by
+/// [`tars_config::AntigravityEffortConfig`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AntigravityEffort {
+    Low,
+    High,
+}
+
+impl AntigravityEffort {
+    fn as_flag(self) -> &'static str {
+        match self {
+            AntigravityEffort::Low => "low",
+            AntigravityEffort::High => "high",
+        }
+    }
+}
+
 /// Antigravity (`agy`) CLI dialect. Holds the per-invocation config
-/// (executable, timeout); the shared `AgentCliBackend` stays free of any
+/// (executable, timeout, effort); the shared `AgentCliBackend` stays free of any
 /// antigravity specifics.
 #[derive(Clone, Debug)]
 pub struct AntigravityDialect {
     executable: String,
     timeout: Duration,
+    effort: AntigravityEffort,
 }
 
 impl AntigravityDialect {
-    pub fn new(executable: String, timeout: Duration) -> Self {
+    pub fn new(executable: String, timeout: Duration, effort: AntigravityEffort) -> Self {
         Self {
             executable,
             timeout,
+            effort,
         }
     }
 }
@@ -57,12 +78,16 @@ impl AntigravityDialect {
 /// Construct the full `agy` argv (without the executable), used by
 /// [`AntigravityDialect::argv`] (which the shared runner calls). `--add-dir
 /// <cwd>` is only emitted when a worktree cwd is present (it needs a real path).
-pub(crate) fn build_agy_argv(inv: &SubprocessInvocation) -> Vec<String> {
+pub(crate) fn build_agy_argv(inv: &SubprocessInvocation, effort: AntigravityEffort) -> Vec<String> {
     let mut argv: Vec<String> = vec![
         "-p".into(),
         inv.prompt.clone(),
         "--model".into(),
         inv.model.clone(),
+        // `gemini-3.1-pro` rejects the call without `--effort` — always emit it;
+        // the level (low/high) is per-provider config.
+        "--effort".into(),
+        effort.as_flag().into(),
         "--dangerously-skip-permissions".into(),
     ];
     if let Some(cwd) = &inv.cwd {
@@ -74,7 +99,7 @@ pub(crate) fn build_agy_argv(inv: &SubprocessInvocation) -> Vec<String> {
 
 impl CliDialect for AntigravityDialect {
     fn argv(&self, inv: &CliInvocation) -> Vec<String> {
-        build_agy_argv(inv)
+        build_agy_argv(inv, self.effort)
     }
 
     fn invocation(
@@ -184,7 +209,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn dialect() -> AntigravityDialect {
-        AntigravityDialect::new("agy".into(), Duration::from_secs(300))
+        AntigravityDialect::new("agy".into(), Duration::from_secs(300), AntigravityEffort::High)
     }
 
     #[test]
@@ -193,17 +218,18 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("say hi"),
-                "gemini-2.5-pro",
-                &RequestContext::test_default(),
+                "gemini-2.5-pro", &RequestContext::test_default(),
             )
             .unwrap();
         let argv = d.argv(&inv);
-        // `agy -p "<prompt>" --model <model> --dangerously-skip-permissions`.
+        // `agy -p "<prompt>" --model <model> --effort <e> --dangerously-skip-permissions`.
         assert_eq!(argv[0], "-p");
         assert!(argv[1].contains("say hi"));
         assert_eq!(argv[2], "--model");
         assert_eq!(argv[3], "gemini-2.5-pro");
-        assert_eq!(argv[4], "--dangerously-skip-permissions");
+        assert_eq!(argv[4], "--effort");
+        assert_eq!(argv[5], "high");
+        assert_eq!(argv[6], "--dangerously-skip-permissions");
     }
 
     #[test]
@@ -212,16 +238,12 @@ mod tests {
         let mut inv = d
             .invocation(
                 &ChatRequest::user("hi"),
-                "gemini-2.5-pro",
-                &RequestContext::test_default(),
+                "gemini-2.5-pro", &RequestContext::test_default(),
             )
             .unwrap();
         inv.cwd = Some(PathBuf::from("/tmp/worktree"));
         let argv = d.argv(&inv);
-        let i = argv
-            .iter()
-            .position(|a| a == "--add-dir")
-            .expect("--add-dir present");
+        let i = argv.iter().position(|a| a == "--add-dir").expect("--add-dir present");
         assert_eq!(argv[i + 1], "/tmp/worktree");
     }
 
@@ -231,8 +253,7 @@ mod tests {
         let mut inv = d
             .invocation(
                 &ChatRequest::user("hi"),
-                "gemini-2.5-pro",
-                &RequestContext::test_default(),
+                "gemini-2.5-pro", &RequestContext::test_default(),
             )
             .unwrap();
         inv.cwd = None;
@@ -240,27 +261,11 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--add-dir"));
     }
 
-    #[test]
-    fn channel_is_arg_and_mode_is_text() {
-        let d = dialect();
-        assert_eq!(d.prompt_channel(), PromptChannel::Arg);
-        assert_eq!(d.output_mode(), OutputMode::Text);
-    }
-
-    #[test]
-    fn invocation_does_not_strip_auth_env() {
-        let d = dialect();
-        let inv = d
-            .invocation(
-                &ChatRequest::user("x"),
-                "gemini-2.5-pro",
-                &RequestContext::test_default(),
-            )
-            .unwrap();
-        // agy authenticates via these — they must NOT be stripped.
-        assert!(inv.stripped_env.is_empty());
-    }
-
+    // The (channel, mode, framing) declaration and the env-strip contract (agy
+    // strips NOTHING — its auth env passes through, asserted as the empty
+    // whole-set case) are cross-dialect invariants folded into
+    // `tests/cli_conformance.rs` (D-12). The passthrough NAMING below is
+    // antigravity-UNIQUE and stays here.
     #[test]
     fn env_lists_passthrough_auth_keys() {
         let d = dialect();
@@ -268,28 +273,15 @@ mod tests {
         assert!(d.env().contains(&"ANTIGRAVITY_API_KEY"));
     }
 
-    #[test]
-    fn oversized_prompt_rejected_with_invalid_request() {
-        let d = dialect();
-        let big = "x".repeat(MAX_PROMPT_BYTES + 1);
-        let err = d
-            .invocation(
-                &ChatRequest::user(big),
-                "gemini-2.5-pro",
-                &RequestContext::test_default(),
-            )
-            .unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidRequest(_)));
-    }
+    // The arg-channel prompt-size cap (`MAX_PROMPT_BYTES` → InvalidRequest) is a
+    // cross-dialect invariant folded into `tests/cli_conformance.rs` (D-12).
 
     #[test]
     fn parse_text_yields_delta_then_finished() {
         let d = dialect();
         let events = d.parse_text("the whole printed answer\n").unwrap();
         assert_eq!(events.len(), 2);
-        assert!(
-            matches!(&events[0], ChatEvent::Delta { text } if text == "the whole printed answer")
-        );
+        assert!(matches!(&events[0], ChatEvent::Delta { text } if text == "the whole printed answer"));
         assert!(matches!(
             &events[1],
             ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn
@@ -302,8 +294,7 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("x").with_system("be precise"),
-                "gemini-2.5-pro",
-                &RequestContext::test_default(),
+                "gemini-2.5-pro", &RequestContext::test_default(),
             )
             .unwrap();
         assert!(inv.prompt.starts_with("[system]\nbe precise"));

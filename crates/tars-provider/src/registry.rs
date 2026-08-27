@@ -21,12 +21,13 @@ use tars_types::{Auth, ProviderId};
 use crate::auth::AuthResolver;
 use crate::backends::anthropic::AnthropicProviderBuilder;
 use crate::backends::cassette::CassetteProvider;
+use crate::backends::cli::{
+    AgentCliBackend, AntigravityDialect, AntigravityEffort, OpenCodeDialect, SharedCliRunner,
+};
 use crate::backends::claude_cli::ClaudeCliProviderBuilder;
 use crate::backends::claude_sdk::ClaudeSdkProviderBuilder;
-use crate::backends::cli::{AgentCliBackend, AntigravityDialect, OpenCodeDialect, SharedCliRunner};
 use crate::backends::codex_cli::{CodexCliProviderBuilder, SandboxMode};
 use crate::backends::gemini::GeminiProviderBuilder;
-use crate::backends::gemini_cli::GeminiCliProviderBuilder;
 use crate::backends::llamacpp::llamacpp;
 use crate::backends::mlx::mlx;
 use crate::backends::mock::{CannedResponse, MockProvider};
@@ -58,9 +59,7 @@ pub enum RegistryError {
     /// `ProviderRegistry::init` ran before the config was installed. The
     /// composition root must call `tars_config::init_tars` (or `Config::set`)
     /// first.
-    #[error(
-        "tars config not initialized — call tars_config::init_tars() before ProviderRegistry::init()"
-    )]
+    #[error("tars config not initialized — call tars_config::init_tars() before ProviderRegistry::init()")]
     ConfigNotInitialized,
     /// `ProviderRegistry::init` already ran in this process. Reported rather
     /// than silently ignored: a second initializer would otherwise run against
@@ -140,6 +139,12 @@ impl ProviderRegistry {
     ) -> Result<Self, RegistryError> {
         let mut map: HashMap<ProviderId, Arc<dyn LlmProvider>> = HashMap::new();
         let mut default_models: HashMap<ProviderId, String> = HashMap::new();
+        // Resolve the process-wide force-record override ONCE here, at the
+        // config-assembly boundary, and thread it down as a plain value. Read
+        // deep inside the `build_cassette` leaf it made that builder read the
+        // ambient environment on every call (non-referentially-transparent);
+        // resolving it here keeps the leaf a pure function of its arguments.
+        let force_record = cassette_force_record_from_env();
         // Two passes: cassette providers may wrap another provider (record
         // mode wraps `record_from`), so build the base providers first, then
         // the cassettes once the map can be looked up.
@@ -149,8 +154,10 @@ impl ProviderRegistry {
         for (id, entry) in base.into_iter().chain(cassettes) {
             let provider = match entry {
                 ProviderConfig::Cassette {
-                    path, record_from, ..
-                } => build_cassette(id.clone(), path, record_from.as_deref(), &map),
+                    path,
+                    record_from,
+                    ..
+                } => build_cassette(id.clone(), path, record_from.as_deref(), force_record, &map),
                 _ => build_one(id.clone(), entry, http.clone(), auth_resolver.clone())?,
             };
             // Keep the two maps coupled: only record the default model on
@@ -346,7 +353,7 @@ fn build_one(
             auth_resolver,
         ),
 
-        // AWS Bedrock (Doc 31). Keyless: the arm ignores `http` and
+        // AWS Bedrock. Keyless: the arm ignores `http` and
         // `auth_resolver` (Bedrock owns its transport + SigV4 auth via the
         // AWS SDK). Only built when the `bedrock` feature is on; the AWS-
         // specific work lives in the `tars-bedrock` leaf crate, adapted to
@@ -357,12 +364,10 @@ fn build_one(
             region,
             model,
             profile,
-        } => {
-            crate::backends::bedrock::BedrockProviderBuilder::new(id, region.clone(), model.clone())
-                .profile(profile.clone())
-                .capabilities(tars_config::capabilities_for("bedrock", model))
-                .build()
-        }
+        } => crate::backends::bedrock::BedrockProviderBuilder::new(id, region.clone(), model.clone())
+            .profile(profile.clone())
+            .capabilities(tars_config::capabilities_for("bedrock", model))
+            .build(),
 
         // Same variant, feature OFF: fail with an actionable message
         // instead of silently dropping the provider.
@@ -416,31 +421,6 @@ fn build_one(
                 .build()
         }
 
-        ProviderConfig::GeminiCli {
-            executable,
-            timeout_secs,
-            default_model: _,
-        } => GeminiCliProviderBuilder::new(id)
-            .executable(executable.clone())
-            .timeout(Duration::from_secs(*timeout_secs))
-            .build(),
-
-        ProviderConfig::ClaudeSdk {
-            executable,
-            script_path,
-            timeout_secs,
-            default_model,
-        } => {
-            let mut b = ClaudeSdkProviderBuilder::new(id)
-                .executable(executable.clone())
-                .default_model(default_model.clone())
-                .timeout(Duration::from_secs(*timeout_secs));
-            if let Some(sp) = script_path {
-                b = b.script_path(sp.clone());
-            }
-            b.build()
-        }
-
         ProviderConfig::CodexCli {
             executable,
             timeout_secs,
@@ -462,8 +442,8 @@ fn build_one(
                 .build()
         }
 
-        // opencode (Doc 32 M2): the shared AgentCliBackend driven by an
-        // OpenCodeDialect; its runner spawns through the tars-sandbox OS jail.
+        // opencode: the shared AgentCliBackend driven by an OpenCodeDialect; its
+        // runner spawns through the tars-sandbox OS jail.
         ProviderConfig::Opencode {
             executable,
             timeout_secs,
@@ -478,20 +458,43 @@ fn build_one(
             Arc::new(AgentCliBackend::new(id, caps, dialect, runner))
         }
 
-        // Antigravity (Doc 32 M3): the shared AgentCliBackend driven by an
-        // AntigravityDialect (the first OutputMode::Text dialect); sandboxed.
+        // Antigravity: the shared AgentCliBackend driven by an AntigravityDialect
+        // (an OutputMode::Text dialect); sandboxed.
         ProviderConfig::Antigravity {
             executable,
             timeout_secs,
             default_model,
+            effort,
         } => {
+            use tars_config::AntigravityEffortConfig;
+            let effort_runtime = match effort {
+                AntigravityEffortConfig::Low => AntigravityEffort::Low,
+                AntigravityEffortConfig::High => AntigravityEffort::High,
+            };
             let caps = tars_config::capabilities_for("antigravity", default_model);
             let dialect = Arc::new(AntigravityDialect::new(
                 executable.clone(),
                 Duration::from_secs(*timeout_secs),
+                effort_runtime,
             ));
             let runner = Arc::new(SharedCliRunner::new(dialect.clone()));
             Arc::new(AgentCliBackend::new(id, caps, dialect, runner))
+        }
+
+        ProviderConfig::ClaudeSdk {
+            executable,
+            script_path,
+            timeout_secs,
+            default_model,
+        } => {
+            let mut b = ClaudeSdkProviderBuilder::new(id)
+                .executable(executable.clone())
+                .default_model(default_model.clone())
+                .timeout(Duration::from_secs(*timeout_secs));
+            if let Some(sp) = script_path {
+                b = b.script_path(sp.clone());
+            }
+            b.build()
         }
 
         ProviderConfig::Mock { canned_response } => {
@@ -511,6 +514,17 @@ fn build_one(
     Ok(provider)
 }
 
+/// Resolve the process-wide cassette force-record override from the
+/// environment (`TARS_CASSETTE_RECORD=1`/`true`). This is the single
+/// env-read boundary — the registry reads it once while assembling the
+/// cassette config and threads the resulting `bool` down, so the
+/// `build_cassette` leaf never touches the ambient environment.
+fn cassette_force_record_from_env() -> bool {
+    std::env::var("TARS_CASSETTE_RECORD")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Build a cassette provider (deterministic LLM replay; INTERNAL testing).
 ///
 /// `path` exists → REPLAY it. `path` absent + `record_from` names a built
@@ -522,19 +536,18 @@ fn build_cassette(
     id: ProviderId,
     path: &str,
     record_from: Option<&str>,
+    // Explicit record override: force record mode even though the file may
+    // already exist. A recording session flushes the cassette on its FIRST
+    // capture, so a later registry build in the SAME session would otherwise
+    // see the file and flip to replay — losing every request after the first
+    // (re-reviews, multi-turn agent loops). The explicit flag keeps the whole
+    // session in record mode (proper VCR "record" vs "replay" vs file-driven
+    // "auto"). Resolved once by the caller so this builder stays a pure
+    // function of its arguments.
+    force_record: bool,
     built: &HashMap<ProviderId, Arc<dyn LlmProvider>>,
 ) -> Arc<dyn LlmProvider> {
     let pb = std::path::PathBuf::from(path);
-    // Explicit record override (`TARS_CASSETTE_RECORD=1`): force record mode
-    // even though the file may already exist. A recording session flushes the
-    // cassette on its FIRST capture, so a later registry build in the SAME
-    // session would otherwise see the file and flip to replay — losing every
-    // request after the first (re-reviews, multi-turn agent loops). The
-    // explicit flag keeps the whole session in record mode (proper VCR
-    // "record" vs "replay" vs file-driven "auto").
-    let force_record = std::env::var("TARS_CASSETTE_RECORD")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
     if pb.exists() && !force_record {
         match CassetteProvider::replay_from_file(id.clone(), &pb) {
             Ok(p) => return p,
@@ -555,10 +568,7 @@ fn build_cassette(
             tracing::info!(path, record_from = src, "cassette recording");
             return CassetteProvider::record_seeded(id, inner.clone(), Some(pb), seed);
         }
-        tracing::warn!(
-            record_from = src,
-            "cassette record_from not found; replaying empty"
-        );
+        tracing::warn!(record_from = src, "cassette record_from not found; replaying empty");
     }
     CassetteProvider::replay(id, HashMap::new())
 }
@@ -603,10 +613,10 @@ mod tests {
         assert!(mapped.get(&ProviderId::new("b")).is_some());
     }
 
-    /// Caps honesty (Doc 32 M4): every CLI delegate runs through
+    /// Caps honesty: every CLI delegate runs through
     /// `AgentCliBackend`, which drains the delegate's stdout to completion
     /// and only then emits ChatEvents. None deliver tokens incrementally and
-    /// none can be cancelled mid-turn, so all 5 dialects MUST advertise
+    /// none can be cancelled mid-turn, so all dialects MUST advertise
     /// `streaming: false` and `supports_cancel: false`. Guards against a
     /// delegate re-declaring a liveness capability its buffered runtime path
     /// does not deliver.
@@ -617,10 +627,6 @@ mod tests {
             [providers.claude]
             type = "claude_cli"
             default_model = "opus"
-
-            [providers.gemini]
-            type = "gemini_cli"
-            default_model = "gemini-2.5-pro"
 
             [providers.codex]
             type = "codex_cli"
@@ -638,7 +644,7 @@ mod tests {
         .unwrap();
         let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
 
-        for id in ["claude", "gemini", "codex", "opencode", "antigravity"] {
+        for id in ["claude", "codex", "opencode", "antigravity"] {
             let p = reg
                 .get(&ProviderId::new(id))
                 .unwrap_or_else(|| panic!("delegate `{id}` should be built"));
@@ -660,8 +666,8 @@ mod tests {
         use futures::StreamExt;
         use tars_types::{ChatEvent, ChatRequest, RequestContext};
 
-        let path =
-            std::env::temp_dir().join(format!("tars_cassette_cfg_{}.json", std::process::id()));
+        let path = std::env::temp_dir()
+            .join(format!("tars_cassette_cfg_{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let cfg_str = format!(
             r#"
@@ -680,8 +686,7 @@ mod tests {
         async fn ask(p: Arc<dyn LlmProvider>, prompt: &str) -> String {
             p.stream(
                 ChatRequest::user(prompt),
-                "test-model",
-                RequestContext::test_default(),
+                "test-model", RequestContext::test_default(),
             )
             .await
             .unwrap()
@@ -756,10 +761,6 @@ mod tests {
             type = "claude_cli"
             default_model = "claude-opus-4-7"
 
-            [providers.gemini_cli]
-            type = "gemini_cli"
-            default_model = "gemini-2.5-pro"
-
             [providers.codex_cli]
             type = "codex_cli"
             default_model = "gpt-5"
@@ -770,10 +771,10 @@ mod tests {
         "#;
         let cfg = ConfigManager::load_from_str(toml_str).unwrap();
         let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
-        // 11 user-declared + 9 builtins, but two of the user-declared
-        // ids (`claude_cli`, `gemini_cli`) collide with builtins of the
-        // same name and override them — net 11 + (9 - 2) = 18.
-        assert_eq!(reg.len(), 18);
+        // 10 user-declared + 8 builtins, but one user-declared id
+        // (`claude_cli`) collides with a builtin of the same name and
+        // overrides it — net 10 + (8 - 1) = 17.
+        assert_eq!(reg.len(), 17);
         assert!(reg.get(&ProviderId::new("openai_main")).is_some());
         assert!(reg.get(&ProviderId::new("openai_compat_local")).is_some());
         assert!(reg.get(&ProviderId::new("anthropic_main")).is_some());
@@ -782,7 +783,6 @@ mod tests {
         assert!(reg.get(&ProviderId::new("mlx_local")).is_some());
         assert!(reg.get(&ProviderId::new("llamacpp_local")).is_some());
         assert!(reg.get(&ProviderId::new("claude_cli")).is_some());
-        assert!(reg.get(&ProviderId::new("gemini_cli")).is_some());
         assert!(reg.get(&ProviderId::new("codex_cli")).is_some());
         assert!(reg.get(&ProviderId::new("mock_test")).is_some());
     }
@@ -804,8 +804,7 @@ mod tests {
         let resp = provider
             .complete(
                 ChatRequest::user("ping"),
-                "test-model",
-                RequestContext::test_default(),
+                "test-model", RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -815,8 +814,8 @@ mod tests {
     #[cfg(feature = "bedrock")]
     #[test]
     fn bedrock_builds_from_keyless_config_when_feature_on() {
-        // E2E-5 (build half): a keyless `type = "bedrock"` block builds a
-        // live `Arc<dyn LlmProvider>` when the `bedrock` feature is on.
+        // A keyless `type = "bedrock"` block builds a live
+        // `Arc<dyn LlmProvider>` when the `bedrock` feature is on.
         // No AWS call — construction is lazy (client built on first use).
         let cfg = ConfigManager::load_from_str(
             r#"
@@ -865,9 +864,9 @@ mod tests {
 
     #[test]
     fn builds_opencode_and_antigravity_cli_delegates() {
-        // Doc 32 M2/M3: both new CLI delegates build into live providers via
-        // the shared AgentCliBackend, and their configured default models are
-        // captured for tier resolution.
+        // Both CLI delegates build into live providers via the shared
+        // AgentCliBackend, and their configured default models are captured
+        // for tier resolution.
         let cfg = ConfigManager::load_from_str(
             r#"
             [providers.oc]
@@ -887,10 +886,7 @@ mod tests {
             reg.default_model(&ProviderId::new("oc")),
             Some("anthropic/claude-sonnet-4-5")
         );
-        assert_eq!(
-            reg.default_model(&ProviderId::new("agy")),
-            Some("gemini-2.5-pro")
-        );
+        assert_eq!(reg.default_model(&ProviderId::new("agy")), Some("gemini-2.5-pro"));
     }
 
     #[test]

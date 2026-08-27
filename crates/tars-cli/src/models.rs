@@ -476,7 +476,6 @@ pub fn provider_type_of(cfg: &ProviderConfig) -> &'static str {
         P::Mlx { .. } => "mlx",
         P::Llamacpp { .. } => "llamacpp",
         P::ClaudeCli { .. } => "claude_cli",
-        P::GeminiCli { .. } => "gemini_cli",
         P::ClaudeSdk { .. } => "claude_sdk",
         P::CodexCli { .. } => "codex_cli",
         P::Opencode { .. } => "opencode",

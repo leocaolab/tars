@@ -36,7 +36,7 @@ pub mod web_search;
 
 pub use builtin::{
     built_in_provider_defaults, default_anthropic, default_claude_cli, default_gemini,
-    default_gemini_cli, default_openai, default_vllm, merge_builtin_with_user,
+    default_openai, default_vllm, merge_builtin_with_user,
 };
 pub use error::ConfigError;
 pub use global::resolve_home;
@@ -48,8 +48,8 @@ pub use model_kb::{
 };
 pub use paths::default_config_path;
 pub use providers::{
-    CapabilitiesOverrides, ClaudeCliEffortConfig, ClaudeCliToolsConfig, ClaudeCliToolsKeyword,
-    CodexSandboxConfig, ProviderConfig, ProvidersConfig,
+    AntigravityEffortConfig, CapabilitiesOverrides, ClaudeCliEffortConfig, ClaudeCliToolsConfig,
+    ClaudeCliToolsKeyword, CodexSandboxConfig, ProviderConfig, ProvidersConfig,
 };
 pub use roles::RoleConfig;
 pub use routing::RoutingConfig;

@@ -2,16 +2,10 @@
 //!
 //! `mlx-lm` ships an OpenAI-compatible HTTP server, so this is a thin
 //! wrapper over [`OpenAiProviderBuilder`] with sensible "local server,
-//! no auth" defaults — same recipe as `vllm.rs`.
-//!
-//! Why a dedicated variant instead of `openai_compat`?
-//! - Distinct identity in logs / config: `type = "mlx"` reads as
-//!   "running on the Mac Pro with unified memory" at a glance.
-//! - Different default capability profile (Apple Silicon GPUs have
-//!   first-class fp16/bf16 paths but no implicit prefix cache, etc.).
-//! - Future-proofing: when `mlx_lm.server` grows MLX-specific extras
-//!   (e.g. KV cache reuse hints), they land here without polluting the
-//!   generic OpenAI adapter.
+//! no auth" defaults. A dedicated variant (rather than `openai_compat`)
+//! carries a distinct identity in logs/config and its own capability
+//! profile: Apple Silicon GPUs have first-class fp16/bf16 paths but no
+//! implicit prefix cache.
 //!
 //! Run an MLX server:
 //! ```bash
@@ -27,9 +21,8 @@ use crate::backends::openai::OpenAiProviderBuilder;
 use crate::http_base::{HttpProviderBase, HttpProviderExtras};
 use crate::provider::LlmProvider;
 
-/// Default `mlx_lm.server` base URL. The server's own default is
-/// `127.0.0.1:8080`; we keep `localhost` (resolves the same on macOS)
-/// for symmetry with [`crate::backends::vllm::DEFAULT_BASE_URL`].
+/// Default `mlx_lm.server` base URL (the server's own default is
+/// `127.0.0.1:8080`).
 pub const DEFAULT_BASE_URL: &str = "http://localhost:8080/v1";
 
 /// Build a provider configured for an MLX server.
@@ -76,8 +69,7 @@ pub fn mlx_local(
 ///
 /// `mlx_lm.server` doesn't authenticate by default. Without this, the
 /// OpenAI adapter would build a `Bearer ` (empty) header that some
-/// gateways reject. Lifted out of [`mlx`] so it can be unit-tested
-/// directly — `LlmProvider` doesn't expose its resolved auth.
+/// gateways reject.
 fn normalize_auth(auth: Auth) -> Auth {
     match auth {
         Auth::Secret {
@@ -140,9 +132,9 @@ mod tests {
 
     #[tokio::test]
     async fn mlx_with_empty_inline_auth_constructs_provider() {
-        // Smoke test: end-to-end construction with empty inline auth
-        // shouldn't panic — the normalize step keeps the OpenAI builder
-        // from seeing a malformed credential.
+        // End-to-end construction with empty inline auth must not panic —
+        // the normalize step keeps the OpenAI builder from seeing a
+        // malformed credential.
         let http = HttpProviderBase::default_arc().unwrap();
         let _ = mlx(
             "mlx_t",

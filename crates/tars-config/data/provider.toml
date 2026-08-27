@@ -744,43 +744,6 @@ thinking = "optional"
 modalities = ["text"]
 status = "ga"
 
-# ───────────────────── gemini_cli (gemini login) — CONSUMER SUNSET ─────────────
-# Consumer path sunset 2026-06-18, enterprise-only now.
-[providers.gemini_cli]
-interface = "cli"
-billed = "subscription"
-default = "gemini-2.5-flash"
-
-  [providers.gemini_cli.capabilities]
-  structured_output = "none"  # no schema flag (issue #8022)
-  tool_use = false
-  parallel_tool_calls = false
-  cancel = false             # UNKNOWN native (kill-subprocess)
-  streaming = false          # native: stream-json (tars buffers)
-  prompt_cache = "delegated"
-
-# context / max_output blank (# UNKNOWN).
-[[providers.gemini_cli.models]]
-id = "gemini-3-pro-preview"
-tier = "flagship"
-thinking = "only"
-modalities = ["text"]
-status = "preview"
-
-[[providers.gemini_cli.models]]
-id = "gemini-2.5-pro"
-tier = "flagship"
-thinking = "only"
-modalities = ["text"]
-status = "ga"
-
-[[providers.gemini_cli.models]]
-id = "gemini-2.5-flash"
-tier = "fast"
-thinking = "optional"
-modalities = ["text"]
-status = "ga"
-
 # ───────────── opencode — BYO-key frontend over models.dev (open set) ──────────
 # No fixed model set (selected as provider/model), so NO model rows and no
 # default. billed=subscription is the closest marker: tars sees no per-token

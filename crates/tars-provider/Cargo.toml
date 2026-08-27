@@ -48,17 +48,14 @@ httpdate = "1"
 thiserror.workspace = true
 tracing.workspace = true
 
-# Signal-time child reaper: SIGKILL the spawned claude process groups when
-# the host is terminated by SIGINT/SIGTERM (kill_on_drop only covers the
-# graceful path). See `child_reaper`. `nix` gives a SAFE `killpg` wrapper so
-# we don't need an `unsafe` FFI block (the workspace forbids `unsafe_code`).
+# The process-group reaper (`child_reaper`) SIGKILLs spawned child groups when
+# the host dies by signal — the claude_sdk daemon + the CLI backends register here.
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
-# The bless (golden-file approval) loop lives in the testing crate.
-tars-eval = { path = "../tars-eval" }
 tars-utils = { path = "../tars-utils" }
+tars-eval = { path = "../tars-eval" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 wiremock.workspace = true
 serde_json.workspace = true

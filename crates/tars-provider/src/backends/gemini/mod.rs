@@ -20,22 +20,16 @@
 //!   `candidates: null` — surface as ContentFiltered, don't index `[0]`.
 //! - **Streaming endpoint**: `streamGenerateContent?alt=sse&key=...`.
 //!
-//! ## Module layout (split per `arc scan --judge` finding)
-//!
-//! Originally a single 1060-line file mixing provider lifecycle,
-//! protocol translation, and free-function helpers; the L5 Tribunal
-//! flagged it as the only god-module across the provider backends.
-//! Split into three sub-modules with the same public surface:
+//! ## Module layout
 //!
 //! - [`provider`] — `GeminiProviderBuilder`, `GeminiProvider`, and the
-//!   trait impls that connect them to the HTTP base + the (unsupported)
-//!   batch surface. The orchestration layer.
+//!   trait impls connecting them to the HTTP base + the (unsupported)
+//!   batch surface.
 //! - [`adapter`] — `GeminiAdapter` and its `HttpAdapter` impl: request
-//!   translation, SSE event parsing, error classification. The
-//!   protocol-translation layer; reusable in tests without an
-//!   `HttpProviderBase`.
+//!   translation, SSE event parsing, error classification. Reusable in
+//!   tests without an `HttpProviderBase`.
 //! - [`mapping`] — pure helpers (`map_stop_reason`, `parse_usage`,
-//!   `truncate`, `urlencoding`). No I/O, no state, easy to unit-test.
+//!   `truncate`, `urlencoding`).
 
 mod adapter;
 mod mapping;

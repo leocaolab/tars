@@ -2,13 +2,12 @@
 //! child processes the way `#[tracing::instrument(err)]` is for
 //! `Result::Err`.
 //!
-//! When tars or arc spawn a child (claude-cli, codex, gemini-cli, …)
+//! When tars or arc spawn a child (claude-cli, codex, antigravity, …)
 //! and that child exits non-zero, the operator deserves more than a
-//! bare `i32`. We saw this the hard way: an `arc auto` run died with
-//! exit 145 and it took 30 minutes of grepping claude-code source +
-//! the JSONL session transcript + macOS system log to figure out the
-//! 145 meant "Bash tool aborted before execution" (claude-code's
-//! `ShellCommand.ts:420` default).
+//! bare `i32` — e.g. exit 145 means "Bash tool aborted before
+//! execution" (claude-code's `ShellCommand.ts:420` default), which is
+//! otherwise only recoverable by grepping claude-code source and the
+//! JSONL session transcript.
 //!
 //! This module provides one entry point, [`diagnose_child_exit`],
 //! that returns a [`SubprocessDiagnostics`] value the caller prints
@@ -281,9 +280,8 @@ mod tests {
 
     #[test]
     fn summarise_session_log_handles_missing_result_event() {
-        // Hand-build a minimal jsonl in tmp that mimics the
-        // 39-event-but-no-result-event shape we saw in the
-        // killed-mid-stream incident.
+        // Hand-build a minimal jsonl that mimics the no-result-event
+        // shape of a session killed mid-stream.
         let tmpdir =
             std::env::temp_dir().join(format!("tars_subprocess_diag_test_{}", std::process::id(),));
         std::fs::create_dir_all(&tmpdir).unwrap();

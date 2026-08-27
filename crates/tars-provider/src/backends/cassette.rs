@@ -2,7 +2,7 @@
 //!
 //! Stays a provider: it serves recorded events rather than live ones, and
 //! nothing more. Diffing a MISS, blessing a baseline, judging whether a change
-//! is a regression is testing-layer work in the testing layer that consumes the miss. That
+//! is a regression is testing-layer work in `tars_harness::cassette_diff`. That
 //! split is load-bearing: a MISS here reports the FACTS (the fingerprint, and
 //! the recorded request when one was captured) and does not decide whether the
 //! difference is acceptable — the same cassette pins "same result" for one test
@@ -99,7 +99,7 @@ impl<'de> serde::Deserialize<'de> for Recording {
 /// picked.
 ///
 /// Selection only — no diffing and no rendering. Those are the testing layer's
-/// job (the testing layer that consumes the miss); this side owns the recordings, so it is
+/// job (`tars_harness::cassette_diff`); this side owns the recordings, so it is
 /// the only place that CAN choose, and it hands the choice out as a fact.
 ///
 /// Priority:
@@ -414,7 +414,7 @@ impl LlmProvider for CassetteProvider {
                     // Hand the located-miss facts to the testing layer as a
                     // structured error — the wanted fingerprint + canonical
                     // request, plus the nearest captured baseline (if any) and how
-                    // it was chosen — so a located-diff renderer in the testing layer can
+                    // it was chosen — so `tars_harness::RequestDiff::from_miss` can
                     // render a located diff. The truth travels in the error, never
                     // a flattened sentinel string.
                     Err(ProviderError::CassetteMiss {
@@ -598,7 +598,7 @@ mod tests {
     async fn replay_miss_carries_the_nearest_baseline() {
         // Record one call, then replay and ask for a DIFFERENT prompt: the miss
         // hands back the recorded call as the nearest baseline (prefix-picked),
-        // with BOTH canonical requests, so a located-diff renderer in the testing layer
+        // with BOTH canonical requests, so `tars_harness::RequestDiff::from_miss`
         // can locate where the request diverged. This is the producer side of the
         // structured miss — the facts must travel in the error, not a sentinel.
         let real = MockProvider::with_responses("real", vec![CannedResponse::text("A")]);

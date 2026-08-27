@@ -5,9 +5,9 @@
 //! the legacy `TARS_CLAUDE_SANDBOX=1` env gate. This test proves the thing the
 //! audit found missing:
 //!
-//!   1. a delegate OTHER than claude (here the shared `SharedCliRunner` driving a
-//!      `GeminiCliDialect`, which spawns `gemini` with the prompt as an argv arg
-//!      and frames a buffered single JSON object) is confined, and
+//!   1. a delegate OTHER than claude (here the shared `SharedCliRunner` driving an
+//!      `AntigravityDialect`, which spawns `agy` with the prompt as an argv arg
+//!      and frames the raw stdout as plain text) is confined, and
 //!   2. confinement comes from the **default** — the invocation carries a plain
 //!      `SandboxPolicy::default()` (`DangerFullAccess`) and `TARS_CLAUDE_SANDBOX`
 //!      is NOT set — so it exercises the default-confine flip
@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tars_provider::backends::cli::{
-    GeminiCliDialect, SharedCliRunner, SubprocessInvocation, SubprocessRunner,
+    AntigravityDialect, AntigravityEffort, SharedCliRunner, SubprocessInvocation, SubprocessRunner,
 };
 
 #[test]
@@ -41,7 +41,7 @@ fn non_claude_delegate_default_confined_through_policy_path() {
 }
 
 async fn escape_blocked_async() {
-    let tag = format!("tars_gemini_default_{}", std::process::id());
+    let tag = format!("tars_agy_default_{}", std::process::id());
 
     // ── worktree: the ONLY place the delegate may write ──────────────────
     let worktree = fresh_dir(&format!("{tag}_wt"));
@@ -56,15 +56,16 @@ async fn escape_blocked_async() {
     let outside_victim = outside_dir.join("victim.txt"); // pre-existing → delegate tries to rm
     std::fs::write(&outside_victim, b"i must survive").expect("seed outside victim");
 
-    // ── mock "gemini" CLI: a shell script that (a) attempts to escape the
+    // ── mock "agy" CLI: a shell script that (a) attempts to escape the
     //    worktree (create + delete outside), (b) writes a legit file INSIDE the
-    //    worktree, then (c) prints gemini-CLI-shaped JSON (`{"response":…}`) so
-    //    `SharedCliRunner::run` parses it. The escape attempts are
-    //    `|| :`-guarded so the script still exits 0 and emits its JSON even when
-    //    the jail denies the writes (EPERM). The gemini runner passes the prompt
+    //    worktree, then (c) prints a plain-text answer (agy is an
+    //    `OutputMode::Text` delegate — no JSON) so `SharedCliRunner::run` hands
+    //    the raw stdout back as a JSON string. The escape attempts are
+    //    `|| :`-guarded so the script still exits 0 and emits its answer even when
+    //    the jail denies the writes (EPERM). The agy runner passes the prompt
     //    as an argv arg (stdin is null), so the script ignores its args. ──
-    let script = mock_gemini_script(&outside_create, &outside_victim, &inside_file);
-    let script_path = outside_dir.join("mock_gemini.sh"); // outside worktree — reads/exec are broad
+    let script = mock_agy_script(&outside_create, &outside_victim, &inside_file);
+    let script_path = outside_dir.join("mock_agy.sh"); // outside worktree — reads/exec are broad
     std::fs::write(&script_path, script).expect("write mock CLI");
     make_executable(&script_path);
 
@@ -73,7 +74,7 @@ async fn escape_blocked_async() {
     //    TARS_CLAUDE_SANDBOX — the default-confine flip is what must jail it. ──
     let inv = SubprocessInvocation::neutral(
         script_path.to_string_lossy().into_owned(),
-        "mock-gemini-model".into(),
+        "mock-agy-model".into(),
         "please escape the worktree".into(),
         Duration::from_secs(30),
         HashSet::new(),
@@ -84,21 +85,23 @@ async fn escape_blocked_async() {
     );
 
     // ── drive the REAL production runner (a NON-claude one): the shared
-    //    SharedCliRunner driving a GeminiCliDialect (prompt as arg, single-object
-    //    JSON framing). ─────────────────────────────────────────────────────
-    let dialect = Arc::new(GeminiCliDialect::new(
-        "gemini".into(),
+    //    SharedCliRunner driving an AntigravityDialect (prompt as arg, raw-text
+    //    framing). ──────────────────────────────────────────────────────────
+    let dialect = Arc::new(AntigravityDialect::new(
+        "agy".into(),
         Duration::from_secs(30),
+        AntigravityEffort::High,
     ));
     let runner = SharedCliRunner::new(dialect);
     let result = runner.run(inv).await;
 
-    // 1. Normal operation survived the sandbox: the mock's JSON round-trips.
-    let payload = result.expect("SharedCliRunner.run should succeed (mock JSON parsed)");
+    // 1. Normal operation survived the sandbox: the mock's stdout round-trips.
+    //    A RawText dialect's runner returns the raw stdout as a JSON string.
+    let payload = result.expect("SharedCliRunner.run should succeed (mock stdout drained)");
     assert_eq!(
-        payload.get("response").and_then(|v| v.as_str()),
+        payload.as_str().map(str::trim),
         Some("done"),
-        "mock gemini JSON did not round-trip through the real run path: {payload:?}"
+        "mock agy stdout did not round-trip through the real run path: {payload:?}"
     );
 
     // 2. Worktree write ALLOWED: default-confine didn't break legitimate work.
@@ -132,9 +135,9 @@ async fn escape_blocked_async() {
     let _ = std::fs::remove_dir_all(&outside_dir);
 }
 
-/// Build the mock gemini CLI script body. Absolute paths are baked in so the
+/// Build the mock agy CLI script body. Absolute paths are baked in so the
 /// child doesn't depend on cwd/TMPDIR.
-fn mock_gemini_script(outside_create: &Path, outside_victim: &Path, inside_file: &Path) -> String {
+fn mock_agy_script(outside_create: &Path, outside_victim: &Path, inside_file: &Path) -> String {
     format!(
         "#!/bin/sh\n\
          # (a) ATTEMPT escape: create a file outside the worktree (jail must deny)\n\
@@ -143,8 +146,8 @@ fn mock_gemini_script(outside_create: &Path, outside_victim: &Path, inside_file:
          rm -f '{victim}' 2>/dev/null || :\n\
          # (b) legit: write inside the worktree (jail must allow)\n\
          echo done > '{inside}'\n\
-         # (c) emit gemini-CLI-shaped JSON on stdout for the runner to parse\n\
-         printf '{{\"response\":\"done\",\"stats\":{{}}}}\\n'\n",
+         # (c) emit a plain-text answer on stdout (agy is OutputMode::Text)\n\
+         printf 'done\\n'\n",
         create = outside_create.display(),
         victim = outside_victim.display(),
         inside = inside_file.display(),

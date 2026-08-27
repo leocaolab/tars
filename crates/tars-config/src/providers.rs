@@ -279,19 +279,6 @@ pub enum ProviderConfig {
         extra_args: Vec<String>,
     },
 
-    /// Gemini CLI subscription path.
-    GeminiCli {
-        #[serde(
-            default = "default_gemini_executable",
-            deserialize_with = "de_trimmed_string"
-        )]
-        executable: String,
-        #[serde(default = "default_cli_timeout_secs")]
-        timeout_secs: u64,
-        #[serde(deserialize_with = "de_trimmed_string")]
-        default_model: String,
-    },
-
     /// Claude SDK child process — tars spawns a long-lived
     /// `@anthropic-ai/claude-agent-sdk` Node process and multiplexes
     /// requests over its stdin / stdout (NDJSON, one JSON object per
@@ -395,6 +382,10 @@ pub enum ProviderConfig {
         timeout_secs: u64,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
+        /// `agy --effort` level. `gemini-3.1-pro` requires it; agy takes
+        /// `low` / `high`. Defaults to `high`.
+        #[serde(default = "default_antigravity_effort")]
+        effort: AntigravityEffortConfig,
     },
 
     /// In-process mock — for tests and dry-run config validation.
@@ -430,10 +421,6 @@ fn default_cassette_model() -> String {
 
 fn default_claude_executable() -> String {
     "claude".into()
-}
-
-fn default_gemini_executable() -> String {
-    "gemini".into()
 }
 
 fn default_codex_executable() -> String {
@@ -521,6 +508,19 @@ pub enum ClaudeCliEffortConfig {
     Max,
 }
 
+/// TOML-friendly mirror of [`tars_provider::AntigravityEffort`]. `agy` REQUIRES
+/// `--effort` for `gemini-3.1-pro` and exposes only `low` / `high`.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AntigravityEffortConfig {
+    Low,
+    High,
+}
+
+fn default_antigravity_effort() -> AntigravityEffortConfig {
+    AntigravityEffortConfig::High
+}
+
 fn default_mock_response() -> String {
     "LGTM — no issues found.".into()
 }
@@ -601,7 +601,6 @@ impl ProviderConfig {
         use tars_types::InterfaceKind as Ik;
         match self {
             ClaudeCli { .. }
-            | GeminiCli { .. }
             | CodexCli { .. }
             | Opencode { .. }
             | Antigravity { .. } => Ik::Cli,
@@ -631,7 +630,6 @@ impl ProviderConfig {
             | Llamacpp { default_model, .. }
             | ClaudeCli { default_model, .. }
             | ClaudeSdk { default_model, .. }
-            | GeminiCli { default_model, .. }
             | CodexCli { default_model, .. }
             | Opencode { default_model, .. }
             | Antigravity { default_model, .. }
@@ -658,7 +656,6 @@ impl ProviderConfig {
         use ProviderConfig::*;
         match &mut self {
             ClaudeCli { timeout_secs, .. }
-            | GeminiCli { timeout_secs, .. }
             | ClaudeSdk { timeout_secs, .. }
             | CodexCli { timeout_secs, .. }
             | Opencode { timeout_secs, .. }
@@ -853,11 +850,6 @@ impl ProviderConfig {
                 default_model,
                 ..
             }
-            | ProviderConfig::GeminiCli {
-                executable,
-                timeout_secs,
-                default_model,
-            }
             | ProviderConfig::Opencode {
                 executable,
                 timeout_secs,
@@ -867,6 +859,7 @@ impl ProviderConfig {
                 executable,
                 timeout_secs,
                 default_model,
+                ..
             } => {
                 if executable.trim().is_empty() {
                     sink.push(ValidationError::new(key("executable"), "must not be empty"));
@@ -1210,10 +1203,13 @@ mod tests {
                 executable,
                 timeout_secs,
                 default_model,
+                effort,
             } => {
                 assert_eq!(executable, "agy");
                 assert_eq!(timeout_secs, 300);
                 assert_eq!(default_model, "gemini-2.5-pro");
+                // `effort` is unspecified in the TOML above ⇒ defaults to High.
+                assert_eq!(effort, AntigravityEffortConfig::High);
             }
             other => panic!("wrong variant: {other:?}"),
         }
@@ -1231,6 +1227,7 @@ mod tests {
                 executable: "agy".into(),
                 timeout_secs: 300,
                 default_model: String::new(),
+                effort: AntigravityEffortConfig::High,
             },
         ] {
             let id = ProviderId::new("d");

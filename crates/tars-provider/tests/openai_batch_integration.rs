@@ -62,10 +62,15 @@ async fn submit_uploads_jsonl_file_then_creates_batch() {
     let id = submitter
         .submit(
             vec![
-                (BatchItemId::new("draft-1"), ChatRequest::user("draft one")),
-                (BatchItemId::new("draft-2"), ChatRequest::user("draft two")),
-            ],
-            "test-model",
+                (
+                    BatchItemId::new("draft-1"),
+                    ChatRequest::user("draft one"),
+                ),
+                (
+                    BatchItemId::new("draft-2"),
+                    ChatRequest::user("draft two"),
+                ),
+            ], "test-model",
             &tars_types::RequestContext::test_default(),
         )
         .await
@@ -79,11 +84,7 @@ async fn submit_empty_items_is_invalid_request_before_http() {
     let provider = build_provider(&server);
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
-        .submit(
-            vec![],
-            "test-model",
-            &tars_types::RequestContext::test_default(),
-        )
+        .submit(vec![], "test-model", &tars_types::RequestContext::test_default())
         .await
         .expect_err("reject");
     assert!(matches!(err, ProviderError::InvalidRequest(_)));

@@ -5,10 +5,10 @@
 //! [`AuthResolver`] turns an [`Auth`] spec into a [`ResolvedAuth`]
 //! the adapter can stuff into headers.
 //!
-//! When `tars-security` lands (Doc 14 §M0), the resolver implementations
-//! that talk to Vault / KMS / etc. will live there. For now the basic
-//! Inline / Env / File / None / Delegate resolutions live here so the
-//! Provider layer is self-contained.
+//! When `tars-security` lands, the resolver implementations that talk to
+//! Vault / KMS / etc. will live there. For now the basic Inline / Env /
+//! File / None / Delegate resolutions live here so the Provider layer is
+//! self-contained.
 
 use std::sync::Arc;
 #[cfg(not(test))]
@@ -49,14 +49,9 @@ impl CredentialSource<'_> {
     }
 }
 
-/// Shared validation step for every [`SecretRef`] arm: enforce the
-/// size cap, trim whitespace, and reject an empty/whitespace-only
-/// secret. Extracted from the three previously-duplicated bodies of
-/// `BasicAuthResolver::resolve` (`arc scan --judge` finding
-/// `ARC-L5-DUP-1`): "the validation logic (size cap, trim, empty-
-/// check) is identical credential hygiene that does not vary by
-/// backend or context; forgetting to update one site when changing
-/// the other creates drift risk."
+/// Enforce the size cap, trim whitespace, and reject an empty/
+/// whitespace-only secret. Shared by every [`SecretRef`] arm so
+/// credential hygiene can't drift between them.
 fn validate_credential(raw: &str, source: CredentialSource<'_>) -> Result<String, AuthError> {
     if raw.len() > MAX_CREDENTIAL_BYTES {
         return Err(AuthError::Internal(format!(
@@ -67,12 +62,8 @@ fn validate_credential(raw: &str, source: CredentialSource<'_>) -> Result<String
     }
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        // The Env arm previously said "is set but empty" — that
-        // distinction was useful (helps the operator separate "var
-        // unset" from "var set to ''"). The Env arm's outer
-        // VarError::NotPresent branch still surfaces the unset case;
-        // here we land only when the var IS set and the value is
-        // whitespace-only, so the simpler wording is accurate.
+        // Reached only when a value is present but whitespace-only; the Env
+        // arm's outer `VarError::NotPresent` branch handles the unset case.
         return Err(AuthError::Missing(format!("{} is empty", source.label())));
     }
     Ok(trimmed.to_string())
@@ -101,9 +92,9 @@ impl From<AuthError> for ProviderError {
 /// What the resolver hands back. The Adapter decides how to apply it
 /// (Bearer header, x-api-key header, query string …).
 ///
-/// `Debug` is implemented manually to redact credential bodies. Audit
-/// finding `tars-provider-src-auth-2`: a `tracing::error!(auth = ?auth)`
-/// on this type would otherwise dump the bearer/api-key plaintext.
+/// `Debug` is implemented manually to redact credential bodies: a
+/// `tracing::error!(auth = ?auth)` would otherwise dump the
+/// bearer/api-key plaintext.
 #[derive(Clone)]
 pub enum ResolvedAuth {
     /// Plaintext bearer-style credential string.
@@ -128,7 +119,7 @@ impl std::fmt::Debug for ResolvedAuth {
 pub trait AuthResolver: Send + Sync {
     /// Resolve `auth` in the context of `ctx`. The context carries
     /// tenant/principal so production resolvers can do per-tenant
-    /// secret namespacing (Doc 06 §5.3).
+    /// secret namespacing.
     async fn resolve(&self, auth: &Auth, ctx: &RequestContext) -> Result<ResolvedAuth, AuthError>;
 }
 
@@ -143,17 +134,16 @@ pub struct BasicAuthResolver;
 impl AuthResolver for BasicAuthResolver {
     async fn resolve(&self, auth: &Auth, _ctx: &RequestContext) -> Result<ResolvedAuth, AuthError> {
         match auth {
+            // `Delegate` means the spawned tool/CLI carries its own credential
+            // (e.g. `claude login`); tars injects nothing.
             Auth::None | Auth::Delegate => Ok(ResolvedAuth::None),
             Auth::Secret { secret } => match secret {
                 SecretRef::Inline { value } => {
-                    // Audit `tars-provider-src-auth-8`: `SecretRef::Inline`
-                    // is documented as test/dev-only but nothing in the
-                    // resolver enforced that. We can't safely refuse it
-                    // (existing tests + Personal-mode workflows pass
-                    // inline keys), but emit a loud one-time warning so
-                    // production deployments notice if it slips through
-                    // a config review. Suppress in test builds where
-                    // it's the expected path.
+                    // `SecretRef::Inline` is test/dev-only but can't be
+                    // refused — existing tests and Personal-mode workflows
+                    // pass inline keys — so emit a loud one-time warning
+                    // instead. Suppressed in test builds where it's the
+                    // expected path.
                     #[cfg(not(test))]
                     {
                         static WARNED: AtomicBool = AtomicBool::new(false);
@@ -167,12 +157,6 @@ impl AuthResolver for BasicAuthResolver {
                             );
                         }
                     }
-                    // `validate_credential` handles the size cap + trim
-                    // + empty check uniformly across all three sources
-                    // (ARC-L5-DUP-1: extracted from the three SecretRef
-                    // arms below). The size cap fires only on a paste-
-                    // accident inline; in production, `SecretRef::Env`
-                    // and `SecretRef::File` are the real paths.
                     let raw = value.expose();
                     let trimmed = validate_credential(raw, CredentialSource::Inline)?;
                     Ok(ResolvedAuth::ApiKey(trimmed))
@@ -182,11 +166,9 @@ impl AuthResolver for BasicAuthResolver {
                         let trimmed = validate_credential(&v, CredentialSource::Env { var })?;
                         Ok(ResolvedAuth::ApiKey(trimmed))
                     }
-                    // Audit `tars-provider-src-auth-1`: VarError has
-                    // two distinct cases — surfacing them separately
-                    // turns "auth doesn't work" into actionable
-                    // diagnostics ("set the env var" vs "the env
-                    // var contains a NUL or non-UTF-8 byte").
+                    // `VarError`'s two cases are surfaced separately so the
+                    // error is actionable: "set the env var" vs "the value
+                    // isn't valid UTF-8".
                     Err(std::env::VarError::NotPresent) => {
                         Err(AuthError::Missing(format!("env var `{var}` is not set")))
                     }
@@ -270,8 +252,8 @@ mod tests {
 
     #[test]
     fn resolved_auth_debug_redacts_credentials() {
-        // Audit `tars-provider-src-auth-2`: a `tracing::error!(auth = ?a)`
-        // would dump the bearer plaintext if Debug were derived.
+        // A `tracing::error!(auth = ?a)` would dump the bearer plaintext
+        // if Debug were derived.
         let a = ResolvedAuth::Bearer("super-secret-token".into());
         let s = format!("{a:?}");
         assert!(!s.contains("super-secret-token"));
@@ -312,8 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_strips_surrounding_whitespace() {
-        // Audit `tars-provider-src-auth-7`: a file like "  secret  \n"
-        // must not leak whitespace into the API key.
+        // A file like "  secret  \n" must not leak whitespace into the API key.
         let dir = std::env::temp_dir();
         let path = dir.join(format!("tars-auth-ws-test-{}-{}", std::process::id(), "ws"));
         std::fs::write(&path, "  secret-key  \n").unwrap();
@@ -362,8 +343,8 @@ mod tests {
 
     #[tokio::test]
     async fn file_oversized_returns_internal() {
-        // Audit `tars-provider-src-auth-8`: a credential file larger
-        // than the cap must be rejected, not loaded into memory.
+        // A credential file larger than the cap must be rejected, not
+        // loaded into memory.
         let dir = std::env::temp_dir();
         let path = dir.join(format!("tars-auth-big-{}", std::process::id()));
         let big = vec![b'a'; 64 * 1024 + 16];
@@ -379,8 +360,8 @@ mod tests {
 
     #[tokio::test]
     async fn inline_empty_returns_missing() {
-        // Audit `tars-provider-src-auth-5`: an empty inline credential
-        // must be rejected at resolution time, not produce a 401 later.
+        // An empty inline credential must be rejected at resolution time,
+        // not produce a 401 later.
         let r = BasicAuthResolver;
         let err = r
             .resolve(&Auth::inline("   "), &RequestContext::test_default())
