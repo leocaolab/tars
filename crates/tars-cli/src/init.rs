@@ -197,5 +197,5 @@ fn print_next_steps(target: &Path) {
     println!("  3. test:  tars run --provider <id> 'hello'");
     println!();
     println!("built-in provider ids available without any config:");
-    println!("  openai, anthropic, gemini, claude_cli, codex_cli, mlx, llamacpp, vllm");
+    println!("  openai, anthropic, gemini, claude_cli, mlx, llamacpp, vllm");
 }

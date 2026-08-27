@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use tars_config::{ConfigManager, ProviderConfig};
 use tars_types::{Auth, SecretRef};
 
-use crate::model_query::{Outcome, Plan, plan_for, query};
+use crate::model_query::{plan_for, query, Outcome, Plan};
 use crate::models::provider_type_of;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(6);
@@ -37,9 +37,7 @@ fn key_status(cfg: &ProviderConfig) -> KeyStatus {
         Some(Auth::Secret {
             secret: SecretRef::Env { var },
         }) => {
-            let set = std::env::var(var)
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false);
+            let set = std::env::var(var).map(|v| !v.trim().is_empty()).unwrap_or(false);
             KeyStatus::Env {
                 var: var.clone(),
                 set,

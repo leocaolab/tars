@@ -12,9 +12,15 @@ workspace = true
 [dependencies]
 tars-types = { path = "../tars-types" }
 tars-pipeline = { path = "../tars-pipeline" }
+# The replay engine drives a real registry and a real tool set.
+tars-provider = { path = "../tars-provider" }
+tars-tools = { path = "../tars-tools" }
+tars-utils = { path = "../tars-utils" }
 
 # Async
 async-trait.workspace = true
+anyhow.workspace = true
+tokio-util.workspace = true
 futures.workspace = true
 
 # Serialization
@@ -27,4 +33,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tars-provider = { path = "../tars-provider" }
+tempfile = "3"

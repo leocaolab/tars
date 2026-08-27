@@ -182,18 +182,9 @@ mod tests {
     #[test]
     fn stale_default_detected_only_for_ok_and_absent() {
         // Ok + default present → not stale.
-        assert!(
-            !entry(&["gemini-2.5-flash"], "gemini-2.5-flash", EntryStatus::Ok).default_is_stale()
-        );
+        assert!(!entry(&["gemini-2.5-flash"], "gemini-2.5-flash", EntryStatus::Ok).default_is_stale());
         // Ok + default absent → stale (the leftover-preview case).
-        assert!(
-            entry(
-                &["gemini-2.5-flash"],
-                "gemini-3-flash-preview",
-                EntryStatus::Ok
-            )
-            .default_is_stale()
-        );
+        assert!(entry(&["gemini-2.5-flash"], "gemini-3-flash-preview", EntryStatus::Ok).default_is_stale());
         // Non-Ok → we can't tell → not flagged stale.
         assert!(!entry(&[], "whatever", EntryStatus::NoKey).default_is_stale());
     }
@@ -205,11 +196,7 @@ mod tests {
         let mut lib = ModelLibrary::new("2026-07-07T12:00:00Z".into());
         lib.providers.insert(
             "gemini_flash".into(),
-            entry(
-                &["gemini-2.5-flash", "gemini-2.5-pro"],
-                "gemini-2.5-flash",
-                EntryStatus::Ok,
-            ),
+            entry(&["gemini-2.5-flash", "gemini-2.5-pro"], "gemini-2.5-flash", EntryStatus::Ok),
         );
         lib.save(&path).unwrap();
 

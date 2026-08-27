@@ -111,7 +111,10 @@ impl From<LogFormat> for TelemetryFormat {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Sanity-check a CLI provider (`claude_cli` / `codex_cli` / `opencode`) — sends
+    /// Send a single prompt to a provider and stream the response.
+    /// RETIRED — ran on the deleted OrchestratorAgent/Plan model; not ported to run_dag/board.
+    /// RETIRED — ran on the deleted Orchestrator→Worker→Critic run_task model; not ported to run_dag/board.
+    /// Sanity-check a CLI provider (`claude_cli` / `codex_cli` / `antigravity`) — sends
     /// a fixed "say hi" prompt and dumps every event so you can see what the
     /// subprocess actually returns.
     Probe(probe::ProbeArgs),

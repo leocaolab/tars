@@ -28,10 +28,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
-use tars_melt::event::{ContentRef, PipelineEvent};
 use tars_melt::event::{
-    LlmRecordStore, PipelineEventLog, PipelineEventQuery, SqliteLlmRecordStore,
-    SqliteLlmRecordStoreConfig, SqlitePipelineEventLog, SqlitePipelineEventLogConfig,
+    ContentRef, LlmRecordStore, PipelineEvent, PipelineEventLog, PipelineEventQuery,
+    SqliteLlmRecordStore, SqliteLlmRecordStoreConfig, SqlitePipelineEventLog,
+    SqlitePipelineEventLogConfig,
 };
 use tars_types::TenantId;
 

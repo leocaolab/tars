@@ -4853,15 +4853,20 @@ dependencies = [
 name = "tars-eval"
 version = "1.9.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "futures",
  "serde",
  "serde_json",
  "tars-pipeline",
  "tars-provider",
+ "tars-tools",
  "tars-types",
+ "tars-utils",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

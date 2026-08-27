@@ -18,6 +18,8 @@
 
 pub mod arg_judge;
 pub mod bless;
+pub mod cassette_diff;
+pub mod eval;
 pub mod check;
 pub mod judge;
 pub mod judge_stats;

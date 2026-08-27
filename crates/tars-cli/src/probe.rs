@@ -9,7 +9,7 @@
 //!
 //! ## Works for every provider type
 //!
-//! Originally CLI-only (`claude_cli` / `codex_cli` / `opencode`)
+//! Originally CLI-only (`claude_cli` / `codex_cli` / `antigravity`)
 //! because those are the trickiest to get auth + binary lookup right.
 //! Loosened to **all provider types** since the event-by-event dump
 //! is genuinely more informative than `tars run` for HTTP providers
@@ -50,7 +50,7 @@ use crate::config_loader;
 #[derive(Args, Debug)]
 pub struct ProbeArgs {
     /// Provider id from your config. Works for every provider type —
-    /// CLI subscriptions (`claude_cli` / `codex_cli` / `opencode`),
+    /// CLI subscriptions (`claude_cli` / `codex_cli` / `antigravity`),
     /// direct HTTP APIs (`openai` / `anthropic` / `gemini`), and
     /// local OpenAI-compatible servers (`openai_compat` / `vllm` /
     /// `mlx` / `llamacpp`).
