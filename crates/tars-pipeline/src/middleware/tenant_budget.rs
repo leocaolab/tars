@@ -612,9 +612,12 @@ mod tests {
         }
 
         let mw = TenantBudgetMiddleware::from_parts(store.clone(), priced(3.0, 15.0), 1000);
-        let svc = LlmService::builder(Arc::new(ImmediateError) as Arc<dyn LlmProvider>, "test-model")
-            .layer(mw)
-            .build();
+        let svc = LlmService::builder(
+            Arc::new(ImmediateError) as Arc<dyn LlmProvider>,
+            "test-model",
+        )
+        .layer(mw)
+        .build();
 
         let err = svc
             .call(req("hi", Some(100)), ctx_for("acme"))

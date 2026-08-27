@@ -136,7 +136,10 @@ impl CliDialect for CodexCliDialect {
             model,
             prompt,
             ctx.call_budget(self.timeout),
-            STRIPPED_ENV_KEYS_UPPER.iter().map(|s| s.to_string()).collect(),
+            STRIPPED_ENV_KEYS_UPPER
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             ctx.cwd.clone(),
             ctx.sandbox.clone(),
         ))
@@ -285,8 +288,12 @@ struct ThreadItem {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ThreadItemDetails {
-    AgentMessage { text: String },
-    Reasoning { text: String },
+    AgentMessage {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
     #[serde(other)]
     Other,
 }
@@ -379,7 +386,6 @@ fn flatten_blocks(blocks: &[ContentBlock]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    
 
     fn dialect() -> CodexCliDialect {
         CodexCliDialect::new(
@@ -400,7 +406,8 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("hi"),
-                "gpt-5", &RequestContext::test_default(),
+                "gpt-5",
+                &RequestContext::test_default(),
             )
             .unwrap();
         let argv = d.argv(&inv);
@@ -411,7 +418,10 @@ mod tests {
         assert_eq!(argv[2], "--model");
         assert_eq!(argv[3], "gpt-5");
         // codex's OWN sandbox flag MUST stay (tars-sandbox wraps on top).
-        let s = argv.iter().position(|a| a == "--sandbox").expect("--sandbox present");
+        let s = argv
+            .iter()
+            .position(|a| a == "--sandbox")
+            .expect("--sandbox present");
         assert_eq!(argv[s + 1], "read-only");
         assert!(argv.iter().any(|a| a == "--skip-git-repo-check"));
         assert_eq!(argv.last().map(String::as_str), Some("-"));
@@ -426,7 +436,12 @@ mod tests {
 
     #[test]
     fn argv_omits_skip_git_when_disabled() {
-        let d = CodexCliDialect::new("codex".into(), Duration::from_secs(1), SandboxMode::ReadOnly, false);
+        let d = CodexCliDialect::new(
+            "codex".into(),
+            Duration::from_secs(1),
+            SandboxMode::ReadOnly,
+            false,
+        );
         let argv = build_codex_argv("gpt-5", d.sandbox, d.skip_git_repo_check);
         assert!(!argv.iter().any(|a| a == "--skip-git-repo-check"));
     }
@@ -448,12 +463,16 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("x"),
-                "gpt-5-codex", &RequestContext::test_default(),
+                "gpt-5-codex",
+                &RequestContext::test_default(),
             )
             .unwrap();
         assert_eq!(inv.model, "gpt-5-codex");
         for k in ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_AGENT_IDENTITY"] {
-            assert!(inv.stripped_env.contains(k), "stripped_env must contain {k}");
+            assert!(
+                inv.stripped_env.contains(k),
+                "stripped_env must contain {k}"
+            );
         }
     }
 
@@ -479,10 +498,14 @@ mod tests {
                     thinking: Default::default(),
                     enable_chat_template_thinking: None,
                 },
-                "gpt-5-codex", &RequestContext::test_default(),
+                "gpt-5-codex",
+                &RequestContext::test_default(),
             )
             .unwrap();
-        assert!(inv.prompt.starts_with("[system]\nbe brief\n\n[user]\nfirst user\n\n"));
+        assert!(
+            inv.prompt
+                .starts_with("[system]\nbe brief\n\n[user]\nfirst user\n\n")
+        );
         assert!(inv.prompt.contains("[assistant]\nfirst assistant"));
         assert!(inv.prompt.ends_with("[user]\nsecond user"));
     }
@@ -616,12 +639,20 @@ mod tests {
 
     #[test]
     fn unknown_item_kinds_drop_via_serde_other() {
-        for kind in ["command_execution", "file_change", "mcp_tool_call", "web_search"] {
+        for kind in [
+            "command_execution",
+            "file_change",
+            "mcp_tool_call",
+            "web_search",
+        ] {
             let out = map_thread_event(parse(json!({
                 "type": "item.completed",
                 "item": {"id": "x", "type": kind, "command": "ls", "aggregated_output": "", "status": "completed"},
             })));
-            assert!(out.is_empty(), "item.completed of kind `{kind}` should drop in v1");
+            assert!(
+                out.is_empty(),
+                "item.completed of kind `{kind}` should drop in v1"
+            );
         }
     }
 

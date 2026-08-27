@@ -488,7 +488,10 @@ impl SubprocessRunner for SharedCliRunner {
                 let _ = child.wait().await;
                 return Err(ProviderError::TimedOut {
                     budget: inv.timeout,
-                    detail: format!("{label} killed after wall-clock timeout (model={})", inv.model),
+                    detail: format!(
+                        "{label} killed after wall-clock timeout (model={})",
+                        inv.model
+                    ),
                 });
             }
         };
@@ -528,8 +531,10 @@ impl SubprocessRunner for SharedCliRunner {
             OutputFraming::JsonLinesArray => {
                 // Keep each line as a raw string; the dialect's `parse_line`
                 // applies its lenient/critical per-line handling unchanged.
-                let lines: Vec<Value> =
-                    stdout.lines().map(|l| Value::String(l.to_string())).collect();
+                let lines: Vec<Value> = stdout
+                    .lines()
+                    .map(|l| Value::String(l.to_string()))
+                    .collect();
                 Ok(Value::Array(lines))
             }
             OutputFraming::RawText => {
@@ -636,11 +641,13 @@ mod tests {
             thinking_per_million: 0.0,
         };
         let cost = pricing.cost_for(&usage);
-        let expected = 10.0 * 3.0 / 1e6
-            + 42.0 * 15.0 / 1e6
-            + 23808.0 * 0.3 / 1e6
-            + 100.0 * 3.75 / 1e6;
-        assert!((cost.0 - expected).abs() < 1e-12, "cost {} != {expected}", cost.0);
+        let expected =
+            10.0 * 3.0 / 1e6 + 42.0 * 15.0 / 1e6 + 23808.0 * 0.3 / 1e6 + 100.0 * 3.75 / 1e6;
+        assert!(
+            (cost.0 - expected).abs() < 1e-12,
+            "cost {} != {expected}",
+            cost.0
+        );
     }
 
     #[test]
@@ -667,7 +674,10 @@ mod tests {
             network: false,
         };
         let (eff, _root) = resolve_effective_policy(&policy, Some(&cwd)).unwrap();
-        assert_eq!(eff.writable_roots, roots, "configured roots are not overwritten");
+        assert_eq!(
+            eff.writable_roots, roots,
+            "configured roots are not overwritten"
+        );
         assert!(!eff.network, "network toggle carried through");
     }
 
@@ -722,7 +732,10 @@ mod tests {
     fn danger_full_access_carries_network_toggle() {
         // The caller's network toggle survives the downgrade.
         let cwd = PathBuf::from("/repo/wt");
-        let no_net = SandboxPolicy { network: false, ..SandboxPolicy::default() };
+        let no_net = SandboxPolicy {
+            network: false,
+            ..SandboxPolicy::default()
+        };
         let (eff, _) = resolve_effective_policy(&no_net, Some(&cwd)).unwrap();
         assert!(!eff.network, "network=false carried through the downgrade");
     }

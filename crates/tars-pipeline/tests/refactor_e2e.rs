@@ -10,9 +10,7 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 
 use tars_cache::CachePolicy;
-use tars_pipeline::{
-    BudgetConfigError, CircuitBreakerConfig, PerCallBudgetMiddleware,
-};
+use tars_pipeline::{BudgetConfigError, CircuitBreakerConfig, PerCallBudgetMiddleware};
 use tars_provider::{
     LlmProvider,
     backends::mock::{CannedResponse, MockProvider},

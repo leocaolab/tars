@@ -412,7 +412,9 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
     // pre-Filter response — i.e. "hello world". Currently the
     // ValidationMiddleware re-emit-on-Filter path leaks post-Filter
     // events into the cache.
-    let key = factory.compute(&req, "test-model", &ctx).expect("cacheable");
+    let key = factory
+        .compute(&req, "test-model", &ctx)
+        .expect("cacheable");
     let policy = CachePolicy::default();
     let cached = registry
         .lookup(&key, &policy)

@@ -179,10 +179,7 @@ async fn retry_middleware_actually_replays_http_call_on_5xx() {
         .build();
 
     let mut stream = Arc::new(pipeline)
-        .call(
-            ChatRequest::user("x"),
-            RequestContext::test_default(),
-        )
+        .call(ChatRequest::user("x"), RequestContext::test_default())
         .await
         .expect("retry recovers and opens stream");
 
@@ -266,10 +263,7 @@ async fn registry_built_from_toml_can_drive_pipeline_call() {
 
     // Round-trip a single request — proves the whole Arc/dyn chain holds.
     let mut stream = Arc::new(pipeline)
-        .call(
-            ChatRequest::user("ping"),
-            RequestContext::test_default(),
-        )
+        .call(ChatRequest::user("ping"), RequestContext::test_default())
         .await
         .expect("pipeline.call() returns Ok");
     let mut events = 0;

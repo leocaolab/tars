@@ -193,7 +193,8 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("say hi"),
-                "gemini-2.5-pro", &RequestContext::test_default(),
+                "gemini-2.5-pro",
+                &RequestContext::test_default(),
             )
             .unwrap();
         let argv = d.argv(&inv);
@@ -211,12 +212,16 @@ mod tests {
         let mut inv = d
             .invocation(
                 &ChatRequest::user("hi"),
-                "gemini-2.5-pro", &RequestContext::test_default(),
+                "gemini-2.5-pro",
+                &RequestContext::test_default(),
             )
             .unwrap();
         inv.cwd = Some(PathBuf::from("/tmp/worktree"));
         let argv = d.argv(&inv);
-        let i = argv.iter().position(|a| a == "--add-dir").expect("--add-dir present");
+        let i = argv
+            .iter()
+            .position(|a| a == "--add-dir")
+            .expect("--add-dir present");
         assert_eq!(argv[i + 1], "/tmp/worktree");
     }
 
@@ -226,7 +231,8 @@ mod tests {
         let mut inv = d
             .invocation(
                 &ChatRequest::user("hi"),
-                "gemini-2.5-pro", &RequestContext::test_default(),
+                "gemini-2.5-pro",
+                &RequestContext::test_default(),
             )
             .unwrap();
         inv.cwd = None;
@@ -241,14 +247,14 @@ mod tests {
         assert_eq!(d.output_mode(), OutputMode::Text);
     }
 
-    
     #[test]
     fn invocation_does_not_strip_auth_env() {
         let d = dialect();
         let inv = d
             .invocation(
                 &ChatRequest::user("x"),
-                "gemini-2.5-pro", &RequestContext::test_default(),
+                "gemini-2.5-pro",
+                &RequestContext::test_default(),
             )
             .unwrap();
         // agy authenticates via these — they must NOT be stripped.
@@ -269,7 +275,8 @@ mod tests {
         let err = d
             .invocation(
                 &ChatRequest::user(big),
-                "gemini-2.5-pro", &RequestContext::test_default(),
+                "gemini-2.5-pro",
+                &RequestContext::test_default(),
             )
             .unwrap_err();
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
@@ -280,7 +287,9 @@ mod tests {
         let d = dialect();
         let events = d.parse_text("the whole printed answer\n").unwrap();
         assert_eq!(events.len(), 2);
-        assert!(matches!(&events[0], ChatEvent::Delta { text } if text == "the whole printed answer"));
+        assert!(
+            matches!(&events[0], ChatEvent::Delta { text } if text == "the whole printed answer")
+        );
         assert!(matches!(
             &events[1],
             ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn
@@ -293,7 +302,8 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("x").with_system("be precise"),
-                "gemini-2.5-pro", &RequestContext::test_default(),
+                "gemini-2.5-pro",
+                &RequestContext::test_default(),
             )
             .unwrap();
         assert!(inv.prompt.starts_with("[system]\nbe precise"));

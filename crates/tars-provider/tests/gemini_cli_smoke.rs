@@ -29,8 +29,7 @@ async fn gemini_cli_say_hi_against_real_binary() {
         .timeout(std::time::Duration::from_secs(120))
         .build();
 
-    let req = ChatRequest::user("Say exactly: hello from gemini. Nothing else.",
-    );
+    let req = ChatRequest::user("Say exactly: hello from gemini. Nothing else.");
 
     println!("\n── gemini_cli smoke: spawning real `gemini` ──");
     let mut stream = Arc::clone(&provider)

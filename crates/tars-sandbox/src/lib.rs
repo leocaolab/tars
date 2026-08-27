@@ -48,7 +48,11 @@ impl Default for SandboxPolicy {
     /// Unrestricted — preserves today's behaviour until a caller opts into a
     /// confining mode (backward-compatible with the old tars-tools stub).
     fn default() -> Self {
-        Self { mode: SandboxMode::DangerFullAccess, writable_roots: Vec::new(), network: true }
+        Self {
+            mode: SandboxMode::DangerFullAccess,
+            writable_roots: Vec::new(),
+            network: true,
+        }
     }
 }
 
@@ -85,7 +89,11 @@ impl SandboxPolicy {
 
     /// Read-only jail (reviewer): no writable roots.
     pub fn read_only(network: bool) -> Self {
-        Self { mode: SandboxMode::ReadOnly, writable_roots: Vec::new(), network }
+        Self {
+            mode: SandboxMode::ReadOnly,
+            writable_roots: Vec::new(),
+            network,
+        }
     }
 
     /// Wrap `(program, args)` per the mode, working dir `workdir`. Returns
@@ -110,8 +118,11 @@ impl SandboxPolicy {
         // REAL path (`/tmp`→`/private/tmp`); a symlinked root would match
         // nothing (silent over-deny).
         let work = canon(workdir)?;
-        let writable: Vec<PathBuf> =
-            self.writable_roots.iter().map(|p| canon(p)).collect::<Result<_, _>>()?;
+        let writable: Vec<PathBuf> = self
+            .writable_roots
+            .iter()
+            .map(|p| canon(p))
+            .collect::<Result<_, _>>()?;
 
         #[cfg(target_os = "macos")]
         {
@@ -122,7 +133,10 @@ impl SandboxPolicy {
         }
         #[cfg(target_os = "linux")]
         {
-            Ok(("bwrap".to_string(), bwrap_argv(program, args, &writable, &work, self.network)))
+            Ok((
+                "bwrap".to_string(),
+                bwrap_argv(program, args, &writable, &work, self.network),
+            ))
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
@@ -198,7 +212,10 @@ pub fn seatbelt_profile(writable: &[PathBuf], network: bool, workdir: &Path) -> 
     // Re-deny the repo's git dir (last match wins), even though it sits under a
     // writable worktree root. Deny both `.git` itself and its subtree.
     let git = workdir.join(".git");
-    p.push_str(&format!("(deny file-write* (subpath \"{}\"))\n", git.display()));
+    p.push_str(&format!(
+        "(deny file-write* (subpath \"{}\"))\n",
+        git.display()
+    ));
     p
 }
 
@@ -287,7 +304,11 @@ mod tests {
         // The delegate spawn appends /tmp + $TMPDIR + state dirs as roots; the
         // profile must re-allow each as a subpath.
         let prof = seatbelt_profile(
-            &[PathBuf::from("/wt"), PathBuf::from("/private/tmp"), PathBuf::from("/home/u/.codex")],
+            &[
+                PathBuf::from("/wt"),
+                PathBuf::from("/private/tmp"),
+                PathBuf::from("/home/u/.codex"),
+            ],
             true,
             Path::new("/wt"),
         );
@@ -305,7 +326,13 @@ mod tests {
 
     #[test]
     fn bwrap_ro_root_rw_workspace() {
-        let argv = bwrap_argv("c", &["-p".into()], &[PathBuf::from("/wt")], Path::new("/wt"), true);
+        let argv = bwrap_argv(
+            "c",
+            &["-p".into()],
+            &[PathBuf::from("/wt")],
+            Path::new("/wt"),
+            true,
+        );
         let j = argv.join(" ");
         assert!(j.contains("--ro-bind / /"));
         assert!(j.contains("--bind /wt /wt"));
@@ -322,8 +349,14 @@ mod tests {
         // /tmp exists on any Unix CI box; every returned root must be a real dir
         // (so `wrap`'s canonicalize can't fail on them).
         let roots = default_tmp_writable_roots();
-        assert!(roots.iter().all(|p| p.is_dir()), "all tmp roots must exist: {roots:?}");
-        assert!(roots.iter().any(|p| p == Path::new("/tmp")), "expected /tmp: {roots:?}");
+        assert!(
+            roots.iter().all(|p| p.is_dir()),
+            "all tmp roots must exist: {roots:?}"
+        );
+        assert!(
+            roots.iter().any(|p| p == Path::new("/tmp")),
+            "expected /tmp: {roots:?}"
+        );
     }
 
     #[test]

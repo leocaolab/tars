@@ -98,7 +98,10 @@ impl CliDialect for GeminiCliDialect {
             model,
             prompt,
             ctx.call_budget(self.timeout),
-            STRIPPED_ENV_KEYS_UPPER.iter().map(|s| s.to_string()).collect(),
+            STRIPPED_ENV_KEYS_UPPER
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             // When the OS jail is on, gemini's process is confined to the
             // request's worktree (previously gemini ignored cwd → unconfined).
             ctx.cwd.clone(),
@@ -230,7 +233,6 @@ fn extract_usage(payload: &Value, model: &str) -> Usage {
 mod tests {
     use super::*;
     use serde_json::json;
-    
 
     fn dialect() -> GeminiCliDialect {
         GeminiCliDialect::new("gemini".into(), Duration::from_secs(300))
@@ -242,7 +244,8 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("say hi"),
-                "gemini-2.5-flash", &RequestContext::test_default(),
+                "gemini-2.5-flash",
+                &RequestContext::test_default(),
             )
             .unwrap();
         let argv = d.argv(&inv);
@@ -262,7 +265,6 @@ mod tests {
         assert_eq!(d.output_mode(), OutputMode::JsonEvents);
     }
 
-    
     #[test]
     fn oversized_prompt_rejected_with_invalid_request() {
         let d = dialect();
@@ -270,7 +272,8 @@ mod tests {
         let err = d
             .invocation(
                 &ChatRequest::user(big),
-                "gemini-2.5-flash", &RequestContext::test_default(),
+                "gemini-2.5-flash",
+                &RequestContext::test_default(),
             )
             .unwrap_err();
         assert!(matches!(err, ProviderError::InvalidRequest(_)));
@@ -281,9 +284,9 @@ mod tests {
         let d = dialect();
         let inv = d
             .invocation(
-                &ChatRequest::user("x")
-                    .with_system("be precise"),
-                "gemini-2.5-flash", &RequestContext::test_default(),
+                &ChatRequest::user("x").with_system("be precise"),
+                "gemini-2.5-flash",
+                &RequestContext::test_default(),
             )
             .unwrap();
         assert!(inv.stripped_env.contains("GEMINI_API_KEY"));
@@ -324,7 +327,9 @@ mod tests {
     #[test]
     fn parse_line_missing_response_is_empty_delta() {
         let d = dialect();
-        let events = d.parse_line(&json!({"session_id": "x", "stats": {}})).unwrap();
+        let events = d
+            .parse_line(&json!({"session_id": "x", "stats": {}}))
+            .unwrap();
         assert!(matches!(&events[0], ChatEvent::Delta { text } if text.is_empty()));
     }
 

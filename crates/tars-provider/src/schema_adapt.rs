@@ -90,10 +90,12 @@ fn inline_refs(value: &mut Value) -> Result<(), SchemaAdaptError> {
     // The definitions bag is `$defs` (2020-12) or `definitions` (draft-07,
     // what the pinned schemars emits). Take ownership once at the root so
     // we can drop it after resolution.
-    let bag = ["$defs", "definitions"].into_iter().find_map(|k| match value.get(k) {
-        Some(Value::Object(m)) => Some((k, m.clone())),
-        _ => None,
-    });
+    let bag = ["$defs", "definitions"]
+        .into_iter()
+        .find_map(|k| match value.get(k) {
+            Some(Value::Object(m)) => Some((k, m.clone())),
+            _ => None,
+        });
     let (key, defs) = match bag {
         Some((k, m)) => (Some(k), m),
         // No bag: there is nothing to inline INTO. But a stray `$ref` could
@@ -532,10 +534,21 @@ mod tests {
         let out = adapt_schema(&raw, SchemaDialect::Gemini).unwrap();
         let item = &out["properties"]["items"]["items"];
         assert!(item.get("$ref").is_none(), "$ref resolved away: {item}");
-        assert_eq!(item["properties"]["verdict"]["type"], json!("string"), "verdict kept: {item}");
-        assert_eq!(item["properties"]["reply"]["type"], json!("string"), "reply kept: {item}");
+        assert_eq!(
+            item["properties"]["verdict"]["type"],
+            json!("string"),
+            "verdict kept: {item}"
+        );
+        assert_eq!(
+            item["properties"]["reply"]["type"],
+            json!("string"),
+            "reply kept: {item}"
+        );
         // The definitions bag is dropped after inlining.
-        assert!(out.get("definitions").is_none(), "definitions dropped: {out}");
+        assert!(
+            out.get("definitions").is_none(),
+            "definitions dropped: {out}"
+        );
         assert!(!out.to_string().contains("$ref"), "no $ref survives: {out}");
     }
 
@@ -552,8 +565,15 @@ mod tests {
         });
         let out = adapt_schema(&raw, SchemaDialect::Gemini).unwrap();
         let status = &out["properties"]["status"];
-        assert!(status.get("allOf").is_none(), "allOf flattened after inline: {status}");
-        assert_eq!(status["enum"], json!(["open", "closed"]), "enum hoisted: {status}");
+        assert!(
+            status.get("allOf").is_none(),
+            "allOf flattened after inline: {status}"
+        );
+        assert_eq!(
+            status["enum"],
+            json!(["open", "closed"]),
+            "enum hoisted: {status}"
+        );
     }
 
     /// A `$ref` naming no definition is an `Err` carrying the exact
@@ -581,7 +601,10 @@ mod tests {
     fn ref_without_defs_bag_errors() {
         let raw = json!({"$ref": "#/definitions/Nope"});
         let err = adapt_schema(&raw, SchemaDialect::Gemini).unwrap_err();
-        assert!(matches!(err, SchemaAdaptError::DanglingRef { .. }), "got {err:?}");
+        assert!(
+            matches!(err, SchemaAdaptError::DanglingRef { .. }),
+            "got {err:?}"
+        );
     }
 
     /// A recursive schema (`$ref` cycle) cannot be inlined — it is an
@@ -635,7 +658,11 @@ mod tests {
         });
         for d in [SchemaDialect::Passthrough, SchemaDialect::Vllm] {
             let out = adapt_schema(&raw, d).unwrap();
-            assert_eq!(out["properties"]["x"]["type"], json!("string"), "{d:?}: inlined");
+            assert_eq!(
+                out["properties"]["x"]["type"],
+                json!("string"),
+                "{d:?}: inlined"
+            );
             assert!(!out.to_string().contains("$ref"), "{d:?}: no $ref: {out}");
         }
     }

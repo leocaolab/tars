@@ -259,12 +259,20 @@ async fn score(
             "actual": actual_names,
             "expected": expected_names,
         });
-        writeln!(out, "{}", serde_json::to_string(&v).context("encode score json")?)
-            .context("stdout write")?;
+        writeln!(
+            out,
+            "{}",
+            serde_json::to_string(&v).context("encode score json")?
+        )
+        .context("stdout write")?;
     } else {
         writeln!(out, "trajectory {id}").context("stdout write")?;
-        writeln!(out, "  mode:      {} (threshold {threshold:.2})", mode.as_str())
-            .context("stdout write")?;
+        writeln!(
+            out,
+            "  mode:      {} (threshold {threshold:.2})",
+            mode.as_str()
+        )
+        .context("stdout write")?;
         writeln!(
             out,
             "  score:     {s:.3}  {}",
@@ -546,15 +554,26 @@ mod tests {
         // Two LLM calls → cross-call sequence [search, read_file, edit_file].
         let id = traj_with_steps(
             store.as_ref(),
-            &[&[("search", n.clone()), ("read_file", n.clone())], &[("edit_file", n.clone())]],
+            &[
+                &[("search", n.clone()), ("read_file", n.clone())],
+                &[("edit_file", n.clone())],
+            ],
         )
         .await;
 
         let expected = vec![ns("search"), ns("read_file"), ns("edit_file")];
         let mut out = Vec::new();
-        let passed = score(store.as_ref(), &id, &expected, MatchMode::Exact, 1.0, false, &mut out)
-            .await
-            .unwrap();
+        let passed = score(
+            store.as_ref(),
+            &id,
+            &expected,
+            MatchMode::Exact,
+            1.0,
+            false,
+            &mut out,
+        )
+        .await
+        .unwrap();
         assert!(passed);
         let rendered = String::from_utf8(out).unwrap();
         assert!(rendered.contains("PASS"), "{rendered}");
@@ -562,9 +581,17 @@ mod tests {
 
         // Wrong expected under exact → fail.
         let mut out2 = Vec::new();
-        let passed2 = score(store.as_ref(), &id, &[ns("search")], MatchMode::Exact, 1.0, false, &mut out2)
-            .await
-            .unwrap();
+        let passed2 = score(
+            store.as_ref(),
+            &id,
+            &[ns("search")],
+            MatchMode::Exact,
+            1.0,
+            false,
+            &mut out2,
+        )
+        .await
+        .unwrap();
         assert!(!passed2);
     }
 
@@ -574,7 +601,11 @@ mod tests {
         // them — right tool, wrong args must FAIL where exact passes.
         let dir = tempfile::tempdir().unwrap();
         let store = fixture(&dir).await;
-        let id = traj_with_steps(store.as_ref(), &[&[("search", serde_json::json!({"q": "ducks"}))]]).await;
+        let id = traj_with_steps(
+            store.as_ref(),
+            &[&[("search", serde_json::json!({"q": "ducks"}))]],
+        )
+        .await;
 
         let want_right = vec![ToolStep {
             name: "search".into(),

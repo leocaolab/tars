@@ -104,8 +104,8 @@ pub fn complete_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::{ChainOpts, LlmService};
+    use std::sync::Arc;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
     use tars_types::ProviderId;
 
@@ -119,7 +119,8 @@ mod tests {
     #[test]
     fn complete_sync_drains_stream_into_response() {
         let provider = MockProvider::new("p", CannedResponse::text("hello"));
-        let pipeline = LlmService::default_chain(provider, "p", ChainOpts::new(ProviderId::new("p")));
+        let pipeline =
+            LlmService::default_chain(provider, "p", ChainOpts::new(ProviderId::new("p")));
         let svc: LlmService = pipeline;
 
         let req = ChatRequest::user("ping");

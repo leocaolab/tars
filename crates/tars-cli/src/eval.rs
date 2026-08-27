@@ -103,17 +103,16 @@ fn list_dir(path: &Path) -> Result<fs::ReadDir> {
     fs::read_dir(path).with_context(|| format!("listing {}", path.display()))
 }
 
-use tars_pipeline::{
-    ChainOpts, JsonShapeValidator, LlmService, MaxLengthValidator, NotEmptyValidator,
-};
 use tars_eval::trajectory_match::{self, MatchMode, ToolStep};
 use tars_eval::{
     ArgEquivalenceJudge, CheckRunner, Invariant, ValidatorInvariant, args_match_judged,
     ensure_anti_incest,
 };
+use tars_pipeline::{
+    ChainOpts, JsonShapeValidator, LlmService, MaxLengthValidator, NotEmptyValidator,
+};
 use tars_types::{
-    ChatRequest, ChatResponse, ChatResponseBuilder, ProviderId, RequestContext,
-    Usage,
+    ChatRequest, ChatResponse, ChatResponseBuilder, ProviderId, RequestContext, Usage,
 };
 
 use crate::config_loader;
@@ -721,11 +720,23 @@ fn run_bless(args: EvalBlessArgs) -> Result<()> {
             let bless = tars_types::Bless::capture(&value, &selectors, None)
                 .with_context(|| format!("capturing bless for case {}", case.case_id))?;
             if args.accept {
-                bless.save(&bless_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-                println!("  {} … blessed ({} fields)", case.case_id, bless.asserts.len());
+                bless
+                    .save(&bless_path)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!(
+                    "  {} … blessed ({} fields)",
+                    case.case_id,
+                    bless.asserts.len()
+                );
             } else {
-                let pending = bless.save_pending(&bless_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-                println!("  {} … staged {} (review + --accept)", case.case_id, pending.display());
+                let pending = bless
+                    .save_pending(&bless_path)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                println!(
+                    "  {} … staged {} (review + --accept)",
+                    case.case_id,
+                    pending.display()
+                );
             }
         } else if bless_path.exists() {
             let bless = tars_types::Bless::load(&bless_path).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -740,12 +751,18 @@ fn run_bless(args: EvalBlessArgs) -> Result<()> {
                         case.case_id,
                         d.selector,
                         d.expected,
-                        d.actual.as_ref().map(|v| v.to_string()).unwrap_or_else(|| "<missing>".into()),
+                        d.actual
+                            .as_ref()
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "<missing>".into()),
                     );
                 }
             }
         } else {
-            println!("  {} … no bless (run with --select to create)", case.case_id);
+            println!(
+                "  {} … no bless (run with --select to create)",
+                case.case_id
+            );
         }
     }
 
@@ -759,7 +776,7 @@ fn run_bless(args: EvalBlessArgs) -> Result<()> {
 
 async fn run_judge(args: EvalJudgeArgs, config_path: Option<PathBuf>) -> Result<()> {
     use tars_eval::{JudgeItem, LlmJudge, ensure_anti_incest, run_judge_pass};
-    use tars_types::{ProviderId};
+    use tars_types::ProviderId;
 
     let manifest = load_manifest(&args.run)?;
 
@@ -936,7 +953,11 @@ fn compute_traj_diff(a: &EvalRunManifest, b: &EvalRunManifest, mode: MatchMode) 
     }
     let a_only = amap.keys().filter(|k| !bmap.contains_key(*k)).count() as u32;
     let b_only = bmap.keys().filter(|k| !amap.contains_key(*k)).count() as u32;
-    let mean_similarity = if paired == 0 { 1.0 } else { sum_sim / paired as f64 };
+    let mean_similarity = if paired == 0 {
+        1.0
+    } else {
+        sum_sim / paired as f64
+    };
 
     // McNemar on every trajectory-match check both runs share.
     let a_traj: BTreeSet<&str> = a
@@ -1151,9 +1172,18 @@ fn run_diff(args: EvalDiffArgs) -> Result<()> {
         );
         if !td.diverging_ids.is_empty() {
             const CAP: usize = 12;
-            let shown: Vec<&str> = td.diverging_ids.iter().take(CAP).map(String::as_str).collect();
+            let shown: Vec<&str> = td
+                .diverging_ids
+                .iter()
+                .take(CAP)
+                .map(String::as_str)
+                .collect();
             let more = td.diverging_ids.len().saturating_sub(CAP);
-            let suffix = if more > 0 { format!(", +{more} more") } else { String::new() };
+            let suffix = if more > 0 {
+                format!(", +{more} more")
+            } else {
+                String::new()
+            };
             println!("  diverging:      {}{}", shown.join(", "), suffix);
         }
         if td.mcnemar.is_empty() {
@@ -1339,7 +1369,9 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
         })?;
         // Anti-incest: the judge must not be the provider under test.
         ensure_anti_incest(jp, &[provider_id.as_str()]).map_err(|e| {
-            anyhow::anyhow!("{e}\nthe run uses provider `{provider_id}`; pick a different --judge-provider")
+            anyhow::anyhow!(
+                "{e}\nthe run uses provider `{provider_id}`; pick a different --judge-provider"
+            )
         })?;
         let jpid = ProviderId::new(jp);
         let jprov = registry
@@ -1350,7 +1382,11 @@ async fn run_eval(args: EvalRunArgs, config_path: Option<PathBuf>) -> Result<()>
             args.judge_model.clone().unwrap_or_default(),
             ChainOpts::new(jpid.clone()),
         );
-        let jid = format!("{}:{}", jp, args.judge_model.as_deref().unwrap_or("default"));
+        let jid = format!(
+            "{}:{}",
+            jp,
+            args.judge_model.as_deref().unwrap_or("default")
+        );
         Some(ArgEquivalenceJudge::new(jpipeline, jid))
     } else {
         if args.judge_provider.is_some() || args.judge_model.is_some() {
@@ -1549,8 +1585,12 @@ fn read_expected_tools(path: &Path) -> Result<Option<Vec<ToolStep>>> {
         return Ok(None);
     }
     let raw = read_text(path)?;
-    let entries: Vec<ExpectedToolEntry> = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {} (expect a JSON array of tool names or {{name,args}})", path.display()))?;
+    let entries: Vec<ExpectedToolEntry> = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "parsing {} (expect a JSON array of tool names or {{name,args}})",
+            path.display()
+        )
+    })?;
     let steps = entries
         .into_iter()
         .map(|e| match e {
@@ -1611,7 +1651,6 @@ async fn run_completion_case(
     (response, tool_steps, error)
 }
 
-
 #[allow(clippy::too_many_arguments)] // each arg is a distinct per-case input; a
 // struct would just move the same fields elsewhere without clarifying anything.
 async fn run_one_case(
@@ -1643,33 +1682,33 @@ async fn run_one_case(
 
     // Run checks only on successful cases — an errored call has no real
     // output to check.
-    let mut case_checks: Vec<CaseCheckResult> = if status == EvalCaseStatus::Ok && !checks.is_empty()
-    {
-        checks
-            .run(&req_for_checks, &response)
-            .into_iter()
-            .map(|(name, r)| {
-                if r.passed {
-                    CaseCheckResult::Passed {
-                        name,
-                        note: r.detail,
+    let mut case_checks: Vec<CaseCheckResult> =
+        if status == EvalCaseStatus::Ok && !checks.is_empty() {
+            checks
+                .run(&req_for_checks, &response)
+                .into_iter()
+                .map(|(name, r)| {
+                    if r.passed {
+                        CaseCheckResult::Passed {
+                            name,
+                            note: r.detail,
+                        }
+                    } else {
+                        // CheckResult::fail always populates detail; if it
+                        // somehow didn't, surface that as the failure
+                        // reason rather than swallow it.
+                        CaseCheckResult::Failed {
+                            name,
+                            reason: r
+                                .detail
+                                .unwrap_or_else(|| "(check failed without a reason)".into()),
+                        }
                     }
-                } else {
-                    // CheckResult::fail always populates detail; if it
-                    // somehow didn't, surface that as the failure
-                    // reason rather than swallow it.
-                    CaseCheckResult::Failed {
-                        name,
-                        reason: r
-                            .detail
-                            .unwrap_or_else(|| "(check failed without a reason)".into()),
-                    }
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
     // Case-parameterized trajectory-match checks (Doc 26): each scores the
     // selected tools against this case's expected_tools. A case with no
@@ -1860,10 +1899,14 @@ mod tests {
         assert_eq!(bare.threshold, 1.0);
         assert_eq!(bare.name(), "trajectory-match");
 
-        let exact = TrajectorySpec::parse("trajectory-match:exact").unwrap().unwrap();
+        let exact = TrajectorySpec::parse("trajectory-match:exact")
+            .unwrap()
+            .unwrap();
         assert_eq!(exact.mode, MatchMode::Exact);
 
-        let thr = TrajectorySpec::parse("trajectory-match:ordered:0.8").unwrap().unwrap();
+        let thr = TrajectorySpec::parse("trajectory-match:ordered:0.8")
+            .unwrap()
+            .unwrap();
         assert_eq!(thr.mode, MatchMode::Ordered);
         assert!((thr.threshold - 0.8).abs() < 1e-9);
     }
@@ -1876,12 +1919,16 @@ mod tests {
 
     #[test]
     fn trajectory_spec_args_judge_sets_judge_flag() {
-        let s = TrajectorySpec::parse("trajectory-match:args-judge").unwrap().unwrap();
+        let s = TrajectorySpec::parse("trajectory-match:args-judge")
+            .unwrap()
+            .unwrap();
         assert_eq!(s.mode, MatchMode::Args);
         assert!(s.judge, "args-judge must set the judge flag");
         assert_eq!(s.name(), "trajectory-match:args-judge");
         // plain args mode does NOT enable the judge
-        let plain = TrajectorySpec::parse("trajectory-match:args").unwrap().unwrap();
+        let plain = TrajectorySpec::parse("trajectory-match:args")
+            .unwrap()
+            .unwrap();
         assert!(!plain.judge);
     }
 
@@ -1889,39 +1936,61 @@ mod tests {
 
     #[test]
     fn trajectory_eval_case_passes_on_match() {
-        let spec = TrajectorySpec::parse("trajectory-match:exact").unwrap().unwrap();
+        let spec = TrajectorySpec::parse("trajectory-match:exact")
+            .unwrap()
+            .unwrap();
         let expected = tsteps(&["search"]);
-        let r = spec.eval_case(&tsteps(&["search"]), Some(&expected)).unwrap();
+        let r = spec
+            .eval_case(&tsteps(&["search"]), Some(&expected))
+            .unwrap();
         assert!(r.passed());
         assert_eq!(r.name(), "trajectory-match:exact");
     }
 
     #[test]
     fn trajectory_eval_case_fails_on_mismatch_with_reason() {
-        let spec = TrajectorySpec::parse("trajectory-match:exact").unwrap().unwrap();
+        let spec = TrajectorySpec::parse("trajectory-match:exact")
+            .unwrap()
+            .unwrap();
         let expected = tsteps(&["search"]);
-        let r = spec.eval_case(&tsteps(&["fetch"]), Some(&expected)).unwrap();
+        let r = spec
+            .eval_case(&tsteps(&["fetch"]), Some(&expected))
+            .unwrap();
         assert!(!r.passed());
         // reason names both want and got — not a bare failure
         let detail = r.detail().unwrap();
-        assert!(detail.contains("search") && detail.contains("fetch"), "detail={detail}");
+        assert!(
+            detail.contains("search") && detail.contains("fetch"),
+            "detail={detail}"
+        );
     }
 
     #[test]
     fn trajectory_eval_case_args_mode_checks_arguments() {
-        let spec = TrajectorySpec::parse("trajectory-match:args").unwrap().unwrap();
-        let s = |n: &str, a: serde_json::Value| ToolStep { name: n.into(), args: a };
+        let spec = TrajectorySpec::parse("trajectory-match:args")
+            .unwrap()
+            .unwrap();
+        let s = |n: &str, a: serde_json::Value| ToolStep {
+            name: n.into(),
+            args: a,
+        };
         let expected = vec![s("search", serde_json::json!({"q": "x"}))];
         // same name + same args → pass
         assert!(
-            spec.eval_case(&[s("search", serde_json::json!({"q": "x"}))], Some(&expected))
-                .unwrap()
-                .passed()
+            spec.eval_case(
+                &[s("search", serde_json::json!({"q": "x"}))],
+                Some(&expected)
+            )
+            .unwrap()
+            .passed()
         );
         // same name, WRONG args → fail (what args mode adds over exact)
         assert!(
             !spec
-                .eval_case(&[s("search", serde_json::json!({"q": "y"}))], Some(&expected))
+                .eval_case(
+                    &[s("search", serde_json::json!({"q": "y"}))],
+                    Some(&expected)
+                )
                 .unwrap()
                 .passed()
         );
@@ -1929,7 +1998,9 @@ mod tests {
 
     #[test]
     fn trajectory_eval_case_skips_when_no_expected_tools() {
-        let spec = TrajectorySpec::parse("trajectory-match:ordered").unwrap().unwrap();
+        let spec = TrajectorySpec::parse("trajectory-match:ordered")
+            .unwrap()
+            .unwrap();
         // None expected → skipped (not a silent pass)
         assert!(spec.eval_case(&tsteps(&["search"]), None).is_none());
     }
@@ -1937,11 +2008,24 @@ mod tests {
     #[test]
     fn trajectory_ordered_threshold_allows_partial_credit() {
         // ordered score for [a,x] vs [a,y] is 0.5; threshold 0.5 passes, 0.6 fails
-        let pass = TrajectorySpec::parse("trajectory-match:ordered:0.5").unwrap().unwrap();
-        let fail = TrajectorySpec::parse("trajectory-match:ordered:0.6").unwrap().unwrap();
+        let pass = TrajectorySpec::parse("trajectory-match:ordered:0.5")
+            .unwrap()
+            .unwrap();
+        let fail = TrajectorySpec::parse("trajectory-match:ordered:0.6")
+            .unwrap()
+            .unwrap();
         let expected = tsteps(&["a", "y"]);
-        assert!(pass.eval_case(&tsteps(&["a", "x"]), Some(&expected)).unwrap().passed());
-        assert!(!fail.eval_case(&tsteps(&["a", "x"]), Some(&expected)).unwrap().passed());
+        assert!(
+            pass.eval_case(&tsteps(&["a", "x"]), Some(&expected))
+                .unwrap()
+                .passed()
+        );
+        assert!(
+            !fail
+                .eval_case(&tsteps(&["a", "x"]), Some(&expected))
+                .unwrap()
+                .passed()
+        );
     }
 
     // ── corpus expected_tools.json (Doc 26 FR-5) ──────────────────────
@@ -1950,13 +2034,20 @@ mod tests {
     fn read_expected_tools_accepts_names_and_objects_and_missing() {
         let dir = TempDir::new().unwrap();
         // missing file → None
-        assert!(read_expected_tools(&dir.path().join("nope.json")).unwrap().is_none());
+        assert!(
+            read_expected_tools(&dir.path().join("nope.json"))
+                .unwrap()
+                .is_none()
+        );
 
         // bare names
         let names = dir.path().join("names.json");
         write(&names, r#"["search","fetch"]"#);
         let got = read_expected_tools(&names).unwrap().unwrap();
-        assert_eq!(got.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["search", "fetch"]);
+        assert_eq!(
+            got.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["search", "fetch"]
+        );
 
         // {name,args} objects
         let objs = dir.path().join("objs.json");
@@ -1978,9 +2069,15 @@ mod tests {
 
     fn ecase(id: &str, traj: &[&str], check: Option<(&str, bool)>) -> EvalCaseReport {
         let checks = match check {
-            Some((name, true)) => vec![CaseCheckResult::Passed { name: name.into(), note: None }],
+            Some((name, true)) => vec![CaseCheckResult::Passed {
+                name: name.into(),
+                note: None,
+            }],
             Some((name, false)) => {
-                vec![CaseCheckResult::Failed { name: name.into(), reason: "x".into() }]
+                vec![CaseCheckResult::Failed {
+                    name: name.into(),
+                    reason: "x".into(),
+                }]
             }
             None => vec![],
         };
@@ -2058,8 +2155,14 @@ mod tests {
     fn compute_traj_diff_reports_unpaired_cases_and_no_shared_check() {
         // a has c1,c2; b has c2,c3 → 1 paired, 1 a-only, 1 b-only.
         // No trajectory-match check anywhere → empty mcnemar (graceful).
-        let a = emanifest(vec![ecase("c1", &["s"], None), ecase("c2", &["s"], None)], &[]);
-        let b = emanifest(vec![ecase("c2", &["s"], None), ecase("c3", &["s"], None)], &[]);
+        let a = emanifest(
+            vec![ecase("c1", &["s"], None), ecase("c2", &["s"], None)],
+            &[],
+        );
+        let b = emanifest(
+            vec![ecase("c2", &["s"], None), ecase("c3", &["s"], None)],
+            &[],
+        );
         let td = compute_traj_diff(&a, &b, MatchMode::Ordered);
         assert_eq!(td.paired, 1);
         assert_eq!(td.a_only, 1);
@@ -2072,7 +2175,10 @@ mod tests {
     fn load_corpus_reads_expected_tools_into_case() {
         let dir = TempDir::new().unwrap();
         write(&dir.path().join("c1").join("input.txt"), "hi");
-        write(&dir.path().join("c1").join("expected_tools.json"), r#"["search"]"#);
+        write(
+            &dir.path().join("c1").join("expected_tools.json"),
+            r#"["search"]"#,
+        );
         let cases = load_corpus(dir.path()).unwrap();
         let et = cases[0].expected_tools.as_ref().unwrap();
         assert_eq!(et[0].name, "search");

@@ -51,15 +51,12 @@ pub(super) fn openai_auth_only_headers(auth: &ResolvedAuth) -> Result<HeaderMap,
 ///   cancelling → InProgress
 ///   cancelled → Cancelled
 pub(super) fn translate_openai_batch_status(v: &Value) -> Result<BatchStatus, ProviderError> {
-    let status = v
-        .get("status")
-        .and_then(|s| s.as_str())
-        .ok_or_else(|| {
-            ProviderError::Parse(format!(
-                "batch status: missing `status`; raw: {}",
-                crate::http_base::truncate(&v.to_string(), RAW_ERR_CAP)
-            ))
-        })?;
+    let status = v.get("status").and_then(|s| s.as_str()).ok_or_else(|| {
+        ProviderError::Parse(format!(
+            "batch status: missing `status`; raw: {}",
+            crate::http_base::truncate(&v.to_string(), RAW_ERR_CAP)
+        ))
+    })?;
 
     let counts = v
         .get("request_counts")
@@ -347,8 +344,14 @@ mod usage_tests {
             "prompt_tokens_details": { "cached_tokens": 0 }
         });
         let usage = parse_openai_usage(u.as_object().unwrap());
-        assert_eq!(usage.output_tokens, 224, "output stays the full completion (billed)");
-        assert_eq!(usage.thinking_tokens, 130, "reasoning surfaced, not hardcoded 0");
+        assert_eq!(
+            usage.output_tokens, 224,
+            "output stays the full completion (billed)"
+        );
+        assert_eq!(
+            usage.thinking_tokens, 130,
+            "reasoning surfaced, not hardcoded 0"
+        );
     }
 
     #[test]
@@ -365,8 +368,8 @@ mod raw_carry_tests {
     //! that came back — not a bare "not JSON"/sentinel that drops the
     //! truth. These lock in that the raw response substring survives
     //! into the error string (truncated, never a naked token).
-    use super::*;
     use super::super::dialect::StandardDialect;
+    use super::*;
 
     #[test]
     fn malformed_batch_line_error_carries_raw() {
@@ -423,6 +426,9 @@ mod raw_carry_tests {
             msg.len(),
             huge.len()
         );
-        assert!(msg.contains('…'), "truncation ellipsis expected, got: {msg}");
+        assert!(
+            msg.contains('…'),
+            "truncation ellipsis expected, got: {msg}"
+        );
     }
 }

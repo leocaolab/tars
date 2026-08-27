@@ -597,13 +597,21 @@ impl ProviderConfig {
     /// until its interface is declared (contrast arc's deleted
     /// `ProviderType::from_wire` `_ => Other`).
     pub fn interface(&self) -> tars_types::InterfaceKind {
-        use tars_types::InterfaceKind as Ik;
         use ProviderConfig::*;
+        use tars_types::InterfaceKind as Ik;
         match self {
-            ClaudeCli { .. } | GeminiCli { .. } | CodexCli { .. } | Opencode { .. }
+            ClaudeCli { .. }
+            | GeminiCli { .. }
+            | CodexCli { .. }
+            | Opencode { .. }
             | Antigravity { .. } => Ik::Cli,
-            Openai { .. } | OpenaiCompat { .. } | Anthropic { .. } | Gemini { .. }
-            | Vllm { .. } | Mlx { .. } | Llamacpp { .. } => Ik::Http,
+            Openai { .. }
+            | OpenaiCompat { .. }
+            | Anthropic { .. }
+            | Gemini { .. }
+            | Vllm { .. }
+            | Mlx { .. }
+            | Llamacpp { .. } => Ik::Http,
             ClaudeSdk { .. } | Bedrock { .. } => Ik::Api,
             Mock { .. } | Cassette { .. } => Ik::Mock,
         }
@@ -1317,7 +1325,10 @@ mod tests {
         let id = ProviderId::new("claude_bedrock");
         let mut errs = Vec::new();
         cfg.validate_self(&id, &mut errs);
-        assert!(errs.is_empty(), "keyless bedrock must validate clean: {errs:?}");
+        assert!(
+            errs.is_empty(),
+            "keyless bedrock must validate clean: {errs:?}"
+        );
     }
 
     #[test]

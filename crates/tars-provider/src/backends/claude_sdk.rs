@@ -51,8 +51,8 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
 
 use tars_types::{
-    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message,
-    ProviderError, ProviderId, RequestContext, StopReason, Usage,
+    Capabilities, ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, ProviderId,
+    RequestContext, StopReason, Usage,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
@@ -190,7 +190,9 @@ impl LlmProvider for ClaudeSdkProvider {
         let mut events: Vec<Result<ChatEvent, ProviderError>> =
             vec![Ok(ChatEvent::started(actual_model))];
         if !resp.thinking.is_empty() {
-            events.push(Ok(ChatEvent::ThinkingDelta { text: resp.thinking }));
+            events.push(Ok(ChatEvent::ThinkingDelta {
+                text: resp.thinking,
+            }));
         }
         events.push(Ok(ChatEvent::Delta { text: resp.text }));
         events.push(Ok(ChatEvent::Finished { stop_reason, usage }));
@@ -272,14 +274,10 @@ impl ClaudeSdkProvider {
             {
                 let mut stdin = session.stdin.lock().await;
                 stdin.write_all(line.as_bytes()).await.map_err(|e| {
-                    ProviderError::Internal(format!(
-                        "claude_sdk: write to child stdin failed: {e}"
-                    ))
+                    ProviderError::Internal(format!("claude_sdk: write to child stdin failed: {e}"))
                 })?;
                 stdin.flush().await.map_err(|e| {
-                    ProviderError::Internal(format!(
-                        "claude_sdk: flush child stdin failed: {e}"
-                    ))
+                    ProviderError::Internal(format!("claude_sdk: flush child stdin failed: {e}"))
                 })?;
             }
             // `rx` resolves to the daemon's `Result<reply, ProviderError>`;
@@ -678,7 +676,6 @@ struct RawUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn serialize_single_user_message() {
@@ -760,11 +757,14 @@ mod tests {
         let p = ClaudeSdkProviderBuilder::new("claude_sdk_smoke")
             .default_model("claude-sonnet-4-5")
             .build();
-        let req = ChatRequest::user("Reply with only the literal word: pong",
-        );
+        let req = ChatRequest::user("Reply with only the literal word: pong");
         let resp = p
             .clone()
-            .complete(req, "test-model", tars_types::RequestContext::test_default())
+            .complete(
+                req,
+                "test-model",
+                tars_types::RequestContext::test_default(),
+            )
             .await
             .expect("daemon round-trip");
         let text = resp.text.to_lowercase();
@@ -786,15 +786,21 @@ mod tests {
         let p = ClaudeSdkProviderBuilder::new("claude_sdk_smoke_concurrent")
             .default_model("claude-sonnet-4-5")
             .build();
-        let req_a = ChatRequest::user("Reply with only: alpha",
-        );
-        let req_b = ChatRequest::user("Reply with only: beta",
-        );
+        let req_a = ChatRequest::user("Reply with only: alpha");
+        let req_b = ChatRequest::user("Reply with only: beta");
         let p2 = p.clone();
         let p3 = p.clone();
         let (a, b) = tokio::join!(
-            p2.complete(req_a, "test-model", tars_types::RequestContext::test_default()),
-            p3.complete(req_b, "test-model", tars_types::RequestContext::test_default()),
+            p2.complete(
+                req_a,
+                "test-model",
+                tars_types::RequestContext::test_default()
+            ),
+            p3.complete(
+                req_b,
+                "test-model",
+                tars_types::RequestContext::test_default()
+            ),
         );
         let a = a.expect("alpha");
         let b = b.expect("beta");
@@ -840,7 +846,11 @@ mod tests {
         let req = ChatRequest::user(big_prompt);
         let t0 = std::time::Instant::now();
         let r = p
-            .complete(req, "test-model", tars_types::RequestContext::test_default())
+            .complete(
+                req,
+                "test-model",
+                tars_types::RequestContext::test_default(),
+            )
             .await;
         let elapsed = t0.elapsed();
         let _ = std::fs::remove_file(&script);

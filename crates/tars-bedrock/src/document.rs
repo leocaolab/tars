@@ -73,9 +73,11 @@ pub fn document_to_value(d: &Document) -> Value {
         },
         Document::String(s) => Value::String(s.clone()),
         Document::Array(arr) => Value::Array(arr.iter().map(document_to_value).collect()),
-        Document::Object(map) => {
-            Value::Object(map.iter().map(|(k, v)| (k.clone(), document_to_value(v))).collect())
-        }
+        Document::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), document_to_value(v)))
+                .collect(),
+        ),
     }
 }
 

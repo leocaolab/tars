@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 
 use tars_types::{ChatRequest, ProviderError, ThinkingMode};
 
-use super::OpenAiDialect;
 use super::super::adapter::OpenAiAdapter;
+use super::OpenAiDialect;
 
 /// DeepSeek (`api.deepseek.com` and openai_compat gateways fronting it).
 ///
@@ -92,7 +92,11 @@ mod tests {
         assert_eq!(enabled["thinking"]["type"], "enabled");
 
         let budget = DeepSeekDialect
-            .build_request(&adapter, &req(ThinkingMode::Budget(1024)), "deepseek-v4-flash")
+            .build_request(
+                &adapter,
+                &req(ThinkingMode::Budget(1024)),
+                "deepseek-v4-flash",
+            )
             .unwrap();
         assert_eq!(budget["thinking"]["type"], "enabled");
 

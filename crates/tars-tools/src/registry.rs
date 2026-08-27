@@ -330,13 +330,22 @@ mod tests {
         // fingerprint/cache derived from it — is stable run to run. Register in
         // a deliberately non-sorted order and across two independent registries
         // to defeat any incidental ordering.
-        let names_in = ["fs.read_file", "bash.run", "ast.find", "fs.glob", "cargo.dep_source"];
+        let names_in = [
+            "fs.read_file",
+            "bash.run",
+            "ast.find",
+            "fs.glob",
+            "cargo.dep_source",
+        ];
         let build = || {
             let mut reg = ToolRegistry::new();
             for n in names_in {
                 reg.register_owned(EchoTool::ok(n, "x")).unwrap();
             }
-            reg.to_tool_specs().into_iter().map(|s| s.name).collect::<Vec<_>>()
+            reg.to_tool_specs()
+                .into_iter()
+                .map(|s| s.name)
+                .collect::<Vec<_>>()
         };
         let a = build();
         let b = build();
@@ -369,9 +378,9 @@ mod tests {
 
     // ── Doc 23 permission/approval gate (M0/M1) ──────────────────────
 
+    use crate::SandboxPolicy;
     use crate::approval::{ApprovalDecision, ApprovalRequest, ApprovalSink};
     use crate::permission::{PermissionView, ToolDecision};
-    use crate::SandboxPolicy;
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};

@@ -30,7 +30,9 @@ use tars_config::{Config, resolve_home};
 use tars_provider::{LlmProvider, ProviderRegistry};
 
 use crate::context::ContextGuard;
-use crate::errors::{config_to_py, provider_not_registered_to_py, runtime_to_py, unknown_role_to_py};
+use crate::errors::{
+    config_to_py, provider_not_registered_to_py, runtime_to_py, unknown_role_to_py,
+};
 use crate::{Pipeline, Provider};
 
 // ── Global init ───────────────────────────────────────────────────────
@@ -94,7 +96,10 @@ pub(crate) fn role_provider(role: String) -> PyResult<String> {
 #[pyfunction]
 pub(crate) fn role_model(role: String) -> PyResult<String> {
     let cfg = Config::get();
-    let entry = cfg.roles.get(&role).ok_or_else(|| unknown_role_to_py(&role))?;
+    let entry = cfg
+        .roles
+        .get(&role)
+        .ok_or_else(|| unknown_role_to_py(&role))?;
     Ok(entry.model.clone())
 }
 
@@ -102,10 +107,12 @@ pub(crate) fn role_model(role: String) -> PyResult<String> {
 /// went wrong: the role isn't configured, or it names a provider the registry
 /// doesn't hold.
 fn resolve_global_role(role: &str) -> PyResult<(String, Arc<dyn LlmProvider>)> {
-    let registry =
-        ProviderRegistry::global().map_err(|e| runtime_to_py("provider registry", e))?;
+    let registry = ProviderRegistry::global().map_err(|e| runtime_to_py("provider registry", e))?;
     let cfg = Config::get();
-    let entry = cfg.roles.get(role).ok_or_else(|| unknown_role_to_py(role))?;
+    let entry = cfg
+        .roles
+        .get(role)
+        .ok_or_else(|| unknown_role_to_py(role))?;
     let prov = registry
         .get(&entry.provider)
         .ok_or_else(|| provider_not_registered_to_py(role, &entry.provider))?;

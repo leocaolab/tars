@@ -37,8 +37,8 @@ use serde_json::json;
 
 use tars_types::JsonSchema;
 
-use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 use crate::SandboxMode;
+use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
 
 /// Default max bytes read by `fs.read_file`. ~256 KiB.
 pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024;
@@ -116,11 +116,7 @@ impl ReadFileTool {
     ///   (the default) adds nothing, so default behaviour is unchanged.
     ///
     /// Returns the canonicalized path to actually open.
-    fn resolve(
-        &self,
-        input: &str,
-        ctx: &ToolContext,
-    ) -> Result<PathBuf, ToolResult> {
+    fn resolve(&self, input: &str, ctx: &ToolContext) -> Result<PathBuf, ToolResult> {
         let cwd = ctx.cwd.as_deref();
         let raw = Path::new(input);
         let combined = if raw.is_absolute() {
@@ -516,7 +512,11 @@ mod tests {
             .execute(json!({"path": inside.to_str().unwrap()}), ctx.clone())
             .await
             .unwrap();
-        assert!(!r.is_error, "read inside readable_root must succeed: {}", r.content);
+        assert!(
+            !r.is_error,
+            "read inside readable_root must succeed: {}",
+            r.content
+        );
         assert_eq!(r.content, "inside");
 
         // Outside every read root: rejected.
@@ -551,7 +551,11 @@ mod tests {
             .execute(json!({"path": path.to_str().unwrap()}), ctx)
             .await
             .unwrap();
-        assert!(!r.is_error, "default policy must not restrict reads: {}", r.content);
+        assert!(
+            !r.is_error,
+            "default policy must not restrict reads: {}",
+            r.content
+        );
         assert_eq!(r.content, "free");
     }
 

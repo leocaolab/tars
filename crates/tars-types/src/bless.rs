@@ -169,7 +169,11 @@ impl Bless {
                 }
             }
         }
-        Ok(Self { codec: Codec::Json, source_fingerprint, asserts })
+        Ok(Self {
+            codec: Codec::Json,
+            source_fingerprint,
+            asserts,
+        })
     }
 
     /// Check `value` against every assertion — exact/normalized only; a
@@ -346,7 +350,9 @@ fn parse_segments(selector: &str) -> Result<Vec<Seg>, BlessError> {
         reason: reason.to_string(),
     };
     let s = selector.trim();
-    let mut rest = s.strip_prefix('$').ok_or_else(|| bad("must start with '$'"))?;
+    let mut rest = s
+        .strip_prefix('$')
+        .ok_or_else(|| bad("must start with '$'"))?;
     let mut segs = Vec::new();
     while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix('.') {
@@ -417,14 +423,22 @@ mod tests {
     #[test]
     fn bad_selector_is_loud() {
         let v = json!({"a": 1});
-        assert!(matches!(resolve(&v, "a").unwrap_err(), BlessError::BadSelector { .. }));
-        assert!(matches!(resolve(&v, "$.a[bad]").unwrap_err(), BlessError::BadSelector { .. }));
+        assert!(matches!(
+            resolve(&v, "a").unwrap_err(),
+            BlessError::BadSelector { .. }
+        ));
+        assert!(matches!(
+            resolve(&v, "$.a[bad]").unwrap_err(),
+            BlessError::BadSelector { .. }
+        ));
     }
 
     // ── check: exact (CUJ-2/3) ──────────────────────────────────────
     #[test]
     fn exact_match_passes() {
-        let out = bless_json(8).check(&json!({"severity": 8, "summary": "x"})).unwrap();
+        let out = bless_json(8)
+            .check(&json!({"severity": 8, "summary": "x"}))
+            .unwrap();
         assert!(out.is_pass(), "{:?}", out.drifts);
     }
 
@@ -441,7 +455,9 @@ mod tests {
     #[test]
     fn missing_field_is_a_drift_not_a_pass() {
         // Fail-closed (FR-3).
-        let out = bless_json(8).check(&json!({"summary": "no severity here"})).unwrap();
+        let out = bless_json(8)
+            .check(&json!({"summary": "no severity here"}))
+            .unwrap();
         assert_eq!(out.drifts.len(), 1);
         assert_eq!(out.drifts[0].actual, None);
         assert_eq!(out.drifts[0].reason, "missing");
@@ -454,7 +470,11 @@ mod tests {
             codec: Codec::Json,
             source_fingerprint: None,
             asserts: vec![
-                Assert { selector: "$.n".into(), expected: json!(8), tier: MatchTier::Normalized },
+                Assert {
+                    selector: "$.n".into(),
+                    expected: json!(8),
+                    tier: MatchTier::Normalized,
+                },
                 Assert {
                     selector: "$.s".into(),
                     expected: json!("a b"),
@@ -526,7 +546,10 @@ mod tests {
         let out = Bless::check_or_bless(&path, &v8, &["$.severity"], None, true).unwrap();
         assert!(out.is_pass());
         assert!(path.exists(), "bless file created");
-        assert!(!pending_path(&path).exists(), "pending promoted, not left behind");
+        assert!(
+            !pending_path(&path).exists(),
+            "pending promoted, not left behind"
+        );
 
         // do_bless=false + file exists → loads + checks; same value passes
         let out = Bless::check_or_bless(&path, &v8, &["$.severity"], None, false).unwrap();
@@ -551,8 +574,9 @@ mod tests {
     fn check_without_bless_and_no_file_is_an_error() {
         let path = tmp("missing");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap(); // ensure absent
-        let err = Bless::check_or_bless(&path, &json!({"severity": 8}), &["$.severity"], None, false)
-            .unwrap_err();
+        let err =
+            Bless::check_or_bless(&path, &json!({"severity": 8}), &["$.severity"], None, false)
+                .unwrap_err();
         assert!(matches!(err, BlessError::Io { .. }));
     }
 
@@ -565,9 +589,17 @@ mod tests {
         // stage a different capture; committed file must be untouched until accept
         let staged = Bless::capture(&json!({"severity": 9}), &["$.severity"], None).unwrap();
         let pending = staged.save_pending(&path).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), committed, "committed untouched");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            committed,
+            "committed untouched"
+        );
         accept_pending(&pending, &path).unwrap();
-        assert!(std::fs::read_to_string(&path).unwrap().contains("\"expected\": 9"));
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"expected\": 9")
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -575,7 +607,10 @@ mod tests {
     fn file_format_round_trips_with_match_rename() {
         let b = bless_json(8);
         let s = b.to_json().unwrap();
-        assert!(s.contains("\"match\": \"exact\""), "match field renamed: {s}");
+        assert!(
+            s.contains("\"match\": \"exact\""),
+            "match field renamed: {s}"
+        );
         let back: Bless = serde_json::from_str(&s).unwrap();
         assert_eq!(back.asserts[0].selector, "$.severity");
     }

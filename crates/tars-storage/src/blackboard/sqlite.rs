@@ -33,7 +33,11 @@ impl<S: BlackboardStore> SqliteBlackboard<S> {
             let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
             S::init(&guard)?;
         }
-        Ok(Self { conn, run_id: run_id.into(), _store: PhantomData })
+        Ok(Self {
+            conn,
+            run_id: run_id.into(),
+            _store: PhantomData,
+        })
     }
 
     /// Convenience: a private in-process SQLite db (tests / ephemeral runs).

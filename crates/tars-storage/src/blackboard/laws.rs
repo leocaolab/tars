@@ -9,7 +9,7 @@
 //! [`InMemoryBlackboard<ToyStore>`] (framework storage + the same domain). Same
 //! assertions, two backings: that is the proof.
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use super::{
     BbError, Blackboard, BlackboardDomain, BlackboardStore, InMemoryBlackboard, Scope,
@@ -132,20 +132,29 @@ impl BlackboardStore for ToyStore {
     fn sync_status(conn: &Connection, key: &str) -> Result<(), BbError> {
         let timeline = Self::read_timeline(conn, key)?;
         if let Some(status) = Self::project_status(&timeline) {
-            conn.execute("UPDATE toy_entities SET status = ?2 WHERE id = ?1", params![key, status])?;
+            conn.execute(
+                "UPDATE toy_entities SET status = ?2 WHERE id = ?1",
+                params![key, status],
+            )?;
         }
         Ok(())
     }
 
     fn view(conn: &Connection, scope: &Scope) -> Result<Vec<Item>, BbError> {
         let mut items = Vec::new();
-        let mut push = |stmt: &mut rusqlite::Statement, p: &[&dyn rusqlite::ToSql]| -> Result<(), BbError> {
-            let rows = stmt.query_map(p, |r| Ok(Item { id: r.get(0)?, label: r.get(1)? }))?;
-            for r in rows {
-                items.push(r?);
-            }
-            Ok(())
-        };
+        let mut push =
+            |stmt: &mut rusqlite::Statement, p: &[&dyn rusqlite::ToSql]| -> Result<(), BbError> {
+                let rows = stmt.query_map(p, |r| {
+                    Ok(Item {
+                        id: r.get(0)?,
+                        label: r.get(1)?,
+                    })
+                })?;
+                for r in rows {
+                    items.push(r?);
+                }
+                Ok(())
+            };
         match scope {
             Scope::All => {
                 let mut stmt = conn.prepare("SELECT id, label FROM toy_entities ORDER BY id")?;
@@ -153,8 +162,9 @@ impl BlackboardStore for ToyStore {
             }
             Scope::WithStatus(statuses) => {
                 for st in statuses {
-                    let mut stmt = conn
-                        .prepare("SELECT id, label FROM toy_entities WHERE status = ?1 ORDER BY id")?;
+                    let mut stmt = conn.prepare(
+                        "SELECT id, label FROM toy_entities WHERE status = ?1 ORDER BY id",
+                    )?;
                     push(&mut stmt, &[st])?;
                 }
             }
@@ -172,7 +182,10 @@ impl BlackboardStore for ToyStore {
 type ToyBoard = dyn Blackboard<Entity = Item, Event = Ev>;
 
 fn item(id: &str) -> Item {
-    Item { id: id.into(), label: format!("label-{id}") }
+    Item {
+        id: id.into(),
+        label: format!("label-{id}"),
+    }
 }
 fn tr(kind: Ev) -> Transition<Ev> {
     Transition::new(kind, 100, Some("v1".into()))
@@ -184,7 +197,11 @@ fn run_all_laws(make: &dyn Fn() -> Box<ToyBoard>) {
         let bb = make();
         bb.commit(&item("a"), tr(Ev::Open)).unwrap();
         bb.commit(&item("a"), tr(Ev::Close)).unwrap();
-        assert_eq!(bb.timeline("a").unwrap(), vec![Ev::Open, Ev::Close], "append-only");
+        assert_eq!(
+            bb.timeline("a").unwrap(),
+            vec![Ev::Open, Ev::Close],
+            "append-only"
+        );
     }
     // law 2 — atomic: value + event both present after one commit
     {
@@ -199,7 +216,11 @@ fn run_all_laws(make: &dyn Fn() -> Box<ToyBoard>) {
         bb.commit(&item("c"), tr(Ev::Close)).unwrap();
         bb.commit(&item("c"), tr(Ev::Close)).unwrap();
         bb.commit(&item("c"), tr(Ev::Close)).unwrap();
-        assert_eq!(bb.timeline("c").unwrap(), vec![Ev::Close], "idempotent: no duplicate");
+        assert_eq!(
+            bb.timeline("c").unwrap(),
+            vec![Ev::Close],
+            "idempotent: no duplicate"
+        );
     }
     // law 4 — read-your-writes (by status)
     {
@@ -214,8 +235,18 @@ fn run_all_laws(make: &dyn Fn() -> Box<ToyBoard>) {
         for k in [Ev::Open, Ev::Close, Ev::Reopen] {
             bb.commit(&item("e"), tr(k)).unwrap();
         }
-        assert!(bb.view(&Scope::WithStatus(vec!["open".into()])).unwrap().iter().any(|x| x.id == "e"));
-        assert!(!bb.view(&Scope::WithStatus(vec!["closed".into()])).unwrap().iter().any(|x| x.id == "e"));
+        assert!(
+            bb.view(&Scope::WithStatus(vec!["open".into()]))
+                .unwrap()
+                .iter()
+                .any(|x| x.id == "e")
+        );
+        assert!(
+            !bb.view(&Scope::WithStatus(vec!["closed".into()]))
+                .unwrap()
+                .iter()
+                .any(|x| x.id == "e")
+        );
     }
 }
 
@@ -238,5 +269,9 @@ fn entities_persist_across_runs_same_key_two_events() {
     r1.commit(&item("x"), tr(Ev::Open)).unwrap();
     let r2 = SqliteBlackboard::<ToyStore>::open(conn, "run-2").unwrap();
     r2.commit(&item("x"), tr(Ev::Close)).unwrap();
-    assert_eq!(r2.timeline("x").unwrap(), vec![Ev::Open, Ev::Close], "cross-run timeline accrues");
+    assert_eq!(
+        r2.timeline("x").unwrap(),
+        vec![Ev::Open, Ev::Close],
+        "cross-run timeline accrues"
+    );
 }

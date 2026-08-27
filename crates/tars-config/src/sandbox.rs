@@ -102,12 +102,22 @@ impl From<SandboxModeConfig> for SandboxMode {
 /// The flag intentionally overrides only `mode` (the security-critical knob a
 /// user reaches for on the command line); the finer `network` / `writable_roots`
 /// stay TOML-driven.
-pub fn resolve_policy(cfg: Option<&SandboxConfig>, flag_mode: Option<SandboxMode>) -> SandboxPolicy {
+pub fn resolve_policy(
+    cfg: Option<&SandboxConfig>,
+    flag_mode: Option<SandboxMode>,
+) -> SandboxPolicy {
     match (cfg, flag_mode) {
         (None, None) => SandboxPolicy::default(),
         (Some(c), None) => c.to_policy(),
-        (None, Some(mode)) => SandboxPolicy { mode, writable_roots: Vec::new(), network: true },
-        (Some(c), Some(mode)) => SandboxPolicy { mode, ..c.to_policy() },
+        (None, Some(mode)) => SandboxPolicy {
+            mode,
+            writable_roots: Vec::new(),
+            network: true,
+        },
+        (Some(c), Some(mode)) => SandboxPolicy {
+            mode,
+            ..c.to_policy()
+        },
     }
 }
 
@@ -119,7 +129,10 @@ mod tests {
     #[test]
     fn absent_section_means_none_on_config() {
         let cfg = ConfigManager::load_from_str("[providers]\n").unwrap();
-        assert!(cfg.sandbox.is_none(), "no [sandbox] ⇒ None ⇒ unconfined default");
+        assert!(
+            cfg.sandbox.is_none(),
+            "no [sandbox] ⇒ None ⇒ unconfined default"
+        );
         // And the resolver turns None + no flag into today's behaviour.
         let pol = resolve_policy(cfg.sandbox.as_ref(), None);
         assert_eq!(pol.mode, SandboxMode::DangerFullAccess);
@@ -155,7 +168,10 @@ mod tests {
     fn danger_full_access_mode_parses() {
         let cfg =
             ConfigManager::load_from_str("[sandbox]\nmode = \"danger-full-access\"\n").unwrap();
-        assert_eq!(cfg.sandbox.unwrap().to_policy().mode, SandboxMode::DangerFullAccess);
+        assert_eq!(
+            cfg.sandbox.unwrap().to_policy().mode,
+            SandboxMode::DangerFullAccess
+        );
     }
 
     #[test]
@@ -169,7 +185,10 @@ mod tests {
     #[test]
     fn unknown_field_in_sandbox_is_rejected() {
         let err = ConfigManager::load_from_str("[sandbox]\nmoed = \"read-only\"\n");
-        assert!(err.is_err(), "typo'd key must be caught by deny_unknown_fields");
+        assert!(
+            err.is_err(),
+            "typo'd key must be caught by deny_unknown_fields"
+        );
     }
 
     #[test]
@@ -185,7 +204,11 @@ mod tests {
         let pol = resolve_policy(cfg.sandbox.as_ref(), Some(SandboxMode::ReadOnly));
         assert_eq!(pol.mode, SandboxMode::ReadOnly, "flag mode wins");
         assert!(!pol.network, "TOML network kept");
-        assert_eq!(pol.writable_roots, vec![PathBuf::from("/repo/wt")], "TOML roots kept");
+        assert_eq!(
+            pol.writable_roots,
+            vec![PathBuf::from("/repo/wt")],
+            "TOML roots kept"
+        );
     }
 
     #[test]

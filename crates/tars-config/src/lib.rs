@@ -41,20 +41,20 @@ pub use builtin::{
 pub use error::ConfigError;
 pub use global::resolve_home;
 pub use manager::{Config, ConfigManager};
-pub use roles::RoleConfig;
 pub use model_kb::{
-    capabilities_for, BillingModel, KbModality, ModelEntry, ModelKb, ModelStatus, ModelTier,
-    ProviderCapabilities, ProviderDef, ProviderModels, PromptCacheSpec, Thinking, ThinkingParam,
-    MODEL_KB,
+    BillingModel, KbModality, MODEL_KB, ModelEntry, ModelKb, ModelStatus, ModelTier,
+    PromptCacheSpec, ProviderCapabilities, ProviderDef, ProviderModels, Thinking, ThinkingParam,
+    capabilities_for,
 };
 pub use paths::default_config_path;
 pub use providers::{
     CapabilitiesOverrides, ClaudeCliEffortConfig, ClaudeCliToolsConfig, ClaudeCliToolsKeyword,
     CodexSandboxConfig, ProviderConfig, ProvidersConfig,
 };
+pub use roles::RoleConfig;
 pub use routing::RoutingConfig;
-pub use sandbox::{resolve_policy, SandboxConfig, SandboxModeConfig};
+pub use sandbox::{SandboxConfig, SandboxModeConfig, resolve_policy};
 // `[web_search]` schema is owned by sisurf; we re-export it so consumers wire
 // the resolved backend without a direct sisurf-core dependency of their own.
 pub use sisurf_core::SearchConfig;
-pub use web_search::{inject_search_keys, BRAVE_API_KEY_ENV, GOOGLE_CSE_API_KEY_ENV};
+pub use web_search::{BRAVE_API_KEY_ENV, GOOGLE_CSE_API_KEY_ENV, inject_search_keys};

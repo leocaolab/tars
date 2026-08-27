@@ -25,8 +25,8 @@ use rusqlite::{Connection, params};
 
 use tars_types::TrajectoryId;
 
+use crate::agent_event_log::{AgentEventLog, EventRecord};
 use crate::error::StorageError;
-use crate::agent_event_log::{EventRecord, AgentEventLog};
 
 const SCHEMA_VERSION: i64 = 1;
 

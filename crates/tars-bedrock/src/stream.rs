@@ -98,14 +98,18 @@ impl StreamTranslator {
                     // Only the visible reasoning text is a ThinkingDelta;
                     // signature / redacted-content chunks are opaque and have
                     // no canonical surface, so they fall through to nothing.
-                    Some(ContentBlockDelta::ReasoningContent(ReasoningContentBlockDelta::Text(
-                        t,
-                    ))) => vec![ChatEvent::ThinkingDelta { text: t.clone() }],
+                    Some(ContentBlockDelta::ReasoningContent(
+                        ReasoningContentBlockDelta::Text(t),
+                    )) => vec![ChatEvent::ThinkingDelta { text: t.clone() }],
                     Some(ContentBlockDelta::ToolUse(tu)) => {
                         // Buffer the partial JSON locally AND surface the
                         // fragment so a consumer can render progress; final
                         // parse happens at ContentBlockStop.
-                        self.tools.entry(cbi).or_default().input.push_str(tu.input());
+                        self.tools
+                            .entry(cbi)
+                            .or_default()
+                            .input
+                            .push_str(tu.input());
                         vec![ChatEvent::ToolCallArgsDelta {
                             index: slot(cbi),
                             args_delta: tu.input().to_string(),
@@ -207,12 +211,12 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_sdk_bedrockruntime::types::ConversationRole;
     use aws_sdk_bedrockruntime::types::{
         ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
         ConverseStreamMetadataEvent, MessageStartEvent, MessageStopEvent,
         StopReason as AwsStopReason, TokenUsage, ToolUseBlockDelta, ToolUseBlockStart,
     };
-    use aws_sdk_bedrockruntime::types::ConversationRole;
     use serde_json::json;
 
     fn text_delta(idx: i32, text: &str) -> ConverseStreamOutput {
@@ -276,7 +280,10 @@ mod tests {
 
     fn message_stop(reason: AwsStopReason) -> ConverseStreamOutput {
         ConverseStreamOutput::MessageStop(
-            MessageStopEvent::builder().stop_reason(reason).build().unwrap(),
+            MessageStopEvent::builder()
+                .stop_reason(reason)
+                .build()
+                .unwrap(),
         )
     }
 

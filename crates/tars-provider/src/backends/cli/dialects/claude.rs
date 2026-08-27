@@ -11,8 +11,8 @@ use serde_json::Value;
 use tars_types::{ChatEvent, ChatRequest, ProviderError, RequestContext, StopReason};
 
 use super::super::argv::{
-    ClaudeCliEffort, ClaudeCliTools, STRIPPED_ENV_KEYS_UPPER, SubprocessInvocation, build_argv_with,
-    serialize_messages_for_cli, streaming_enabled,
+    ClaudeCliEffort, ClaudeCliTools, STRIPPED_ENV_KEYS_UPPER, SubprocessInvocation,
+    build_argv_with, serialize_messages_for_cli, streaming_enabled,
 };
 use super::super::dialect::{CliDialect, CliInvocation, OutputMode, PromptChannel};
 use super::super::subprocess::{extract_result_text, extract_usage};
@@ -162,7 +162,6 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
-    
 
     fn dialect() -> ClaudeCliDialect {
         ClaudeCliDialect::new(
@@ -185,7 +184,8 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("hi"),
-                "test-model", &RequestContext::test_default(),
+                "test-model",
+                &RequestContext::test_default(),
             )
             .unwrap();
         assert_eq!(d.argv(&inv), build_argv_with(&inv, streaming_enabled()));
@@ -208,7 +208,9 @@ mod tests {
         );
         let mut ctx = RequestContext::test_default();
         ctx.deadline = Some(std::time::Instant::now() + Duration::from_secs(600));
-        let inv = d.invocation(&ChatRequest::user("x"), "sonnet", &ctx).unwrap();
+        let inv = d
+            .invocation(&ChatRequest::user("x"), "sonnet", &ctx)
+            .unwrap();
         // A longer deadline buys a longer run (arc's reconcile), not a clamp to 42s.
         assert!(
             inv.timeout > Duration::from_secs(500) && inv.timeout <= Duration::from_secs(600),
@@ -219,8 +221,14 @@ mod tests {
         // And a shorter deadline cuts the call off early.
         let mut ctx = RequestContext::test_default();
         ctx.deadline = Some(std::time::Instant::now() + Duration::from_secs(5));
-        let inv = d.invocation(&ChatRequest::user("x"), "sonnet", &ctx).unwrap();
-        assert!(inv.timeout <= Duration::from_secs(5), "got {:?}", inv.timeout);
+        let inv = d
+            .invocation(&ChatRequest::user("x"), "sonnet", &ctx)
+            .unwrap();
+        assert!(
+            inv.timeout <= Duration::from_secs(5),
+            "got {:?}",
+            inv.timeout
+        );
     }
 
     /// An expired deadline saturates to ZERO, so the subprocess is not spawned
@@ -238,7 +246,9 @@ mod tests {
         );
         let mut ctx = RequestContext::test_default();
         ctx.deadline = Some(std::time::Instant::now() - Duration::from_secs(1));
-        let inv = d.invocation(&ChatRequest::user("x"), "sonnet", &ctx).unwrap();
+        let inv = d
+            .invocation(&ChatRequest::user("x"), "sonnet", &ctx)
+            .unwrap();
         assert_eq!(inv.timeout, Duration::ZERO);
     }
 
@@ -257,7 +267,8 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("x").with_system("brief"),
-                "sonnet", &RequestContext::test_default().with_cwd(wt.clone()),
+                "sonnet",
+                &RequestContext::test_default().with_cwd(wt.clone()),
             )
             .unwrap();
         assert_eq!(inv.model, "sonnet");
@@ -311,7 +322,9 @@ mod tests {
     #[test]
     fn parse_line_null_result_is_empty_delta() {
         let d = dialect();
-        let events = d.parse_line(&json!({"result": null, "is_error": false})).unwrap();
+        let events = d
+            .parse_line(&json!({"result": null, "is_error": false}))
+            .unwrap();
         assert!(matches!(&events[0], ChatEvent::Delta { text } if text.is_empty()));
     }
 

@@ -674,9 +674,7 @@ mod tests {
     #[test]
     fn translate_request_promotes_system_to_top_level() {
         let a = adapter();
-        let req = ChatRequest::user("hello",
-        )
-        .with_system("you are concise");
+        let req = ChatRequest::user("hello").with_system("you are concise");
         let body = a.translate_request(&req, "claude-opus-4-7").unwrap();
         assert!(body["system"].is_array());
         assert_eq!(body["system"][0]["type"], "text");
@@ -688,9 +686,7 @@ mod tests {
     #[test]
     fn cache_marker_attaches_to_last_message_block() {
         let a = adapter();
-        let mut req = ChatRequest::user("context",
-        )
-        .with_system("sys");
+        let mut req = ChatRequest::user("context").with_system("sys");
         req.cache_directives.push(CacheDirective::MarkBoundary {
             ttl: std::time::Duration::from_secs(300),
         });
@@ -705,8 +701,7 @@ mod tests {
     #[test]
     fn structured_output_injects_forced_tool() {
         let a = adapter();
-        let mut req = ChatRequest::user("give json",
-        );
+        let mut req = ChatRequest::user("give json");
         req.structured_output = Some(tars_types::JsonSchema::strict(
             "Resp",
             serde_json::json!({"type":"object"}),

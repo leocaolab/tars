@@ -286,10 +286,8 @@ impl Middleware for TpmRateLimiter {
                 return;
             }
             if let Ok(ChatEvent::Finished { usage, .. }) = ev {
-                let actual = u32::try_from(
-                    usage.input_tokens.saturating_add(usage.output_tokens),
-                )
-                .unwrap_or(u32::MAX);
+                let actual = u32::try_from(usage.input_tokens.saturating_add(usage.output_tokens))
+                    .unwrap_or(u32::MAX);
                 bucket.settle(reserve, actual);
                 reconciled = true;
             }
@@ -357,8 +355,17 @@ mod tests {
         let c = TpmRateLimiter::shared("acct-test-B", cfg());
         let d = TpmRateLimiter::new(cfg());
         let e = TpmRateLimiter::new(cfg());
-        assert!(Arc::ptr_eq(&a.bucket, &b.bucket), "same key must share one bucket");
-        assert!(!Arc::ptr_eq(&a.bucket, &c.bucket), "different key → different bucket");
-        assert!(!Arc::ptr_eq(&d.bucket, &e.bucket), "new() always builds a private bucket");
+        assert!(
+            Arc::ptr_eq(&a.bucket, &b.bucket),
+            "same key must share one bucket"
+        );
+        assert!(
+            !Arc::ptr_eq(&a.bucket, &c.bucket),
+            "different key → different bucket"
+        );
+        assert!(
+            !Arc::ptr_eq(&d.bucket, &e.bucket),
+            "new() always builds a private bucket"
+        );
     }
 }

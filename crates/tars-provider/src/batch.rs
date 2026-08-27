@@ -293,11 +293,19 @@ mod tests {
     async fn submit_assigns_unique_job_ids() {
         let m = MockBatchSubmitter::new();
         let id1 = m
-            .submit(vec![(BatchItemId::new("a"), req("hello"))], "test-model", &ctx())
+            .submit(
+                vec![(BatchItemId::new("a"), req("hello"))],
+                "test-model",
+                &ctx(),
+            )
             .await
             .unwrap();
         let id2 = m
-            .submit(vec![(BatchItemId::new("b"), req("world"))], "test-model", &ctx())
+            .submit(
+                vec![(BatchItemId::new("b"), req("world"))],
+                "test-model",
+                &ctx(),
+            )
             .await
             .unwrap();
         assert_ne!(id1, id2);
@@ -307,7 +315,11 @@ mod tests {
     async fn status_after_submit_is_completed_by_default() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
+            .submit(
+                vec![(BatchItemId::new("a"), req("x"))],
+                "test-model",
+                &ctx(),
+            )
             .await
             .unwrap();
         assert_eq!(m.status(&id, &ctx()).await.unwrap(), BatchStatus::Completed);
@@ -344,7 +356,11 @@ mod tests {
     async fn results_non_terminal_status_errors() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
+            .submit(
+                vec![(BatchItemId::new("a"), req("x"))],
+                "test-model",
+                &ctx(),
+            )
             .await
             .unwrap();
         m.set_status(
@@ -367,7 +383,11 @@ mod tests {
     async fn set_status_drives_polling_simulation() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
+            .submit(
+                vec![(BatchItemId::new("a"), req("x"))],
+                "test-model",
+                &ctx(),
+            )
             .await
             .unwrap();
         // Simulate progress polling.
@@ -391,7 +411,11 @@ mod tests {
     async fn cancel_default_returns_unsupported() {
         let m = MockBatchSubmitter::new();
         let id = m
-            .submit(vec![(BatchItemId::new("a"), req("x"))], "test-model", &ctx())
+            .submit(
+                vec![(BatchItemId::new("a"), req("x"))],
+                "test-model",
+                &ctx(),
+            )
             .await
             .unwrap();
         let err = m

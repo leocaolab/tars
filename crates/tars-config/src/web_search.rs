@@ -73,11 +73,7 @@ fn env_key(var: &str) -> Option<String> {
 
 /// Blank-guard: a present-but-whitespace value is treated as absent.
 fn non_blank(v: String) -> Option<String> {
-    if v.trim().is_empty() {
-        None
-    } else {
-        Some(v)
-    }
+    if v.trim().is_empty() { None } else { Some(v) }
 }
 
 #[cfg(test)]
@@ -109,7 +105,10 @@ mod tests {
         assert_eq!(cfg.backend, BackendKind::GoogleCse);
         let g = cfg.google_cse.expect("google_cse section");
         assert_eq!(g.cx, "abc123");
-        assert!(g.api_key.is_empty(), "secret must not be in the committed TOML");
+        assert!(
+            g.api_key.is_empty(),
+            "secret must not be in the committed TOML"
+        );
     }
 
     #[test]
@@ -135,7 +134,10 @@ mod tests {
             cfg,
             fake_env(&[(GOOGLE_CSE_API_KEY_ENV, "resolved-secret")]),
         );
-        assert_eq!(injected.google_cse.as_ref().unwrap().api_key, "resolved-secret");
+        assert_eq!(
+            injected.google_cse.as_ref().unwrap().api_key,
+            "resolved-secret"
+        );
         // And it now builds into a runnable backend.
         assert!(injected.build().is_ok());
     }
@@ -200,6 +202,9 @@ mod tests {
         // A present-but-whitespace env value must not inject an empty-ish key.
         assert!(super::non_blank("   ".to_string()).is_none());
         assert!(super::non_blank(String::new()).is_none());
-        assert_eq!(super::non_blank("sk-x".to_string()), Some("sk-x".to_string()));
+        assert_eq!(
+            super::non_blank("sk-x".to_string()),
+            Some("sk-x".to_string())
+        );
     }
 }

@@ -97,7 +97,6 @@ mod service;
 /// validation-outcome side channel honoured.
 pub mod sync;
 
-pub use sync::{complete_async, complete_sync, shared_runtime};
 pub use middleware::budget::{BudgetConfigError, PerCallBudgetMiddleware};
 pub use middleware::cache::{CacheLookupMiddleware, set_cache_policy};
 pub use middleware::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
@@ -114,6 +113,7 @@ pub use middleware::validation::{
 };
 pub use middleware::{ChainOpts, EventStores, LlmServiceBuilder, Middleware};
 pub use service::{LlmService, Next};
+pub use sync::{complete_async, complete_sync, shared_runtime};
 
 // Re-export the few tars-types items that show up in middleware
 // signatures so callers don't need a separate `use tars_types::…`.

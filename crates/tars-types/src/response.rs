@@ -222,9 +222,9 @@ impl ChatResponseBuilder {
                         String::new()
                     }
                 };
-                self.inner
-                    .tool_calls
-                    .push(ToolCall::new(id, name, parsed_args).with_thought_signature(thought_signature));
+                self.inner.tool_calls.push(
+                    ToolCall::new(id, name, parsed_args).with_thought_signature(thought_signature),
+                );
             }
             ChatEvent::UsageProgress { partial } => {
                 // Don't overwrite — we'll get the authoritative figure
@@ -414,7 +414,10 @@ mod tests {
         let r = b.finish();
         // The whole point: a finalized response carries its DISCOVERY time —
         // common infra, every consumer can read it instead of guessing.
-        assert!(r.created > 0, "finish() must stamp `created` with the finalize wall-clock");
+        assert!(
+            r.created > 0,
+            "finish() must stamp `created` with the finalize wall-clock"
+        );
         // finish_checked takes the same path.
         let mut b2 = ChatResponseBuilder::new();
         b2.apply(ChatEvent::Finished {

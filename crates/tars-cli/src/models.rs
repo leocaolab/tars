@@ -18,10 +18,8 @@ use anyhow::{Context, Result};
 use tars_config::{Config, ConfigManager, ProviderConfig};
 use tars_types::ProviderId;
 
-use crate::model_library::{
-    diff_models, library_path, EntryStatus, ModelLibrary, ProviderEntry,
-};
-use crate::model_query::{plan_for, query, Outcome};
+use crate::model_library::{EntryStatus, ModelLibrary, ProviderEntry, diff_models, library_path};
+use crate::model_query::{Outcome, plan_for, query};
 
 /// Per-request budget for a live model-list query. Bounds each provider so a
 /// dead local server or a hung TLS handshake can't stall the command.
@@ -82,7 +80,16 @@ pub async fn execute(args: ModelsArgs, config_flag: Option<PathBuf>) -> Result<(
         Some(ModelsAction::Update { provider, json }) => {
             run_update(&config, &home, provider.as_deref(), json).await
         }
-        None => run_query(&config, &home, args.provider.as_deref(), args.live, args.json).await,
+        None => {
+            run_query(
+                &config,
+                &home,
+                args.provider.as_deref(),
+                args.live,
+                args.json,
+            )
+            .await
+        }
     }
 }
 
@@ -106,8 +113,7 @@ fn select_providers<'c>(
                 .providers
                 .get(&ProviderId::new(name))
                 .with_context(|| {
-                    let names: Vec<&str> =
-                        all.iter().map(|(n, _)| n.as_str()).collect();
+                    let names: Vec<&str> = all.iter().map(|(n, _)| n.as_str()).collect();
                     format!(
                         "provider '{name}' is not configured. Known providers: {}",
                         names.join(", ")
@@ -151,7 +157,9 @@ fn outcome_to_entry(provider_type: &str, default_model: &str, outcome: Outcome) 
         Outcome::AuthFailed { status } => base(
             EntryStatus::AuthFailed,
             vec![],
-            Some(format!("auth rejected (HTTP {status}) — key invalid/expired?")),
+            Some(format!(
+                "auth rejected (HTTP {status}) — key invalid/expired?"
+            )),
         ),
         Outcome::HttpStatus { status } => base(
             EntryStatus::HttpError,
@@ -190,7 +198,9 @@ async fn run_update(
 
     // Merge into the prior library: a single-provider update must not drop the
     // rows for providers it didn't touch.
-    let mut lib = old.clone().unwrap_or_else(|| ModelLibrary::new(now_rfc3339()));
+    let mut lib = old
+        .clone()
+        .unwrap_or_else(|| ModelLibrary::new(now_rfc3339()));
     lib.updated_at = now_rfc3339();
     lib.version = crate::model_library::LIBRARY_VERSION;
     for (name, entry) in &fresh {
@@ -250,7 +260,10 @@ fn print_update_human(path: &std::path::Path, changes: &[ProviderChange]) {
                     println!("      + added:   {}", c.added.join(", "));
                 }
                 if !c.removed.is_empty() {
-                    println!("      - removed: {}  (deprecated/retired)", c.removed.join(", "));
+                    println!(
+                        "      - removed: {}  (deprecated/retired)",
+                        c.removed.join(", ")
+                    );
                 }
                 if c.added.is_empty() && c.removed.is_empty() {
                     println!("      (no change)");
@@ -356,16 +369,18 @@ async fn run_query(
         providers
             .iter()
             .map(|(name, cfg)| {
-                let entry = lib.providers.get(name).cloned().unwrap_or_else(|| {
-                    ProviderEntry {
+                let entry = lib
+                    .providers
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| ProviderEntry {
                         provider_type: provider_type_of(cfg).to_string(),
                         default_model: cfg.default_model().to_string(),
                         status: EntryStatus::Skipped,
                         models: vec![],
                         note: Some("not in library — run `tars models update`".to_string()),
                         queried_at: String::new(),
-                    }
-                });
+                    });
                 // Reflect the live config default (not the one snapshotted at
                 // update time) so the stale check tracks current config.
                 let entry = ProviderEntry {
@@ -404,7 +419,11 @@ fn print_query_human(live: bool, rows: &[(String, ProviderEntry)]) {
                     println!("      (no models listed)");
                 }
                 for m in &entry.models {
-                    let marker = if m == &entry.default_model { "  ← default" } else { "" };
+                    let marker = if m == &entry.default_model {
+                        "  ← default"
+                    } else {
+                        ""
+                    };
                     println!("      {m}{marker}");
                 }
             }

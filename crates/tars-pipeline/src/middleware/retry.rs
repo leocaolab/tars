@@ -399,7 +399,9 @@ mod tests {
             ok_inner: mock,
             observed: observed.clone(),
         });
-        let svc = LlmService::builder(failer, "test-model").layer(retry).build();
+        let svc = LlmService::builder(failer, "test-model")
+            .layer(retry)
+            .build();
         (svc, observed)
     }
 
@@ -411,10 +413,7 @@ mod tests {
             RetryMiddleware::no_backoff(5),
         );
         let mut s = svc
-            .call(
-                ChatRequest::user("x"),
-                RequestContext::test_default(),
-            )
+            .call(ChatRequest::user("x"), RequestContext::test_default())
             .await
             .unwrap();
         while let Some(ev) = s.next().await {
@@ -449,10 +448,7 @@ mod tests {
             RetryMiddleware::no_backoff(5),
         );
         let err = match svc
-            .call(
-                ChatRequest::user("x"),
-                RequestContext::test_default(),
-            )
+            .call(ChatRequest::user("x"), RequestContext::test_default())
             .await
         {
             Ok(_) => panic!("expected Auth error, got success"),
@@ -483,10 +479,7 @@ mod tests {
             RetryMiddleware::new(cfg),
         );
         let result = svc
-            .call(
-                ChatRequest::user("x"),
-                RequestContext::test_default(),
-            )
+            .call(ChatRequest::user("x"), RequestContext::test_default())
             .await;
         assert!(result.is_err(), "expected Parse error after retries");
         assert_eq!(observed.load(Ordering::SeqCst), 2);
@@ -515,10 +508,7 @@ mod tests {
         let cancel = ctx.cancel.clone();
 
         // Cancel after first failure but during backoff.
-        let task = tokio::spawn(async move {
-            svc.call(ChatRequest::user("x"), ctx)
-                .await
-        });
+        let task = tokio::spawn(async move { svc.call(ChatRequest::user("x"), ctx).await });
 
         // Let the first attempt happen + enter backoff.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -556,10 +546,7 @@ mod tests {
             RetryMiddleware::new(cfg),
         );
         let err = svc
-            .call(
-                ChatRequest::user("x"),
-                RequestContext::test_default(),
-            )
+            .call(ChatRequest::user("x"), RequestContext::test_default())
             .await
             .err()
             .expect("bubble RateLimited");

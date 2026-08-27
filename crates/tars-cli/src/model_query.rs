@@ -132,23 +132,17 @@ pub fn plan_for(cfg: &ProviderConfig) -> Plan {
                 env_var: env_var_of(auth),
             })
         }
-        P::OpenaiCompat {
-            base_url, auth, ..
-        } => Plan::Http(HttpPlan {
+        P::OpenaiCompat { base_url, auth, .. } => Plan::Http(HttpPlan {
             url: format!("{}/models", trim_base(base_url)),
             auth: AuthMode::Bearer,
             parse: ParseStyle::OpenAiData,
             env_var: env_var_of(auth),
         }),
-        P::Vllm {
-            base_url, auth, ..
-        } => local_openai_plan(base_url.as_deref(), VLLM_BASE, auth),
-        P::Mlx {
-            base_url, auth, ..
-        } => local_openai_plan(base_url.as_deref(), MLX_BASE, auth),
-        P::Llamacpp {
-            base_url, auth, ..
-        } => local_openai_plan(base_url.as_deref(), LLAMACPP_BASE, auth),
+        P::Vllm { base_url, auth, .. } => local_openai_plan(base_url.as_deref(), VLLM_BASE, auth),
+        P::Mlx { base_url, auth, .. } => local_openai_plan(base_url.as_deref(), MLX_BASE, auth),
+        P::Llamacpp { base_url, auth, .. } => {
+            local_openai_plan(base_url.as_deref(), LLAMACPP_BASE, auth)
+        }
         P::Bedrock { .. } => Plan::Skip {
             note: "bedrock — foundation-model list is an AWS SDK (SigV4) call, not queried here"
                 .to_string(),
@@ -295,7 +289,7 @@ pub async fn query(client: &reqwest::Client, plan: &Plan, timeout: Duration) -> 
         Err(e) => {
             return Outcome::Unreachable {
                 detail: reqwest_error_detail(&e),
-            }
+            };
         }
     };
 

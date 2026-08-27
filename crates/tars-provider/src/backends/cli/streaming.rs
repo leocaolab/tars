@@ -365,7 +365,10 @@ mod tests {
             started.elapsed()
         );
         let msg = err.to_string();
-        assert!(msg.contains("timed out"), "expected a timeout error, got: {msg}");
+        assert!(
+            msg.contains("timed out"),
+            "expected a timeout error, got: {msg}"
+        );
         // We killed the child; it did not die on its own — the abort is a
         // `TimedOut`, NOT a `CliSubprocessDied`, and `budget` is the invocation
         // budget the call was given (200ms here).

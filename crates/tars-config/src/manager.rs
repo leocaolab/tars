@@ -247,7 +247,10 @@ mod tests {
     #[test]
     fn absent_web_search_section_is_none() {
         let cfg = ConfigManager::load_from_str("[providers]\n").expect("loads");
-        assert!(cfg.web_search.is_none(), "absent [web_search] = None (keyless DDG default)");
+        assert!(
+            cfg.web_search.is_none(),
+            "absent [web_search] = None (keyless DDG default)"
+        );
     }
 
     #[test]
@@ -313,10 +316,16 @@ mod tests {
             model    = "mlx-community/Qwen3-8B"
         "#;
         let cfg = ConfigManager::load_from_str(toml_str).expect("[roles.<name>] must load");
-        assert_eq!(cfg.roles["critic"].provider, tars_types::ProviderId::new("deepseek"));
+        assert_eq!(
+            cfg.roles["critic"].provider,
+            tars_types::ProviderId::new("deepseek")
+        );
         assert_eq!(cfg.roles["critic"].model, "deepseek-chat");
         // `mlx` is a built-in, merged in, so a role pointing at it validates.
-        assert_eq!(cfg.roles["fixer"].provider, tars_types::ProviderId::new("mlx"));
+        assert_eq!(
+            cfg.roles["fixer"].provider,
+            tars_types::ProviderId::new("mlx")
+        );
     }
 
     #[test]
@@ -337,7 +346,11 @@ mod tests {
             ConfigError::ValidationFailed { errors } => {
                 // The key points at the offending *field*, not just the role.
                 assert!(errors.iter().any(|e| e.key == "roles.critic.provider"));
-                assert!(errors.iter().any(|e| e.message.contains("no_such_provider")));
+                assert!(
+                    errors
+                        .iter()
+                        .any(|e| e.message.contains("no_such_provider"))
+                );
             }
             _ => panic!("wrong error variant: {err:?}"),
         }

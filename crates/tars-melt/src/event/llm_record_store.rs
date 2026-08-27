@@ -202,19 +202,18 @@ impl LlmRecordStore for SqliteLlmRecordStore {
         let tenant = r.tenant_id().as_ref().to_string();
         let hash = r.content_hash().to_vec();
 
-        let bytes =
-            tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, StoreError> {
-                let conn = conn.lock().expect("llm record store mutex poisoned");
-                conn.query_row(
-                    "SELECT content FROM llm_records WHERE tenant_id = ? AND content_hash = ?",
-                    params![tenant, hash],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()
-                .map_err(|e| StoreError::backend_source("fetch llm record", e))
-            })
-            .await
-            .map_err(|e| StoreError::backend_source("spawn_blocking", e))??;
+        let bytes = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, StoreError> {
+            let conn = conn.lock().expect("llm record store mutex poisoned");
+            conn.query_row(
+                "SELECT content FROM llm_records WHERE tenant_id = ? AND content_hash = ?",
+                params![tenant, hash],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(|e| StoreError::backend_source("fetch llm record", e))
+        })
+        .await
+        .map_err(|e| StoreError::backend_source("spawn_blocking", e))??;
 
         Ok(bytes.map(Bytes::from))
     }
@@ -246,7 +245,10 @@ impl LlmRecordStore for SqliteLlmRecordStore {
         let n = tokio::task::spawn_blocking(move || -> Result<u64, StoreError> {
             let conn = conn.lock().expect("llm record store mutex poisoned");
             let n = conn
-                .execute("DELETE FROM llm_records WHERE tenant_id = ?", params![tenant])
+                .execute(
+                    "DELETE FROM llm_records WHERE tenant_id = ?",
+                    params![tenant],
+                )
                 .map_err(|e| StoreError::backend_source("purge_tenant", e))?;
             Ok(n as u64)
         })

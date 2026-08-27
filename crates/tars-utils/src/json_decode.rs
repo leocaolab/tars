@@ -455,15 +455,17 @@ mod tests {
 
     #[test]
     fn strict_mode_parses_clean_json_directly() {
-        let p: Point =
-            decode_json(r#"{"x":1,"y":2}"#, StructuredOutputMode::StrictSchema).unwrap();
+        let p: Point = decode_json(r#"{"x":1,"y":2}"#, StructuredOutputMode::StrictSchema).unwrap();
         assert_eq!(p, Point { x: 1, y: 2 });
     }
 
     #[test]
     fn strict_mode_tolerates_surrounding_whitespace() {
-        let p: Point =
-            decode_json("  \n{\"x\":3,\"y\":4}\n ", StructuredOutputMode::StrictSchema).unwrap();
+        let p: Point = decode_json(
+            "  \n{\"x\":3,\"y\":4}\n ",
+            StructuredOutputMode::StrictSchema,
+        )
+        .unwrap();
         assert_eq!(p, Point { x: 3, y: 4 });
     }
 
@@ -484,7 +486,10 @@ mod tests {
             StructuredOutputMode::StrictSchema,
         )
         .unwrap_err();
-        assert!(matches!(err, TarsJsonError::InvalidJson { .. }), "got {err:?}");
+        assert!(
+            matches!(err, TarsJsonError::InvalidJson { .. }),
+            "got {err:?}"
+        );
     }
 
     // ── decode_json: chatty (None) fence-scrape fallback ────────────
@@ -559,7 +564,10 @@ mod tests {
             StructuredOutputMode::ToolUseEmulation,
         ] {
             let err = decode_json::<Point>("   \n\t ", mode).unwrap_err();
-            assert!(matches!(err, TarsJsonError::EmptyStream), "mode {mode:?} → {err:?}");
+            assert!(
+                matches!(err, TarsJsonError::EmptyStream),
+                "mode {mode:?} → {err:?}"
+            );
         }
     }
 
@@ -575,9 +583,8 @@ mod tests {
 
     #[test]
     fn none_mode_valid_json_wrong_shape_is_schema_error() {
-        let err =
-            decode_json::<Point>(r#"answer: {"foo":1,"bar":2}"#, StructuredOutputMode::None)
-                .unwrap_err();
+        let err = decode_json::<Point>(r#"answer: {"foo":1,"bar":2}"#, StructuredOutputMode::None)
+            .unwrap_err();
         assert!(matches!(err, TarsJsonError::Schema { .. }), "got {err:?}");
     }
 
@@ -590,9 +597,12 @@ mod tests {
 
     #[test]
     fn strict_mode_malformed_json_is_invalid_json() {
-        let err =
-            decode_json::<Point>(r#"{"x":1,"y":}"#, StructuredOutputMode::StrictSchema).unwrap_err();
-        assert!(matches!(err, TarsJsonError::InvalidJson { .. }), "got {err:?}");
+        let err = decode_json::<Point>(r#"{"x":1,"y":}"#, StructuredOutputMode::StrictSchema)
+            .unwrap_err();
+        assert!(
+            matches!(err, TarsJsonError::InvalidJson { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -747,17 +757,24 @@ mod tests {
     fn clamp_off_by_default_overflow_int_is_schema_error() {
         // u64::MAX doesn't fit i64 → Schema error when clamp is off.
         let text = r#"{"id": 18446744073709551615}"#;
-        let err =
-            decode::<HasId>(text, StructuredOutputMode::StrictSchema, DecodeOpts::default())
-                .unwrap_err();
+        let err = decode::<HasId>(
+            text,
+            StructuredOutputMode::StrictSchema,
+            DecodeOpts::default(),
+        )
+        .unwrap_err();
         assert!(matches!(err, TarsJsonError::Schema { .. }), "got {err:?}");
     }
 
     #[test]
     fn clamp_on_recovers_overflow_int_to_i64_max() {
         let text = r#"{"id": 18446744073709551615}"#;
-        let h: HasId =
-            decode(text, StructuredOutputMode::StrictSchema, DecodeOpts::clamping()).unwrap();
+        let h: HasId = decode(
+            text,
+            StructuredOutputMode::StrictSchema,
+            DecodeOpts::clamping(),
+        )
+        .unwrap();
         assert_eq!(h, HasId { id: i64::MAX });
     }
 
@@ -772,9 +789,20 @@ mod tests {
         impl JsonAgentResponse for Mix {}
         // a in range, b float, c negative — none should be clamped.
         let text = r#"{"a": 42, "b": 3.5, "c": -100}"#;
-        let m: Mix =
-            decode(text, StructuredOutputMode::StrictSchema, DecodeOpts::clamping()).unwrap();
-        assert_eq!(m, Mix { a: 42, b: 3.5, c: -100 });
+        let m: Mix = decode(
+            text,
+            StructuredOutputMode::StrictSchema,
+            DecodeOpts::clamping(),
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            Mix {
+                a: 42,
+                b: 3.5,
+                c: -100
+            }
+        );
     }
 
     #[test]

@@ -28,9 +28,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tars_types::{
-    Capabilities, ProviderId,
-};
+use tars_types::{Capabilities, ProviderId};
 
 use crate::backends::cli::{AgentCliBackend, CodexCliDialect, SharedCliRunner};
 
@@ -145,7 +143,11 @@ mod tests {
     impl SubprocessRunner for FakeRunner {
         async fn run(&self, invocation: SubprocessInvocation) -> Result<Value, ProviderError> {
             *self.recorded.lock().unwrap() = Some(invocation);
-            let arr = self.lines.iter().map(|l| Value::String(l.clone())).collect();
+            let arr = self
+                .lines
+                .iter()
+                .map(|l| Value::String(l.clone()))
+                .collect();
             Ok(Value::Array(arr))
         }
     }
@@ -170,7 +172,8 @@ mod tests {
         let response = provider
             .complete(
                 ChatRequest::user("say hi"),
-                "gpt-5", RequestContext::test_default(),
+                "gpt-5",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -182,7 +185,10 @@ mod tests {
         let inv = runner.recorded.lock().unwrap().clone().unwrap();
         assert_eq!(inv.model, "gpt-5");
         for k in ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_AGENT_IDENTITY"] {
-            assert!(inv.stripped_env.contains(k), "stripped_env must contain {k}");
+            assert!(
+                inv.stripped_env.contains(k),
+                "stripped_env must contain {k}"
+            );
         }
     }
 
@@ -196,7 +202,8 @@ mod tests {
         let response = provider
             .complete(
                 ChatRequest::user("x"),
-                "gpt-5", RequestContext::test_default(),
+                "gpt-5",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -216,7 +223,8 @@ mod tests {
         let response = provider
             .complete(
                 ChatRequest::user("x"),
-                "gpt-5", RequestContext::test_default(),
+                "gpt-5",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -225,12 +233,14 @@ mod tests {
 
     #[tokio::test]
     async fn end_to_end_turn_failed_surfaces_provider_error() {
-        let (provider, _) =
-            make_provider(vec![r#"{"type":"turn.failed","error":{"message":"context too long"}}"#]);
+        let (provider, _) = make_provider(vec![
+            r#"{"type":"turn.failed","error":{"message":"context too long"}}"#,
+        ]);
         let result = provider
             .complete(
                 ChatRequest::user("x"),
-                "gpt-5", RequestContext::test_default(),
+                "gpt-5",
+                RequestContext::test_default(),
             )
             .await;
         match result {

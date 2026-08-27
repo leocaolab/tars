@@ -105,7 +105,8 @@ async fn function_call_decodes_to_tool_call_events() {
     let resp = provider
         .complete(
             ChatRequest::user("search"),
-            "test-model", RequestContext::test_default(),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
         .expect("complete ok");
@@ -145,7 +146,8 @@ async fn safety_filter_block_returns_content_filtered_error() {
     let mut stream = provider
         .stream(
             ChatRequest::user("blocked"),
-            "test-model", RequestContext::test_default(),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
         .expect("stream open");
@@ -181,7 +183,8 @@ async fn http_403_maps_to_auth_error() {
     let err = match provider
         .stream(
             ChatRequest::user("hi"),
-            "test-model", RequestContext::test_default(),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
     {

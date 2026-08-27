@@ -165,7 +165,9 @@ fn open_records(dir: &std::path::Path) -> Result<std::sync::Arc<dyn LlmRecordSto
         // Records missing isn't fatal — events still listable.
         return Ok(SqliteLlmRecordStore::in_memory()?);
     }
-    Ok(SqliteLlmRecordStore::open(SqliteLlmRecordStoreConfig::new(path))?)
+    Ok(SqliteLlmRecordStore::open(
+        SqliteLlmRecordStoreConfig::new(path),
+    )?)
 }
 
 async fn list(store: &dyn PipelineEventLog, args: ListArgs) -> Result<()> {

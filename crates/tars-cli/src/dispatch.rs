@@ -30,10 +30,6 @@ use tars_pipeline::{CircuitBreaker, CircuitBreakerConfig};
 use tars_provider::registry::ProviderRegistry;
 use tars_types::ProviderId;
 
-
-
-
-
 /// Build the registry, optionally wrapping providers with CircuitBreaker.
 pub fn build_registry_with_breaker(
     cfg: &Config,
@@ -90,8 +86,6 @@ pub fn pick_provider(cfg: &Config, requested: Option<&str>) -> Result<ProviderId
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +133,4 @@ mod tests {
         let err = pick_provider(&c, None).unwrap_err();
         assert!(err.to_string().contains("multiple"));
     }
-
 }

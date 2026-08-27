@@ -301,7 +301,6 @@ fn flatten_blocks(blocks: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     fn dialect() -> OpenCodeDialect {
         OpenCodeDialect::new("opencode".into(), Duration::from_secs(300))
@@ -313,7 +312,8 @@ mod tests {
         let inv = d
             .invocation(
                 &ChatRequest::user("say hi"),
-                "anthropic/claude-sonnet-4-5", &RequestContext::test_default(),
+                "anthropic/claude-sonnet-4-5",
+                &RequestContext::test_default(),
             )
             .unwrap();
         let argv = d.argv(&inv);
@@ -333,7 +333,6 @@ mod tests {
         assert_eq!(d.output_mode(), OutputMode::JsonEvents);
     }
 
-    
     /// parse_line over a JSONL array (the runner's reconstructed shape).
     fn parse_line(lines: &[&str]) -> Result<Vec<ChatEvent>, ProviderError> {
         let arr = Value::Array(lines.iter().map(|l| Value::String(l.to_string())).collect());
@@ -434,7 +433,9 @@ mod tests {
 
     #[test]
     fn parse_line_non_array_payload_is_typed_error() {
-        let err = dialect().parse_line(&Value::String("not an array".into())).unwrap_err();
+        let err = dialect()
+            .parse_line(&Value::String("not an array".into()))
+            .unwrap_err();
         assert!(matches!(err, ProviderError::Parse(_)));
     }
 
@@ -443,7 +444,8 @@ mod tests {
         let inv = dialect()
             .invocation(
                 &ChatRequest::user("x").with_system("be precise"),
-                "anthropic/claude-sonnet-4-5", &RequestContext::test_default(),
+                "anthropic/claude-sonnet-4-5",
+                &RequestContext::test_default(),
             )
             .unwrap();
         assert!(inv.prompt.starts_with("[system]\nbe precise"));

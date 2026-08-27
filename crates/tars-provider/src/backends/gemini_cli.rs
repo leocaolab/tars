@@ -22,9 +22,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tars_types::{
-    Capabilities, ProviderId,
-};
+use tars_types::{Capabilities, ProviderId};
 
 use crate::backends::cli::{AgentCliBackend, GeminiCliDialect, SharedCliRunner};
 
@@ -136,7 +134,8 @@ mod tests {
         let resp = provider
             .complete(
                 ChatRequest::user("say hi"),
-                "gemini-2.5-flash", RequestContext::test_default(),
+                "gemini-2.5-flash",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -159,7 +158,8 @@ mod tests {
         let resp = provider
             .complete(
                 ChatRequest::user("hi"),
-                "gemini-2.5-flash", RequestContext::test_default(),
+                "gemini-2.5-flash",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -173,7 +173,8 @@ mod tests {
         let err = provider
             .complete(
                 ChatRequest::user(big),
-                "gemini-2.5-flash", RequestContext::test_default(),
+                "gemini-2.5-flash",
+                RequestContext::test_default(),
             )
             .await
             .unwrap_err();
@@ -201,9 +202,9 @@ mod tests {
         let (provider, runner) = make_provider(json!({"response": "ok"}));
         let _ = provider
             .complete(
-                ChatRequest::user("x")
-                    .with_system("be precise"),
-                "gemini-2.5-flash", RequestContext::test_default(),
+                ChatRequest::user("x").with_system("be precise"),
+                "gemini-2.5-flash",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -219,14 +220,17 @@ mod tests {
         let events: Vec<ChatEvent> = Arc::clone(&provider)
             .stream(
                 ChatRequest::user("hi"),
-                "gemini-2.5-flash", RequestContext::test_default(),
+                "gemini-2.5-flash",
+                RequestContext::test_default(),
             )
             .await
             .unwrap()
             .map(|e| e.unwrap())
             .collect()
             .await;
-        assert!(matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "gemini-2.5-flash"));
+        assert!(
+            matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "gemini-2.5-flash")
+        );
         assert!(matches!(&events[1], ChatEvent::Delta { text } if text == "hi"));
         assert!(matches!(&events[2], ChatEvent::Finished { .. }));
     }

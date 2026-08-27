@@ -18,7 +18,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use tars_storage::{
     BbError, Blackboard, BlackboardDomain, BlackboardStore, InMemoryBlackboard, Scope,
     SqliteBlackboard, Transition,
@@ -111,7 +111,10 @@ impl BlackboardDomain for ReviewBoard {
     }
 
     fn with_status(e: &Finding, status: &str) -> Finding {
-        Finding { status: status.to_string(), ..e.clone() }
+        Finding {
+            status: status.to_string(),
+            ..e.clone()
+        }
     }
 }
 
@@ -194,7 +197,11 @@ impl BlackboardStore for ReviewBoard {
         };
         let mut stmt = conn.prepare(&sql)?;
         let map = |r: &rusqlite::Row| {
-            Ok(Finding { id: r.get(0)?, title: r.get(1)?, status: r.get(2)? })
+            Ok(Finding {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                status: r.get(2)?,
+            })
         };
         let rows = match bind {
             Some(b) => stmt.query_map([b], map)?.collect::<Result<Vec<_>, _>>()?,
@@ -207,7 +214,11 @@ impl BlackboardStore for ReviewBoard {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn finding(id: &str, title: &str) -> Finding {
-    Finding { id: id.into(), title: title.into(), status: "new".into() }
+    Finding {
+        id: id.into(),
+        title: title.into(),
+        status: "new".into(),
+    }
 }
 
 fn at(kind: Event, secs: i64, commit: &str) -> Transition<Event> {
@@ -255,7 +266,9 @@ fn lifecycle(bb: &dyn Blackboard<Entity = Finding, Event = Event>, label: &str) 
     println!(" merge  → merged");
     show(bb, "F-1");
 
-    println!(" ⇒ the timeline is COMPLETE (found→fixed→verified→merged), not collapsed to just `merged`.");
+    println!(
+        " ⇒ the timeline is COMPLETE (found→fixed→verified→merged), not collapsed to just `merged`."
+    );
 
     // Law #3: re-committing the same transition is absorbed (no duplicate).
     bb.commit(&f, at(Event::Merged, 400, "dddd")).unwrap();
@@ -270,7 +283,10 @@ fn main() -> Result<(), BbError> {
 
     // Backing A: the SQLite orchestrator driving the injected ReviewBoard store.
     let sqlite = SqliteBlackboard::<ReviewBoard>::in_memory("run-1")?;
-    lifecycle(&sqlite, "SqliteBlackboard<ReviewBoard>  (orchestrator + injected store)");
+    lifecycle(
+        &sqlite,
+        "SqliteBlackboard<ReviewBoard>  (orchestrator + injected store)",
+    );
 
     // Backing B: the framework's in-memory storage, same domain seam.
     let mem = InMemoryBlackboard::<ReviewBoard>::new("run-1");

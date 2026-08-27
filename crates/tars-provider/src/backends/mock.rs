@@ -221,7 +221,8 @@ mod tests {
             .clone()
             .stream(
                 ChatRequest::user("ping"),
-                "test-model", RequestContext::test_default(),
+                "test-model",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -247,7 +248,8 @@ mod tests {
             .clone()
             .complete(
                 ChatRequest::user("ping"),
-                "test-model", RequestContext::test_default(),
+                "test-model",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -266,7 +268,8 @@ mod tests {
                 .clone()
                 .complete(
                     ChatRequest::user("ping"),
-                    "test-model", RequestContext::test_default(),
+                    "test-model",
+                    RequestContext::test_default(),
                 )
                 .await;
             assert!(r.is_ok(), "complete() unexpectedly errored");
@@ -281,7 +284,8 @@ mod tests {
             .clone()
             .complete(
                 ChatRequest::user("ping"),
-                "test-model", RequestContext::test_default(),
+                "test-model",
+                RequestContext::test_default(),
             )
             .await;
         assert!(r.is_err());

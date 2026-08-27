@@ -91,7 +91,10 @@ fn resolve_global(
 ) -> std::result::Result<(String, Arc<dyn LlmProvider>, String), JsError> {
     let registry = ProviderRegistry::global().map_err(registry_to_js)?;
     let cfg = Config::get();
-    let entry = cfg.roles.get(role).ok_or_else(|| unknown_role_to_js(role))?;
+    let entry = cfg
+        .roles
+        .get(role)
+        .ok_or_else(|| unknown_role_to_js(role))?;
     let prov = registry
         .get(&entry.provider)
         .ok_or_else(|| provider_not_registered_to_js(role, &entry.provider))?;

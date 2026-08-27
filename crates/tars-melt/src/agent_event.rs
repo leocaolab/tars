@@ -438,7 +438,7 @@ mod tests {
                 reason: "root".into(),
             },
             cap(1, &["search", "read_file"]), // a worker step that made 2 calls
-            cap(2, &[]),                       // a step with no tool calls
+            cap(2, &[]),                      // a step with no tool calls
             cap(3, &["edit_file"]),
         ];
         // Cross-call sequence = every LlmCallCaptured's tools, in order.

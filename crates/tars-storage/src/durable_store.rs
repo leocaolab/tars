@@ -289,8 +289,10 @@ impl BlackboardStore for DurableBoard {
                 if statuses.is_empty() {
                     return Ok(Vec::new());
                 }
-                let placeholders =
-                    (1..=statuses.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
+                let placeholders = (1..=statuses.len())
+                    .map(|i| format!("?{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 (
                     format!(
                         "SELECT job_id, step_id, message_json, usage_json, created, status \
@@ -396,11 +398,7 @@ pub trait DurableStore: Send + Sync {
     fn answers(&self, job_id: &str) -> Result<HashMap<String, RawAnswer>, DurableStoreError>;
 
     /// One step's checkpoint, if present.
-    fn answer(
-        &self,
-        job_id: &str,
-        step_id: &str,
-    ) -> Result<Option<RawAnswer>, DurableStoreError>;
+    fn answer(&self, job_id: &str, step_id: &str) -> Result<Option<RawAnswer>, DurableStoreError>;
 
     /// Read a job's `result_events`, `seq > since`, in order.
     fn result_events_since(
@@ -458,7 +456,9 @@ impl SqliteDurableStore {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         init_schema(&conn)?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -510,11 +510,7 @@ impl DurableStore for SqliteDurableStore {
         Ok(out)
     }
 
-    fn answer(
-        &self,
-        job_id: &str,
-        step_id: &str,
-    ) -> Result<Option<RawAnswer>, DurableStoreError> {
+    fn answer(&self, job_id: &str, step_id: &str) -> Result<Option<RawAnswer>, DurableStoreError> {
         let key = format!("{job_id}{KEY_SEP}{step_id}");
         let conn = self.lock();
         let raw = conn

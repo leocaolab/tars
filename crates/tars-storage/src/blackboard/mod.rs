@@ -66,7 +66,13 @@ pub struct Transition<Ev> {
 
 impl<Ev> Transition<Ev> {
     pub fn new(kind: Ev, at: i64, version: Option<String>) -> Self {
-        Self { kind, at, version, reason: None, role: None }
+        Self {
+            kind,
+            at,
+            version,
+            reason: None,
+            role: None,
+        }
     }
 
     pub fn with_reason(mut self, reason: impl Into<String>) -> Self {

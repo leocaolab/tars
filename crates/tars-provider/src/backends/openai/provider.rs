@@ -166,7 +166,15 @@ impl LlmProvider for OpenAiProvider {
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
-        stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, model, ctx).await
+        stream_via_adapter(
+            self.http.clone(),
+            self.adapter.clone(),
+            auth,
+            req,
+            model,
+            ctx,
+        )
+        .await
     }
 
     fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn BatchSubmitter>> {
@@ -432,8 +440,8 @@ mod dialect_seam_tests {
     fn provider_defaults_to_standard_dialect_and_routes_through_it() {
         let http =
             HttpProviderBase::default_arc().expect("failed to create default HTTP provider base");
-        let provider = OpenAiProviderBuilder::new("openai", Auth::None)
-            .build(http, crate::auth::basic());
+        let provider =
+            OpenAiProviderBuilder::new("openai", Auth::None).build(http, crate::auth::basic());
 
         let req = ChatRequest {
             system: None,
@@ -451,7 +459,10 @@ mod dialect_seam_tests {
         };
 
         let via_dialect = provider.adapter.translate_request(&req, "gpt-4o").unwrap();
-        let direct = provider.adapter.build_request_default(&req, "gpt-4o").unwrap();
+        let direct = provider
+            .adapter
+            .build_request_default(&req, "gpt-4o")
+            .unwrap();
         assert_eq!(
             via_dialect, direct,
             "default dialect must produce the standard body byte-for-byte",
@@ -508,8 +519,8 @@ mod dialect_seam_tests {
     fn non_deepseek_base_url_emits_no_thinking() {
         use tars_types::ThinkingMode;
         let http = HttpProviderBase::default_arc().expect("http base");
-        let provider = OpenAiProviderBuilder::new("openai", Auth::None)
-            .build(http, crate::auth::basic());
+        let provider =
+            OpenAiProviderBuilder::new("openai", Auth::None).build(http, crate::auth::basic());
 
         let body = provider
             .adapter

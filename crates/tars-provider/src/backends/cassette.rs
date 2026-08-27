@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 
 use tars_types::{
     Capabilities, ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, RequestContext,
@@ -106,7 +106,9 @@ enum Mode {
         flush_path: Option<PathBuf>,
     },
     /// Serve recorded events by fingerprint; a miss is an error (signal).
-    Replay { cassette: HashMap<String, Recording> },
+    Replay {
+        cassette: HashMap<String, Recording>,
+    },
 }
 
 pub struct CassetteProvider {
@@ -230,7 +232,10 @@ fn write_cassette(map: &HashMap<String, Recording>, caps: &Capabilities, path: &
     }
     let recordings: std::collections::BTreeMap<String, Recording> =
         map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    let file = CassetteFile { capabilities: Some(caps.clone()), recordings };
+    let file = CassetteFile {
+        capabilities: Some(caps.clone()),
+        recordings,
+    };
     match serde_json::to_string_pretty(&file) {
         Ok(json) => {
             if let Some(parent) = path.parent() {
@@ -365,7 +370,10 @@ mod tests {
     async fn record_then_replay_round_trips_by_fingerprint() {
         let real = MockProvider::with_responses(
             "real",
-            vec![CannedResponse::text("FINDING_A"), CannedResponse::text("FINDING_B")],
+            vec![
+                CannedResponse::text("FINDING_A"),
+                CannedResponse::text("FINDING_B"),
+            ],
         );
         let rec = CassetteProvider::record("cass", real);
         assert_eq!(collect_text(rec.clone(), req("file-1")).await, "FINDING_A");
@@ -387,32 +395,52 @@ mod tests {
         use tars_types::{StopReason, Usage};
         let tool_resp = CannedResponse::Sequence(vec![
             ChatEvent::started("real"),
-            ChatEvent::ToolCallStart { index: 0, id: "c1".into(), name: "fs.write_file".into() },
+            ChatEvent::ToolCallStart {
+                index: 0,
+                id: "c1".into(),
+                name: "fs.write_file".into(),
+            },
             ChatEvent::ToolCallEnd {
                 index: 0,
                 id: "c1".into(),
                 parsed_args: serde_json::json!({"path": "a.rs", "content": "fixed"}),
                 thought_signature: None,
             },
-            ChatEvent::Finished { stop_reason: StopReason::ToolUse, usage: Usage::default() },
+            ChatEvent::Finished {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
         ]);
         let real = MockProvider::with_responses("real", vec![tool_resp]);
         let rec = CassetteProvider::record("cass", real);
-        assert_eq!(collect_tool_names(rec.clone(), req("fix")).await, vec!["fs.write_file"]);
+        assert_eq!(
+            collect_tool_names(rec.clone(), req("fix")).await,
+            vec!["fs.write_file"]
+        );
         let cassette = rec.take_captured();
 
         let play = CassetteProvider::replay("cass", cassette);
         // the tool call survives record→replay
-        assert_eq!(collect_tool_names(play.clone(), req("fix")).await, vec!["fs.write_file"]);
+        assert_eq!(
+            collect_tool_names(play.clone(), req("fix")).await,
+            vec!["fs.write_file"]
+        );
     }
 
     #[tokio::test]
     async fn replay_miss_is_a_signal() {
         let play = CassetteProvider::replay("cass", HashMap::new());
         let err = play
-            .stream(req("uncovered"), "test-model", RequestContext::test_default())
+            .stream(
+                req("uncovered"),
+                "test-model",
+                RequestContext::test_default(),
+            )
             .await;
-        assert!(err.is_err(), "a cassette miss must surface as an error, not a silent wrong answer");
+        assert!(
+            err.is_err(),
+            "a cassette miss must surface as an error, not a silent wrong answer"
+        );
     }
 
     #[test]
@@ -439,7 +467,10 @@ mod tests {
         // FIRST fixer call MISSes when replayed from a different directory.
         let here = r#"{"system":"Working directory (absolute): /Users/dev/checkout-a/.arc/worktrees/fix-1140ccbb\nfix it"}"#;
         let there = r#"{"system":"Working directory (absolute): /private/tmp/.tmpXY9/repo/.arc/worktrees/fix-563e568e\nfix it"}"#;
-        assert_ne!(here, there, "raw strings differ (different tmp/root prefixes)");
+        assert_ne!(
+            here, there,
+            "raw strings differ (different tmp/root prefixes)"
+        );
         assert_eq!(
             request_fingerprint_of(here),
             request_fingerprint_of(there),
@@ -457,7 +488,11 @@ mod tests {
 
         // A prompt with no worktree path (the critic) passes through untouched.
         let critic = r#"{"system":"review crates/foo.rs against the rubric"}"#;
-        assert_eq!(normalize_volatile(critic), critic, "non-worktree prompts are unchanged");
+        assert_eq!(
+            normalize_volatile(critic),
+            critic,
+            "non-worktree prompts are unchanged"
+        );
     }
 
     /// Hash a canonical string the same way `request_fingerprint` does, but
@@ -482,7 +517,10 @@ mod tests {
         };
         let json = serde_json::to_string(&file).unwrap();
         let back: CassetteFile = serde_json::from_str(&json).unwrap();
-        assert!(back.capabilities.unwrap().supports_tool_use, "caps survive the cassette file");
+        assert!(
+            back.capabilities.unwrap().supports_tool_use,
+            "caps survive the cassette file"
+        );
         // legacy bare map fails to parse as CassetteFile (no `recordings` key)
         assert!(serde_json::from_str::<CassetteFile>(r#"{"abc":[]}"#).is_err());
     }

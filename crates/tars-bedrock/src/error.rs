@@ -32,7 +32,9 @@ where
 /// message for the non-service cases. Kept separate so the service-error
 /// classification is unit-testable without constructing a full
 /// `SdkError` (which needs an HTTP response).
-fn into_service_error_or_context<R>(err: SdkError<ConverseError, R>) -> Result<ConverseError, String>
+fn into_service_error_or_context<R>(
+    err: SdkError<ConverseError, R>,
+) -> Result<ConverseError, String>
 where
     R: std::fmt::Debug,
 {
@@ -121,7 +123,9 @@ pub fn classify_stream_service_error(err: ConverseStreamError) -> ProviderError 
     let msg = service_message(&err);
     match err {
         ConverseStreamError::AccessDeniedException(_) => ProviderError::Auth(msg),
-        ConverseStreamError::ThrottlingException(_) => ProviderError::RateLimited { retry_after: None },
+        ConverseStreamError::ThrottlingException(_) => {
+            ProviderError::RateLimited { retry_after: None }
+        }
         ConverseStreamError::ModelNotReadyException(_)
         | ConverseStreamError::ServiceUnavailableException(_) => ProviderError::ModelOverloaded,
         ConverseStreamError::ValidationException(_)

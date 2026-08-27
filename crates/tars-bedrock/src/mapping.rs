@@ -10,10 +10,10 @@ use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as AwsConverseOu
 use aws_sdk_bedrockruntime::types::{
     AnyToolChoice, AutoToolChoice, ContentBlock as AwsContentBlock, ConversationRole,
     ConverseOutput as ConverseOutputBody, ImageBlock, ImageFormat, ImageSource,
-    InferenceConfiguration, Message as AwsMessage, ReasoningContentBlock,
-    SpecificToolChoice, StopReason as AwsStopReason, SystemContentBlock, TokenUsage, Tool,
-    ToolChoice as AwsToolChoice, ToolConfiguration, ToolInputSchema, ToolResultBlock,
-    ToolResultContentBlock, ToolResultStatus, ToolSpecification, ToolUseBlock,
+    InferenceConfiguration, Message as AwsMessage, ReasoningContentBlock, SpecificToolChoice,
+    StopReason as AwsStopReason, SystemContentBlock, TokenUsage, Tool, ToolChoice as AwsToolChoice,
+    ToolConfiguration, ToolInputSchema, ToolResultBlock, ToolResultContentBlock, ToolResultStatus,
+    ToolSpecification, ToolUseBlock,
 };
 use aws_smithy_types::Blob;
 
@@ -97,7 +97,10 @@ pub fn build_converse(req: &ChatRequest) -> Result<ConverseParts, ProviderError>
                 // with a ToolResult content block referencing the call id.
                 let result_content: Vec<ToolResultContentBlock> = content
                     .iter()
-                    .filter_map(|cb| cb.as_text().map(|t| ToolResultContentBlock::Text(t.to_string())))
+                    .filter_map(|cb| {
+                        cb.as_text()
+                            .map(|t| ToolResultContentBlock::Text(t.to_string()))
+                    })
                     .collect();
                 let mut trb = ToolResultBlock::builder()
                     .tool_use_id(tool_call_id.clone())
@@ -164,7 +167,10 @@ pub fn build_converse(req: &ChatRequest) -> Result<ConverseParts, ProviderError>
                 // `u32 → i32`: Bedrock's field is i32; a caller value above
                 // i32::MAX is nonsensical for a token cap — clamp rather
                 // than wrap, so we never send a negative token count.
-                .set_max_tokens(req.max_output_tokens.map(|n| i32::try_from(n).unwrap_or(i32::MAX)))
+                .set_max_tokens(
+                    req.max_output_tokens
+                        .map(|n| i32::try_from(n).unwrap_or(i32::MAX)),
+                )
                 .set_temperature(req.temperature)
                 .set_stop_sequences(stop)
                 .build(),
@@ -463,8 +469,14 @@ mod tests {
 
     #[test]
     fn stop_reason_maps_known_and_unknown() {
-        assert_eq!(map_stop_reason(&AwsStopReason::EndTurn), StopReason::EndTurn);
-        assert_eq!(map_stop_reason(&AwsStopReason::ToolUse), StopReason::ToolUse);
+        assert_eq!(
+            map_stop_reason(&AwsStopReason::EndTurn),
+            StopReason::EndTurn
+        );
+        assert_eq!(
+            map_stop_reason(&AwsStopReason::ToolUse),
+            StopReason::ToolUse
+        );
         assert_eq!(
             map_stop_reason(&AwsStopReason::ModelContextWindowExceeded),
             StopReason::Other

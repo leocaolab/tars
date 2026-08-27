@@ -103,9 +103,8 @@ impl SqlitePipelineEventLog {
     }
 
     pub fn in_memory() -> Result<Arc<Self>, StoreError> {
-        let conn = Connection::open_in_memory().map_err(|e| {
-            StoreError::backend_source("opening in-memory pipeline event store", e)
-        })?;
+        let conn = Connection::open_in_memory()
+            .map_err(|e| StoreError::backend_source("opening in-memory pipeline event store", e))?;
         Self::pragma_setup(&conn)?;
         Self::migrate(&conn)?;
         Ok(Arc::new(Self {

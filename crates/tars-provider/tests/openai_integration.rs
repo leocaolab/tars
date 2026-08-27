@@ -121,8 +121,7 @@ async fn deepseek_reasoning_content_surfaces_as_thinking_delta() {
         .base_url(server.uri())
         .build(http, basic());
 
-    let req = ChatRequest::user("what is 2+2?",
-    );
+    let req = ChatRequest::user("what is 2+2?");
     let mut stream = provider
         .stream(req, "test-model", RequestContext::test_default())
         .await
@@ -169,7 +168,8 @@ async fn complete_aggregates_streaming_response() {
     let resp = provider
         .complete(
             ChatRequest::user("hi"),
-            "test-model", RequestContext::test_default(),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
         .expect("complete ok");
@@ -199,7 +199,8 @@ async fn http_401_maps_to_auth_error() {
     let err = match provider
         .stream(
             ChatRequest::user("hi"),
-            "test-model", RequestContext::test_default(),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
     {
@@ -228,7 +229,8 @@ async fn http_429_maps_to_rate_limited() {
     let err = match provider
         .stream(
             ChatRequest::user("hi"),
-            "test-model", RequestContext::test_default(),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
     {
@@ -270,7 +272,8 @@ async fn streaming_tool_call_emits_start_delta_end() {
     let resp = provider
         .complete(
             ChatRequest::user("search rust"),
-            "test-model", RequestContext::test_default(),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
         .expect("complete ok");
@@ -296,7 +299,8 @@ async fn mock_provider_satisfies_trait() {
         .clone()
         .complete(
             ChatRequest::user("ping"),
-            "test-model", RequestContext::test_default(),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
         .unwrap();

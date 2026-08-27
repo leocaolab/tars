@@ -58,10 +58,7 @@ impl ProviderRegistry {
     /// The process-global provider registry. A **pure getter** — it never
     /// builds. [`ProviderRegistry::init`] must have run at the composition root.
     pub fn global() -> Result<Arc<ProviderRegistry>, RegistryError> {
-        REGISTRY
-            .get()
-            .cloned()
-            .ok_or(RegistryError::NotInitialized)
+        REGISTRY.get().cloned().ok_or(RegistryError::NotInitialized)
     }
 
     /// The process-global registry if it has already been built, else `None`.
@@ -91,7 +88,10 @@ mod tests {
             "precondition: nothing may have initialized the registry yet"
         );
         assert!(
-            matches!(ProviderRegistry::global(), Err(RegistryError::NotInitialized)),
+            matches!(
+                ProviderRegistry::global(),
+                Err(RegistryError::NotInitialized)
+            ),
             "an un-initialized registry must report, never lazily build"
         );
         assert!(
@@ -106,7 +106,10 @@ mod tests {
         // 3. A second init is reported, never a silent no-op over a registry
         //    the caller did not build.
         assert!(
-            matches!(ProviderRegistry::init(), Err(RegistryError::AlreadyInitialized)),
+            matches!(
+                ProviderRegistry::init(),
+                Err(RegistryError::AlreadyInitialized)
+            ),
             "a second init must error"
         );
 

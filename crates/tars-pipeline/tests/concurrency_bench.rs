@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 
 use tars_pipeline::{ChainOpts, LlmService};
 use tars_provider::provider::{LlmEventStream, LlmProvider};
@@ -82,7 +82,11 @@ impl LlmProvider for LatencyMock {
 /// optional `Semaphore` gate models the tars-runtime executor's `max_concurrent`
 /// cap (`tokio::sync::Semaphore`, executor.rs) — the concurrency limiter tars
 /// actually has today (there is NO proactive rate/TPM limiter — #41 is unbuilt).
-async fn drive(svc: Arc<LlmService>, n: usize, gate: Option<Arc<tokio::sync::Semaphore>>) -> Duration {
+async fn drive(
+    svc: Arc<LlmService>,
+    n: usize,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+) -> Duration {
     let start = Instant::now();
     let mut handles = Vec::with_capacity(n);
     for i in 0..n {
@@ -129,12 +133,18 @@ async fn host_concurrency_bench() {
 
     eprintln!("\n=== host-concurrency bench (latency/call = {latency:?}) ===");
     eprintln!("serialized baseline would be N * {latency:?}\n");
-    eprintln!("{:<10} {:<14} {:>10} {:>14} {:>12}", "service", "gate", "N", "wall", "throughput");
+    eprintln!(
+        "{:<10} {:<14} {:>10} {:>14} {:>12}",
+        "service", "gate", "N", "wall", "throughput"
+    );
 
     for &n in &[1_000usize, 10_000, 50_000] {
         let el = drive(chained.clone(), n, None).await;
         let tput = n as f64 / el.as_secs_f64();
-        eprintln!("{:<10} {:<14} {:>10} {:>14?} {:>10.0}/s", "chain", "unbounded", n, el, tput);
+        eprintln!(
+            "{:<10} {:<14} {:>10} {:>14?} {:>10.0}/s",
+            "chain", "unbounded", n, el, tput
+        );
     }
 
     // The concurrency gate tars actually has: a tokio Semaphore (executor's
@@ -144,13 +154,23 @@ async fn host_concurrency_bench() {
         let n = 10_000;
         let el = drive(chained.clone(), n, Some(gate)).await;
         let tput = n as f64 / el.as_secs_f64();
-        eprintln!("{:<10} {:<14} {:>10} {:>14?} {:>10.0}/s", "chain", format!("sem({c})"), n, el, tput);
+        eprintln!(
+            "{:<10} {:<14} {:>10} {:>14?} {:>10.0}/s",
+            "chain",
+            format!("sem({c})"),
+            n,
+            el,
+            tput
+        );
     }
 
     // Bare-vs-chain at 10k to show the middleware onion's overhead.
     let el = drive(bare.clone(), 10_000, None).await;
     let tput = 10_000f64 / el.as_secs_f64();
-    eprintln!("{:<10} {:<14} {:>10} {:>14?} {:>10.0}/s", "bare", "unbounded", 10_000, el, tput);
+    eprintln!(
+        "{:<10} {:<14} {:>10} {:>14?} {:>10.0}/s",
+        "bare", "unbounded", 10_000, el, tput
+    );
 
     // Proof of real concurrency: 10k calls at 50ms each, unbounded, must finish in
     // FAR less than the serialized 500s — i.e. they were genuinely parked together.
@@ -159,7 +179,9 @@ async fn host_concurrency_bench() {
         el < Duration::from_secs(5),
         "10k concurrent 50ms calls took {el:?} — expected << serialized 500s; concurrency broken"
     );
-    eprintln!("\nconcurrency proof: 10k × 50ms unbounded finished in {el:?} (serialized would be 500s)\n");
+    eprintln!(
+        "\nconcurrency proof: 10k × 50ms unbounded finished in {el:?} (serialized would be 500s)\n"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -196,7 +218,9 @@ async fn tpm_limiter_curve() {
     let cost = 100.0; // tokens/call the mock reports → the limiter binds on this
     let n = 2_000usize; // offered tokens = n * cost = 200k
 
-    eprintln!("\n=== TPM limiter curve — real TpmRateLimiter (latency={latency:?}, ~{cost}tok/call, N={n}) ===");
+    eprintln!(
+        "\n=== TPM limiter curve — real TpmRateLimiter (latency={latency:?}, ~{cost}tok/call, N={n}) ==="
+    );
     eprintln!(
         "{:>14} {:>12} {:>14} {:>14} {:>12}",
         "configured TPM", "wall", "achieved TPM", "achieved/cfg", "calls/s"
@@ -225,7 +249,11 @@ async fn tpm_limiter_curve() {
     .await;
     eprintln!(
         "{:>14} {:>12?} {:>14} {:>14} {:>12.0}",
-        "none", el, "-", "-", n as f64 / el.as_secs_f64()
+        "none",
+        el,
+        "-",
+        "-",
+        n as f64 / el.as_secs_f64()
     );
 
     // The curve must track: a tighter TPM must yield a strictly longer wall.
@@ -247,7 +275,10 @@ async fn drive_split(a: Arc<LlmService>, b: Arc<LlmService>, n: usize) -> Durati
         let svc = if i % 2 == 0 { a.clone() } else { b.clone() };
         handles.push(tokio::spawn(async move {
             let mut s = svc
-                .call(ChatRequest::user(format!("ping {i}")), RequestContext::test_default())
+                .call(
+                    ChatRequest::user(format!("ping {i}")),
+                    RequestContext::test_default(),
+                )
                 .await
                 .expect("call");
             while let Some(ev) = s.next().await {

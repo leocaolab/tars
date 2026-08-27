@@ -119,7 +119,10 @@ mod tests {
         assert_eq!(via_dialect.stop_reason, direct.stop_reason);
         assert_eq!(via_dialect.usage.input_tokens, direct.usage.input_tokens);
         assert_eq!(via_dialect.usage.output_tokens, direct.usage.output_tokens);
-        assert_eq!(via_dialect.usage.thinking_tokens, direct.usage.thinking_tokens);
+        assert_eq!(
+            via_dialect.usage.thinking_tokens,
+            direct.usage.thinking_tokens
+        );
         assert_eq!(
             via_dialect.usage.cached_input_tokens,
             direct.usage.cached_input_tokens

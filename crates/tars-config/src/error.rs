@@ -43,7 +43,9 @@ pub enum ConfigError {
     /// `init_tars` / `Config::set`. Reported rather than silently dropped:
     /// a second installer would otherwise run against a config it did not
     /// provide, with no way to find out.
-    #[error("tars config already initialized — init_tars/Config::set may run only once per process")]
+    #[error(
+        "tars config already initialized — init_tars/Config::set may run only once per process"
+    )]
     AlreadyInitialized,
 
     #[error("internal: {0}")]

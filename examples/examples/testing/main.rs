@@ -31,8 +31,6 @@ use tars_pipeline::{LlmService, complete_sync};
 use tars_provider::{CannedResponse, MockProvider};
 use tars_types::{ChatRequest, ProviderError, RequestContext};
 
-
-
 // ── The agent under test ────────────────────────────────────────────
 //
 // A tiny reviewer: classify a code snippet in one word. It depends only

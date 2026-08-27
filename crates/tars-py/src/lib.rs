@@ -564,8 +564,10 @@ impl Pipeline {
         // pick up the same canonical stack. The chain is rebuilt per
         // call bound to the caller-supplied model.
         let cache_origin = ProviderId::new(id.clone());
-        let events = event_stores
-            .map(|EventStorePair { events, records }| tars_pipeline::EventStores { events, records });
+        let events =
+            event_stores.map(
+                |EventStorePair { events, records }| tars_pipeline::EventStores { events, records },
+            );
         let factory: Arc<dyn Fn(&str) -> LlmService + Send + Sync> = {
             // `EventStores` isn't Clone, but its inner Arcs are — snapshot
             // the handles so each rebuild shares the same stores.
@@ -639,10 +641,11 @@ impl EventStorePair {
                 tars_melt::event::SqlitePipelineEventLogConfig::new(events_path),
             )
             .map_err(|e| runtime_to_py("open pipeline event store", e))?;
-        let records: Arc<dyn tars_melt::event::LlmRecordStore> = tars_melt::event::SqliteLlmRecordStore::open(
-            tars_melt::event::SqliteLlmRecordStoreConfig::new(records_path),
-        )
-        .map_err(|e| runtime_to_py("open llm record store", e))?;
+        let records: Arc<dyn tars_melt::event::LlmRecordStore> =
+            tars_melt::event::SqliteLlmRecordStore::open(
+                tars_melt::event::SqliteLlmRecordStoreConfig::new(records_path),
+            )
+            .map_err(|e| runtime_to_py("open llm record store", e))?;
         Ok(Self { events, records })
     }
 }
@@ -1675,57 +1678,57 @@ fn run_complete_tagged(
             // back the middleware's writes.
             let call_ctx = ctx.clone();
             let drain = async move {
-            let mut stream = svc.call(req, call_ctx).await.map_err(provider_to_py)?;
-            let mut builder = ChatResponseBuilder::new();
-            while let Some(ev) = stream.next().await {
-                let ev = ev.map_err(provider_to_py)?;
-                builder.apply(ev);
-            }
-            let mut resp = builder.finish();
+                let mut stream = svc.call(req, call_ctx).await.map_err(provider_to_py)?;
+                let mut builder = ChatResponseBuilder::new();
+                while let Some(ev) = stream.next().await {
+                    let ev = ev.map_err(provider_to_py)?;
+                    builder.apply(ev);
+                }
+                let mut resp = builder.finish();
 
-            // ValidationMiddleware (when present) publishes its
-            // post-Filter response + summary on the side-channel; prefer
-            // that over the stream-rebuild so `validation_summary` is
-            // populated and any Filter outcome is reflected.
-            // A poisoned lock here means a validator panicked while
-            // holding it. Falling through would return the *unfiltered*
-            // `builder.finish()` response — silently bypassing any
-            // FilterText/Reject outcome (PII scrub, content moderation,
-            // …). Refuse to serve potentially-unvalidated content.
-            match validation_handle.lock() {
-                Ok(rec) => {
-                    if let Some(filtered) = &rec.filtered_response {
-                        resp = filtered.clone();
+                // ValidationMiddleware (when present) publishes its
+                // post-Filter response + summary on the side-channel; prefer
+                // that over the stream-rebuild so `validation_summary` is
+                // populated and any Filter outcome is reflected.
+                // A poisoned lock here means a validator panicked while
+                // holding it. Falling through would return the *unfiltered*
+                // `builder.finish()` response — silently bypassing any
+                // FilterText/Reject outcome (PII scrub, content moderation,
+                // …). Refuse to serve potentially-unvalidated content.
+                match validation_handle.lock() {
+                    Ok(rec) => {
+                        if let Some(filtered) = &rec.filtered_response {
+                            resp = filtered.clone();
+                        }
+                    }
+                    Err(_) => {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "validation state lock poisoned — refusing to return a \
+                         possibly-unvalidated response (a validator likely panicked)",
+                        ));
                     }
                 }
-                Err(_) => {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        "validation state lock poisoned — refusing to return a \
-                         possibly-unvalidated response (a validator likely panicked)",
-                    ));
-                }
-            }
 
-            let telemetry = read_telemetry(&telemetry_handle);
-            let validation_summary = validation_summary_to_py(resp.validation_summary.clone());
+                let telemetry = read_telemetry(&telemetry_handle);
+                let validation_summary = validation_summary_to_py(resp.validation_summary.clone());
 
-            Ok(Response {
-                text: resp.text,
-                thinking: resp.thinking,
-                usage: Usage {
-                    input_tokens: resp.usage.input_tokens,
-                    output_tokens: resp.usage.output_tokens,
-                    cached_input_tokens: resp.usage.cached_input_tokens,
-                    cache_creation_tokens: resp.usage.cache_creation_tokens,
-                    thinking_tokens: resp.usage.thinking_tokens,
-                },
-                stop_reason: resp
-                    .stop_reason
-                    .map(|r| stop_reason_str(&r).to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-                telemetry,
-                validation_summary,
-            })
+                Ok(Response {
+                    text: resp.text,
+                    thinking: resp.thinking,
+                    usage: Usage {
+                        input_tokens: resp.usage.input_tokens,
+                        output_tokens: resp.usage.output_tokens,
+                        cached_input_tokens: resp.usage.cached_input_tokens,
+                        cache_creation_tokens: resp.usage.cache_creation_tokens,
+                        thinking_tokens: resp.usage.thinking_tokens,
+                    },
+                    stop_reason: resp
+                        .stop_reason
+                        .map(|r| stop_reason_str(&r).to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    telemetry,
+                    validation_summary,
+                })
             };
             RUN_CONTEXT.scope(ctx, drain).await
         })
@@ -1795,7 +1798,6 @@ pub(crate) fn stop_reason_str_pub(r: &StopReason) -> &'static str {
 fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
-
 
 /// PyO3 module entry point. Symbol must be `_tars_py` to match
 /// `pyproject.toml`'s `module-name = "tars._tars_py"`. Public Python

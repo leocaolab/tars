@@ -146,7 +146,8 @@ impl LlmProvider for AgentCliBackend {
         //    WE clipped — otherwise a cut reply looks like a natural end.
         let content = clamp_to_output_budget(content, req.max_output_tokens);
 
-        let mut events: Vec<Result<ChatEvent, ProviderError>> = Vec::with_capacity(content.len() + 1);
+        let mut events: Vec<Result<ChatEvent, ProviderError>> =
+            Vec::with_capacity(content.len() + 1);
         events.push(Ok(ChatEvent::started(model)));
         events.extend(content.into_iter().map(Ok));
 
@@ -251,7 +252,8 @@ mod tests {
         let events: Vec<ChatEvent> = Arc::clone(&backend)
             .stream(
                 ChatRequest::user("hi"),
-                "opus", RequestContext::test_default(),
+                "opus",
+                RequestContext::test_default(),
             )
             .await
             .unwrap()
@@ -259,7 +261,9 @@ mod tests {
             .collect()
             .await;
 
-        assert!(matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "opus"));
+        assert!(
+            matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "opus")
+        );
         assert!(matches!(&events[1], ChatEvent::Delta { text } if text == "hello from claude"));
         match &events[2] {
             ChatEvent::Finished { stop_reason, usage } => {
@@ -328,7 +332,8 @@ mod tests {
         let err = backend
             .complete(
                 ChatRequest::user("x"),
-                "test-model", RequestContext::test_default(),
+                "test-model",
+                RequestContext::test_default(),
             )
             .await
             .unwrap_err();
@@ -362,7 +367,8 @@ mod tests {
         let events: Vec<ChatEvent> = Arc::clone(&backend)
             .stream(
                 ChatRequest::user("hi"),
-                "gemini-2.5-pro", RequestContext::test_default(),
+                "gemini-2.5-pro",
+                RequestContext::test_default(),
             )
             .await
             .unwrap()
@@ -370,9 +376,13 @@ mod tests {
             .collect()
             .await;
 
-        assert!(matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "gemini-2.5-pro"));
+        assert!(
+            matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "gemini-2.5-pro")
+        );
         assert!(matches!(&events[1], ChatEvent::Delta { text } if text == "plain text answer"));
-        assert!(matches!(&events[2], ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn));
+        assert!(
+            matches!(&events[2], ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn)
+        );
     }
 
     #[test]
@@ -388,6 +398,8 @@ mod tests {
         ];
         let out = clamp_to_output_budget(content, None);
         assert!(matches!(&out[0], ChatEvent::Delta { text } if text.len() == 100));
-        assert!(matches!(&out[1], ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn));
+        assert!(
+            matches!(&out[1], ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn)
+        );
     }
 }

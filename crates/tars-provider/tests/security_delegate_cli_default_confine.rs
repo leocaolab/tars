@@ -86,7 +86,10 @@ async fn escape_blocked_async() {
     // ── drive the REAL production runner (a NON-claude one): the shared
     //    SharedCliRunner driving a GeminiCliDialect (prompt as arg, single-object
     //    JSON framing). ─────────────────────────────────────────────────────
-    let dialect = Arc::new(GeminiCliDialect::new("gemini".into(), Duration::from_secs(30)));
+    let dialect = Arc::new(GeminiCliDialect::new(
+        "gemini".into(),
+        Duration::from_secs(30),
+    ));
     let runner = SharedCliRunner::new(dialect);
     let result = runner.run(inv).await;
 

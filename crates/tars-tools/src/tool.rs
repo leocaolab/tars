@@ -9,9 +9,9 @@ use tokio_util::sync::CancellationToken;
 
 use tars_types::JsonSchema;
 
+use crate::SandboxPolicy;
 use crate::approval::ApprovalSink;
 use crate::permission::PermissionView;
-use crate::SandboxPolicy;
 
 /// Per-call environment a [`Tool`] receives. The `cancel`/`cwd` fields are the
 /// historical core; `permission`/`approval`/`sandbox` are the gate + seams

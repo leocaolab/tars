@@ -39,7 +39,11 @@ impl<D: BlackboardDomain> InMemoryBlackboard<D> {
     pub fn new(run_id: impl Into<String>) -> Self {
         Self {
             run_id: run_id.into(),
-            state: Mutex::new(State { entities: HashMap::new(), log: Vec::new(), _d: PhantomData }),
+            state: Mutex::new(State {
+                entities: HashMap::new(),
+                log: Vec::new(),
+                _d: PhantomData,
+            }),
         }
     }
 
@@ -98,7 +102,11 @@ impl<D: BlackboardDomain> Blackboard for InMemoryBlackboard<D> {
             .unwrap_or_else(|| self.run_id.clone());
         s.entities.insert(
             key.clone(),
-            Entry { value: e.clone(), status: D::initial_status(e), first_seen_run: first_seen },
+            Entry {
+                value: e.clone(),
+                status: D::initial_status(e),
+                first_seen_run: first_seen,
+            },
         );
 
         // Law #3 (idempotent on key+run+kind): absorb a duplicate transition.
@@ -108,7 +116,11 @@ impl<D: BlackboardDomain> Blackboard for InMemoryBlackboard<D> {
             .iter()
             .any(|ev| ev.key == key && ev.run_id == self.run_id && ev.kind_str == kind_str);
         if !dup {
-            s.log.push(Logged { key: key.clone(), run_id: self.run_id.clone(), kind_str });
+            s.log.push(Logged {
+                key: key.clone(),
+                run_id: self.run_id.clone(),
+                kind_str,
+            });
         }
 
         // Law #5 (value ≡ timeline): re-derive status from the post-append log.
