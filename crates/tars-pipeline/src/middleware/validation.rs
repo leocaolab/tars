@@ -1,62 +1,30 @@
-//! Output-validation middleware. See [Doc 15](../../docs/architecture/15-output-validation.md).
+//! Output-validation middleware.
 //!
-//! Position in the onion (W4 final): **outside Cache, outside Retry,
+//! Position in the onion: **outside Cache, outside Retry,
 //! inside Telemetry**. Onion order:
 //! `Telemetry → Validation → Cache → Retry → Provider`.
 //!
 //! `ValidationFailed` is **always `ErrorClass::Permanent`** — no retry.
-//! The W1 "retriable Reject" path was cut in W4: it would have required
-//! either putting Validation back inside Retry (re-introducing the
-//! cache×filter corruption W4 fixes) or duplicating retry logic inside
-//! ValidationMiddleware itself, both for a use case (model resample on
-//! validation failure) that real consumers (2026-05-08 dogfood feedback)
-//! don't have. Callers who do need a model retry on validation failure
+//! Callers who do need a model retry on validation failure
 //! catch `ValidationFailed` at their own layer.
 //!
-//! ## Lifecycle within `call()`
-//!
-//! 1. Drain the inner stream into a complete `ChatResponse`.
-//!    Validators by definition need the whole response (rule_id
-//!    whitelist needs all findings, JSON shape needs the full text).
-//!    Streaming UX is preserved at the *outer* layer (caller still
-//!    iterates a stream); inside this middleware, the response is
-//!    materialised once.
-//! 2. Run validators in registration order.
-//!    - `Pass` → keep response, record `OutcomeSummary::Pass`.
-//!    - `Filter { response, dropped }` → response replaces current;
-//!      subsequent validators see the filtered version.
-//!    - `Reject { reason }` → short-circuit. Return
-//!      `Err(ValidationFailed { validator, reason })` (always Permanent).
-//!      No subsequent validators run; no summary is attached because
-//!      there's no Response object.
-//!    - `Annotate { metrics }` → keep response; record metrics.
-//! 3. Stamp `validation_summary` onto the (potentially Filtered)
-//!    response. Re-emit as a stream so the caller-visible contract
-//!    is unchanged.
+//! Invariants:
+//! - Streaming UX is preserved at the outer layer, but validators materialise the full response internally.
+//! - Validators run in registration order; a `Filter` replaces the response for subsequent validators.
+//! - A `Reject` short-circuits immediately without a summary.
 //!
 //! ## Cache × Validator interaction
 //!
-//! W4 (2026-05-08) moved Validation OUTSIDE Cache, fixing two W1 bugs:
+//! Cache sees and stores raw Provider events. Validation runs on every call
+//! (hit or miss) because it sits outside Cache.
 //!
-//! 1. Cache used to store post-Filter events (because ValidationMiddleware
-//!    re-emit happened *inside* Cache); now Cache sees raw Provider
-//!    events and stores raw.
-//! 2. Cache hits used to skip validators entirely (because Cache
-//!    short-circuits before reaching its inner layer); now Validation
-//!    runs on every call — hit or miss — because it sits *outside* Cache.
+//! Validators are pure and rerun on every call. Cache holds raw across
+//! the lifetime of an entry, so multi-caller cache sharing across distinct
+//! validator chains is safe.
 //!
-//! Result: validators are pure (same input → same output, per
-//! [`OutputValidator`] trait contract) and rerun on every call. Cache
-//! holds raw across the lifetime of an entry — changing the validator
-//! chain on a Pipeline doesn't invalidate cache, multi-caller cache
-//! sharing across distinct validator chains is safe.
-//!
-//! Failed-validator runs DO have a side-effect on cache: the raw
-//! Provider response was already streamed through Cache before
-//! Validation could reject, so it's stored. Repeated cache hits
-//! deterministically fail the same way (validator is pure). Callers
-//! who want force-fresh on validation fail use an explicit
-//! `skip_cache=True` kwarg (future).
+//! A failed validation run still caches the raw response, because it streamed
+//! through Cache before Validation could reject. Repeated cache hits will
+//! deterministically fail the same way.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -74,7 +42,7 @@ use crate::service::Next;
 
 pub mod builtin;
 
-/// Trait implemented by output validators. See module docs / Doc 15
+/// Trait implemented by output validators. See module docs
 /// for the full lifecycle and design rationale.
 ///
 /// **Pure-function contract**: implementations MUST be deterministic
@@ -82,7 +50,7 @@ pub mod builtin;
 /// (no IO, no global state mutation). The Cache×Validator interaction
 /// rule depends on this property — if it breaks, multi-caller cache
 /// sharing produces incorrect behaviour. Validators that need IO go
-/// to the evaluator framework (Doc 16) where async + non-determinism
+/// to the evaluator framework where async + non-determinism
 /// are first-class.
 ///
 /// **Panic safety**: implementations should not panic on
@@ -113,9 +81,7 @@ pub struct ValidationMiddleware {
 }
 
 impl ValidationMiddleware {
-    /// Build from a `Vec<Arc<dyn OutputValidator>>`. Callers porting
-    /// from the previous `Vec<Box<...>>` shape rewrite `Box::new(X)`
-    /// to `Arc::new(X)`; single-validator vec literals need an
+    /// Build from a `Vec<Arc<dyn OutputValidator>>`. Single-validator vec literals need an
     /// explicit `as Arc<dyn OutputValidator>` cast on one element
     /// (subsequent elements coerce automatically).
     pub fn new(validators: Vec<Arc<dyn OutputValidator>>) -> Self {
@@ -209,7 +175,7 @@ impl Middleware for ValidationMiddleware {
                     // Don't write summary on Reject — there's no
                     // Response to attach it to. The error itself
                     // carries everything caller needs. ValidationFailed
-                    // is always Permanent (W4): no retry.
+                    // is always Permanent: no retry.
                     return Err(ProviderError::ValidationFailed {
                         validator: name,
                         reason,

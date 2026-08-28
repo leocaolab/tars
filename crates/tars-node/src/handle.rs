@@ -120,7 +120,7 @@ impl Provider {
     }
 
     /// Single non-streaming chat completion against the raw provider. Re-scopes
-    /// `RUN_CONTEXT` with this handle's ctx at the boundary (Doc 06 §9).
+    /// `RUN_CONTEXT` with this handle's ctx at the boundary.
     #[napi]
     pub async fn complete(&self, opts: CompleteOptions) -> napi::Result<CompleteResult> {
         drive_complete(self.inner.clone(), self.ctx.clone(), opts).await

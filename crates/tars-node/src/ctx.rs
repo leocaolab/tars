@@ -1,4 +1,4 @@
-//! The FFI call-context boundary (Doc 06 §9, Doc 12 §7.2).
+//! The FFI call-context boundary.
 //!
 //! `RUN_CONTEXT` is a Rust-internal `tokio::task_local` — it deliberately does
 //! **not** cross the napi hop. So on the JS side the context is **explicit**: a
@@ -41,7 +41,7 @@ fn next_trace() -> TraceId {
 pub struct JsContext {
     /// Session id — the conversation / batch partition. Default `"local"`.
     pub session: Option<String>,
-    /// Tenant id — the multi-tenant partition key (Doc 06 §8). Default
+    /// Tenant id — the multi-tenant partition key. Default
     /// `"local"`.
     pub tenant: Option<String>,
     /// Trace id for log correlation. Default: an auto-incremented `node-<n>`.

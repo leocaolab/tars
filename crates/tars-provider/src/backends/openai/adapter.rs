@@ -1,9 +1,4 @@
 //! Wire-format translation for OpenAI / OpenAI-compatible endpoints.
-//!
-//! Pure I/O-free struct: takes a `base_url` + `HttpProviderExtras`,
-//! translates [`ChatRequest`] ↔ OpenAI JSON, parses SSE deltas into
-//! [`ChatEvent`]s, classifies HTTP errors. Reusable in tests without
-//! an `HttpProviderBase`.
 
 use std::sync::Arc;
 
@@ -28,7 +23,6 @@ use super::mapping::drain_buffer_into;
 /// Models that require `max_completion_tokens` instead of `max_tokens`.
 const NEW_TOKENS_PARAM_PREFIXES: &[&str] = &["gpt-5", "o1", "o3", "o4"];
 
-/// The wire-format adapter — pure functions, no state.
 pub struct OpenAiAdapter {
     base_url: String,
     extras: HttpProviderExtras,
@@ -59,14 +53,11 @@ impl OpenAiAdapter {
         }
     }
 
-    /// Swap in a non-default dialect (a per-variant `impl OpenAiDialect`).
-    /// The provider builder calls this; `new` alone yields [`StandardDialect`].
     pub(super) fn with_dialect(mut self, dialect: Arc<dyn OpenAiDialect>) -> Self {
         self.dialect = dialect;
         self
     }
 
-    /// Decide which "max tokens" parameter the model accepts.
     fn max_tokens_field(model: &str) -> &'static str {
         if NEW_TOKENS_PARAM_PREFIXES
             .iter()
@@ -78,7 +69,6 @@ impl OpenAiAdapter {
         }
     }
 
-    /// Translate one of our [`Message`]s into OpenAI's wire format.
     fn translate_message(m: &Message) -> Value {
         match m {
             Message::User { content } => json!({
@@ -178,7 +168,6 @@ impl OpenAiAdapter {
         Value::Array(out)
     }
 
-    /// Build the full OpenAI tool spec from our [`tars_types::ToolSpec`].
     fn translate_tools(tools: &[tars_types::ToolSpec]) -> Value {
         let arr: Vec<Value> = tools
             .iter()
@@ -200,7 +189,6 @@ impl OpenAiAdapter {
         Value::Array(arr)
     }
 
-    /// Build a URL under `{base_url}/files{suffix}` (file upload + download).
     pub(crate) fn files_url(&self, suffix: &str) -> Result<Url, ProviderError> {
         let trimmed = self.base_url.trim_end_matches('/');
         Url::parse(&format!("{trimmed}/files{suffix}"))
@@ -216,8 +204,6 @@ impl OpenAiAdapter {
             .map_err(|e| ProviderError::Internal(format!("bad openai batches url: {e}")))
     }
 
-    /// Standard OpenAI chat/completions body; the [`OpenAiDialect`] default
-    /// (`StandardDialect`) delegates here.
     pub(crate) fn build_request_default(
         &self,
         req: &ChatRequest,
@@ -255,7 +241,6 @@ impl OpenAiAdapter {
             "model": model,
             "messages": messages,
             "stream": true,
-            // Ask for token usage in the final stream chunk.
             "stream_options": {"include_usage": true},
         });
 
@@ -344,8 +329,6 @@ impl OpenAiAdapter {
         Ok(body)
     }
 
-    /// Standard OpenAI SSE parsing — the [`OpenAiDialect`] default
-    /// (`StandardDialect`) delegates here.
     pub(crate) fn parse_event_default(
         &self,
         raw: &SseEvent,

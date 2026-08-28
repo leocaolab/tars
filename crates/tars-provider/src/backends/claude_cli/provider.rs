@@ -1,14 +1,12 @@
 //! Provider lifecycle for the Claude CLI backend: the builder and the
 //! `claude_cli()` convenience constructor.
 //!
-//! Since Doc 32 M0, the runtime provider is the shared
+//! The runtime provider is the shared
 //! [`AgentCliBackend`](crate::backends::cli::AgentCliBackend) driven by a
 //! [`ClaudeCliDialect`](crate::backends::cli::ClaudeCliDialect). This module
-//! keeps only the claude-specific **construction** surface — the public
+//! keeps the claude-specific **construction** surface — the public
 //! [`ClaudeCliProviderBuilder`] API that `registry.rs` and the smoke test
-//! depend on — and wires the builder's configuration into a dialect + the
-//! real subprocess runner. [`ClaudeCliProvider`] is an alias to
-//! `AgentCliBackend` so the crate-root re-export stays stable.
+//! depend on.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -304,11 +302,6 @@ mod tests {
     }
 
     // ─── argv-shape tests ──────────────────────────────────────────────
-    //
-    // The point of these tests is *not* to assert that the CLI does what
-    // we hope. The point is: when Anthropic renames `--tools` to
-    // `--enabled-tools` (or whatever), exactly the tests below break,
-    // they break loudly, and we know to update one constant in one place.
 
     fn make_invocation(
         configure: impl FnOnce(ClaudeCliProviderBuilder) -> ClaudeCliProviderBuilder,
@@ -402,7 +395,7 @@ mod tests {
         let inv = make_invocation(|b| b);
         let argv = build_argv(&inv);
 
-        // Required backbone — unchanged from the pre-Builder-overhaul shape.
+        // Required backbone.
         assert_eq!(argv[0], "-p");
         assert_eq!(argv[1], "-");
         let m = idx(&argv, "--model");

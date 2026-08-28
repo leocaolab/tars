@@ -1,22 +1,4 @@
-//! Invocation-shape types and argv construction for the CLI-delegate
-//! backends. This is the SHARED machinery, lifted verbatim out of
-//! `claude_cli/argv.rs` (Doc 32 §7 reuse map) so every CLI dialect can
-//! reuse the [`SubprocessRunner`] trait and the [`SubprocessInvocation`]
-//! payload.
-//!
-//! Holds the "what flags go where" knowledge: the [`SubprocessRunner`]
-//! trait every runner implements, the [`SubprocessInvocation`] payload,
-//! the env-strip table, and the pure functions ([`build_argv`],
-//! [`build_argv_with`], [`streaming_enabled`]) that translate a builder
-//! configuration into the exact tokens that follow `claude`.
-//!
-//! ## M0 note
-//! The argv builder ([`build_argv_with`]) and the field enums
-//! ([`ClaudeCliTools`], [`ClaudeCliEffort`]) are still claude-flavored —
-//! they were lifted here as the shared base so the `security_delegate_cli`
-//! integration test keeps driving `RealSubprocessRunner::run` with the
-//! same [`SubprocessInvocation`] fields. M1 generalizes the invocation and
-//! moves the per-CLI argv knowledge fully behind each `CliDialect::argv`.
+//! Invocation-shape types and argv construction for the CLI-delegate backends.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -106,24 +88,13 @@ pub struct SubprocessInvocation {
     pub cwd: Option<PathBuf>,
     /// OS-confinement policy for the spawn (G10). Threaded from
     /// `RequestContext.sandbox` (resolved from the `[sandbox]` section +
-    /// `--sandbox` flag). `DangerFullAccess` (the default) leaves the spawn
-    /// unconfined — in which case the legacy `TARS_CLAUDE_SANDBOX=1` env gate
-    /// still applies a workspace-write jail (back-compat). A confining mode
-    /// here is the real policy path and takes precedence over the env gate.
+    /// `--sandbox` flag).
     pub sandbox: tars_sandbox::SandboxPolicy,
 }
 
 impl SubprocessInvocation {
     /// Build a CLI-neutral invocation for a **non-claude** dialect: only the
-    /// fields the shared spawn machinery actually needs (executable, model,
-    /// prompt, timeout, env-strip table, cwd). The claude-specific argv knobs
-    /// (`system`/`tools`/`bare`/`effort`/`exclude_dynamic_sections`/
-    /// `extra_args`) are inert for these dialects — each builds its own argv in
-    /// [`CliDialect::argv`](super::dialect::CliDialect::argv) and its paired
-    /// runner. This is the M1 seam: the invocation is still claude-shaped, so
-    /// gemini/codex fill the neutral fields and leave the claude knobs at their
-    /// defaults. Doc 32 M4/G10 generalizes the invocation so the inert fields
-    /// go away entirely.
+    /// fields the shared spawn machinery actually needs.
     pub fn neutral(
         executable: String,
         model: String,
@@ -185,19 +156,14 @@ pub(crate) fn streaming_enabled() -> bool {
 }
 
 /// Construct the full `claude` argv (without the executable itself) for
-/// a given [`SubprocessInvocation`]. Shared between the production
-/// runner and the argv-shape tests — that's the whole point of
-/// factoring this out: when Anthropic renames a flag, exactly one
-/// place changes and every test covering that flag fails immediately.
+/// a given [`SubprocessInvocation`].
 ///
 /// Output format is `json` by default. When `TARS_CLAUDE_CLI_STREAM` is
 /// set, the CLI is invoked with `stream-json` + `--include-partial-messages`
 /// + `--verbose`, which produces a real-time NDJSON event stream
 ///   (the runner tees each event to stderr for observability,
 ///   reconstructs the final `result` event as the return Value).
-// Production now calls `build_argv_with` directly (reading
-// `streaming_enabled()` exactly once — see `RealSubprocessRunner::run`).
-// This convenience wrapper remains for the argv unit tests.
+
 #[allow(dead_code)]
 pub(crate) fn build_argv(inv: &SubprocessInvocation) -> Vec<String> {
     build_argv_with(inv, streaming_enabled())

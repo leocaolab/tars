@@ -106,7 +106,7 @@ pub fn hello(name: String) -> String {
     format!("tars-node says hi, {name}")
 }
 
-/// One failed bless assertion (Doc 28). `expected`/`actual` are JSON-encoded
+/// One failed bless assertion. `expected`/`actual` are JSON-encoded
 /// strings so any value shape survives the FFI boundary.
 #[napi(object)]
 pub struct BlessDrift {
@@ -124,7 +124,7 @@ pub struct BlessResult {
 }
 
 /// Load a committed bless file and check a completion's text against it
-/// (Doc 28). `text` is decoded as JSON (chatty-tolerant), then each blessed
+///. `text` is decoded as JSON (chatty-tolerant), then each blessed
 /// field is asserted. Mirrors `tars-py`'s `bless_check`.
 #[napi]
 pub fn bless_check(path: String, text: String) -> Result<BlessResult> {
@@ -164,9 +164,8 @@ pub struct CompleteOptions {
     /// System prompt.
     pub system: Option<String>,
     /// Pre-built message list as opaque JSON (`[{ role, content }, ...]`).
-    /// Mutually exclusive with `user`. M3 will replace with a typed
-    /// `MessageJs[]`; M2 keeps it `Value` so a Node caller with an
-    /// existing OpenAI-shape message list can drop it in.
+    /// Mutually exclusive with `user`. Kept permissive as `Value` so
+    /// a Node caller with an existing OpenAI-shape message list can drop it in.
     pub messages: Option<serde_json::Value>,
     /// Cap on output tokens. Unset → provider default.
     pub max_output_tokens: Option<u32>,
@@ -175,7 +174,7 @@ pub struct CompleteOptions {
     /// Enable thinking / extended reasoning (provider-specific).
     pub thinking: Option<bool>,
     /// JSON Schema the model MUST conform to. Triggers the provider's
-    /// strict structured-output mode (Doc 01 §9).
+    /// strict structured-output mode.
     pub response_schema: Option<serde_json::Value>,
     /// When `response_schema` is set, require strict conformance
     /// (default true). False → schema is a hint, not enforced.
@@ -224,7 +223,7 @@ pub struct Pipeline {
     /// drives the clone on the tokio runtime without moving `self`.
     inner: LlmService,
     /// The explicit call context re-scoped onto `RUN_CONTEXT` at the binding
-    /// boundary for each `complete()` (Doc 06 §9). The `from_*` factories set a
+    /// boundary for each `complete()`. The `from_*` factories set a
     /// fresh single-user default; the role path
     /// ([`handle::pipeline`]) threads an explicit ctx.
     ctx: RequestContext,
@@ -232,13 +231,10 @@ pub struct Pipeline {
 
 #[napi]
 impl Pipeline {
-    /// Construct from a `.arc/config.toml`-shaped file. `providerId`
-    /// names which `[providers.<id>]` block in the TOML to bind to.
-    /// Errors:
-    ///   - file missing / unreadable / not valid TOML → ConfigError
-    ///   - provider id absent from the config → ConfigError
-    ///   - provider construction fails (e.g. bad API key shape) →
-    ///     ProviderError
+/// Errors:
+///   - file missing / unreadable / not valid TOML → ConfigError
+///   - provider id absent from the config → ConfigError
+///   - provider construction fails (e.g. bad API key shape) → ProviderError
     #[napi(factory)]
     pub fn from_config_path(path: String, provider_id: String) -> Result<Pipeline> {
         let cfg = ConfigManager::load_from_file(&path)
@@ -265,11 +261,7 @@ impl Pipeline {
     }
 
     /// Single non-streaming chat-completion call.
-    ///
-    /// Builds a `ChatRequest` from `opts`, drives it through the
-    /// held middleware stack, drains the resulting event stream,
-    /// returns the aggregated text + usage + stop_reason. napi-rs
-    /// marshals this as a `Promise<CompleteResult>` to JS callers.
+    /// napi-rs marshals this as a `Promise<CompleteResult>` to JS callers.
     #[napi]
     pub async fn complete(&self, opts: CompleteOptions) -> Result<CompleteResult> {
         drive_complete(self.inner.clone(), self.ctx.clone(), opts).await
@@ -277,11 +269,7 @@ impl Pipeline {
 }
 
 impl Pipeline {
-    /// Internal constructor shared by every `from_*` factory: wrap
-    /// the resolved `Arc<dyn LlmProvider>` in TARS's default
-    /// middleware onion (`LlmService::default_chain`) so cache, retry,
-    /// telemetry, and the rest are all active by construction. Uses a fresh
-    /// single-user default context (the handle path threads its own).
+    /// Cache, retry, telemetry, and the rest are all active by construction.
     fn from_provider(id: String, provider: Arc<dyn LlmProvider>, model: String) -> Self {
         let opts = ChainOpts::new(ProviderId::new(id.clone()));
         let inner = LlmService::default_chain(provider, model, opts);
@@ -301,7 +289,7 @@ impl Pipeline {
 }
 
 /// Drive one non-streaming completion through `svc`, re-establishing the
-/// explicit call context on `RUN_CONTEXT` at the binding boundary (Doc 06 §9:
+/// explicit call context on `RUN_CONTEXT` at the binding boundary (§9:
 /// the `task_local` never crosses the FFI hop, so we re-scope it per call).
 /// Shared by [`LlmService::complete`] and [`handle::Provider::complete`].
 pub(crate) async fn drive_complete(
@@ -394,8 +382,7 @@ fn stop_reason_str(r: &tars_types::StopReason) -> &'static str {
     }
 }
 
-/// Build a `ChatRequest` from the napi `CompleteOptions`. Mirrors
-/// `tars-py::build_request` but for the napi shape.
+
 fn build_request(opts: CompleteOptions) -> Result<ChatRequest> {
     if opts.user.is_some() && opts.messages.is_some() {
         return Err(Error::from_reason(
@@ -441,8 +428,7 @@ fn build_request(opts: CompleteOptions) -> Result<ChatRequest> {
 
 /// Map the boolean `thinking` flag onto the typed
 /// [`tars_types::ThinkingMode`]. `true` → Auto (provider picks the
-/// depth); `false` → Off. Granular control (Budget(N) for specific
-/// token caps) is M5+ work.
+/// depth); `false` → Off.
 fn map_thinking(enabled: bool) -> ThinkingMode {
     if enabled {
         ThinkingMode::Auto
@@ -453,8 +439,7 @@ fn map_thinking(enabled: bool) -> ThinkingMode {
 
 /// Parse the opaque `messages` JSON into typed `Message`s. Accepts
 /// the canonical OpenAI-style `[{role: "user|assistant|system|tool",
-/// content: "..."}, ...]` shape. M3 will switch to a typed
-/// `MessageJs[]` napi struct; M2 keeps it permissive so existing
+/// content: "..."}, ...]` shape. Kept permissive so existing
 /// OpenAI-shape callers can drop in.
 fn parse_messages_json(v: serde_json::Value) -> Result<Vec<Message>> {
     let arr = v

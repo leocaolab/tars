@@ -42,8 +42,7 @@ use tars_types::{
 
 use crate::provider::{LlmEventStream, LlmProvider};
 
-/// One recorded call: the event sequence, plus the canonical request text the
-/// fingerprint was taken over.
+///
 ///
 /// `request` is what makes a MISS diffable. It is optional because cassettes
 /// recorded before this field exists must keep loading — for those, a MISS can
@@ -73,8 +72,7 @@ impl Recording {
     }
 }
 
-/// Accepts BOTH shapes: the legacy bare `[event, …]` array and the current
-/// `{ request?, events }` object. Written by hand rather than `#[serde(untagged)]`
+/// Written by hand rather than `#[serde(untagged)]`
 /// so a malformed object reports ITS error instead of the untagged
 /// "data did not match any variant", which hides the real cause.
 impl<'de> serde::Deserialize<'de> for Recording {
@@ -103,8 +101,6 @@ impl<'de> serde::Deserialize<'de> for Recording {
     }
 }
 
-/// Pick the recording a MISS should be compared against, and say how it was
-/// picked.
 ///
 /// Selection only — no diffing and no rendering. Those are the testing layer's
 /// job (`tars_harness::cassette_diff`); this side owns the recordings, so it is
@@ -151,7 +147,7 @@ fn pick_baseline<'a>(
     Some((fp, req, "prefix"))
 }
 
-/// The consumer's label for this call, read from the request context.
+///
 ///
 /// Lives in `attributes` because that map's stated purpose is passing values
 /// through to inner layers — and "which step of the journey is this" is the
@@ -220,8 +216,6 @@ pub fn request_fingerprint(req: &ChatRequest, model: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// The EXACT text the fingerprint is taken over, after volatile-path
-/// normalization.
 ///
 /// Recorded alongside every response so a MISS can be explained rather than
 /// merely announced. A fingerprint alone tells you "the request changed" and
@@ -238,14 +232,13 @@ pub fn canon_request(req: &ChatRequest, model: &str) -> String {
 }
 
 enum Mode {
-    /// Pass through `inner`, capturing each (fingerprint → events) into
-    /// `captured`. `flush_path` (if set) is written after every capture.
+    /// `flush_path` (if set) is written after every capture.
     Record {
         inner: Arc<dyn LlmProvider>,
         captured: Mutex<HashMap<String, Recording>>,
         flush_path: Option<PathBuf>,
     },
-    /// Serve recorded events by fingerprint; a miss is an error (signal).
+    /// A miss is an error (signal).
     Replay {
         cassette: HashMap<String, Recording>,
     },
@@ -257,7 +250,7 @@ pub struct CassetteProvider {
     mode: Mode,
 }
 
-/// On-disk cassette: the recordings PLUS the recorded provider's capabilities.
+///
 /// ProviderProfile matter because arc builds a DIFFERENT request depending on
 /// whether the provider advertises tool support (a fixer's request carries tool
 /// defs); a replay that advertised a bare `text_only_baseline` produced a
@@ -274,8 +267,7 @@ struct CassetteFile {
 }
 
 impl CassetteProvider {
-    /// Replay from a loaded cassette (fingerprint → recorded event sequence),
-    /// advertising a bare text-only baseline.
+    ///
     pub fn replay(id: impl Into<ProviderId>, cassette: HashMap<String, Recording>) -> Arc<Self> {
         Self::replay_with_caps(id, cassette, None)
     }
@@ -300,12 +292,12 @@ impl CassetteProvider {
         })
     }
 
-    /// Record by wrapping a real provider; flush the captured map with `take`.
+    ///
     pub fn record(id: impl Into<ProviderId>, inner: Arc<dyn LlmProvider>) -> Arc<Self> {
         Self::record_to(id, inner, None)
     }
 
-    /// Record + flush to `flush_path` (if set) after every captured response.
+    ///
     /// `seed` pre-loads already-recorded entries so a recording session split
     /// across multiple registry builds ACCUMULATES into the file instead of
     /// each build overwriting it with only its own captures.
@@ -317,7 +309,7 @@ impl CassetteProvider {
         Self::record_seeded(id, inner, flush_path, HashMap::new())
     }
 
-    /// Like [`Self::record_to`] but pre-seeded with prior recordings.
+    ///
     pub fn record_seeded(
         id: impl Into<ProviderId>,
         inner: Arc<dyn LlmProvider>,
@@ -352,7 +344,7 @@ impl CassetteProvider {
         Ok(Self::replay(id, cassette))
     }
 
-    /// Drain everything captured so far (record mode) → write it to a cassette.
+    ///
     pub fn take_captured(&self) -> HashMap<String, Recording> {
         match &self.mode {
             Mode::Record { captured, .. } => {
@@ -363,8 +355,7 @@ impl CassetteProvider {
     }
 }
 
-/// Serialize a captured map + the recorded provider's capabilities to a cassette
-/// file (sorted keys → stable, diff-friendly). Best-effort: a write failure is
+/// Best-effort: a write failure is
 /// logged, never panics.
 fn write_cassette(
     map: &HashMap<String, Recording>,
@@ -452,8 +443,7 @@ impl LlmProvider for CassetteProvider {
                 captured,
                 flush_path,
             } => {
-                // Collect the inner stream, capture the full event sequence,
-                // then re-emit verbatim (collect-then-replay; recording is not
+                // collect-then-replay; recording is not
                 // latency-sensitive). Only a clean stream (no transport error)
                 // is cached — a failed call must not be frozen as a "response".
                 // Read the step label BEFORE the context is moved into the inner

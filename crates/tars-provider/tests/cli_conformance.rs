@@ -1,12 +1,4 @@
-//! Cross-dialect CLI-delegate conformance suite — Doc 14 §8.2 D-12.
-//!
-//! The subprocess sibling of [`conformance.rs`]: where that suite mounts a
-//! wiremock server and drives each HTTP backend through one shared test body,
-//! this one mounts a **fake [`SubprocessRunner`]** and drives each of the
-//! CLI-delegate dialects (claude / codex / opencode / antigravity)
-//! through the invariants they all share. One `CliScenarios` impl per dialect,
-//! one `cli_conformance_suite!` line each — same shape as the HTTP suite.
-//!
+//! Cross-dialect CLI-delegate conformance suite.
 //! What the suite proves is UNIFORM across every dialect:
 //!   1. **Declarations.** Each dialect declares a `(PromptChannel, OutputMode,
 //!      OutputFraming)` triple and the backend/runner honor it.
@@ -73,13 +65,12 @@ const CONFIG_TIMEOUT: Duration = Duration::from_secs(137);
 const ANSWER: &str = "conformance answer";
 
 // ──────────────────────────────────────────────────────────────────────
-// Fake runners — the subprocess analog of conformance.rs's wiremock mounts.
+// Fake runners.
 // A dialect never spawns anything here; the runner hands back a canned payload
 // (the exact shape the real `SharedCliRunner`/`RealSubprocessRunner` would
 // reconstruct for that dialect's declared framing) or a typed failure.
 // ──────────────────────────────────────────────────────────────────────
 
-/// Returns a canned payload, ignoring the invocation — the happy path.
 struct OkRunner {
     payload: Value,
 }
@@ -91,7 +82,6 @@ impl SubprocessRunner for OkRunner {
     }
 }
 
-/// Reports a dead subprocess — the typed error the backend must pass through.
 struct DeadRunner;
 
 #[async_trait]
@@ -104,7 +94,6 @@ impl SubprocessRunner for DeadRunner {
     }
 }
 
-/// Build an `AgentCliBackend` around a scenario's dialect + a runner.
 fn backend(
     dialect: Arc<dyn CliDialect>,
     runner: Arc<dyn SubprocessRunner>,
@@ -124,8 +113,7 @@ fn jsonl(lines: &[&str]) -> Value {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Per-dialect scenarios — each a unit struct used as a namespace, mirroring
-// conformance.rs's `scenarios::OpenAi` / `::Anthropic` / `::Gemini`.
+// Per-dialect scenarios — each a unit struct used as a namespace.
 // ──────────────────────────────────────────────────────────────────────
 
 mod scenarios {
@@ -383,18 +371,18 @@ macro_rules! cli_conformance_suite {
                     .collect()
                     .await;
 
-                // First event is Started echoing the requested model.
+
                 assert!(
                     matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == model),
                     "first event must be Started({model}), got {:?}",
                     events[0],
                 );
-                // Some content Delta carries the answer text verbatim.
+
                 assert!(
                     events.iter().any(|e| matches!(e, ChatEvent::Delta { text } if text == ANSWER)),
                     "a Delta must carry the answer text, got {events:?}",
                 );
-                // Terminal event is a natural Finished(EndTurn).
+
                 assert!(
                     matches!(
                         events.last(),

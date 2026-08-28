@@ -94,8 +94,6 @@ pub(crate) fn install(
     ))
 }
 
-/// Build the batch OTLP tracer provider, tagging spans with
-/// `service.name` and applying head sampling at `sample_ratio`.
 fn build_provider(
     endpoint: &str,
     service: &str,

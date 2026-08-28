@@ -1,18 +1,9 @@
 //! tars-config — declarative configuration for TARS Runtime.
 //!
-//! Per Doc 06 (process isolation) the shape is a global immutable Config
+//! Under process isolation, the shape is a global immutable Config
 //! loaded once from `~/.tars` (one tenant per process) plus a small
-//! per-workspace `[roles]` overlay — NOT the old shared-process 5-layer
-//! stack with hot reload / in-process tenant overrides (that is the
-//! DEPRECATED appendix of Doc 06). This v0.1 ships only the pieces needed
-//! to **declaratively configure providers** so the existing
-//! `tars-provider` builders no longer need to be hand-wired:
-//!
-//! - [`Config`] — top-level container (only `providers` populated for now)
-//! - [`ProvidersConfig`] / [`ProviderConfig`] — provider declarations
-//!   covering every concrete backend in `tars-provider`
-//! - [`ConfigManager`] — load + validate from a TOML file
-//! - [`ConfigError`] — typed errors for all loader / validator paths
+//! per-workspace `[roles]` overlay. This ships only the pieces needed
+//! to **declaratively configure providers**.
 //!
 //! Everything else (tenants, pipeline order, lock constraints, hot
 //! reload, secret manager backends) lands in subsequent iterations.

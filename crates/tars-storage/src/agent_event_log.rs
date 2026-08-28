@@ -1,9 +1,6 @@
 //! [`AgentEventLog`] trait — append-only per-trajectory event log.
 //!
-//! Doc 04 §3 describes the Trajectory as an event-sourced tree; this
-//! trait is the durable backing for that. Two implementors today:
-//! the SQLite-backed [`crate::SqliteAgentEventLog`] (Personal mode) and
-//! a future Postgres impl (Team mode, Doc 14 M6).
+//! This trait is the durable backing for the event-sourced Trajectory tree.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

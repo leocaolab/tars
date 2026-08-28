@@ -171,7 +171,6 @@ fn write_starter_config(target: &Path, force: bool) -> Result<()> {
         Ok(mut f) => {
             f.write_all(STARTER_TEMPLATE.as_bytes())
                 .with_context(|| format!("writing starter config to {}", target.display()))?;
-            // Surface write/fsync errors before we report success.
             f.flush()
                 .with_context(|| format!("flushing starter config to {}", target.display()))?;
             f.sync_all()

@@ -17,7 +17,6 @@ use tars_types::{
 use crate::provider::{LlmEventStream, LlmProvider};
 use std::collections::VecDeque;
 
-/// A canned response for the mock to replay.
 #[derive(Clone, Debug)]
 pub enum CannedResponse {
     /// Simple text completion — emits Started + one Delta + Finished.
@@ -30,13 +29,11 @@ pub enum CannedResponse {
 }
 
 impl CannedResponse {
-    /// Convenience — single text response.
     pub fn text(s: impl Into<String>) -> Self {
         Self::Text(s.into())
     }
 }
 
-/// Records calls to the mock so tests can assert on them.
 #[derive(Debug, Default)]
 pub struct MockHistory {
     pub requests: Vec<ChatRequest>,
@@ -105,9 +102,6 @@ impl MockProvider {
         })
     }
 
-    /// Replace the canned response — useful for multi-step tests that
-    /// want to vary behavior between invocations.
-    ///
     /// Recovers from a poisoned mutex (`into_inner`) rather than
     /// `unwrap()`-panicking: a prior panic while holding the lock must not
     /// cascade-panic this helper and mask the original test failure.

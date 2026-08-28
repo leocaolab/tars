@@ -14,16 +14,14 @@ use crate::roles::RoleConfig;
 use crate::routing::RoutingConfig;
 use crate::sandbox::SandboxConfig;
 
-/// Top-level configuration. Future fields (pipeline, cache, agents,
-/// tools, tenants, secrets, observability, deployment) land here as
-/// each subsystem comes online.
+/// Top-level configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub providers: ProvidersConfig,
 
-    /// M2: tier-based routing table. Doc 01 §12 + Doc 02 §4.6.
+    /// 
     /// Optional — if missing, the CLI falls through to single-provider
     /// dispatch (existing behaviour).
     #[serde(default)]
@@ -46,9 +44,9 @@ pub struct Config {
     #[serde(default)]
     pub roles: HashMap<String, RoleConfig>,
 
-    /// M4 (D6): user security config → `tars_sandbox::SandboxPolicy`, threaded
-    /// into `ToolContext.sandbox`. **Optional** — absent `[sandbox]` = `None` =
-    /// today's behaviour (unconfined / `DangerFullAccess`). Present = opt into
+    /// User security config mapped to `tars_sandbox::SandboxPolicy`, threaded
+    /// into `ToolContext.sandbox`. **Optional** — absent `[sandbox]` = `None`
+    /// (unconfined / `DangerFullAccess`). Present = opt into
     /// confinement. See [`crate::sandbox`] + [`crate::resolve_policy`] (the
     /// `--sandbox` flag overrides the mode here).
     #[serde(default)]
@@ -92,11 +90,8 @@ impl Config {
     pub fn validate(&self) -> Result<(), Vec<ValidationError>> {
         let mut errs = Vec::new();
         self.providers.validate(&mut errs);
-        // Routing references must point at known provider IDs.
         let known: HashSet<_> = self.providers.iter().map(|(id, _)| id.clone()).collect();
         self.routing.validate(&known, &mut errs);
-        // Each `[roles]` entry must reference a known provider id — same
-        // dangling-reference check the routing tiers get — and name a model.
         for (role, entry) in &self.roles {
             let id = &entry.provider;
             if !known.contains(id) {
@@ -130,10 +125,9 @@ impl Config {
 
 /// Loads + validates a [`Config`] from a single TOML file.
 ///
-/// Under Doc 06 (process isolation) this loads the global immutable Config
+/// Under process isolation this loads the global immutable Config
 /// once from ~/.tars; the per-workspace `[roles]` overlay is a separate small
-/// layer. The old shared-process 5-layer merge (System/Tenant/Per-Request +
-/// hot reload) is the DEPRECATED appendix of Doc 06, not the target.
+/// layer.
 pub struct ConfigManager;
 
 impl ConfigManager {
@@ -208,13 +202,11 @@ mod tests {
             default_model = "gpt-4o"
         "#;
         let cfg = ConfigManager::load_from_str(toml_str).unwrap();
-        // User entry present.
         assert!(
             cfg.providers
                 .get(&tars_types::ProviderId::new("openai_main"))
                 .is_some()
         );
-        // Built-ins also merged in (`mlx`, `vllm`, etc.).
         assert!(
             cfg.providers
                 .get(&tars_types::ProviderId::new("mlx"))
@@ -280,11 +272,6 @@ mod tests {
 
     #[test]
     fn empty_providers_block_yields_builtins_only() {
-        // Previous behavior: empty `[providers]` failed validation.
-        // New behavior (per Stage-2 builtin-merge): empty user table
-        // is fine, the loader fills in built-in defaults so callers
-        // can resolve `mlx` / `vllm` / `openai` etc. without writing
-        // any TOML at all.
         let toml_str = r#"
             [providers]
         "#;
@@ -329,7 +316,6 @@ mod tests {
             tars_types::ProviderId::new("deepseek")
         );
         assert_eq!(cfg.roles["critic"].model, "deepseek-chat");
-        // `mlx` is a built-in, merged in, so a role pointing at it validates.
         assert_eq!(
             cfg.roles["fixer"].provider,
             tars_types::ProviderId::new("mlx")
@@ -419,7 +405,6 @@ mod tests {
 
     #[test]
     fn all_validation_errors_collected_at_once() {
-        // Two distinct violations — we expect BOTH in the error list.
         let toml_str = r#"
             [providers.ant]
             type = "anthropic"
@@ -434,8 +419,6 @@ mod tests {
         let err = ConfigManager::load_from_str(toml_str).unwrap_err();
         match err {
             ConfigError::ValidationFailed { errors } => {
-                // Should catch both the anthropic auth violation and
-                // the openai_compat empty base_url violation.
                 assert!(errors.iter().any(|e| e.key.contains("ant.auth")));
                 assert!(errors.iter().any(|e| e.key.contains("compat.base_url")));
             }

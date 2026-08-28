@@ -1,9 +1,6 @@
 //! `tars harness` — this crate's own command-line surface.
 //!
-//! The arg definitions live next to the machinery they drive, so adding a flag
-//! is one file, not two crates. What stays with the binary is the part that is
-//! genuinely a binary's job: finding the config file and building a registry
-//! from it. That arrives as the `resolve` closure, because "where is the config"
+//! The `resolve` closure arrives because "where is the config"
 //! is a question about how the program was invoked, and this crate has no
 //! opinion on it.
 //!
@@ -61,9 +58,9 @@ pub enum HarnessCommand {
     /// case), writing `judge_report.json` into the run directory. The
     /// judge is a normal tars provider (default `claude_cli`); anti-
     /// incest refuses a judge whose provider matches the run's. See
-    /// Doc 18 §7.
+    /// §7.
     Judge(EvalJudgeArgs),
-    /// Bless an eval run's outputs — the approval loop (Doc 28). With
+    /// Bless an eval run's outputs — the approval loop. With
     /// `--select <jsonpath>` it captures the selected fields of each
     /// case's `output.txt` into `<case>/output.bless.json`; without, it
     /// checks each output against its committed bless and reports drift.
@@ -116,7 +113,7 @@ pub struct EvalDiffArgs {
     /// Add a tool-trajectory section: head-to-head divergence of the tools
     /// each run's model selected (paired by case id, from the persisted
     /// `tool_trajectory`), plus McNemar on any `trajectory-match` check both
-    /// runs share. No oracle needed for the divergence. (Doc 26 P2.)
+    /// runs share. No oracle needed for the divergence.
     #[arg(long)]
     pub trajectory: bool,
     /// Similarity mode for the head-to-head divergence: exact | ordered | set.
@@ -152,12 +149,12 @@ pub struct EvalRunArgs {
     /// Recognized: `non-empty`, `valid-json`, `max-length:<N>`, and
     /// `trajectory-match[:<exact|ordered|set|args|args-judge>[:<threshold>]]` — scores the
     /// tools the model selected against each case's `expected_tools.json`
-    /// (Doc 26). Custom invariants are a Rust-API feature (Doc 18 §4.1).
+    ///. Custom invariants are a Rust-API feature.
     #[arg(long = "check")]
     pub checks: Vec<String>,
 
     /// Run each case through a tool-using agent loop instead of a single
-    /// completion, so multi-step tool trajectories are produced (Doc 26 M2'').
+    /// completion, so multi-step tool trajectories are produced.
     /// SAFETY: only read-only tools are available and they're jailed to the
     /// case dir — never `bash` / write tools.
     #[arg(long)]
@@ -172,7 +169,7 @@ pub struct EvalRunArgs {
     #[arg(long)]
     pub agent_max_iterations: Option<u32>,
 
-    /// Judge provider for `trajectory-match:args-judge` (Doc 26 M3' pt2) —
+    /// Judge provider for `trajectory-match:args-judge` —
     /// an LLM decides whether byte-different tool arguments are *semantically*
     /// equivalent. Must differ from `--provider` (anti-incest).
     #[arg(long)]
@@ -187,8 +184,7 @@ pub struct EvalRunArgs {
 pub async fn execute(args: HarnessArgs, resolve: ResolveProvider<'_>) -> Result<()> {
     match args.command {
         HarnessCommand::Eval(a) => {
-            // Resolve config → registry → provider (same path `tars run` uses),
-            // then hand the engine plain values.
+            // Resolve config → registry → provider (same path `tars run` uses).
             let (registry, provider_id) = resolve(a.provider.as_deref())?;
             run_eval(EvalRunConfig {
                 registry,

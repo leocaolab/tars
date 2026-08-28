@@ -1,10 +1,10 @@
 //! The keyless, lazily-signed Bedrock client and the aggregate
-//! `complete_response` entry point (Doc 31 §6 C3 / §8.1).
+//! `complete_response` entry point.
 //!
 //! **Keyless** — there is no `Auth`/api-key here. The AWS SDK's default
 //! credential chain (env / profile / SSO / ECS / EC2 IMDS) resolves the
 //! signing identity and SigV4-signs every request; tars handles no key
-//! material (Doc 31 §5/§13).
+//! material.
 //!
 //! **Lazy client** — `ProviderRegistry::build_one` is synchronous but the
 //! AWS client build (`aws_config::defaults(..).load().await`) is async, so
@@ -94,10 +94,10 @@ impl BedrockClient {
             .await
     }
 
-    /// Non-streaming completion (Doc 31 §8.2): map → sign → unary
+    /// Non-streaming completion: map → sign → unary
     /// `converse()` → classify → replay into a [`ChatResponse`]. Unary
     /// `converse()` is strictly cheaper than `converse_stream()` for the
-    /// aggregate case, so both the trait `complete` and the M0 `stream`
+    /// aggregate case, so both the trait `complete` and the `stream`
     /// (converse-then-replay) go through here.
     pub async fn complete_response(
         &self,
@@ -119,7 +119,7 @@ impl BedrockClient {
         converse_output_to_response(&out, model)
     }
 
-    /// Streaming completion (Doc 31 §6 C2 / M1): map → sign →
+    /// Streaming completion: map → sign →
     /// `converse_stream()` → translate each `ConverseStreamOutput` event
     /// into a canonical [`ChatEvent`] *incrementally*.
     ///
@@ -182,7 +182,7 @@ pub fn default_capabilities() -> ProviderProfile {
         supports_parallel_tool_calls: true,
         supports_structured_output: StructuredOutputMode::ToolUseEmulation,
         supports_vision: true,
-        // M0 does not yet translate the reasoning knob into the
+        // does not yet translate the reasoning knob into the
         // model-family `additionalModelRequestFields` (see mapping.rs).
         supports_thinking: false,
         supports_cancel: true,

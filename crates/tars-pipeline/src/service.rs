@@ -3,17 +3,15 @@
 //! single bound [`tars_provider::LlmProvider`].
 //!
 //! `LlmService` is intentionally narrow: it binds one `provider + model`
-//! and a fixed, ordered stack of middleware `layers`. A call walks the
-//! layers outer→inner via [`Next`]; the innermost step is the terminal
-//! `provider.stream(req, model, ctx)`. Provider-level concerns (`id`,
+//! and a fixed, ordered stack of middleware `layers`.
+//! Provider-level concerns (`id`,
 //! `capabilities`, `count_tokens`, `cost`) belong to the *Provider* and
 //! don't leak into pipeline composition.
 //!
 //! Provider *selection* (routing / ensemble / provider-fallback) is NOT
 //! a pipeline concern: a caller who wants it composes multiple
-//! `LlmService`s themselves (build N services, call and merge / try in
-//! order). The pipeline's single primitive is "one provider + model,
-//! wrapped in a middleware chain".
+//! `LlmService`s themselves. The pipeline's single primitive is "one
+//! provider + model, wrapped in a middleware chain".
 
 use std::sync::Arc;
 
@@ -26,10 +24,6 @@ use crate::middleware::Middleware;
 /// [`LlmService`] and calls [`LlmService::call`] — it is **model-blind**:
 /// the concrete model is bound here at construction (`provider + model`),
 /// never carried on the [`ChatRequest`].
-///
-/// A call runs the `layers` outer→inner as a handler-chain (see
-/// [`Next`]) and finishes at the terminal `provider.stream(...)`.
-/// Cheap to clone (Arcs + a small Vec of Arcs).
 #[derive(Clone)]
 pub struct LlmService {
     /// The single provider this service streams from at the bottom of
@@ -51,7 +45,7 @@ pub struct LlmService {
 
 impl LlmService {
     /// The leaf service: bind a concrete `model` to a `provider` with no
-    /// middleware. A call goes straight to `provider.stream(req, model, ctx)`.
+    /// middleware.
     pub fn of(provider: Arc<dyn LlmProvider>, model: impl Into<String>) -> LlmService {
         LlmService::compose(provider, model, Vec::new())
     }
@@ -72,9 +66,7 @@ impl LlmService {
         next.run(req, ctx).await
     }
 
-    /// Outermost-first list of layer names. `["telemetry", "retry"]`
-    /// means a request hits Telemetry first, then Retry, then the
-    /// terminal provider.
+    /// Outermost-first list of layer names.
     pub fn layer_names(&self) -> &[&'static str] {
         &self.layer_names
     }
@@ -89,15 +81,14 @@ impl LlmService {
         &self.provider
     }
 
-    /// Split into `(provider, model, layers)`. Crate-internal: lets the
-    /// builder re-seat an already-built service as the inner stack under
-    /// additional outer layers ([`crate::LlmService::builder_with_inner`]).
+    /// Crate-internal: lets the builder re-seat an already-built service
+    /// as the inner stack under additional outer layers
+    /// ([`crate::LlmService::builder_with_inner`]).
     pub(crate) fn into_parts(self) -> (Arc<dyn LlmProvider>, String, Vec<Arc<dyn Middleware>>) {
         (self.provider, self.model, self.layers)
     }
 
-    /// Assemble from a provider + bound model + an outer→inner layer
-    /// stack. Crate-internal: the [`crate::LlmServiceBuilder`] produces the
+    /// Crate-internal: the [`crate::LlmServiceBuilder`] produces the
     /// layer stack and hands it here.
     pub(crate) fn compose(
         provider: Arc<dyn LlmProvider>,
@@ -114,15 +105,10 @@ impl LlmService {
     }
 }
 
-/// Cursor over an [`LlmService`]'s remaining middleware chain. A layer's
-/// [`Middleware::handle`] receives a `Next`; calling [`Next::run`]
-/// advances to the next layer (or, once the layers are exhausted, to the
-/// terminal `provider.stream(...)`).
+/// Cursor over an [`LlmService`]'s remaining middleware chain.
 ///
-/// `Next` is a triple of shared references (the remaining layer slice,
-/// the bound provider, and the bound model), so it is `Copy`: a
-/// middleware that needs to invoke the rest of the chain more than once
-/// (retry) or zero times (cache hit) simply calls — or doesn't call —
+/// `Next` is `Copy`: a middleware that needs to invoke the rest of the chain
+/// more than once (retry) or zero times (cache hit) simply calls — or doesn't call —
 /// `run` as needed.
 ///
 /// The **model** rides on the cursor rather than the call signature: it
@@ -148,9 +134,6 @@ impl<'a> Next<'a> {
         self.model
     }
 
-    /// Advance the chain by one step. If a layer remains, run it with a
-    /// `Next` over the rest; otherwise call the terminal provider with the
-    /// bound model.
     pub async fn run(
         self,
         req: ChatRequest,
@@ -170,12 +153,9 @@ impl<'a> Next<'a> {
     }
 }
 
-/// The terminal of the chain: stream from the bound provider, stamping
-/// the provider-level telemetry the outer layers read back.
+/// The terminal of the chain: stream from the bound provider.
 ///
-/// This is the innermost layer. Record it AND wrap the stream to time
-/// the actual provider work (HTTP open + SSE drain). When called from
-/// inside `RetryMiddleware` the outer call may invoke us multiple times —
+/// When called from inside `RetryMiddleware` the outer call may invoke us multiple times —
 /// `provider_latency_ms` accumulates across attempts so it reflects total
 /// provider wall time across the whole call.
 async fn stream_from_provider(
@@ -207,8 +187,7 @@ async fn stream_from_provider(
     let started = std::time::Instant::now();
     let telemetry = ctx.telemetry.clone();
 
-    // `LlmProvider::stream` takes `Arc<Self>`; clone the provider Arc. The
-    // model arrives as an explicit argument — the request is model-agnostic
+    // The model arrives as an explicit argument — the request is model-agnostic
     // content, the ctx carries no model.
     let inner = provider.clone().stream(req, model, ctx).await?;
 
@@ -228,8 +207,7 @@ async fn stream_from_provider(
     Ok(Box::pin(observed))
 }
 
-/// Records accumulated provider wall-time into the shared telemetry on
-/// drop. Living in a guard (rather than code after the stream loop) means
+/// Living in a guard (rather than code after the stream loop) means
 /// the latency is captured whether the consumer drains the stream to
 /// completion or drops it early — the post-loop tail of an `async_stream`
 /// never runs on early drop.

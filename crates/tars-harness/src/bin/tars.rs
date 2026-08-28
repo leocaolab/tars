@@ -1,11 +1,5 @@
 //! `tars` — the TARS Runtime CLI.
 //!
-//! M1 scope (Doc 14 §7.2 acceptance script): single `run` subcommand
-//! that loads config, builds a pipeline, fires one prompt, streams text
-//! to stdout, prints token+cost summary at end. Other subcommands
-//! (`chat`, `dash`, `task ...`, `config validate/show`, completions)
-//! land in M5.
-//!
 //! Layered cleanly so the actual work lives in modules — `main.rs` is
 //! just clap routing + error → exit-code translation. Keeps the
 //! testable surface (`run::execute`) free of clap types.
@@ -97,8 +91,6 @@ impl From<LogFormat> for TelemetryFormat {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Send a single prompt to a provider and stream the response.
-    /// RETIRED — ran on the deleted OrchestratorAgent/Plan model; not ported to run_dag/board.
-    /// RETIRED — ran on the deleted Orchestrator→Worker→Critic run_task model; not ported to run_dag/board.
     /// Sanity-check a CLI provider (`claude_cli` / `codex_cli` / `antigravity`) — sends
     /// a fixed "say hi" prompt and dumps every event so you can see what the
     /// subprocess actually returns.
@@ -140,7 +132,7 @@ async fn main() -> ExitCode {
     // Telemetry init goes through tars-melt so every binary in the
     // workspace lands the same formatter / env-filter / span shape.
     // The guard is bound to `_telemetry` so `Drop` runs at process
-    // exit (M1 no-op; M5 will flush the OTel exporter).
+    // exit.
     //
     // Use the fallible `init()` (not `init_or_warn`) so that if the
     // subscriber fails to install, the user sees it — otherwise

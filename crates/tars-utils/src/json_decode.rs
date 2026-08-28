@@ -414,18 +414,12 @@ fn find_balanced(bytes: &[u8], start: usize, open: u8, close: u8) -> Option<usiz
     None
 }
 
-/// Extension trait adding a `json` decode method to
-/// [`tars_types::ChatResponse`].
-///
 /// `ChatResponse` is defined in `tars-types`, so the orphan rule forbids
 /// an inherent `impl` here in `tars-utils`; the method rides in on this
 /// trait instead. Bring it into scope (`use tars_utils::ResponseJsonExt;`)
 /// at any `resp.json::<T>(mode)` call site.
 pub trait ResponseJsonExt {
-    /// Decode this response's assistant `text` into a typed `T`, using
-    /// `mode` to pick the decode strategy. Convenience wrapper over
-    /// [`decode_json`]; see it for the mode semantics.
-    ///
+    /// `mode` is the [`StructuredOutputMode`] the request/provider used
     /// `mode` is the [`StructuredOutputMode`] the request/provider used
     /// (from the provider's [`ProviderProfile`](tars_types::ProviderProfile)),
     /// so the caller — which knows how the response was produced — tells
@@ -439,12 +433,10 @@ impl ResponseJsonExt for ChatResponse {
     }
 }
 /// Best-effort recovery of the COMPLETE leading object elements of a truncated
-/// JSON array. Walks the array from its opening `[`, tracking brace
-/// depth + JSON string state, and returns every element that is fully balanced —
-/// dropping only the incomplete tail element the truncation cut off. Bare
-/// (non-object) elements are skipped: elements are expected to be objects, and a
-/// half-written scalar isn't worth guessing at. Returns an empty vec when there is no
-/// recoverable array or no complete element.
+/// JSON array.
+///
+/// Bare (non-object) elements are skipped: elements are expected to be objects, and a
+/// half-written scalar isn't worth guessing at.
 pub fn salvage_json_array(raw: &str, array_key: Option<&str>) -> Vec<Value> {
     let Some(arr_start) = find_json_array_start(raw, array_key) else {
         return Vec::new();
@@ -499,11 +491,9 @@ pub fn salvage_json_array(raw: &str, array_key: Option<&str>) -> Vec<Value> {
     out
 }
 
-/// Locate the byte index just AFTER the `[` that opens the JSON array.
 /// Prefers the envelope form (`"key": [ … ]`); falls
 /// back to a bare top-level array (`[ … ]`) ONLY when the reply starts with `[`
-/// (after stripping whitespace). `None` when there is no
-/// safely-identifiable array to recover from.
+/// (after stripping whitespace).
 pub fn find_json_array_start(raw: &str, array_key: Option<&str>) -> Option<usize> {
     if let Some(key) = array_key {
         let search = format!("\"{}\"", key);

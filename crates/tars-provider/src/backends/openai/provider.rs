@@ -1,6 +1,4 @@
-//! `OpenAiProvider`, its builder, the `LlmProvider` impl, the
-//! `BatchSubmitter` implementation (OpenAI Batch API), and the default
-//! capability descriptor.
+//! `OpenAiProvider`, its builder, and the `LlmProvider` impl.
 
 use std::sync::Arc;
 
@@ -73,8 +71,7 @@ impl OpenAiProviderBuilder {
     }
 
     builder_setter! {
-        /// Attach user-config-supplied http_headers / env_http_headers /
-        /// query_params.
+        ///
         extras: HttpProviderExtras
     }
 
@@ -478,7 +475,7 @@ impl BatchSubmitter for OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    /// Shared GET that pulls the batch object JSON for status / results.
+    ///
     async fn fetch_batch_object(
         &self,
         id: &BatchJobId,

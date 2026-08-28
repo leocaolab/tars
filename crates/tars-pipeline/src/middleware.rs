@@ -21,15 +21,9 @@ pub(crate) mod telemetry;
 pub(crate) mod tenant_budget;
 pub(crate) mod validation;
 
-/// One node in the middleware handler-chain. A layer does its pre-work,
-/// calls [`Next::run`] to invoke the rest of the chain (zero, one, or many
-/// times), and does its post-work — the same shape as a `tower::Service`
-/// wrapping its inner, but driven by an explicit `next` cursor rather than
-/// a stored `inner` handle.
+/// One node in the middleware handler-chain.
 ///
-/// The concrete public service is [`LlmService`]; users implement this
-/// trait and add instances via [`LlmServiceBuilder::layer`]. The **model**
-/// is NOT a call argument: it belongs to the `LlmService`
+/// The **model** is NOT a call argument: it belongs to the `LlmService`
 /// (`provider + model`), and the layers that need it query it off the
 /// chain cursor via [`Next::model`]. The ones that don't never see it.
 #[async_trait]
@@ -37,12 +31,7 @@ pub trait Middleware: Send + Sync + 'static {
     /// Stable, low-cardinality label used in tracing spans / metrics.
     fn name(&self) -> &'static str;
 
-    /// Handle one call. Do pre-work, then call `next.run(req, ctx)` to
-    /// descend to the next layer (or the terminal provider), then
-    /// post-work on the result / stream. Short-circuiting layers (cache
-    /// hit, budget reject) may skip `next` entirely; retrying layers may
-    /// call it more than once. Layers that key on the bound model read it
-    /// from `next.model()`.
+    /// Handle one call.
     async fn handle(
         &self,
         req: ChatRequest,
@@ -56,9 +45,8 @@ pub trait Middleware: Send + Sync + 'static {
 /// service type, [`LlmService`].
 impl LlmService {
     /// Start a new builder around a Provider bound to a concrete
-    /// `model`. The leaf becomes the innermost service; layers added via
-    /// [`LlmServiceBuilder::layer`] wrap it from inside out, with the
-    /// **first** added layer ending up outermost.
+    /// `model`. Layers added via [`LlmServiceBuilder::layer`] wrap from
+    /// inside out, with the **first** added layer ending up outermost.
     pub fn builder(provider: Arc<dyn LlmProvider>, model: impl Into<String>) -> LlmServiceBuilder {
         LlmServiceBuilder {
             provider,
@@ -69,8 +57,7 @@ impl LlmService {
     }
 
     /// Start a builder from an already-bound [`LlmService`] as the
-    /// bottom. The inner service's provider + bound model carry through,
-    /// and its existing layers stay innermost; layers added via
+    /// bottom. The existing layers stay innermost; layers added via
     /// [`LlmServiceBuilder::layer`] wrap OUTSIDE them.
     pub fn builder_with_inner(inner: LlmService) -> LlmServiceBuilder {
         let (provider, model, inner_layers) = inner.into_parts();
@@ -90,13 +77,9 @@ impl LlmService {
     /// ```
     ///
     /// `Validation` sits OUTSIDE `Cache` so cache stores raw provider
-    /// events and validators run on every call (W4 — see Doc 15 §2 /
-    /// Doc 17 §8). `EventEmitter` is outermost when configured so it
+    /// events and validators run on every call. `EventEmitter` is outermost when configured so it
     /// sees the complete telemetry + validation_summary picture for
     /// every call.
-    ///
-    /// This is the Rust-native counterpart of `tars.Pipeline.from_default`
-    /// in tars-py — same composition, no Python dependency.
     pub fn default_chain(
         provider: Arc<dyn LlmProvider>,
         model: impl Into<String>,
@@ -165,11 +148,7 @@ pub struct EventStores {
     pub records: Arc<dyn tars_melt::event::LlmRecordStore>,
 }
 
-/// Options for [`LlmService::default_chain`]. Constructed with
-/// [`ChainOpts::new`] (just a cache origin); each field overridable
-/// before passing to `default_chain`.
-///
-/// Marked `non_exhaustive` so adding fields is a non-breaking change.
+/// Options for [`LlmService::default_chain`].
 #[non_exhaustive]
 pub struct ChainOpts {
     /// Cache namespace id. Distinguishes cache buckets across providers
@@ -210,9 +189,7 @@ pub struct ChainOpts {
 }
 
 impl ChainOpts {
-    /// Minimal opts: only the cache origin specified, everything else
-    /// at defaults (no validators, no event store, in-mem cache,
-    /// default retry).
+    /// Minimal opts: only the cache origin specified.
     pub fn new(cache_origin: tars_types::ProviderId) -> Self {
         Self {
             cache_origin,
@@ -226,8 +203,7 @@ impl ChainOpts {
     }
 }
 
-/// Builder. Layers added via [`Self::layer`] are recorded outer→inner in
-/// add order; `build()` produces an [`LlmService`] whose chain runs the
+/// Builder. `build()` produces an [`LlmService`] whose chain runs the
 /// first-added layer outermost (the order users read top-to-bottom in
 /// code), with any pre-seeded `inner_layers` (from
 /// [`LlmService::builder_with_inner`]) kept innermost.
@@ -248,8 +224,6 @@ impl LlmServiceBuilder {
         self
     }
 
-    /// Return the one concrete public [`LlmService`], carrying the bound
-    /// provider + model and the assembled outer→inner layer stack.
     pub fn build(self) -> LlmService {
         let mut layers = self.outer_layers;
         layers.extend(self.inner_layers);

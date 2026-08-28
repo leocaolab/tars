@@ -1,10 +1,5 @@
 //! `tars run-report <trajectory_id> [--json]` — per-run summary.
 //!
-//! Reads the trajectory event log + rolls it up into a [`RunReport`].
-//! Pretty output by default (human-readable table); `--json` emits the
-//! full report as a single JSON object on stdout for jq / scripting.
-//!
-//! See `docs/eval-and-arc-llm-roadmap.md §1.1` for the design intent.
 //! V1 aggregates from the trajectory store only; LlmCallFinished
 //! pipeline events are not yet joined in (worker doesn't propagate
 //! `trajectory_id` into `RequestContext.trace_id`).

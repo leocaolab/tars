@@ -1,22 +1,8 @@
-//! E2E-4 (Doc 32 §8, CUJ-3 / FR-3): default-confine for a NON-claude delegate
-//! through the **policy path**, not the legacy env gate.
+//! Default-confine for a NON-claude delegate through the **policy path**, not the legacy env gate.
 //!
-//! The sibling `security_delegate_cli.rs` proves the claude runner is jailed via
-//! the legacy `TARS_CLAUDE_SANDBOX=1` env gate. This test proves the thing the
-//! audit found missing:
-//!
-//!   1. a delegate OTHER than claude (here the shared `SharedCliRunner` driving an
-//!      `AntigravityDialect`, which spawns `agy` with the prompt as an argv arg
-//!      and frames the raw stdout as plain text) is confined, and
-//!   2. confinement comes from the **default** — the invocation carries a plain
-//!      `SandboxPolicy::default()` (`DangerFullAccess`) and `TARS_CLAUDE_SANDBOX`
-//!      is NOT set — so it exercises the default-confine flip
-//!      (`resolve_effective_policy` downgrading `DangerFullAccess` to a
-//!      workspace-write jail on the worktree cwd), NOT the env gate.
-//!
-//! Because no process env has to be mutated (the default confines), this test
-//! runs the assertions DIRECTLY — no re-exec dance is needed (contrast the
-//! env-gate test, which must set `TARS_CLAUDE_SANDBOX` on a re-exec'd child).
+//! Confinement comes from the **default** — the invocation carries a plain
+//! `SandboxPolicy::default()` (`DangerFullAccess`) and `TARS_CLAUDE_SANDBOX`
+//! is NOT set — so it exercises the default-confine flip.
 //!
 //! macOS/Linux only (uses the real OS sandbox: Seatbelt / bubblewrap).
 
@@ -84,9 +70,7 @@ async fn escape_blocked_async() {
         tars_sandbox::SandboxPolicy::default(),
     );
 
-    // ── drive the REAL production runner (a NON-claude one): the shared
-    //    SharedCliRunner driving an AntigravityDialect (prompt as arg, raw-text
-    //    framing). ──────────────────────────────────────────────────────────
+    // ── drive the REAL production runner ──
     let dialect = Arc::new(AntigravityDialect::new(
         "agy".into(),
         Duration::from_secs(30),
@@ -95,8 +79,7 @@ async fn escape_blocked_async() {
     let runner = SharedCliRunner::new(dialect);
     let result = runner.run(inv).await;
 
-    // 1. Normal operation survived the sandbox: the mock's stdout round-trips.
-    //    A RawText dialect's runner returns the raw stdout as a JSON string.
+    // A RawText dialect's runner returns the raw stdout as a JSON string.
     let payload = result.expect("SharedCliRunner.run should succeed (mock stdout drained)");
     assert_eq!(
         payload.as_str().map(str::trim),
@@ -167,9 +150,7 @@ fn fresh_dir(name: &str) -> PathBuf {
 /// A fresh dir GUARANTEED outside the delegate's writable set, for the escape
 /// target. The codex-model jail's writable set is: the worktree, real `$TMPDIR`,
 /// `/tmp`, and the CLI's own state dir (none for gemini). `$HOME` at large is
-/// denied, so a dir under `$HOME` is a genuine "outside" — UNLIKE `$TMPDIR`,
-/// which this test used to use back when the jail denied tmp (a policy we have
-/// deliberately reversed to match codex, so the target had to move here).
+/// denied, so a dir under `$HOME` is a genuine "outside".
 fn fresh_denied_dir(name: &str) -> PathBuf {
     let home = std::env::var_os("HOME").expect("HOME must be set for the escape test");
     let p = PathBuf::from(home).join(".tars-sandbox-it").join(name);

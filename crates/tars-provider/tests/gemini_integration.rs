@@ -123,7 +123,6 @@ async fn function_call_decodes_to_tool_call_events() {
 async fn safety_filter_block_returns_content_filtered_error() {
     let server = MockServer::start().await;
 
-    // No `candidates` — only `promptFeedback`.
     let body = sse_body(&[r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#]);
 
     Mock::given(method("POST"))

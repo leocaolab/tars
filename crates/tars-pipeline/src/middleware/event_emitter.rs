@@ -1,6 +1,5 @@
 //! `EventEmitterMiddleware` — emits one `LlmCallFinished` per
 //! `Pipeline.call` boundary to a `PipelineEventLog` + `LlmRecordStore`.
-//! See [Doc 17 §8](../../docs/architecture/17-pipeline-event-store.md).
 //!
 //! Position in the onion: **outermost layer** (added FIRST to the
 //! builder so it ends up wrapping everything else). Reads telemetry +
@@ -81,9 +80,7 @@ impl Middleware for EventEmitterMiddleware {
         // provider terminal once the call reaches the provider; we read
         // it back in `build_event`.
         // None here = "not resolved yet"; when no provider ever ran
-        // (cache hit short-circuit, early validation failure) the
-        // event will carry `provider_id: None` rather than the legacy
-        // "unresolved" sentinel string (ARC-L5-SW-10).
+        // the event will carry `provider_id: None`.
         let provider_id: Option<tars_types::ProviderId> = None;
         let actual_model = model.to_string();
         let has_tools = !req.tools.is_empty();
@@ -304,11 +301,7 @@ fn build_event(i: EventInputs) -> LlmCallFinished {
     // Provider id is stamped onto telemetry by the `LlmService` provider
     // terminal once the call reaches the provider. If telemetry never
     // saw a provider (cache hit short-circuited, early validation
-    // failure, …) the event simply carries `provider_id: None`. No
-    // sentinel string anymore — ARC-L5-SW-10 killed the "unresolved"
-    // fallback; old events with that literal are rewritten by the
-    // tars-storage v1→v2 schema migration so consumers no longer
-    // have to string-match a magic value to detect "not resolved."
+    // failure, …) the event simply carries `provider_id: None`.
     let resolved_provider_id: Option<tars_types::ProviderId> = telemetry
         .provider_id
         .as_deref()
@@ -359,7 +352,7 @@ async fn fire_and_forget(
             "event_emitter: event append failed (degraded silently)",
         );
     }
-    let _ = records; // records already written; keeping the param for future v1.1 retry-write
+    let _ = records; // records already written
 }
 
 /// Wrap the inner stream so we observe every event, build the
@@ -581,7 +574,7 @@ mod tests {
 
     #[tokio::test]
     async fn validation_reject_reason_propagates_into_event() {
-        // B-20.v2 follow-up: a reject's typed reason lands on the event's
+        // a reject's typed reason lands on the event's
         // `validation_reason` (it can't ride `validation_summary` — a
         // reject short-circuits before a Response). EventEmitter sees the
         // reject as `Err(ValidationFailed)` from its inner.call().
@@ -614,14 +607,14 @@ mod tests {
         assert_eq!(stored.len(), 1);
         match &stored[0] {
             PipelineEvent::LlmCallFinished(e) => {
-                // Rollup still flags it as a validation failure.
+
                 assert!(matches!(
                     e.result,
                     CallResult::Error {
                         kind: tars_types::ProviderErrorKind::ValidationFailed
                     }
                 ));
-                // …and the structured reason is preserved for faceting.
+
                 match &e.validation_reason {
                     Some(ValidationReason::NotEmpty { field }) => assert_eq!(field, "text"),
                     other => panic!("expected NotEmpty reason, got {other:?}"),

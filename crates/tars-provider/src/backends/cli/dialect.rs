@@ -1,4 +1,4 @@
-//! The [`CliDialect`] trait (Doc 32 §5 C1): the per-CLI behavior seam.
+//! The [`CliDialect`] trait: the per-CLI behavior seam.
 //!
 //! One `CliDialect` describes everything that varies between delegate
 //! CLIs — the argv (per-CLI flags), where the prompt goes, how the CLI
@@ -15,15 +15,9 @@ use super::argv::SubprocessInvocation;
 
 /// The neutral, per-request invocation the backend hands to a dialect.
 ///
-/// As-built (M0–M3) this is a type alias for the **still claude-shaped**
-/// [`SubprocessInvocation`] that a [`SubprocessRunner`](super::SubprocessRunner)
-/// consumes. Rather than generalizing the payload, M1 added
-/// [`SubprocessInvocation::neutral`](super::SubprocessInvocation::neutral): the
-/// non-claude dialects (gemini/codex/opencode/antigravity) fill only the neutral
-/// fields (executable/model/prompt/timeout/env/cwd/sandbox) and leave the
-/// claude-specific knobs at their defaults, each building its own argv in
-/// [`CliDialect::argv`]. Generalizing the type so those inert claude fields go
-/// away is still open (Doc 32 M4/G10).
+/// Currently, this is a type alias for the claude-shaped [`SubprocessInvocation`].
+/// Non-claude dialects fill neutral fields and leave claude-specific knobs at
+/// defaults, building their own argv in [`CliDialect::argv`].
 pub type CliInvocation = SubprocessInvocation;
 
 /// Where a dialect wants the prompt delivered to the child process.
@@ -51,11 +45,7 @@ pub enum OutputMode {
 
 /// How the shared runner
 /// ([`SharedCliRunner`](super::subprocess::SharedCliRunner)) reconstructs a
-/// delegate's stdout into the single [`Value`] the dialect then maps. This is
-/// the axis Doc 32 C2 factored out: the buffered CLI delegates differ only in
-/// their OUTPUT FRAMING, so the dialect DECLARES its framing and ONE runner
-/// serves every buffered CLI (FR-6 — add a CLI = a `CliDialect`, no bespoke
-/// runner). The variants are the framings the delegates actually use:
+/// delegate's stdout into the single [`Value`] the dialect then maps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputFraming {
     /// Parse the whole stdout as a single JSON object (`Value::Object`). When
@@ -85,7 +75,7 @@ pub trait CliDialect: Send + Sync {
     /// request. Returns a typed error if the request can't be honored
     /// (e.g. a non-explicit model).
     ///
-    /// M0 seam: the invocation is the claude-shaped [`CliInvocation`]; M1
+    /// seam: the invocation is the claude-shaped [`CliInvocation`];
     /// splits the neutral fields (built by the backend) from the per-CLI
     /// flags (contributed here).
     fn invocation(
@@ -104,10 +94,7 @@ pub trait CliDialect: Send + Sync {
 
     /// How the shared [`SharedCliRunner`](super::subprocess::SharedCliRunner)
     /// frames this CLI's stdout into a [`Value`] (see [`OutputFraming`]).
-    /// Default: a single JSON object with no prefix strip. Each buffered dialect
-    /// declares its framing so ONE runner serves them all (FR-6). claude
-    /// declares its framing too but is served by the streaming-capable
-    /// [`RealSubprocessRunner`](super::subprocess::RealSubprocessRunner).
+    /// Default: a single JSON object with no prefix strip.
     fn output_framing(&self) -> OutputFraming {
         OutputFraming::SingleObject {
             strip_prefix: false,
@@ -126,7 +113,7 @@ pub trait CliDialect: Send + Sync {
 
     /// `Text`: the whole stdout → content [`ChatEvent`]s. Default: one
     /// `Delta` carrying the raw text + a natural `Finished`. `agy -p`
-    /// (M3) uses this.
+    /// uses this.
     fn parse_text(&self, stdout: &str) -> Result<Vec<ChatEvent>, ProviderError> {
         Ok(vec![
             ChatEvent::Delta {

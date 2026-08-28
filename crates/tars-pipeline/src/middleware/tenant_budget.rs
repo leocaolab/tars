@@ -6,9 +6,8 @@
 //! debits the **real** USD cost from the stream's terminal `Finished`
 //! event.
 //!
-//! See [`docs/roadmap.md §4`](../../../../docs/roadmap.md) for the
-//! design and the soft-cap tradeoff (no pre-debit → small race where
-//! concurrent calls can both pass pre-check). That tradeoff is
+//! The soft-cap tradeoff (no pre-debit → small race where
+//! concurrent calls can both pass pre-check) is
 //! deliberate: tars is an agent runtime, not a financial ledger.
 //! Hard accounting belongs in caller-owned `BudgetStore` impls that
 //! choose their own consistency model (Redis WATCH, Postgres row
@@ -181,8 +180,7 @@ pub struct TenantBudgetMiddleware {
     pricing: Pricing,
     default_max_output_tokens: u32,
     /// Warn-once latch for a zero-priced provider. Lives on the
-    /// middleware (built once, lives for the pipeline's life) — same
-    /// per-instance semantics the old per-call wrapper had.
+    /// middleware (built once, lives for the pipeline's life).
     zero_pricing_warned: AtomicBool,
 }
 
@@ -220,10 +218,7 @@ impl TenantBudgetMiddleware {
 
     /// Best-effort pre-call USD estimate. Delegated to
     /// [`Pricing::estimate_chat_cost`] — same formula as the per-call
-    /// middleware. The earlier "kept duplicated for likely
-    /// divergence" comment didn't pan out; if V2 wants a cache-discount
-    /// estimate, it'll land on `Pricing` itself so both budget
-    /// middlewares pick it up.
+    /// middleware.
     fn estimate_cost_usd(&self, req: &ChatRequest) -> f64 {
         self.pricing
             .estimate_chat_cost(req, self.default_max_output_tokens)

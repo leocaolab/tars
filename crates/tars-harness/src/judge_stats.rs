@@ -4,7 +4,7 @@
 //! Per arc's production experience, the high-ROI offline eval phase
 //! is: take a corpus of (input, agent_output) pairs, ask a second
 //! LLM to verdict each one as TP / FP / Unsure, aggregate into a
-//! precision-style report. Different shape from Doc 16 §7.1's
+//! precision-style report. Different shape from §7.1's
 //! per-call deterministic dimension scoring.
 //!
 //! The trait + reference impl live in `tars-runtime::judge`; this
@@ -13,10 +13,6 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One item to be judged — the input the agent saw, the output it
-/// produced, optional gold-standard expectation, optional context the
-/// judge needs.
-///
 /// `item_id` is caller-chosen and shows up in [`JudgeReport`] so each
 /// verdict can be traced back to its source (e.g. arc finding
 /// `"app-shell-runner-14"`).
@@ -33,17 +29,13 @@ pub struct JudgeItem {
     pub context: Option<String>,
 }
 
-/// The judge's verdict on one item.
-///
 /// Deliberately binary classification — production agent eval at the
 /// "is this output correct" level is a yes/no question; nuanced
 /// scoring is its own (heavier) framework and lives elsewhere.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum JudgeVerdict {
-    /// Output is correct / valid.
     TruePositive,
-    /// Output is wrong / hallucination / over-flag.
     FalsePositive,
     /// Judge can't confidently decide. Caller decides what to do —
     /// retry with different judge, escalate to human, etc.
@@ -60,21 +52,16 @@ impl JudgeVerdict {
     }
 }
 
-/// One judge pass's full verdict log + aggregates.
-///
 /// `precision()` is the headline number for "was the critic right":
 /// `TP / (TP + FP)`. `Unsure` is held out of the denominator — it's
 /// a separate signal about judge calibration, not about the critic.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JudgeReport {
-    /// Identifier of the judge that produced the verdicts.
-    /// Conventionally `"provider:model"` (e.g. `"anthropic:claude-opus-4-7"`).
     pub judge_id: String,
     pub item_count: u32,
     pub true_positives: u32,
     pub false_positives: u32,
     pub unsure: u32,
-    /// Per-item verdicts in the order they were judged.
     pub verdicts: Vec<JudgedItem>,
 }
 
@@ -100,7 +87,6 @@ impl JudgeReport {
             == Some(self.item_count)
     }
 
-    /// `TP / (TP + FP)`. `None` when no decisive verdicts.
     pub fn precision(&self) -> Option<f64> {
         // Saturating: counts are u32 and could in principle sum past
         // u32::MAX; a wrapping add in release would yield a bogus
@@ -113,10 +99,6 @@ impl JudgeReport {
         }
     }
 
-    /// Wilson score interval for precision at `confidence_level`
-    /// (e.g. `0.95`). Returns `(point, lower, upper)` or `None` when
-    /// there are no decisive verdicts.
-    ///
     /// Why Wilson and not normal-approximation: Wilson behaves well at
     /// the edges (precision = 0 or 1, small n) and doesn't ever
     /// produce intervals outside [0, 1]. The closed-form normal CI
@@ -150,8 +132,7 @@ impl JudgeReport {
     }
 }
 
-/// Inverse standard normal at the right tail for common confidence
-/// levels. Returns `None` for unsupported levels — keeps the API
+/// Returns `None` for unsupported levels — keeps the API
 /// honest about what's tabulated (no fake "any-level" guarantees that
 /// would require a real erf-inverse implementation).
 ///
@@ -174,8 +155,7 @@ fn z_for_confidence(level: f64) -> Option<f64> {
     }
 }
 
-/// Result of a McNemar paired-significance test comparing two judge
-/// runs over the **same** items. See `docs/eval-methodology.md §2`.
+/// See `docs/eval-methodology.md §2`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct McNemarResult {
     /// Items baseline got right but candidate got wrong (regressions).
@@ -191,9 +171,7 @@ pub struct McNemarResult {
     pub significant_at_01: bool,
 }
 
-/// McNemar's test on two sets of per-item correctness, paired by item
-/// id. `correct` maps item_id → was-correct (TruePositive). Only items
-/// present in **both** maps are paired; the rest are ignored (you
+/// Only items present in **both** maps are paired; the rest are ignored (you
 /// can't compare an item one run didn't judge).
 ///
 /// This is the statistically correct test for "did config B change
@@ -235,10 +213,6 @@ pub fn mcnemar(
     }
 }
 
-/// Wilson score interval — closed-form binomial confidence interval.
-/// `p` is the observed proportion (TP / n); `n` is the trial count;
-/// `z` is the standard normal quantile for the desired level.
-/// Returns `(lower, upper)`, both clamped to `[0, 1]`.
 fn wilson_interval(p: f64, n: f64, z: f64) -> Option<(f64, f64)> {
     if n <= 0.0 {
         return None;

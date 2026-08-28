@@ -38,9 +38,7 @@ async fn antigravity_cli_say_hi_against_real_binary() {
         panic!("`agy` not in PATH; install antigravity or skip this test");
     }
 
-    // Build the SAME stack the registry's `ProviderConfig::Antigravity` arm
-    // builds: an AgentCliBackend driven by an AntigravityDialect over the
-    // shared SharedCliRunner.
+    // Build the SAME stack the registry's `ProviderConfig::Antigravity` arm builds.
     let dialect = Arc::new(AntigravityDialect::new(
         "agy".into(),
         Duration::from_secs(120),

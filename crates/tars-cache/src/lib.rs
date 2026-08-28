@@ -1,12 +1,3 @@
-//! LLM response cache.
-//!
-//! Two registry implementations behind one [`CacheRegistry`] trait:
-//! [`MemoryCacheRegistry`] (L1 only, moka-backed in-process LRU) and
-//! [`SqliteCacheRegistry`] (L1 + persistent L2). L3 (provider-side
-//! `cachedContent` / `cache_control` handles) is not built yet.
-//!
-//! ## Cache key construction
-//!
 //! [`CacheKeyFactory::compute`] enforces:
 //!
 //! - **`hasher_version`** is the first byte hashed — bumping it

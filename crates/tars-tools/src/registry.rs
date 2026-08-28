@@ -24,9 +24,7 @@ use tars_types::{ContentBlock, Message, ToolCall, ToolSpec};
 use crate::tool::{Tool, ToolContext, ToolError};
 
 /// Errors that escape the registry (i.e., aren't quietly turned into
-/// `is_error=true` messages by the dispatcher). Today only one
-/// variant — duplicate registration — because everything else maps
-/// cleanly to a tool-error result.
+/// `is_error=true` messages by the dispatcher).
 #[derive(Debug, Error)]
 pub enum ToolRegistryError {
     #[error("tool with name `{0}` is already registered")]
@@ -56,7 +54,7 @@ impl ToolRegistry {
         Ok(())
     }
 
-    /// Convenience: register a fresh `Arc<T>` from owned `T`.
+
     pub fn register_owned<T: Tool>(&mut self, tool: T) -> Result<(), ToolRegistryError> {
         self.register(Arc::new(tool))
     }
@@ -146,9 +144,7 @@ impl ToolRegistry {
         }
     }
 
-    /// Internal: lookup + execute. Pulls out the
-    /// `Result<ToolResult, ToolError>` shape so [`Self::dispatch`] can
-    /// uniformly format both halves.
+
     async fn execute(
         &self,
         call: &ToolCall,
@@ -352,7 +348,7 @@ mod tests {
         }
     }
 
-    // E2E-6: a tool observes the sandbox policy threaded through ctx.
+    // A tool observes the sandbox policy threaded through ctx.
     #[tokio::test]
     async fn tool_sees_sandbox_policy() {
         let tool = RanTool::new("a");

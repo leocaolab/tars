@@ -1,6 +1,6 @@
 //! Retry middleware — exponential backoff at *open* time only.
 //!
-//! Mid-stream retries are **out of scope** for the M1 implementation
+//! Mid-stream retries are **out of scope**
 //! and likely forever: once the provider has emitted any [`ChatEvent`]
 //! the consumer has already started observing the response (text
 //! deltas, tool-call starts) and replaying from scratch would either
@@ -33,7 +33,7 @@
 //! `max_wait` caps how long we'll honour a `Retry-After`. Past the
 //! cap, we bubble the error unchanged so the caller — e.g. a fallback
 //! chain composing several `LlmService`s — can decide; agents should
-//! never sleep 30 minutes inside a single call. See `docs/roadmap.md §1`.
+//! never sleep 30 minutes inside a single call.
 
 use std::time::Duration;
 
@@ -274,11 +274,7 @@ impl Middleware for RetryMiddleware {
     }
 }
 
-/// Typed kind tag matching `tars-py`'s `TarsProviderError.kind`
-/// Wrapper around [`ProviderError::kind`] kept for call-site clarity
-/// and so a future `provider_error_kind` divergence (if it ever needs
-/// to differ from the canonical kind) doesn't have to update every
-/// callsite.
+/// Wrapper around [`ProviderError::kind`] kept for call-site clarity.
 fn provider_error_kind(err: &ProviderError) -> tars_types::ProviderErrorKind {
     err.kind()
 }

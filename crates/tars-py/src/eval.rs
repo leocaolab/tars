@@ -1,11 +1,9 @@
 //! `tars.eval` — minimal evaluation helpers over the pipeline event
-//! store (Doc 16, re-scoped M9 plan).
+//! store.
 //!
-//! The full Doc 16 vision (Evaluator traits, Online/Offline runners,
-//! samplers) was re-scoped to a thin surface: callers write evaluator
-//! scripts (cron / CI / notebook) that **read** finished calls and
-//! **write** scores back as `EvaluationScored` events. Two functions
-//! cover that loop:
+//! Callers write evaluator loops in Python, fetching records via the
+//! event store and logging scores back as `EvaluationScored` events.
+//! Two functions cover that loop:
 //!
 //! - [`read_calls`] — pull `LlmCallFinished` events as plain dicts so a
 //!   script can compute a metric per call.

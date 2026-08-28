@@ -8,8 +8,7 @@
 //!
 //! Tokens ARE semaphore permits. `acquire_many(cost).await` parks the caller in
 //! tokio's fair FIFO queue — no shared `Mutex<Bucket>` that every one of 10k
-//! callers spins on (that turns the limiter itself into the bottleneck, the same
-//! trap as a single-connection store). A single background **refiller** task adds
+//! callers spins on. A single background **refiller** task adds
 //! `TPM/60` permits per second, capped at the burst size; nothing else writes the
 //! bucket. The refiller is spawned once, lazily, on the first call (so
 //! construction needs no runtime).
@@ -17,8 +16,8 @@
 //! ## Cost = estimate → reconcile
 //!
 //! Pre-call the true token count is unknown, so we RESERVE an upper bound —
-//! `chars/4` over `system` + message text (the house heuristic, budget.rs §15
-//! "no tokenizers on the hot path"), plus the reserved output (`req.max_output`,
+//! `chars/4` over `system` + message text (the house heuristic —
+//! no tokenizers on the hot path), plus the reserved output (`req.max_output`,
 //! else the provider cap). After the stream finishes we know the REAL
 //! [`Usage`]; the unused reserve is refunded to the bucket, so the limit binds on
 //! *actual* tokens, not the worst-case reserve. A call that outruns its estimate
@@ -285,8 +284,7 @@ impl Middleware for TpmRateLimiter {
     }
 }
 
-/// Input-token estimate: `chars / 4` over `system` + every text content block, the
-/// same heuristic the budget middleware documents (no tokenizer on the hot path).
+/// Input-token estimate: `chars / 4` over `system` + every text content block.
 fn estimate_input_tokens(req: &ChatRequest) -> u32 {
     let mut chars = req.system.as_deref().map_or(0, str::len);
     for m in &req.messages {

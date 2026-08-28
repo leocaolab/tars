@@ -229,7 +229,6 @@ pub async fn query(client: &reqwest::Client, plan: &Plan, timeout: Duration) -> 
         Plan::Skip { note } => return Outcome::Skipped { note: note.clone() },
     };
 
-    // Resolve the key (if this provider needs one).
     let key = match &plan.env_var {
         Some(var) => match std::env::var(var) {
             Ok(k) if !k.trim().is_empty() => Some(k),

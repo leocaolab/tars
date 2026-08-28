@@ -1,6 +1,3 @@
-//! Per-request cache policy. Threaded through `RequestContext.attributes`
-//! by upstream callers (Agent layer / explicit override).
-//!
 //! `l1` is honoured by every registry; `l2` only by
 //! [`crate::SqliteCacheRegistry`]; `l3` by nothing yet.
 
@@ -29,24 +26,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheLayerPolicy {
-    /// Level disabled entirely — no key compute, no lookup, no write.
     Disabled,
-    /// Level enabled with the registry's configured default TTL.
     #[default]
     Default,
-    /// Level enabled with a per-request TTL override.
     Override { ttl: Duration },
 }
 
 impl CacheLayerPolicy {
-    /// True iff this layer is on (`Default` or `Override`).
     pub fn is_enabled(&self) -> bool {
         !matches!(self, Self::Disabled)
     }
 
-    /// The per-request TTL override, if any. Returns `None` for both
-    /// `Disabled` and `Default` — the registry's configured default
-    /// applies in the latter case.
+    /// Returns `None` for both `Disabled` and `Default` — the registry's
+    /// configured default applies in the latter case.
     pub fn ttl_override(&self) -> Option<Duration> {
         match self {
             Self::Override { ttl } => Some(*ttl),
@@ -55,8 +47,6 @@ impl CacheLayerPolicy {
     }
 }
 
-/// Cache policy across all three tiers.
-///
 /// **Wire shape** — derived `Serialize`/`Deserialize`, one tagged enum
 /// per layer:
 ///
@@ -97,8 +87,7 @@ impl Default for CachePolicy {
 }
 
 impl CachePolicy {
-    /// Disable caching entirely — useful for tests / debugging /
-    /// explicit `--no-cache` flag down the road.
+    /// Useful for tests / debugging / explicit `--no-cache` flag down the road.
     pub fn off() -> Self {
         Self {
             l1: CacheLayerPolicy::Disabled,
@@ -107,21 +96,18 @@ impl CachePolicy {
         }
     }
 
-    /// True iff at least one tier is enabled. The middleware short-
-    /// circuits the entire cache pipeline (no key compute, no lookup,
-    /// no write) when this returns false.
+    /// The middleware short-circuits the entire cache pipeline (no key compute,
+    /// no lookup, no write) when this returns false.
     pub fn any_enabled(&self) -> bool {
         self.l1.is_enabled() || self.l2.is_enabled() || self.l3.is_enabled()
     }
 
-    /// L1 TTL override, observing the "ignored when L1 is off" rule.
     /// Returns `None` when L1 is `Disabled` *or* when it's `Default`
     /// (no per-request override).
     pub fn l1_ttl_effective(&self) -> Option<Duration> {
         self.l1.ttl_override()
     }
 
-    /// See [`Self::l1_ttl_effective`].
     pub fn l2_ttl_effective(&self) -> Option<Duration> {
         self.l2.ttl_override()
     }

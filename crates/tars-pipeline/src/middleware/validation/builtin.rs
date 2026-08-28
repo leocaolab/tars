@@ -1,12 +1,12 @@
 //! Built-in [`OutputValidator`] implementations shipped with tars.
 //!
-//! v1 (Doc 15 Wave 1) ships three: `JsonShapeValidator`,
+//! v1 ships three: `JsonShapeValidator`,
 //! `NotEmptyValidator`, `MaxLengthValidator`. These are the
 //! deterministic / cheap / generic-mechanism set that 80% of consumers
 //! need. Application-specific or business-leaning validators
 //! (`RuleIdWhitelistValidator`, `EvidenceTagValidator`,
 //! `RegexBannedValidator`) are NOT here — consumers compose them via
-//! the trait. See Doc 15 §5 for full philosophy.
+//! the trait.
 
 use tars_types::{ChatRequest, ChatResponse, ValidationOutcome, ValidationReason};
 
@@ -18,10 +18,9 @@ use super::OutputValidator;
 /// surfaces `Reject`. Use as the first validator in a chain when
 /// downstream validators assume JSON output.
 ///
-/// **Schema validation is shape-only** — v1 uses `serde_json` parsing
-/// and doesn't pull a full JSON Schema crate. Rejections carry a typed
-/// [`ValidationReason::JsonShape`] (B-20.v2); full JSON-Schema path
-/// matching waits on the `jsonschema` crate being added.
+/// **Schema validation is shape-only** — uses `serde_json` parsing
+/// without a full JSON Schema crate. Rejections carry a typed
+/// [`ValidationReason::JsonShape`].
 pub struct JsonShapeValidator {
     name: String,
 }

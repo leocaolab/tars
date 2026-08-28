@@ -1,8 +1,7 @@
 //! Caller identity. See `docs/architecture/10-security-model.md` §4.
 //!
-//! `Principal` is the *who*; `Scope` is the *what they can do*.
 //! Provider layer doesn't enforce these — that's the Pipeline IAM
-//! middleware's job (Doc 02 §4.2). We carry them through so layers
+//! middleware's job. We carry them through so layers
 //! that need them (cache key construction, audit) have access.
 
 use std::collections::HashSet;
@@ -29,8 +28,6 @@ pub enum PrincipalKind {
     ServiceAccount {
         description: String,
     },
-    /// A subprocess acting on behalf of a parent principal with a
-    /// reduced scope set. Used for CLI / MCP integrations (Doc 10 §4.1).
     DelegatedSubprocess {
         parent: PrincipalId,
         scope_subset: Vec<Scope>,
@@ -41,18 +38,15 @@ pub enum PrincipalKind {
 /// open: different IAM backends (RBAC / ABAC / OPA) project their rules
 /// onto this representation. The Provider layer never inspects scope
 /// bodies — it only forwards them so the Cache layer can mix them into
-/// the cache key (Doc 03 §3.2).
+/// the cache key.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Scope {
-    /// Resource the scope applies to, e.g. `tenant:acme:repo:tars`.
     pub resource: String,
-    /// Action set — e.g. `["read", "invoke"]`. Sorted for stable hashing.
+    /// Sorted for stable hashing.
     pub actions: Vec<String>,
 }
 
 impl Scope {
-    /// Build a scope with a sorted, deduplicated action set.
-    ///
     /// **An empty `actions` vec produces zero
     /// [`scope_keys`](Principal::scope_keys) entries** — a scope that
     /// grants no action contributes nothing to the per-IAM-view cache
@@ -69,20 +63,15 @@ impl Scope {
         }
     }
 
-    /// True iff this scope grants no actions (and therefore yields no
-    /// scope keys). See the note on [`new`](Self::new).
     pub fn is_empty(&self) -> bool {
         self.actions.is_empty()
     }
 }
 
 impl Principal {
-    /// The scopes that are actually *effective* for this principal.
-    ///
     /// For a [`PrincipalKind::DelegatedSubprocess`] the effective set is
     /// the reduced `scope_subset` — the whole point of delegation is
     /// that the child acts with *fewer* permissions than the parent.
-    /// For every other kind it is the principal's own `scopes`.
     pub fn effective_scopes(&self) -> &[Scope] {
         match &self.kind {
             PrincipalKind::DelegatedSubprocess { scope_subset, .. } => scope_subset,
@@ -90,7 +79,6 @@ impl Principal {
         }
     }
 
-    /// Compute the deduplicated set of *effective* scope identifiers.
     /// Used by the cache key factory to make hash buckets per-IAM-view.
     ///
     /// Uses [`effective_scopes`](Self::effective_scopes), so a delegated

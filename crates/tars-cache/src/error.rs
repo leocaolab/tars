@@ -1,5 +1,3 @@
-//! Cache-layer errors.
-//!
 //! These split into **"don't cache this request"** signals
 //! (`NonDeterministic`) which the middleware should treat as benign —
 //! just skip the cache and call the inner provider — and **real failures**
@@ -15,22 +13,17 @@ pub enum CacheError {
     #[error("not cacheable: temperature must be explicitly 0.0")]
     NonDeterministic,
 
-    /// JSON serialisation of a request component failed (tools schema,
-    /// tool-call args, structured-output schema). Should be impossible
-    /// for in-memory `Value`s but reported for completeness.
+    /// Should be impossible for in-memory `Value`s but reported for completeness.
     #[error("serialize: {0}")]
     Serialize(#[source] serde_json::Error),
 
-    /// Underlying storage failure (moka eviction, future Redis
-    /// connection error, …). Catchall — the middleware logs and
-    /// degrades to a miss.
+    /// Catchall — the middleware logs and degrades to a miss.
     #[error("backend: {0}")]
     Backend(String),
 }
 
 impl CacheError {
-    /// "This request was never cacheable to begin with" — distinct
-    /// from a real failure. The middleware uses this to decide whether
+    /// Distinct from a real failure. The middleware uses this to decide whether
     /// to log loudly or quietly skip caching.
     pub fn is_not_cacheable(&self) -> bool {
         // Full match (not `matches!`) so adding a new variant forces an

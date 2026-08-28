@@ -1,8 +1,4 @@
-//! Provider lifecycle for the Anthropic backend: builder, `LlmProvider`
-//! impl (delegates the streaming path to the HTTP base), default
-//! capabilities, and the Anthropic Message Batches API `BatchSubmitter`
-//! impl. Protocol translation lives in [`super::adapter`]; pure JSON
-//! converters in [`super::mapping`].
+//! Provider lifecycle for the Anthropic backend.
 
 use std::sync::Arc;
 

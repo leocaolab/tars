@@ -1,23 +1,19 @@
 //! [`AntigravityDialect`] — the `agy` (Antigravity) CLI behavior expressed as
-//! a [`CliDialect`] (Doc 32 §5 C3, M3). `agy` is the first **`OutputMode::Text`**
+//! a [`CliDialect`]. `agy` is the first **`OutputMode::Text`**
 //! delegate: v1.0.16 has NO `--output-format json`, it just prints the plain
 //! answer to stdout. The dialect therefore builds the `agy -p "<prompt>"
 //! --model <model> --effort <level> --dangerously-skip-permissions --add-dir <cwd>` argv (prompt
 //! as the `-p` **arg** value) and maps the drained stdout through
 //! [`CliDialect::parse_text`].
 //!
-//! Like gemini/codex, `agy` spawns through the shared
+//! `agy` spawns through the shared
 //! [`SharedCliRunner`](super::super::subprocess::SharedCliRunner) + OS-jail
 //! primitive so — a black-box coding agent — it runs inside the same
-//! `tars-sandbox` write-jail as the other delegates. This dialect declares only
-//! argv + [`OutputFraming::RawText`] + `parse_text`; it has no bespoke runner.
+//! `tars-sandbox` write-jail as the other delegates.
 //!
 //! ## Auth env passthrough (NOT stripped)
 //! `agy` authenticates via `GEMINI_API_KEY` / `ANTIGRAVITY_API_KEY` (or its own
-//! OAuth session). Unlike claude/gemini/codex — which STRIP auth env to force a
-//! subscription path — antigravity's env-strip table is empty, so those keys
-//! pass through untouched (the default `build_sandboxed_command` passes through
-//! everything not in `stripped_env`). [`Self::env`] names them for the record.
+//! OAuth session). Those keys pass through untouched.
 
 use std::time::Duration;
 
@@ -31,9 +27,9 @@ use super::super::dialect::{CliDialect, CliInvocation, OutputFraming, OutputMode
 /// Auth env `agy` reads. Passed THROUGH (not stripped) — see the module doc.
 pub(crate) const PASSTHROUGH_ENV_KEYS: &[&str] = &["GEMINI_API_KEY", "ANTIGRAVITY_API_KEY"];
 
-/// Limit on the rendered prompt length passed via `-p`. Same reasoning as the
-/// gemini dialect: the prompt rides in the argv, so cap it well below ARG_MAX
-/// and surface a clean `InvalidRequest` rather than let `execve` fail E2BIG.
+/// Limit on the rendered prompt length passed via `-p`. The prompt rides in the
+/// argv, so cap it well below ARG_MAX and surface a clean `InvalidRequest`
+/// rather than let `execve` fail E2BIG.
 pub(crate) const MAX_PROMPT_BYTES: usize = 256 * 1024;
 
 /// The `agy --effort <level>` knob. Antigravity's `gemini-3.1-pro` REQUIRES it —
@@ -143,8 +139,6 @@ impl CliDialect for AntigravityDialect {
     }
 
     fn output_framing(&self) -> OutputFraming {
-        // Plain printed answer, no JSON — the shared runner hands the raw stdout
-        // to `parse_text` as a `Value::String`.
         OutputFraming::RawText
     }
 
@@ -171,7 +165,7 @@ impl CliDialect for AntigravityDialect {
 
 /// Render a chat request as a single string prompt for the CLI. Embeds the
 /// system prompt as a leading `[system]` block — `agy -p` has no
-/// `--system-prompt` flag. Same shape as the gemini dialect.
+/// `--system-prompt` flag.
 fn render_prompt_for_cli(req: &ChatRequest) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(req.messages.len() + 1);
     if let Some(sys) = &req.system {
@@ -271,21 +265,13 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--add-dir"));
     }
 
-    // The (channel, mode, framing) declaration and the env-strip contract (agy
-    // strips NOTHING — its auth env passes through, asserted as the empty
-    // whole-set case) are cross-dialect invariants folded into
-    // `tests/cli_conformance.rs` (D-12). The passthrough NAMING below is
-    // antigravity-UNIQUE and stays here.
     #[test]
     fn env_lists_passthrough_auth_keys() {
         let d = dialect();
         assert!(d.env().contains(&"GEMINI_API_KEY"));
         assert!(d.env().contains(&"ANTIGRAVITY_API_KEY"));
     }
-
-    // The arg-channel prompt-size cap (`MAX_PROMPT_BYTES` → InvalidRequest) is a
-    // cross-dialect invariant folded into `tests/cli_conformance.rs` (D-12).
-
+    
     #[test]
     fn parse_text_yields_delta_then_finished() {
         let d = dialect();

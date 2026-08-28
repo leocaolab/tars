@@ -1,9 +1,9 @@
 //! Model selection abstractions.
 //!
 //! The Provider layer accepts `ModelHint::Tier(...)` (abstract) or
-//! `ModelHint::Explicit(...)` (concrete). Routing layer (Doc 02 §4.6)
+//! `ModelHint::Explicit(...)` (concrete). Routing layer
 //! resolves Tier → Explicit. Cache layer requires Explicit before
-//! computing a key (Doc 03 §4.2).
+//! computing a key.
 
 use serde::{Deserialize, Serialize};
 

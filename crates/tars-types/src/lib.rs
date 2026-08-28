@@ -2,22 +2,9 @@
 //!
 //! This crate is the single source of truth for the data types that flow
 //! between Provider / Pipeline / Runtime / Frontend layers. It deliberately
-//! has no business logic — only types, conversions, and pure helpers.
+//! has no business logic.
 //!
-//! Module map:
-//! - [`ids`]        — strongly typed IDs (TenantId, SessionId, …)
-//! - [`principal`]  — caller identity (Principal, Scope)
-//! - [`secret`]     — SecretRef + SecretString (redacting wrapper)
-//! - [`env`]        — process-environment reads, in one place
-//! - [`telemetry`]  — the span/metric vocabulary
-//! - [`validation`] — the typed reasons a response is rejected
-//! - [`providers`]  — everything the provider layer speaks: chat, tools,
-//!   schema, cache, events, response, usage, model, provider_profile, error,
-//!   context, auth, http_extras, batch
-//! - [`run_context`] — the ambient RequestContext a run carries
-//! - [`run_report`]  — the roll-up a finished run produces
-//!
-//! Items are named flat (`tars_types::ChatRequest`); the modules above are the
+//! Items are named flat (`tars_types::ChatRequest`); the modules are the
 //! filing system, not the address.
 //!
 //! See `docs/architecture/01-llm-provider.md` for the full design rationale.

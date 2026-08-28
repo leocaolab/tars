@@ -1,5 +1,5 @@
 //! Classify an AWS SDK error into the canonical [`ProviderError`]
-//! (Doc 31 §8.4). CLAUDE.md #1: every arm carries the SDK's own message
+//!. CLAUDE.md #1: every arm carries the SDK's own message
 //! string — never a `parse_failed`/`unknown` sentinel. The service's
 //! real words ("you don't have access to the model with the specified
 //! model ID") reach the operator classified, not swallowed.
@@ -51,7 +51,7 @@ where
 }
 
 /// Classify the typed Bedrock `ConverseError` service variant, carrying
-/// the service message (Doc 31 §8.4).
+/// the service message.
 pub fn classify_service_error(err: ConverseError) -> ProviderError {
     // The service message is the operator-facing truth; fall back to the
     // error code, then the variant Debug, so we never emit an empty string.
@@ -100,7 +100,7 @@ fn service_message<E: ProvideErrorMetadata + std::fmt::Debug>(err: &E) -> String
 /// Classify the error from `converse_stream().send()`
 /// (`SdkError<ConverseStreamError, _>`). Same taxonomy as the unary path
 /// plus `ModelStreamErrorException`; every arm carries the real service
-/// message (Doc 31 §8.4, CLAUDE.md #1).
+/// message.
 pub fn classify_stream_send_error<R>(err: SdkError<ConverseStreamError, R>) -> ProviderError
 where
     R: std::fmt::Debug,

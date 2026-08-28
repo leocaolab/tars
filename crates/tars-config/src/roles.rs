@@ -45,9 +45,6 @@ mod tests {
 
     #[test]
     fn two_roles_on_one_provider_can_bind_different_models() {
-        // The shape the old `name = "provider_id"` map could not express: the
-        // model was pinned per-provider, so `critic` and `critic_l5` were
-        // forced onto the same model.
         let toml_str = r#"
             [providers.deepseek]
             type = "openai_compat"

@@ -1,8 +1,5 @@
 //! [`ClaudeCliDialect`] — the claude behavior expressed as a
-//! [`CliDialect`] (Doc 32 §5 C3). Reproduces today's `claude_cli`
-//! behavior byte-for-byte: the `claude -p --model X --output-format
-//! stream-json|json --permission-mode bypassPermissions …` argv, prompt
-//! on stdin, JSON output, and the `result`/`usage` → `ChatEvent` mapping.
+//! [`CliDialect`].
 
 use std::time::Duration;
 
@@ -57,8 +54,6 @@ impl ClaudeCliDialect {
 
 impl CliDialect for ClaudeCliDialect {
     fn argv(&self, inv: &CliInvocation) -> Vec<String> {
-        // Identical to the pre-refactor production argv: `build_argv_with`
-        // reads the streaming toggle once (as the runner also does).
         build_argv_with(inv, streaming_enabled())
     }
 
@@ -109,22 +104,13 @@ impl CliDialect for ClaudeCliDialect {
     fn state_dirs(&self) -> Vec<std::path::PathBuf> {
         // claude_cli's own home (`$CLAUDE_CONFIG_DIR`, default `~/.claude`)
         // holds its config, sessions, and the per-session shell-snapshot /
-        // session-env dir its Bash tool creates on first use. Under the
-        // delegate write-jail that `mkdir` was the live `EPERM on session-env
-        // directory creation` — the fixer could edit the worktree but not run
-        // `cargo build`/`cargo test` to self-verify its own fix. Grant
-        // `~/.claude` too (skipped centrally if absent), mirroring codex's
-        // `~/.codex`. Shared with `RealSubprocessRunner` (claude's OWN runner) via
+        // session-env dir its Bash tool creates on first use. Grant
+        // `~/.claude` too (skipped centrally if absent). Shared with `RealSubprocessRunner` (claude's OWN runner) via
         // [`claude_state_dirs`] so BOTH spawn paths grant it — see that fn.
         claude_state_dirs()
     }
 
     fn parse_line(&self, raw: &Value) -> Result<Vec<ChatEvent>, ProviderError> {
-        // The runner reconstructs claude's `--output-format json` payload
-        // (or the stream-json `result` event, `type` stripped) into a single
-        // object. `result` is the answer text; `usage` the token counts.
-        // The backend prepends `Started` and applies the output-budget clamp,
-        // so the natural stop reason here is always `EndTurn`.
         let text = extract_result_text(raw);
         let usage = extract_usage(raw);
         Ok(vec![
@@ -158,12 +144,7 @@ fn resolve_claude_state_dirs(
 /// the process env (`$CLAUDE_CONFIG_DIR` else `~/.claude`). Used by BOTH
 /// [`ClaudeCliDialect::state_dirs`] AND `RealSubprocessRunner` — claude keeps its
 /// OWN runner (its stream-json / reaper path differs from `SharedCliRunner`), so
-/// the `~/.claude` grant MUST be threaded into that runner too. Granting it only
-/// via `SharedCliRunner` (as the earlier fix did) missed claude entirely: claude
-/// never uses `SharedCliRunner`, so its delegate's Bash tool `mkdir
-/// ~/.claude/session-env/<uuid>` was `EPERM`-denied and the delegate couldn't run
-/// bash at all (fixer got away with edit-only; reconcile, which self-verifies via
-/// the build, could not).
+/// the `~/.claude` grant MUST be threaded into that runner too.
 pub(crate) fn claude_state_dirs() -> Vec<std::path::PathBuf> {
     resolve_claude_state_dirs(
         std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
@@ -191,9 +172,7 @@ mod tests {
 
     #[test]
     fn argv_matches_build_argv_with_exactly() {
-        // The dialect's argv is the SAME bytes the pre-refactor production
-        // path produced (E2E-1 argv identity): `dialect.argv` must equal
-        // `build_argv_with(inv, streaming_enabled())`.
+        // `dialect.argv` must equal `build_argv_with(inv, streaming_enabled())`.
         let d = dialect();
         let inv = d
             .invocation(
@@ -238,12 +217,6 @@ mod tests {
         assert_eq!(inv.cwd, Some(wt));
         // (env-strip is a cross-dialect invariant — see `tests/cli_conformance.rs`.)
     }
-
-    // (Deleted `invocation_requires_explicit_model`: the model is now a
-    // required concrete `&str` argument to `invocation`, so the old
-    // "reject a non-explicit model carried on the request" path no longer
-    // exists — the invariant it froze was removed by the model-decoupling
-    // refactor.)
 
     #[test]
     fn parse_line_maps_result_and_usage() {
@@ -311,6 +284,4 @@ mod tests {
         assert!(resolve_claude_state_dirs(None, None).is_empty());
     }
 
-    // The (channel, mode, framing) declaration is a cross-dialect invariant
-    // folded into `tests/cli_conformance.rs` (D-12).
 }

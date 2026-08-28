@@ -1,8 +1,4 @@
-//! Protocol-translation layer for the Anthropic backend. Owns request
-//! body construction (`translate_request`), SSE event parsing
-//! (`parse_event`), error classification, and the `HttpAdapter` impl.
-//! The provider lifecycle + batch-API I/O live in [`super::provider`];
-//! the pure JSON converters live in [`super::mapping`].
+//! Protocol-translation layer for the Anthropic backend.
 
 use async_trait::async_trait;
 use reqwest::StatusCode;
@@ -23,7 +19,7 @@ use super::mapping::{map_stop_reason, parse_usage, truncate};
 /// Synthetic tool name used to emulate structured output.
 pub(super) const STRUCTURED_OUTPUT_TOOL: &str = "__respond_with__";
 
-/// Read an SSE event's `index` field as a `usize`. Anthropic's wire
+/// Anthropic's wire
 /// `index` is a JSON number; a missing one defaults to 0 (first block),
 /// and we use `usize::try_from` rather than `as usize` so a value that
 /// overflows `usize` on a 32-bit target surfaces as a parse error
@@ -50,7 +46,6 @@ impl AnthropicAdapter {
         }
     }
 
-    /// Translate one of our content blocks into Anthropic's content shape.
     fn translate_block(b: &ContentBlock) -> Value {
         match b {
             ContentBlock::Text { text } => json!({"type": "text", "text": text}),
@@ -135,7 +130,7 @@ impl AnthropicAdapter {
         }
     }
 
-    /// Apply [`CacheDirective::MarkBoundary`] markers. Anthropic accepts
+    /// Anthropic accepts
     /// up to 4 cache_control markers; we attach to system + last
     /// content block per directive (in order). The translation here is
     /// best-effort — callers wanting precise placement should construct
@@ -173,7 +168,7 @@ impl AnthropicAdapter {
         }
     }
 
-    /// Build a `messages/batches` URL with the given suffix. Used by
+    /// Used by
     /// the `BatchSubmitter` impl on [`super::provider::AnthropicProvider`]
     /// — `""` is the collection (POST submit), `/{id}` is one job,
     /// `/{id}/results` and `/{id}/cancel` are sub-resources.
@@ -295,8 +290,6 @@ impl HttpAdapter for AnthropicAdapter {
             })
             .collect();
 
-        // Structured output emulation: inject a hidden tool and force its
-        // use.
         if let Some(schema) = &req.structured_output {
             tools_to_send.push(json!({
                 "name": STRUCTURED_OUTPUT_TOOL,

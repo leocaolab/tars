@@ -1,17 +1,17 @@
-//! `tars_melt::event` — the read-able **E-pillar** event store (Doc 08
-//! §3, Doc 17). Two durable, full-fidelity, never-sampled stores read
+//! `tars_melt::event` — the read-able **E-pillar** event store.
+//! Two durable, full-fidelity, never-sampled stores read
 //! back by eval / `tars events` / debug / replay:
 //!
 //! - [`PipelineEventLog`] — one [`PipelineEvent`] per
 //!   `Pipeline.call` boundary. Distinct from recovery's `AgentEventLog`
 //!   (trajectory truth, tars-storage) — there is no shared generic
-//!   `EventStore<E>` (Doc 09 §2.2, Doc 17 Q1).
+//!   `EventStore<E>`.
 //! - [`LlmRecordStore`] — tenant-scoped CAS holding the per-call
 //!   `LlmRecord` (`ChatRequest` + `ChatResponse`) referenced from a
 //!   [`PipelineEvent`] via [`ContentRef`].
 //!
 //! The producing pipeline emits once into melt and never reads these
-//! back; the M/L/T egress is fired independently (Doc 08 §3).
+//! back; the M/L/T egress is fired independently.
 
 pub mod content_ref;
 mod llm_record_store;

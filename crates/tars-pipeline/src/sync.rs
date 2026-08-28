@@ -1,20 +1,4 @@
 //! Sync convenience wrappers over the async `LlmService` trait.
-//!
-//! Two helpers, both motivated by the same observation: every sync
-//! caller of `tars-pipeline` (CLI tools, FFI bindings, downstream
-//! consumers like arc) was reinventing the same plumbing —
-//!
-//! 1. A `LazyLock<tokio::runtime::Runtime>` to bridge sync → async;
-//! 2. `let mut stream = svc.call(...).await?; while let Some(ev) =
-//!    stream.next().await { builder.apply(ev?); }` to assemble a
-//!    [`ChatResponse`] from the event stream;
-//! 3. The `ValidationOutcome` side-channel substitution so callers
-//!    see the post-Filter response (if any) and the validation
-//!    summary in both Filter and non-Filter paths.
-//!
-//! Centralising the trio here removes ~80 lines of duplicated
-//! plumbing from each consumer and ensures the side-channel handling
-//! stays correct as `ValidationMiddleware` evolves.
 
 use std::sync::LazyLock;
 
@@ -45,20 +29,6 @@ pub fn shared_runtime() -> &'static Runtime {
 
 /// Drive `svc.call(req, ctx)` to completion synchronously on the
 /// [`shared_runtime`], returning the assembled [`ChatResponse`].
-///
-/// Applies the validation-outcome side-channel substitution:
-///
-/// - If a Filter validator ran, the post-Filter response replaces
-///   the raw streamed one. (The stream itself re-emits the filtered
-///   text, but the side channel is the authoritative source for the
-///   substitution to handle the empty-validator-chain passthrough
-///   case correctly.)
-/// - The `validation_summary` is copied from the side channel onto
-///   the response even when no Filter ran — the streamed events
-///   don't carry it directly.
-///
-/// Returns the same `ProviderError` shape as a direct async call,
-/// including `ValidationFailed` (always `ErrorClass::Permanent`).
 pub async fn complete_async(
     svc: LlmService,
     req: ChatRequest,
@@ -90,9 +60,8 @@ pub async fn complete_async(
     Ok(response)
 }
 
-/// Block-on wrapper over [`complete_async`] for SYNC call sites: drives it to
-/// completion on the shared runtime. Callers already on a runtime should await
-/// [`complete_async`] directly instead — no nested runtime, no block_on.
+/// Block-on wrapper over [`complete_async`] for SYNC call sites.
+/// Callers already on a runtime should await [`complete_async`] directly instead — no nested runtime, no block_on.
 pub fn complete_sync(
     svc: LlmService,
     req: ChatRequest,

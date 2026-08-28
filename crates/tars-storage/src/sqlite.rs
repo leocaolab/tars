@@ -26,8 +26,7 @@ use crate::agent_event_log::{AgentEventLog, EventRecord};
 use crate::error::StorageError;
 
 /// Embedded versioned schema (`migrations/agent_event_log/`). Applied once at
-/// open on the store's own pool; `_sqlx_migrations` is the version-of-record
-/// (replaces the old refinery `refinery_schema_history` / `user_version` gate).
+/// open on the store's own pool; `_sqlx_migrations` is the version-of-record.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("migrations/agent_event_log");
 
 #[derive(Clone, Debug)]
@@ -211,7 +210,7 @@ pub fn default_personal_agent_event_log_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("tars").join("events.sqlite"))
 }
 
-/// Open at `path`, creating the parent directory if needed.
+
 pub async fn open_agent_event_log_at_path(
     path: &Path,
 ) -> Result<Arc<SqliteAgentEventLog>, StorageError> {
@@ -223,7 +222,7 @@ pub async fn open_agent_event_log_at_path(
     SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(path)).await
 }
 
-/// Decode failure on a fetched row → a `Backend` error preserving the source.
+
 fn row_err(e: sqlx::Error) -> StorageError {
     StorageError::backend_source("decode row", e)
 }
@@ -247,7 +246,7 @@ fn now_ms() -> Result<i64, StorageError> {
 mod tests {
     use super::*;
     use serde_json::json;
-    // Legacy-DB fixtures below build a pre-sqlx pool by hand to prove
+    // Legacy-DB fixtures below build a bare pool by hand to prove
     // non-destructive adoption; the store's own pool comes from `crate::pool`.
 
     fn traj(id: &str) -> TrajectoryId {
@@ -382,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_survives_close_and_reopen() {
-        // Doc 04 §3 recovery-from-checkpoint guarantee: events written
+        // §3 recovery-from-checkpoint guarantee: events written
         // before a crash must be readable after restart.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.sqlite");
@@ -406,10 +405,8 @@ mod tests {
 
     #[tokio::test]
     async fn sqlx_history_stamps_baseline_on_fresh_db() {
-        // E2E-1 (was `refinery_history_stamps_v1_on_fresh_db`): a fresh DB gets
-        // `_sqlx_migrations` with the baseline (version 1) applied — sqlx is the
-        // version-of-record now (the old `user_version=1` / refinery history is
-        // gone). Same intent, new mechanism.
+        // E2E-1: a fresh DB gets `_sqlx_migrations` with the baseline (version 1)
+        // applied — sqlx is the version-of-record now.
         let store = SqliteAgentEventLog::in_memory().await.unwrap();
         let v: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(store.db.sqlite())
@@ -420,9 +417,8 @@ mod tests {
 
     #[tokio::test]
     async fn adopts_pre_sqlx_db_preserving_rows() {
-        // E2E-2 (the "好用" gate, was `adopts_pre_refinery_db_preserving_rows`):
-        // open a DB created by the OLD inline-DDL code (tables present, a row,
-        // NO `_sqlx_migrations`) and confirm baseline adoption is non-destructive
+        // E2E-2 (the "好用" gate): open a DB created by an older version (tables present,
+        // a row, NO `_sqlx_migrations`) and confirm baseline adoption is non-destructive
         // — the pre-existing row survives, sqlx stamps the baseline, and new
         // appends still work. `IF NOT EXISTS` makes the baseline a no-op.
         let dir = tempfile::tempdir().unwrap();

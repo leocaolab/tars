@@ -1,7 +1,4 @@
-//! Pure helpers shared by [`super::adapter`] and [`super::provider`]:
-//! stop-reason mapping, usage parsing, body truncation, and the
-//! batch-API JSON converters (`translate_batch_status`,
-//! `parse_batch_results`, `message_to_chat_response`). Stateless, no I/O.
+//! Pure helpers shared by [`super::adapter`] and [`super::provider`].
 
 use serde_json::{Value, json};
 
@@ -10,8 +7,7 @@ use tars_types::{
     ProviderError, StopReason, Usage,
 };
 
-/// Map Anthropic's `stop_reason` wire string to the canonical
-/// [`StopReason`]. Cross-provider conformance suite relies on these
+/// Cross-provider conformance suite relies on these
 /// mappings — keep in sync with the adapter's tests.
 pub(super) fn map_stop_reason(s: &str) -> StopReason {
     match s {
@@ -23,8 +19,7 @@ pub(super) fn map_stop_reason(s: &str) -> StopReason {
     }
 }
 
-/// Normalize Anthropic's `usage` map into the canonical [`Usage`]
-/// shape. Anthropic reports `input_tokens` **disjoint** from
+/// Anthropic reports `input_tokens` **disjoint** from
 /// `cache_read` / `cache_creation`. Our `Usage` is OpenAI-style:
 /// `input_tokens` is the *total* prompt and includes the cached and
 /// creation subsets. Normalize at the boundary so `Pricing::cost_for`
@@ -57,12 +52,11 @@ pub(super) fn parse_usage(u: &serde_json::Map<String, Value>) -> Usage {
     }
 }
 
-/// UTF-8-safe truncation; appends an ellipsis if anything was dropped.
+///
 /// Re-exported from the shared HTTP base so both backends share one copy.
 pub(super) use crate::http_base::truncate;
 
-/// Translate Anthropic's batch status JSON into our vendor-neutral
-/// [`BatchStatus`]. The vendor reports `processing_status` plus a
+/// The vendor reports `processing_status` plus a
 /// `request_counts` breakdown — we collapse "ended" into one of
 /// Completed / Cancelled / Expired based on the count distribution.
 pub(super) fn translate_batch_status(v: &Value) -> Result<BatchStatus, ProviderError> {
@@ -117,7 +111,7 @@ pub(super) fn translate_batch_status(v: &Value) -> Result<BatchStatus, ProviderE
     }
 }
 
-/// Parse Anthropic's results JSONL into [`BatchResultItem`]s. Each
+/// Each
 /// line has `custom_id` + `result.type` ∈ {succeeded, errored,
 /// canceled, expired}; we translate to a per-item
 /// `Result<ChatResponse, ProviderError>`.
@@ -196,10 +190,7 @@ pub(super) fn parse_batch_results(text: &str) -> Result<Vec<BatchResultItem>, Pr
     Ok(items)
 }
 
-/// Convert one Anthropic message-shape JSON into a [`ChatResponse`] by
-/// replaying it through [`ChatResponseBuilder`]. Text content blocks
-/// become `Delta` events; we set the terminal `Finished` from
-/// `stop_reason` + `usage`.
+///
 ///
 /// **Known gap**: `tool_use` content blocks are skipped. Batch
 /// consumers needing tool calls must parse the raw `message` JSON

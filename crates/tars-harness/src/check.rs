@@ -29,7 +29,6 @@ use std::sync::Arc;
 use tars_pipeline::OutputValidator;
 use tars_types::{ChatRequest, ChatResponse, ValidationOutcome};
 
-/// Outcome of one invariant check against one output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckResult {
     pub passed: bool,
@@ -60,7 +59,6 @@ pub trait Invariant: Send + Sync {
     /// rate shows up in a behavior report.
     fn name(&self) -> &str;
 
-    /// Check the property on one `(request, response)` pair.
     fn check(&self, input: &ChatRequest, output: &ChatResponse) -> CheckResult;
 }
 
@@ -76,7 +74,6 @@ pub trait Invariant: Send + Sync {
 /// page (Zapier). The caller supplies the extractor because *what* to
 /// pull out of the response (a field, a list, the whole text) is
 /// domain-specific; the membership check is generic.
-/// Pulls the candidate value(s) to membership-check out of a response.
 type ExtractFn = Box<dyn Fn(&ChatResponse) -> Vec<String> + Send + Sync>;
 
 pub struct MembershipInvariant {
@@ -86,9 +83,6 @@ pub struct MembershipInvariant {
 }
 
 impl MembershipInvariant {
-    /// `extract` pulls the candidate value(s) out of a response (e.g.
-    /// recommended tool names). Every extracted value must be in
-    /// `allowed`; any that isn't fails the invariant.
     pub fn new<I, S>(
         name: impl Into<String>,
         allowed: I,
@@ -105,8 +99,6 @@ impl MembershipInvariant {
         }
     }
 
-    /// Convenience: the entire response text (trimmed) must be one of
-    /// the allowed values. For single-label classification outputs.
     pub fn whole_text<I, S>(name: impl Into<String>, allowed: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -159,7 +151,6 @@ impl CheckRunner {
         self.invariants.is_empty()
     }
 
-    /// Run every invariant; return `(name, result)` in declared order.
     pub fn run(&self, input: &ChatRequest, output: &ChatResponse) -> Vec<(String, CheckResult)> {
         self.invariants
             .iter()

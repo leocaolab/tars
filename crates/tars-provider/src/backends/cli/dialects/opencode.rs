@@ -1,5 +1,5 @@
 //! [`OpenCodeDialect`] — the `opencode` CLI behavior expressed as a
-//! [`CliDialect`] (Doc 32 §5 C3, M2). Shells out to
+//! [`CliDialect`]. Shells out to
 //! `opencode run --format json --model <provider/model> <prompt>` (prompt as
 //! the positional `message` **arg**), and maps opencode's `--format json`
 //! event stream onto canonical [`ChatEvent`]s.
@@ -7,8 +7,7 @@
 //! `opencode` spawns through the shared
 //! [`SharedCliRunner`](super::super::subprocess::SharedCliRunner) + OS-jail
 //! primitive so — a black-box coding agent — it runs inside the same
-//! `tars-sandbox` write-jail as the other delegates. This dialect declares only
-//! argv + [`OutputFraming::JsonLinesArray`] + `parse_line`; no bespoke runner.
+//! `tars-sandbox` write-jail as the other delegates.
 //!
 //! ## opencode `--format json` event schema (grounded from
 //! `packages/opencode/src/cli/cmd/run.ts` in the checkout at
@@ -128,7 +127,6 @@ impl CliDialect for OpenCodeDialect {
     }
 
     fn prompt_channel(&self) -> PromptChannel {
-        // `opencode run … "<prompt>"` — the prompt is the positional arg.
         PromptChannel::Arg
     }
 
@@ -137,8 +135,6 @@ impl CliDialect for OpenCodeDialect {
     }
 
     fn output_framing(&self) -> OutputFraming {
-        // opencode emits an NDJSON event stream; the shared runner buffers it
-        // into a `Value::Array` of raw lines that `parse_line` maps per event.
         OutputFraming::JsonLinesArray
     }
 
@@ -159,10 +155,6 @@ impl CliDialect for OpenCodeDialect {
     }
 
     fn parse_line(&self, raw: &Value) -> Result<Vec<ChatEvent>, ProviderError> {
-        // The runner reconstructs opencode's NDJSON stream into a `Value::Array`
-        // of raw line strings (same shape as codex). Map each line by its
-        // `type`. The backend prepends `Started`, so we own the content Deltas +
-        // the synthesized terminal `Finished`.
         let lines = raw.as_array().ok_or_else(|| {
             ProviderError::Parse(format!(
                 "opencode runner payload must be a JSONL array, got: {}",
@@ -266,8 +258,7 @@ fn add_step_tokens(usage: &mut Usage, tokens: &Value) {
 }
 
 /// Render a chat request as a single string prompt for the CLI. Embeds the
-/// system prompt as a leading `[system]` block. Same shape as the other CLI
-/// delegates.
+/// system prompt as a leading `[system]` block.
 fn render_prompt_for_cli(req: &ChatRequest) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(req.messages.len() + 1);
     if let Some(sys) = &req.system {
@@ -318,7 +309,6 @@ mod tests {
             )
             .unwrap();
         let argv = d.argv(&inv);
-        // `opencode run --format json --model <provider/model> "<prompt>"`.
         assert_eq!(argv[0], "run");
         assert_eq!(argv[1], "--format");
         assert_eq!(argv[2], "json");
@@ -327,11 +317,6 @@ mod tests {
         assert!(argv[5].contains("say hi"));
     }
 
-    // The (channel, mode, framing) declaration and the arg-channel prompt-size
-    // cap are cross-dialect invariants folded into `tests/cli_conformance.rs`
-    // (D-12) — the latter newly covers opencode, which had no oversized test.
-
-    /// parse_line over a JSONL array (the runner's reconstructed shape).
     fn parse_line(lines: &[&str]) -> Result<Vec<ChatEvent>, ProviderError> {
         let arr = Value::Array(lines.iter().map(|l| Value::String(l.to_string())).collect());
         dialect().parse_line(&arr)

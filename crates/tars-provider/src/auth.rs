@@ -36,8 +36,7 @@ enum CredentialSource<'a> {
 }
 
 impl CredentialSource<'_> {
-    /// Human-readable label embedded into the size-cap / empty error
-    /// messages. Stable wording — operators grep for these strings.
+    /// Stable wording — operators grep for these strings.
     fn label(&self) -> String {
         match self {
             CredentialSource::Inline => "inline credential".into(),
@@ -49,9 +48,8 @@ impl CredentialSource<'_> {
     }
 }
 
-/// Enforce the size cap, trim whitespace, and reject an empty/
-/// whitespace-only secret. Shared by every [`SecretRef`] arm so
-/// credential hygiene can't drift between them.
+/// Shared by every [`SecretRef`] arm so credential hygiene can't drift
+/// between them.
 fn validate_credential(raw: &str, source: CredentialSource<'_>) -> Result<String, AuthError> {
     if raw.len() > MAX_CREDENTIAL_BYTES {
         return Err(AuthError::Internal(format!(
@@ -97,7 +95,6 @@ impl From<AuthError> for ProviderError {
 /// bearer/api-key plaintext.
 #[derive(Clone)]
 pub enum ResolvedAuth {
-    /// Plaintext bearer-style credential string.
     Bearer(String),
     /// API-key style — adapter chooses the header name.
     ApiKey(String),
@@ -205,7 +202,6 @@ impl AuthResolver for BasicAuthResolver {
     }
 }
 
-/// Convenience: `Arc<dyn AuthResolver>` wrapping a [`BasicAuthResolver`].
 pub fn basic() -> Arc<dyn AuthResolver> {
     Arc::new(BasicAuthResolver)
 }
@@ -331,7 +327,6 @@ mod tests {
             std::process::id(),
             "nope"
         ));
-        // Make sure it isn't there.
         let _ = std::fs::remove_file(&path);
         let r = BasicAuthResolver;
         let err = r

@@ -160,7 +160,7 @@ pub enum ProviderConfig {
         extras: HttpProviderExtras,
     },
 
-    /// AWS Bedrock via the unified Converse API (Doc 31). **Keyless** —
+    /// AWS Bedrock via the unified Converse API. **Keyless** —
     /// there is intentionally NO `auth` field: credential resolution is
     /// delegated wholesale to the AWS SDK's default chain (env / profile /
     /// SSO / ECS / EC2 IMDS) and every request is SigV4-signed by the SDK.
@@ -353,7 +353,7 @@ pub enum ProviderConfig {
         default_model: String,
     },
 
-    /// opencode CLI delegate (Doc 32 M2). Shells out to
+    /// opencode CLI delegate. Shells out to
     /// `opencode run --format json --model <provider/model> <prompt>`.
     /// `default_model` is opencode's `provider/model` form
     /// (e.g. `anthropic/claude-sonnet-4-5`).
@@ -369,7 +369,7 @@ pub enum ProviderConfig {
         default_model: String,
     },
 
-    /// Antigravity (`agy`) CLI delegate (Doc 32 M3). Shells out to
+    /// Antigravity (`agy`) CLI delegate. Shells out to
     /// `agy -p "<prompt>" --model <model> --dangerously-skip-permissions
     /// --add-dir <cwd>` and reads the plain-text answer from stdout.
     Antigravity {
@@ -543,7 +543,7 @@ fn default_mock_response() -> String {
 /// max_output_tokens = 32768     # bump from 4K default
 /// ```
 ///
-/// Thaws Doc 01 D-6 (`capabilities_override` config field — the
+/// Thaws D-6 (`capabilities_override` config field — the
 /// trigger fired the first time a user with a heterogeneous local
 /// deployment hit our default 4K output cap).
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -631,7 +631,7 @@ impl ProviderConfig {
             | Opencode { default_model, .. }
             | Antigravity { default_model, .. }
             | Cassette { default_model, .. } => default_model,
-            // Bedrock names its model field `model` (Doc 31), not
+            // Bedrock names its model field `model`, not
             // `default_model` — its own arm.
             Bedrock { model, .. } => model,
             Mock { .. } => "mock-model",
@@ -806,7 +806,7 @@ impl ProviderConfig {
                 check_default_model(default_model, sink);
             }
             ProviderConfig::Bedrock { region, model, .. } => {
-                // Keyless by design (Doc 31 §5): unlike Anthropic/OpenAI/
+                // Keyless by design: unlike Anthropic/OpenAI/
                 // Gemini above, we deliberately do NOT reject a missing
                 // auth field — Bedrock has none. The only config-time
                 // checks are the two non-empty strings the SDK needs.

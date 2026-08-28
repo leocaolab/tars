@@ -9,7 +9,7 @@
 //! for proxied environments.)
 //!
 //! This is **not** a model catalog — only "how to talk to the provider"
-//! defaults. Model picking belongs to the routing layer (Doc 02 §4.6).
+//! defaults. Model picking belongs to the routing layer.
 
 use std::collections::HashMap;
 

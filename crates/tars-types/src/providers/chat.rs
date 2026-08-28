@@ -29,19 +29,15 @@ pub struct ChatRequest {
     /// the recommended layout.
     pub messages: Vec<Message>,
 
-    /// Tool definitions made available to the model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolSpec>,
 
-    /// How aggressively the model can/must call tools.
     #[serde(default)]
     pub tool_choice: ToolChoice,
 
-    /// Force the model to emit JSON matching this schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_output: Option<JsonSchema>,
 
-    /// Per-provider sampling.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,11 +47,9 @@ pub struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
 
-    /// Cache directives — see [`CacheDirective`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_directives: Vec<CacheDirective>,
 
-    /// Thinking / reasoning mode.
     #[serde(default, skip_serializing_if = "ThinkingMode::is_off")]
     pub thinking: ThinkingMode,
 
@@ -71,7 +65,6 @@ pub struct ChatRequest {
 }
 
 impl ChatRequest {
-    /// Minimal builder for the common single-user-turn case.
     pub fn user(prompt: impl Into<String>) -> Self {
         Self {
             system: None,
@@ -91,28 +84,14 @@ impl ChatRequest {
         }
     }
 
-    /// Set system prompt (chainable).
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
         self.system = Some(system.into());
         self
     }
 
-    /// Check whether a provider with the given [`ProviderProfile`] can serve
-    /// this request. Used by routing's pre-flight check (B-31) to skip
-    /// fallback candidates that can't honour the request's feature
-    /// requirements (tools / vision / thinking / structured output /
-    /// context window / max output) — avoids wasting a wire round-trip
-    /// on a candidate that would silently drop features or 400 at the
-    /// provider.
-    ///
-    /// Returns [`CompatibilityCheck::Incompatible`] with a typed list
-    /// of [`CompatibilityReason`]s when the request's feature set
-    /// isn't covered by `caps`. Caller (routing layer / Python
-    /// pre-check) can `match` on each reason to decide:
-    ///
-    /// - downgrade gracefully (e.g. drop tools, retry without)
-    /// - swap providers (e.g. switch to a vision-capable model)
-    /// - reject hard (e.g. context overflow can't be fixed by routing)
+    /// Avoids wasting a wire round-trip on a candidate that would silently drop
+    /// features or 400 at the provider. Returns a typed reason list so callers
+    /// can downgrade gracefully, swap providers, or reject hard.
     ///
     /// **Conservative philosophy**: when in doubt (e.g., a feature
     /// is set but `caps` doesn't explicitly forbid it), return
@@ -167,16 +146,13 @@ impl ChatRequest {
             reasons.push(CompatibilityReason::VisionUnsupported);
         }
 
-        // Context window — partial fix for B-32, ahead of full tokenizer
-        // story (D-5 frozen). We use a chars/4 heuristic (typical
-        // English BPE ratio) as the estimate. The estimate is
-        // conservative-friendly: real provider tokenizers might pack
-        // tighter for languages they're trained on but NOT looser, so
-        // saying "estimated > max" is a real overflow signal even with
-        // the rough estimate. False-negative tolerated (we let
-        // borderline requests through to the provider, which still
-        // catches them via wire-level 400 ContextTooLong); only flag
-        // the obvious-overflow case to keep false-positive rate low.
+        // Context window chars/4 heuristic (typical English BPE ratio).
+        // The estimate is conservative-friendly: real provider tokenizers
+        // might pack tighter for languages they're trained on but NOT looser,
+        // so saying "estimated > max" is a real overflow signal.
+        // False-negative tolerated (we let borderline requests through to the
+        // provider, which catches them via wire-level 400 ContextTooLong);
+        // only flag the obvious-overflow case to keep false-positive rate low.
         let prompt_chars = estimate_prompt_chars(self);
         let estimated_tokens = u32::try_from(prompt_chars / 4).unwrap_or(u32::MAX);
         // `None` context cap = no ceiling to enforce (local model, unknown
@@ -210,9 +186,7 @@ impl ChatRequest {
     }
 }
 
-/// Estimate prompt size in chars by walking every text block of every
-/// message. Used by the context-window pre-flight (no tokenizer
-/// dependency). System prompt is included; the system prompt isn't in
+/// System prompt is included; the system prompt isn't in
 /// `messages` but is sent on every call.
 fn estimate_prompt_chars(req: &ChatRequest) -> usize {
     let mut total = req.system.as_ref().map(|s| s.len()).unwrap_or(0);
@@ -282,8 +256,7 @@ pub enum CompatibilityReason {
     /// `supports_vision=false`.
     VisionUnsupported,
     /// Estimated prompt size exceeds provider's `max_context_tokens`.
-    /// Estimate uses a `chars/4` heuristic (no tokenizer dep until
-    /// D-5 unfreezes). The estimate is conservative-toward-passing:
+    /// Estimate uses a `chars/4` heuristic. The estimate is conservative-toward-passing:
     /// flagged only when overflow is obvious.
     ContextWindowExceeded {
         /// Our estimate of the prompt's token count via chars/4.
@@ -442,9 +415,9 @@ impl ProviderProfile {
     }
 }
 
-/// A message in the chat history. Mirrors the OpenAI/Anthropic role model.
+/// Mirrors the OpenAI/Anthropic role model.
 ///
-/// **Note on `tool_calls`** — only present on `Assistant` messages. The
+/// **Note on `tool_calls`**: only present on `Assistant` messages. The
 /// model emits tool calls; we send back the result as a `Tool` message
 /// referencing the same `tool_call_id`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -478,14 +451,14 @@ pub enum Message {
 }
 
 impl Message {
-    /// Convenience — single-text user turn.
+
     pub fn user_text(text: impl Into<String>) -> Self {
         Self::User {
             content: vec![ContentBlock::text(text)],
         }
     }
 
-    /// Convenience — single-text assistant turn (no tool calls).
+
     pub fn assistant_text(text: impl Into<String>) -> Self {
         Self::Assistant {
             content: vec![ContentBlock::text(text)],
@@ -493,7 +466,7 @@ impl Message {
         }
     }
 
-    /// Borrow the role's content list.
+
     pub fn content(&self) -> &[ContentBlock] {
         match self {
             Self::User { content }
@@ -504,7 +477,7 @@ impl Message {
     }
 }
 
-/// Multi-modal content block. Wire format mirrors OpenAI/Anthropic:
+/// Wire format mirrors OpenAI/Anthropic:
 /// `{"type": "text", "text": "..."}` / `{"type": "image", ...}`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -514,12 +487,12 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
-    /// Convenience constructor — most callers just want a text block.
+
     pub fn text(s: impl Into<String>) -> Self {
         Self::Text { text: s.into() }
     }
 
-    /// Borrow text content if this is a text block.
+
     pub fn as_text(&self) -> Option<&str> {
         if let Self::Text { text } = self {
             Some(text)
@@ -529,8 +502,7 @@ impl ContentBlock {
     }
 }
 
-/// How an image arrives. URL = remote / model-fetched. Inline = base64
-/// bytes. We never send raw `Vec<u8>` over the wire to the LLM; provider
+/// We never send raw `Vec<u8>` over the wire to the LLM; provider
 /// adapters base64-encode at the boundary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -543,9 +515,7 @@ impl ImageData {
     /// SHA-256 hex digest of the *descriptor* — the URL string for
     /// `Url` or the encoded form for `Base64`. **Does not** fetch the
     /// remote bytes for `Url`, so two different images served from the
-    /// same URL hash identically. Audit `tars-types-src-chat-15`:
-    /// previously named `content_hash`, which mis-implied the function
-    /// hashed the actual image bytes and risked stale cache hits.
+    /// same URL hash identically.
     pub fn descriptor_hash(&self) -> String {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
@@ -591,7 +561,7 @@ mod tests {
         assert_eq!(a.len(), 64);
     }
 
-    // ── compatibility_check tests (B-31) ────────────────────────────
+    // ── compatibility_check tests ───────────────────────────────────────────
 
     use crate::providers::provider_profile::{Modality, PromptCacheKind, ProviderProfile};
     use crate::providers::schema::JsonSchema;
@@ -822,7 +792,7 @@ mod tests {
         }
     }
 
-    // ── Context window + max_output checks (new in B-31 v2) ──────
+    // ── Context window + max_output checks ───────────────────────────────
 
     #[test]
     fn compat_context_window_exceeded_flagged() {

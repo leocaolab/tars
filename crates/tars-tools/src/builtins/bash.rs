@@ -5,9 +5,9 @@
 //! captures stdout+stderr, and bounds the blast with a timeout + an
 //! output cap. Cooperative-cancel aware.
 //!
-//! Side effect: **Irreversible** by default (Doc 04 §4.4) — an arbitrary
+//! Side effect: **Irreversible** by default — an arbitrary
 //! command can do anything; whether it may run at all is the Agent's
-//! permission layer's call (Doc 05 IAM), not this tool's. This tool just
+//! permission layer's call, not this tool's. This tool just
 //! executes what it's handed and reports honestly.
 
 use std::sync::OnceLock;
@@ -107,10 +107,8 @@ impl Tool for BashTool {
         let parsed: BashArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        // Confine the shell's process tree via `ctx.sandbox` (Doc 22: "naked
-        // spawn → sandboxed"). The default policy is `DangerFullAccess`, which
-        // `wrap` returns as a passthrough — so behaviour is unchanged until a
-        // caller threads a confining `SandboxMode` (M4). Fail-closed: a
+        // Confine the shell's process tree via `ctx.sandbox`. The default policy
+        // is `DangerFullAccess` (passthrough). Fail-closed: a
         // requested-but-unbuildable sandbox errors here, never spawns bare.
         let workdir = ctx
             .cwd
@@ -208,7 +206,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // M2/M6: BashTool actually confined by a WorkspaceWrite sandbox (macOS).
+    // BashTool actually confined by a WorkspaceWrite sandbox (macOS).
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn sandbox_confines_bash_writes_to_worktree() {

@@ -1,17 +1,11 @@
 //! [`PipelineEventLog`] — durable stream of one event per
-//! `Pipeline.call` boundary. See
-//! [Doc 17](../../../docs/architecture/17-pipeline-event-store.md).
+//! `Pipeline.call` boundary.
 //!
 //! Distinct from recovery's `AgentEventLog` (tars-storage, the
 //! trajectory event log, keyed by `TrajectoryId`). Different access
 //! patterns: this trait queries
 //! by tenant + time range + tags; trajectory queries by id + sequence.
-//! Q1 in Doc 17 explicitly chose two independent traits over a
-//! generic `EventStore<E>`.
-//!
-//! Phase 1 ships `append` + a minimal `query` (filter by tenant +
-//! time range). `subscribe()` (live consumers for OnlineEvaluatorRunner)
-//! lands in Phase 2 with the W3 main body.
+//! This justifies two independent traits over a generic `EventStore<E>`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -116,7 +110,6 @@ impl SqlitePipelineEventLog {
         Self::new(db).await
     }
 
-    /// In-memory store for tests (its own single-connection in-memory pool).
     pub async fn in_memory() -> Result<Arc<Self>, StoreError> {
         let db = Db::sqlite_in_memory()
             .await
@@ -390,7 +383,6 @@ mod tests {
             })
             .await
             .unwrap();
-        // earlier + now match, much_earlier dropped.
         assert_eq!(got.len(), 2);
     }
 
@@ -401,7 +393,6 @@ mod tests {
         let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
         let t2 = SystemTime::UNIX_EPOCH + Duration::from_secs(3_000_000);
 
-        // Insert out of order.
         s.append(&[fake_event("t", t2)]).await.unwrap();
         s.append(&[fake_event("t", t0)]).await.unwrap();
         s.append(&[fake_event("t", t1)]).await.unwrap();
@@ -440,7 +431,6 @@ mod tests {
         let s = store().await;
         let ev = fake_event("t1", SystemTime::now());
         s.append(std::slice::from_ref(&ev)).await.unwrap();
-        // Second append of same event_id replaces (no PK violation).
         s.append(std::slice::from_ref(&ev)).await.unwrap();
         let got = s.query(&PipelineEventQuery::default()).await.unwrap();
         assert_eq!(got.len(), 1);
@@ -526,7 +516,6 @@ mod tests {
         // EXISTS`), 0002 performs the data rewrite.
         db.migrate(&MIGRATOR).await.unwrap();
 
-        // Row count unchanged.
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pipeline_events")
             .fetch_one(db.sqlite())
             .await
@@ -547,14 +536,12 @@ mod tests {
             }
         };
 
-        // The "unresolved" row is now null.
         let v = payload_for("00000000-0000-0000-0000-000000000001").await;
         assert!(
             v["LlmCallFinished"]["provider_id"].is_null(),
             "legacy sentinel rewritten to null: {v}"
         );
 
-        // The already-resolved row is untouched.
         let v = payload_for("00000000-0000-0000-0000-000000000002").await;
         assert_eq!(v["LlmCallFinished"]["provider_id"], "openai-1");
 

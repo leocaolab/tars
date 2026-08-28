@@ -8,9 +8,8 @@
 //!
 //! ## Estimation strategy
 //!
-//! Pre-call we do not know the true token counts. We follow the
-//! anti-pattern checklist in `docs/architecture/01-llm-provider.md §15`
-//! (#1: no tokenizers on the hot path) and use:
+//! Pre-call we do not know the true token counts. We avoid tokenizers
+//! on the hot path and use:
 //!
 //! - **Input tokens** ≈ `chars / 4` over `system` + all `Message::Text`
 //!   content blocks.
@@ -48,9 +47,7 @@ use crate::service::Next;
 /// Refuses any call whose estimated USD cost exceeds `cap_usd`.
 ///
 /// Holds the per-instance `zero_pricing_warned` latch: the middleware is
-/// constructed once and lives for the life of the pipeline, so the
-/// "warn once on a zero-priced provider" state belongs here (it used to
-/// live on the per-call wrapper struct, which was likewise built once).
+/// constructed once and lives for the life of the pipeline.
 #[derive(Debug)]
 pub struct PerCallBudgetMiddleware {
     cap_usd: f64,
@@ -65,9 +62,7 @@ pub struct PerCallBudgetMiddleware {
 /// [`PerCallBudgetMiddleware::try_new`] and
 /// [`PerCallBudgetMiddleware::try_from_parts`] when the configuration
 /// would produce silently-broken budgeting (NaN/inf/negative cap or
-/// pricing rates). Previously this was a `panic!` — fine for
-/// programmer-error invariants but inappropriate for config-derived
-/// input (`arc scan --judge` finding `ARC-L5-EF-9`).
+/// pricing rates).
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum BudgetConfigError {
     #[error("PerCallBudgetMiddleware cap_usd must be finite and non-negative, got {value}")]

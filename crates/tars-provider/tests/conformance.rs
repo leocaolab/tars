@@ -1,34 +1,10 @@
-//! Cross-provider conformance suite — Doc 01 §14 + Doc 14 §8.2 D-9.
+//! Cross-provider conformance suite.
 //!
 //! One body of tests, instantiated per HTTP backend via the
 //! `conformance_suite!` macro. Each backend supplies a `Scenarios`
 //! type that knows how to:
 //!   - spin up a wiremock server + build a configured provider
 //!   - emit the backend's wire bytes for each shared scenario
-//!     (streaming text / tool call / 4xx-5xx error)
-//!
-//! What the suite proves:
-//!   1. Every provider's open-time success path produces the same
-//!      observable [`ChatEvent`] sequence shape for "respond with
-//!      this text" — Started → Delta+ → Finished(EndTurn) with usage.
-//!   2. Every provider's tool-call path produces ToolCall with parsed
-//!      `arguments` (a JSON Object, regardless of whether the wire
-//!      format used a string-encoded payload like OpenAI), name +
-//!      id matches, and stop_reason = ToolUse.
-//!   3. HTTP error → typed [`ProviderError`] mapping is consistent:
-//!      401 → Auth, 429 → RateLimited, 503 → ModelOverloaded.
-//!   4. Capability descriptors expose the same minimum guarantees
-//!      (id stable, modalities non-empty).
-//!
-//! What the suite **doesn't** cover (handled by per-backend
-//! integration tests and intentionally so):
-//!   - Backend-quirk paths: Anthropic cache_control marker placement,
-//!     Gemini safety-filter blocking, OpenAI's tool-message error
-//!     marker, Anthropic's named-event routing, etc.
-//!   - CLI subprocess backends (different wire path entirely; their
-//!     conformance lives next to their fake-runner tests).
-//!   - Live-API smoke (Doc 01 §14's "nightly CI" tier — a separate
-//!     harness with budget controls).
 //!
 //! Adding a new HTTP backend means: implement `Scenarios` for it,
 //! add one `conformance_suite!(name, MyScenarios);` line, done.
@@ -326,7 +302,7 @@ macro_rules! conformance_suite {
                 assert!(
                     tc.arguments.is_object(),
                     "arguments must be a JSON Object, never a string \
-                     (Doc 01 §8 normalization)",
+                    ",
                 );
                 assert_eq!(
                     tc.arguments, expected_args,

@@ -1,23 +1,15 @@
 //! The **bless store** — loadable, committed field-level assertions about a
-//! *pinned* response. Doc 28.
+//! *pinned* response. 
 //!
 //! A [`Bless`] is a JSON file of `{selector, expected, match}` assertions. A
 //! test decodes a (cassette-replayed → deterministic) response into a
 //! [`serde_json::Value`] and calls [`Bless::check`]; an empty [`BlessOutcome`]
 //! is a pass, any [`Drift`] is a fail naming `(selector, expected, actual)`.
 //!
-//! Layers (each generic, no domain types):
-//! - [`Codec`] tags the wire format; tars ships JSON only. Selectors are a
-//!   JSONPath **subset** (`$.a.b`, `$['a']`, `[N]`) resolved internally;
-//!   a full RFC-9535 engine can replace it without touching [`Bless`], and a
-//!   proto field-path impl is possible for a consumer but out of scope (Doc 28 §14).
-//! - [`MatchTier`] is how-equal: `exact` / `normalized` / `semantic`.
-//! - [`Bless`] is the file + `check`.
-//!
-//! Fail-closed (Doc 28 NFR-2): a selector that resolves to nothing is a
+//! Fail-closed: a selector that resolves to nothing is a
 //! [`Drift`], never a silent pass; a `semantic` assert in the pure
 //! [`check`](Bless::check) is reported unresolved (fail-closed) until the
-//! judge-aware path (M2) evaluates it.
+//! judge-aware path evaluates it.
 
 use std::path::Path;
 
@@ -146,8 +138,7 @@ impl Bless {
     }
 
     /// Build a bless by capturing the current value at each `selector`
-    /// (all [`MatchTier::Exact`]). Refuses a selector that resolves to nothing
-    /// — Doc 28 §8: don't freeze an absent field.
+    /// (all [`MatchTier::Exact`]). Refuses a selector that resolves to nothing.
     pub fn capture(
         value: &Value,
         selectors: &[&str],
@@ -187,7 +178,7 @@ impl Bless {
     /// Like [`check`](Bless::check), but `judge(expected, actual) -> bool`
     /// resolves [`Semantic`](MatchTier::Semantic) asserts. The judge lives
     /// *above* `tars-types` (it's an LLM call), so it's injected as a closure —
-    /// the eval layer passes one backed by a real judge provider (Doc 28 §6 C3).
+    /// the eval layer passes one backed by a real judge provider.
     pub fn check_with(
         &self,
         value: &Value,
@@ -229,7 +220,7 @@ impl Bless {
 
 /// The pending-file suffix (insta's `.snap.new` pattern): a capture is written
 /// here first and only an explicit accept promotes it, so a crashed record can
-/// never clobber a committed bless (Doc 28 §12).
+/// never clobber a committed bless.
 pub const PENDING_SUFFIX: &str = ".new";
 
 /// `<path>.new` — where a capture is staged before acceptance.
@@ -262,11 +253,11 @@ impl Bless {
         Ok(pending)
     }
 
-    /// The test/CLI-facing "approval assert" (CUJ-2/4). Mirrors insta:
-    /// - `do_bless` (e.g. `TARS_BLESS=1`): capture `selectors` from `value`,
+    /// The test/CLI-facing approval assert.
+    /// - `do_bless`: capture `selectors` from `value`,
     ///   promote to `path`, return a pass. The git diff of `path` is the review.
     /// - else if `path` exists: load + [`check`](Bless::check) it.
-    /// - else: error (Doc 28 FR-6 — CI must not silently create a bless).
+    /// - else: error.
     pub fn check_or_bless(
         path: &Path,
         value: &Value,
@@ -529,7 +520,7 @@ mod tests {
         ));
     }
 
-    // ── M1: record / re-bless via files (CUJ-1/4, E2E-3) ────────────
+    // ── record / re-bless via files (CUJ-1/4, E2E-3) ────────────
     fn tmp(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("tars_bless_{name}"));
         let _ = std::fs::remove_dir_all(&p);

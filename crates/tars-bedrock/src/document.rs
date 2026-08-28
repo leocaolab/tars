@@ -1,17 +1,7 @@
 //! `serde_json::Value` ↔ `aws_smithy_types::Document` conversion.
 //!
-//! Doc 31 §5/C1 flags this as one of the two hard bits of M0: Bedrock's
-//! tool input schemas (`ToolInputSchema::Json`) and tool-use arguments
-//! (`ToolUseBlock::input`) are typed as the protocol-agnostic
-//! [`Document`] rather than raw JSON. tars carries JSON as
-//! [`serde_json::Value`] everywhere (tool schemas, tool-call args), so
-//! we translate at the Bedrock boundary — in both directions:
-//!
-//! - **outbound** ([`value_to_document`]): a `ToolSpec.input_schema.schema`
-//!   or an assistant-replay `ToolCall.arguments` → `Document` to hand the SDK.
-//! - **inbound** ([`document_to_value`]): a model's `ToolUseBlock.input`
-//!   `Document` → `Value` to hand back as `ChatEvent::ToolCallEnd.parsed_args`
-//!   (whose invariant is a parsed JSON object).
+//! Bedrock's tool schemas and arguments are typed as the protocol-agnostic
+//! [`Document`] rather than raw JSON. We translate at the Bedrock boundary.
 //!
 //! The mapping is total and lossless for the JSON data model. The one
 //! representational choice is numbers: `Document::Number` distinguishes
@@ -24,8 +14,6 @@ use std::collections::HashMap;
 use aws_smithy_types::{Document, Number};
 use serde_json::Value;
 
-/// Convert a [`serde_json::Value`] into an [`aws_smithy_types::Document`].
-///
 /// Total over the JSON data model. A `serde_json::Number` that fits none
 /// of `u64`/`i64`/`f64` cannot occur (serde constructs numbers from
 /// exactly those), but if `as_f64` ever returned `None` we fall back to
@@ -55,9 +43,7 @@ pub fn value_to_document(v: &Value) -> Document {
     }
 }
 
-/// Convert an [`aws_smithy_types::Document`] back into a
-/// [`serde_json::Value`]. Inverse of [`value_to_document`]; used to
-/// surface a model's tool-use `input` as canonical parsed JSON.
+/// Used to surface a model's tool-use `input` as canonical parsed JSON.
 pub fn document_to_value(d: &Document) -> Value {
     match d {
         Document::Null => Value::Null,

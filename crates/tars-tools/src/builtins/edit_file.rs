@@ -7,7 +7,7 @@
 //! the edit is unambiguous and a stale match can't silently corrupt an
 //! unrelated line.
 //!
-//! Side effect: **Reversible** (Doc 04 §4.4).
+//! Side effect: **Reversible**.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

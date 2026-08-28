@@ -1,15 +1,6 @@
 //! [`Db`] — the database handle every store is built from, and the one place in
 //! this workspace that names a driver.
 //!
-//! # Why it exists
-//!
-//! Before this, four crates each carried a byte-identical `pool.rs` (same md5)
-//! and seven stores each took a `SqlitePool` in their constructor. The comment on
-//! those copies said they were kept separate so "no store crate gains a
-//! cross-crate pool dependency" — which bought a dependency edge and paid four
-//! copies of the WAL / synchronous / busy_timeout settings, where a fifth copy
-//! that quietly disagreed would be a real difference nobody would see.
-//!
 //! # What it abstracts, and what it does not
 //!
 //! `Db` hides the driver at CONSTRUCTION: a store takes a `Db`, not a
@@ -18,9 +9,7 @@
 //!
 //! It does NOT hide the driver at EXECUTION. Queries run against a concrete pool
 //! reached through [`Db::sqlite`] — a deliberately named escape hatch, not an
-//! oversight. `grep -c 'sqlite()'` across the workspace is exactly the surface
-//! that is still driver-bound, and it is meant to be countable rather than hidden
-//! behind a plausible-looking generic that would have to be unpicked later.
+//! oversight.
 //!
 //! Two further things stay driver-bound and are stated here so nobody plans
 //! around a capability that is missing: the SQL carries `?` placeholders and

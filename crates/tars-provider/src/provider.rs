@@ -25,15 +25,10 @@ pub type LlmEventStream =
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync + 'static {
-    /// Stable identifier (`openai_main`, `local_qwen`, …).
     fn id(&self) -> &ProviderId;
 
-    /// Static capability descriptor — what this Provider can do.
     fn capabilities(&self) -> &ProviderProfile;
 
-    /// Open a streaming chat against the concrete `model`. Adapter
-    /// clones `self` internally.
-    ///
     /// `model` is the concrete provider-side model name (e.g.
     /// `"gpt-4o-2024-08-06"`). It is passed explicitly rather than read
     /// off the request: the [`ChatRequest`] is model-agnostic content,
@@ -101,7 +96,6 @@ pub trait LlmProvider: Send + Sync + 'static {
         Ok(u64::try_from(chars).unwrap_or(u64::MAX).div_ceil(4))
     }
 
-    /// Compute USD cost from observed usage. Defaults to `pricing.cost_for`.
     fn cost(&self, usage: &Usage) -> CostUsd {
         self.capabilities().pricing.cost_for(usage)
     }
@@ -110,23 +104,12 @@ pub trait LlmProvider: Send + Sync + 'static {
     /// to its [`crate::batch::BatchSubmitter`] surface. Default `None`
     /// — backends that implement `BatchSubmitter` override this to
     /// return `Some(self)`. See `docs/roadmap.md §5` for the rationale.
-    ///
-    /// Callers do:
-    /// ```ignore
-    /// let p: Arc<dyn LlmProvider> = registry.get(&id).unwrap();
-    /// match p.as_batch_submitter() {
-    ///     Some(b) => b.submit(items).await?,
-    ///     None => /* this provider has no batch surface — sync only */,
-    /// }
-    /// ```
     fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn crate::batch::BatchSubmitter>> {
         let _ = self;
         None
     }
 }
 
-/// Convenience helper: turn any `Stream<Item=Result<ChatEvent, ProviderError>> + Send + 'static`
-/// into an [`LlmEventStream`].
 pub fn boxed_stream<S>(s: S) -> LlmEventStream
 where
     S: Stream<Item = Result<ChatEvent, ProviderError>> + Send + 'static,
@@ -134,5 +117,4 @@ where
     Box::pin(s)
 }
 
-// Type alias for downstream consumers that don't want to write `BoxStream` themselves.
 pub type EventBoxStream = BoxStream<'static, Result<ChatEvent, ProviderError>>;

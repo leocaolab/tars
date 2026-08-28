@@ -1,10 +1,6 @@
 //! `tars providers` — list configured providers and their health.
 //!
-//! For every configured provider: name, `type`, `default_model`, and key
-//! health (which env var backs its auth + whether that var is set). With
-//! `--check`, also does a fast, best-effort reachability probe (the same
-//! list-models GET as `tars models --live`) → reachable / auth-failed /
-//! unreachable. Never prints a secret; never hangs (bounded timeout).
+//! Never prints a secret; never hangs (bounded timeout).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,7 +25,6 @@ pub struct ProvidersArgs {
     json: bool,
 }
 
-/// The env var backing a provider's auth, and whether it is currently set.
 /// `None` env var = keyless (local / delegate / none).
 fn key_status(cfg: &ProviderConfig) -> KeyStatus {
     let auth = auth_of(cfg);
@@ -56,8 +51,7 @@ fn key_status(cfg: &ProviderConfig) -> KeyStatus {
     }
 }
 
-/// Borrow the `Auth` of any provider variant that has one. Keyless variants
-/// (bedrock, CLI, mock, cassette) return `None`.
+/// Keyless variants (bedrock, CLI, mock, cassette) return `None`.
 fn auth_of(cfg: &ProviderConfig) -> Option<&Auth> {
     use ProviderConfig as P;
     match cfg {

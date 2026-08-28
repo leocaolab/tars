@@ -1,4 +1,4 @@
-//! The FFI call-context seam (Doc 06 §9 / Doc 12 §6.2).
+//! The FFI call-context seam.
 //!
 //! A `tokio::task_local!` ([`tars_types::RUN_CONTEXT`]) does **not** survive a
 //! Python `with` block — Python holds no live Rust task between the
@@ -46,7 +46,7 @@ fn pop() {
 
 /// Context-manager returned by `Tars.context(...)`. Establishes a
 /// [`RequestContext`] for the duration of a `with` block; every handle call
-/// made inside re-scopes `RUN_CONTEXT` from it (Doc 12 §6.2).
+/// made inside re-scopes `RUN_CONTEXT` from it.
 ///
 /// ```python
 /// with handle.context(session="sess-abc", tags=["dogfood"]):

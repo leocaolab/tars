@@ -1,9 +1,7 @@
 //! `ctx.deadline` is the caller's per-call wall-clock budget, and an HTTP
 //! provider honors it as a per-request total timeout.
 //!
-//! This is the HTTP half of the CLI contract in
-//! `backends::cli::streaming::tests`: the same parameter, enforced by whichever
-//! leaf owns the resource. It is a *parameter*, not config — `HttpProviderConfig`
+//! It is a *parameter*, not config — `HttpProviderConfig`
 //! grows no total-timeout field, because how long a slow-but-progressing stream
 //! may run is a property of the work, not of the environment.
 
@@ -101,9 +99,8 @@ async fn an_already_expired_deadline_does_not_run_the_call() {
     );
 }
 
-/// No deadline ⇒ today's behaviour: only the transport bounds apply
-/// (`connect_timeout` + `stream_idle_timeout`), so a 500ms stall is served, not
-/// aborted. This pins that config grew no total-timeout knob.
+/// No deadline ⇒ only the transport bounds apply (`connect_timeout` + `stream_idle_timeout`),
+/// so a 500ms stall is served, not aborted.
 #[tokio::test]
 async fn no_deadline_leaves_the_request_unbounded_by_total_time() {
     let server = mount_stalling_server(Duration::from_millis(500)).await;

@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Generate a newtype wrapping a `String`, with `Display` / `Debug` /
-/// `serde` / `From<&str>` / `As<&str>` boilerplate.
+// delete
+
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
@@ -45,8 +45,6 @@ macro_rules! string_id {
         }
 
         impl $name {
-            /// Construct from any string-like value.
-            ///
             /// Panics on the empty string. ID semantics require a
             /// non-empty value (see audit `tars-types-src-ids-1`); an
             /// empty `TenantId` / `SessionId` etc. would propagate
@@ -60,12 +58,10 @@ macro_rules! string_id {
                 Self(v)
             }
 
-            /// Borrow the underlying string.
             pub fn as_str(&self) -> &str {
                 &self.0
             }
 
-            /// Move the underlying string out.
             pub fn into_inner(self) -> String {
                 self.0
             }
@@ -105,14 +101,14 @@ macro_rules! string_id {
 
 string_id!(
     TenantId,
-    "Tenant identifier — the hard isolation boundary (Doc 06 §3)."
+    "Tenant identifier — the hard isolation boundary."
 );
-string_id!(SessionId, "Session identifier (Doc 06 §3.3).");
+string_id!(SessionId, "Session identifier.");
 string_id!(
     TraceId,
     "Distributed trace identifier; propagated through all layers."
 );
-string_id!(TrajectoryId, "Trajectory node identifier (Doc 04 §3.1).");
+string_id!(TrajectoryId, "Trajectory node identifier.");
 string_id!(PrincipalId, "Principal (caller identity) identifier.");
 string_id!(
     ProviderId,
@@ -120,15 +116,15 @@ string_id!(
 );
 string_id!(
     L3HandleId,
-    "Internal handle for an L3 explicit cache (Doc 03 §7)."
+    "Internal handle for an L3 explicit cache."
 );
 string_id!(
     AgentId,
-    "Agent instance identifier (Doc 04 §4 — `orchestrator`, `worker:code_review`, etc.)."
+    "Agent instance identifier."
 );
 string_id!(
     BatchJobId,
-    "Batch job identifier returned by the provider on submit (Doc 01 §6.3 / roadmap §5)."
+    "Batch job identifier returned by the provider on submit."
 );
 string_id!(
     BatchItemId,

@@ -1,16 +1,14 @@
-//! Tool-trajectory scoring — [Doc 26](../../../docs/architecture/26-tool-trajectory-eval.md).
+//! Tool-trajectory scoring
 //!
 //! Pure, no I/O, no LLM: given the tool steps an agent *selected* and a
-//! reference list, score how well they agree. This is the tars analogue of
-//! Google ADK's `tool_trajectory_avg_score`, extended with partial-credit
+//! reference list, score how well they agree. Extended with partial-credit
 //! (`Ordered`) and order-insensitive (`Set`) modes.
 //!
 //! P1 scores **names only** — the call sequence of tool names. Argument
-//! matching is a later phase (Doc 26 P3).
+//! matching is a later phase.
 
 use serde_json::Value;
 
-/// One step of a tool trajectory: a tool name + the args it was called with.
 /// P1 scoring uses only `name`; `args` is carried for the P3 `args` mode.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolStep {
@@ -18,11 +16,10 @@ pub struct ToolStep {
     pub args: Value,
 }
 
-/// How two tool sequences are compared. `Exact`/`Ordered`/`Set` look at
+/// `Exact`/`Ordered`/`Set` look at
 /// tool *names* only; `Args` additionally requires matching arguments.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatchMode {
-    /// 1.0 iff the name sequences are identical, else 0.0 (ADK semantics).
     Exact,
     /// Dice coefficient over the longest common subsequence — partial credit
     /// for prefix / subsequence agreement. `2·LCS / (|a| + |b|)`.
@@ -39,7 +36,6 @@ pub enum MatchMode {
 }
 
 impl MatchMode {
-    /// Parse the mode token of a `trajectory-match:<mode>` spec.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "exact" => Some(Self::Exact),
@@ -60,7 +56,6 @@ impl MatchMode {
     }
 }
 
-/// Adapt a response's tool calls into the scorer's step view.
 pub fn from_tool_calls(calls: &[tars_types::ToolCall]) -> Vec<ToolStep> {
     calls
         .iter()
@@ -71,11 +66,9 @@ pub fn from_tool_calls(calls: &[tars_types::ToolCall]) -> Vec<ToolStep> {
         .collect()
 }
 
-/// Score `actual` against `expected` under `mode`. Always in `[0.0, 1.0]`;
-/// 1.0 = perfect agreement. Total: never panics, empty-vs-empty = 1.0.
+/// Always in `[0.0, 1.0]`; 1.0 = perfect agreement. Total: never panics, empty-vs-empty = 1.0.
 pub fn score(actual: &[ToolStep], expected: &[ToolStep], mode: MatchMode) -> f64 {
     if let MatchMode::Args = mode {
-        // Strict (name, args) match — exact sequence including arguments.
         let same = actual.len() == expected.len()
             && actual
                 .iter()
@@ -117,7 +110,7 @@ fn lcs_len(a: &[&str], b: &[&str]) -> usize {
     let m = b.len();
     let mut dp = vec![0usize; m + 1];
     for ai in a {
-        let mut prev = 0; // dp[j-1] from the previous row
+        let mut prev = 0;
         for j in 1..=m {
             let tmp = dp[j];
             dp[j] = if *ai == b[j - 1] {

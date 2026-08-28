@@ -1,25 +1,5 @@
 //! `tars probe <provider-id>` — sanity-check any provider.
 //!
-//! ## What it does
-//!
-//! Loads the user's config, builds the named provider, sends a fixed
-//! "say hello" prompt, and streams every [`ChatEvent`] to stderr in
-//! human-readable form. Exits non-zero on any error or if the stream
-//! ends without a `Finished` event.
-//!
-//! ## Works for every provider type
-//!
-//! Originally CLI-only (`claude_cli` / `codex_cli` / `antigravity`)
-//! because those are the trickiest to get auth + binary lookup right.
-//! Loosened to **all provider types** since the event-by-event dump
-//! is genuinely more informative than `tars run` for HTTP providers
-//! too — you see usage breakdown, model echo, individual deltas, and
-//! exact error variants. Especially useful for local OpenAI-compat
-//! servers (LM Studio / vLLM / MLX / llama.cpp) where the user
-//! typically wants to confirm "yes, the local model server is up,
-//! the loaded model name is X, and tars can talk to it" before using
-//! it in `tars run-task`.
-//!
 //! ## Output shape
 //!
 //! Mirrors the smoke test format (`tars-provider/tests/*_smoke.rs`):
@@ -82,8 +62,6 @@ pub async fn execute(args: ProbeArgs, config_path: Option<PathBuf>) -> Result<()
     let cfg = config_loader::load(config_path)?;
     let provider_id = ProviderId::new(args.provider.clone());
 
-    // Look up the config entry first so we can reject non-CLI types
-    // with a clear message before any subprocess work.
     let provider_cfg = cfg.providers.get(&provider_id).ok_or_else(|| {
         let configured: Vec<String> = cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
         anyhow::anyhow!(

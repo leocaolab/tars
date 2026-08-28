@@ -1,14 +1,4 @@
 //! `tars models` — discover provider models over a persisted **model library**.
-//!
-//! Two actions:
-//!   - `tars models [PROVIDER]`         — QUERY: read the library (fast, offline).
-//!     `--live` bypasses the library and hits the provider APIs directly.
-//!   - `tars models update [PROVIDER]`  — UPDATE: refresh the library from the
-//!     live APIs, report what changed, and flag any stale `default_model`.
-//!
-//! The CLI stays thin: classification + parsing live in [`crate::cli::model_query`],
-//! persistence + diff in [`crate::cli::model_library`]. This module is orchestration
-//! and rendering only.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -95,8 +85,6 @@ pub async fn execute(args: ModelsArgs, config_flag: Option<PathBuf>) -> Result<(
     }
 }
 
-/// Collect the configured providers to act on, sorted by name. Errors if a
-/// requested `PROVIDER` isn't configured.
 fn select_providers<'c>(
     config: &'c Config,
     only: Option<&str>,
@@ -137,7 +125,6 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// Turn a live [`Outcome`] into a persisted [`ProviderEntry`].
 fn outcome_to_entry(provider_type: &str, default_model: &str, outcome: Outcome) -> ProviderEntry {
     let queried_at = now_rfc3339();
     let base = |status, models, note| ProviderEntry {
@@ -464,8 +451,6 @@ fn print_query_json(live: bool, rows: &[(String, ProviderEntry)]) {
     println!("{}", serde_json::to_string_pretty(&env).unwrap_or_default());
 }
 
-/// The provider `type` string, for display/persistence. Mirrors the serde tag
-/// on [`ProviderConfig`].
 pub fn provider_type_of(cfg: &ProviderConfig) -> &'static str {
     use ProviderConfig as P;
     match cfg {

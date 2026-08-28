@@ -42,7 +42,7 @@
 //! Same as the underlying [`OutputValidator`] trait. Python callbacks
 //! MUST be deterministic (same `(req, resp)` → same outcome) and
 //! side-effect-free. Cache×Validator design relies on this. Callers
-//! who need IO go to the evaluator framework (Doc 16) where async +
+//! who need IO go to the evaluator framework where async +
 //! non-determinism are first-class.
 
 use std::collections::HashMap;
@@ -81,7 +81,7 @@ impl PyPass {
 /// "validation_failed")` at their own layer with explicit prompt
 /// variation.
 ///
-/// Two construction paths (B-20.v2 typed reasons):
+/// Two construction paths:
 /// - `tars.Reject("message")` — back-compat string form; wraps into a
 ///   `Custom { kind: "user" }` reason on the Rust side.
 /// - `tars.Reject.typed(kind, message, detail=None)` — explicit typed

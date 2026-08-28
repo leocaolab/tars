@@ -29,7 +29,6 @@ async fn submit_posts_requests_array_and_returns_job_id() {
         .and(path("/v1/messages/batches"))
         .and(header("x-api-key", "test-key"))
         .and(header("anthropic-version", "2023-06-01"))
-        // Confirm body is shape-compatible — `requests` array with custom_ids.
         .and(body_partial_json(serde_json::json!({
             "requests": [
                 {"custom_id": "draft-1"},
@@ -199,7 +198,6 @@ async fn status_all_expired_maps_to_expired() {
 #[tokio::test]
 async fn results_parses_jsonl_with_mixed_outcomes() {
     let server = MockServer::start().await;
-    // First call: status (results() pre-checks terminality).
     Mock::given(method("GET"))
         .and(path("/v1/messages/batches/msgbatch_done"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -216,7 +214,6 @@ async fn results_parses_jsonl_with_mixed_outcomes() {
         .mount(&server)
         .await;
 
-    // Then: actual results JSONL with one succeeded + one errored.
     let jsonl = r#"{"custom_id":"draft-1","result":{"type":"succeeded","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-7","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":2}}}}
 {"custom_id":"draft-2","result":{"type":"errored","error":{"type":"invalid_request_error","message":"bad prompt"}}}"#;
     Mock::given(method("GET"))

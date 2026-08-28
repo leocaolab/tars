@@ -22,13 +22,11 @@ use tars_config::Config;
 
 use crate::registry::{ProviderRegistry, RegistryError};
 
-/// The one process-global registry cell. [`ProviderRegistry::init`]
-/// populates it, and every consumer reads it via
-/// [`ProviderRegistry::global`] / [`ProviderRegistry::try_global`].
+/// The one process-global registry cell.
 static REGISTRY: OnceLock<Arc<ProviderRegistry>> = OnceLock::new();
 
 impl ProviderRegistry {
-    /// Build the process-global registry from the installed [`Config`], eagerly.
+    ///
     ///
     /// Call once at the composition root, after `tars_config::init_tars`:
     ///

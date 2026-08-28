@@ -1,18 +1,5 @@
 //! `tars trajectory` — read-side of the runtime event log.
 //!
-//! Subcommands:
-//!   `tars trajectory list`        — id + event count + terminated?
-//!   `tars trajectory show <ID>`   — full event sequence as JSON lines
-//!   `tars trajectory score <ID>`  — score the cross-call tool sequence
-//!                                   against `--expected` (Doc 26 M2');
-//!                                   non-zero exit below `--threshold`
-//!
-//! Defers (no consumer yet):
-//!   `tars trajectory delete <ID>`  — needs a retention policy decision
-//!   `tars trajectory replay <ID>`  — needs an Agent execution loop
-//!                                    (Doc 04 §4) to know what "replay"
-//!                                    even means at the action level
-//!
 //! Output discipline mirrors `tars run`:
 //!   - `list` writes a small human table to stdout (pipeable but not
 //!     ideal for jq)
@@ -55,7 +42,7 @@ pub enum TrajectoryCommand {
         id: String,
     },
     /// Score a trajectory's cross-call tool sequence against an expected
-    /// list (Doc 26 M2'). Exits non-zero when the score is below the
+    /// list. Exits non-zero when the score is below the
     /// threshold, so it doubles as a CI gate.
     Score {
         /// Trajectory id (as in `show`).
@@ -65,7 +52,7 @@ pub enum TrajectoryCommand {
         #[arg(long)]
         expected: String,
         /// Match mode: `exact` | `ordered` | `set` | `args`. Default
-        /// `ordered`. `args` checks recorded tool arguments too (M3'),
+        /// `ordered`. `args` checks recorded tool arguments too,
         /// against the `{name, args}` objects in an `@file` expected list.
         #[arg(long, default_value = "ordered")]
         mode: String,
@@ -132,9 +119,6 @@ pub async fn execute(args: TrajectoryArgs) -> Result<()> {
     Ok(())
 }
 
-/// Read + decode one trajectory's melt [`AgentEvent`] log straight from
-/// the event store. Replaces the retired `LocalRuntime::replay`, which
-/// was thin glue over `AgentEventLog::read_all` + per-row deserialize.
 /// An unknown trajectory yields an empty `Vec` (read_all returns no rows,
 /// not an error); a row whose payload doesn't decode into `AgentEvent`
 /// surfaces as `Err` so callers can flag the corrupted trajectory.
@@ -149,12 +133,8 @@ async fn replay(store: &dyn AgentEventLog, id: &TrajectoryId) -> Result<Vec<Agen
         .collect()
 }
 
-/// The cross-call tool trajectory as `(name, args)` steps — every
-/// `LlmCallCaptured` event's tool calls paired with their recorded args,
-/// in event (step) order. The arg-carrying sibling of melt's names-only
-/// `tool_sequence`; it was dropped from melt (issue #55) to keep that
-/// telemetry crate free of an `eval` dep on [`ToolStep`], so it lives
-/// here in the one place that needs `ToolStep` (the `--mode args` gate).
+/// The arg-carrying sibling of melt's names-only `tool_sequence`.
+/// Lives here in the one place that needs `ToolStep` (the `--mode args` gate).
 fn tool_step_sequence(events: &[AgentEvent]) -> Vec<ToolStep> {
     let mut out = Vec::new();
     for ev in events {
@@ -178,9 +158,7 @@ fn tool_step_sequence(events: &[AgentEvent]) -> Vec<ToolStep> {
     out
 }
 
-/// Resolve the `--expected` spec into tool steps: a comma list of names
-/// (`search,read_file`), or `@file` pointing at a JSON array of names /
-/// `{name, args}` objects. Args (only present in the `@file` object form) are
+/// Args (only present in the `@file` object form) are
 /// what `--mode args` compares; bare names get `Value::Null` args.
 fn parse_expected(spec: &str) -> Result<Vec<ToolStep>> {
     if let Some(path) = spec.strip_prefix('@') {
@@ -221,9 +199,7 @@ fn parse_expected(spec: &str) -> Result<Vec<ToolStep>> {
     }
 }
 
-/// Score one trajectory's cross-call tool sequence against `expected`.
-/// Returns whether it passed the threshold. Writes the human/JSON report
-/// to `out`. Uses the full `(name, args)` steps so `--mode args` works.
+/// Uses the full `(name, args)` steps so `--mode args` works.
 async fn score(
     store: &dyn AgentEventLog,
     id: &TrajectoryId,
@@ -298,11 +274,8 @@ async fn list(store: &dyn AgentEventLog, out: &mut dyn Write) -> Result<()> {
     ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
     writeln!(out, "{:<34} {:>6}  STATUS", "ID", "EVENTS").context("stdout write")?;
-    // Audit `tars-cli-src-trajectory-1`: per-trajectory replay()
-    // failures used to bail out via `?`, which meant one corrupted
-    // row hid every other (working) trajectory from the user. Now
-    // we render the row with a `<error>` status + log the cause to
-    // stderr so a human can chase it.
+    // We render the row with a `<error>` status + log the cause to
+    // stderr so a human can chase it instead of failing early.
     let mut had_errors = false;
     for id in &ids {
         match replay(store, id).await {
@@ -489,7 +462,7 @@ mod tests {
         assert!(msg.contains("definitely-not-a-real-id"));
     }
 
-    // ── trajectory score (Doc 26 M2' / M3') ──────────────────────────
+    // ── trajectory score ──────────────────────────
 
     /// A ToolStep with null args (the comma-list / bare-name form).
     fn ns(name: &str) -> ToolStep {
@@ -511,7 +484,7 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("e.json");
-        // object form carries args (M3'); bare string has null args
+        // object form carries args; bare string has null args
         std::fs::write(&p, r#"["a", {"name": "b", "args": {"q": "x"}}]"#).unwrap();
         let parsed = parse_expected(&format!("@{}", p.display())).unwrap();
         assert_eq!(names(&parsed), vec!["a", "b"]);
@@ -599,7 +572,7 @@ mod tests {
 
     #[tokio::test]
     async fn score_args_mode_checks_recorded_arguments() {
-        // M3': args are persisted in the trajectory, so --mode args can check
+        // Args are persisted in the trajectory, so --mode args can check
         // them — right tool, wrong args must FAIL where exact passes.
         let dir = tempfile::tempdir().unwrap();
         let store = fixture(&dir).await;

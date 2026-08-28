@@ -1,5 +1,5 @@
 //! Pure, no-I/O conversion between tars canonical types and the AWS SDK's
-//! typed Converse structs (Doc 31 §6 C1). Mirrors the role of
+//! typed Converse structs. Mirrors the role of
 //! `tars-provider/src/backends/anthropic/mapping.rs` — the layer that can
 //! be tested without any transport.
 //!
@@ -27,7 +27,7 @@ use crate::document::{document_to_value, value_to_document};
 /// The four inputs the Bedrock `converse()` / `converse_stream()` fluent
 /// builders take, produced from a canonical [`ChatRequest`]. Passed to the
 /// SDK via `set_system` / `set_messages` / `set_tool_config` /
-/// `set_inference_config` (Doc 31 §8.2).
+/// `set_inference_config`.
 #[derive(Debug, Clone)]
 pub struct ConverseParts {
     pub system: Option<Vec<SystemContentBlock>>,
@@ -177,10 +177,10 @@ pub fn build_converse(req: &ChatRequest) -> Result<ConverseParts, ProviderError>
         )
     };
 
-    // NOTE (M1): `req.thinking` is not yet translated. The reasoning knob
+    // NOTE: `req.thinking` is not yet translated. The reasoning knob
     // is model-family-specific (`additionalModelRequestFields`), and
     // forcing it on a model that doesn't support it 400s. Wiring it per
-    // model family is deferred to M1 with ConverseStream (Doc 31 §6 C1).
+    // model family is deferred to with ConverseStream.
 
     Ok(ConverseParts {
         system: if system_blocks.is_empty() {
@@ -389,12 +389,10 @@ mod tests {
 
         let parts = build_converse(&req).unwrap();
 
-        // system
         let system = parts.system.expect("system block present");
         assert_eq!(system.len(), 1);
         assert!(matches!(&system[0], SystemContentBlock::Text(t) if t == "be terse"));
 
-        // messages: one user turn with a text block
         assert_eq!(parts.messages.len(), 1);
         assert_eq!(*parts.messages[0].role(), ConversationRole::User);
         assert!(matches!(
@@ -402,7 +400,6 @@ mod tests {
             AwsContentBlock::Text(t) if t == "hello"
         ));
 
-        // tool config: one ToolSpec whose input schema round-trips as JSON
         let tc = parts.tool_config.expect("tool config present");
         assert_eq!(tc.tools().len(), 1);
         let Tool::ToolSpec(ts) = &tc.tools()[0] else {
@@ -412,7 +409,6 @@ mod tests {
         let ToolInputSchema::Json(doc) = ts.input_schema().unwrap() else {
             panic!("expected Json schema");
         };
-        // The schema Document must round-trip back to the original JSON.
         assert_eq!(
             document_to_value(doc),
             json!({
@@ -421,13 +417,11 @@ mod tests {
                 "required": ["q"]
             })
         );
-        // Specific tool_choice → SpecificToolChoice(name)
         assert!(matches!(
             tc.tool_choice(),
             Some(AwsToolChoice::Tool(sc)) if sc.name() == "search"
         ));
 
-        // inference config carried max_tokens + temperature
         let inf = parts.inference.expect("inference config present");
         assert_eq!(inf.max_tokens(), Some(256));
         assert_eq!(inf.temperature(), Some(0.2));

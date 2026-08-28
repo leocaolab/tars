@@ -1,5 +1,5 @@
 //! Incremental `ConverseStream` → canonical [`ChatEvent`] translation
-//! (Doc 31 §6 C2 / M1). Pure, no-I/O: [`StreamTranslator`] folds the AWS
+//!. Pure, no-I/O: [`StreamTranslator`] folds the AWS
 //! SDK's `ConverseStreamOutput` events into `tars-types` events one chunk
 //! at a time, so the whole mapping is unit-testable without an AWS call —
 //! the transport (`client::stream_response`) just drives it.
@@ -7,7 +7,7 @@
 //! This crate stays a leaf: it does **not** reuse `tars-provider`'s
 //! `ToolCallBuffer`. The tool-use accumulation Bedrock needs (buffer the
 //! partial `input` JSON fragments per content-block index, parse once at
-//! block-stop) is small enough to keep local (Doc 31 §4).
+//! block-stop) is small enough to keep local.
 
 use std::collections::HashMap;
 
@@ -21,7 +21,7 @@ use tars_types::{ChatEvent, ProviderError, StopReason, Usage};
 use crate::mapping::{map_stop_reason, parse_usage};
 
 /// Per-content-block accumulator for a streaming tool-use call. Mirrors
-/// the `ToolCallBuffer` invariant (Doc 01 §8.1): **never** parse the args
+/// the `ToolCallBuffer` invariant: **never** parse the args
 /// mid-stream — concatenate the `input` fragments and parse once at
 /// `ContentBlockStop`.
 #[derive(Debug, Default)]
@@ -35,7 +35,7 @@ struct ToolAccum {
 ///
 /// Bedrock's stream order is `messageStart`, then per content block
 /// `contentBlockStart? · contentBlockDelta* · contentBlockStop`, then
-/// `messageStop`, then `metadata` (Doc 31 §8.3). We surface `Started`
+/// `messageStop`, then `metadata`. We surface `Started`
 /// from the transport (not here) so this translator maps `MessageStart`
 /// to nothing; the terminal `Finished` is emitted from [`Self::finish`]
 /// at stream end, carrying the `stop_reason` seen on `messageStop` and the
@@ -331,7 +331,6 @@ mod tests {
         ];
         let out = run(events);
 
-        // MessageStart surfaces nothing; two text deltas, then Finished.
         assert_eq!(out.len(), 3, "events: {out:?}");
         assert!(matches!(&out[0], ChatEvent::Delta { text } if text == "Hel"));
         assert!(matches!(&out[1], ChatEvent::Delta { text } if text == "lo"));
@@ -360,7 +359,6 @@ mod tests {
 
     #[test]
     fn tool_use_accumulates_partial_json_across_deltas() {
-        // The `input` arrives in fragments and must parse only at stop.
         let out = run(vec![
             tool_start(1, "call_1", "search"),
             tool_input(1, "{\"q\":"),
@@ -371,7 +369,6 @@ mod tests {
             metadata(20, 8),
         ]);
 
-        // Start, three arg deltas, End, Finished.
         assert!(matches!(
             &out[0],
             ChatEvent::ToolCallStart { index, id, name }

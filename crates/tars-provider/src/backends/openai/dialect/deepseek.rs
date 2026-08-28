@@ -134,8 +134,7 @@ mod tests {
 const DSML: &str = "<｜｜DSML｜｜";
 const DSML_CLOSE: &str = "</｜｜DSML｜｜";
 
-/// Lift DeepSeek's native tool-call markup out of assistant text into
-/// [`ToolCall`]s, and return the text with the markup removed.
+///
 ///
 /// # Why this is here and not in the caller
 ///

@@ -1,14 +1,6 @@
 //! AWS Bedrock provider — the thin `LlmProvider` adapter over the
 //! `tars-bedrock` leaf crate.
 //!
-//! All the Bedrock-specific work — `ChatRequest` ↔ Converse mapping, the
-//! `serde_json::Value` ↔ `Document` shim, the lazy keyless SigV4 client,
-//! and SDK-error classification — lives in `tars-bedrock`, which depends
-//! only on `tars-types`. The `impl LlmProvider` must live with the trait's
-//! owner: hosting it here (rather than in `tars-bedrock`) keeps the crate
-//! graph acyclic — `tars-bedrock` cannot both provide the trait impl *and*
-//! be depended on by the crate that defines the trait.
-//!
 //! Feature-gated behind `tars-provider/bedrock`; the AWS SDK subtree only
 //! enters a build that asks for Bedrock.
 
@@ -103,10 +95,7 @@ impl LlmProvider for BedrockProvider {
         self.client.complete_response(&req, model).await
     }
 
-    /// Token-by-token `ConverseStream`. The leaf client opens the stream
-    /// and translates each `ConverseStreamOutput` event into a canonical
-    /// `ChatEvent` incrementally; the returned stream is already
-    /// `'static + Send`, so it maps straight onto [`LlmEventStream`].
+    /// Token-by-token `ConverseStream`.
     #[tracing::instrument(
         name = "bedrock.stream",
         skip_all,

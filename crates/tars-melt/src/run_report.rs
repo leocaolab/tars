@@ -21,10 +21,6 @@ use thiserror::Error;
 use crate::agent_event::AgentEvent;
 
 /// Errors from rolling a trajectory's event log up into a [`RunReport`].
-///
-/// Formerly `tars-runtime`'s `RuntimeError`; scoped down to just the
-/// three cases `build_run_report` can actually hit now that the roll-up
-/// lives in the telemetry crate (no runtime facade behind it).
 #[derive(Debug, Error)]
 pub enum RunReportError {
     /// Reading the event log from storage failed. Carried typed via
@@ -92,9 +88,6 @@ pub async fn build_run_report(
     let mut by_agent: BTreeMap<String, AgentBreakdown> = BTreeMap::new();
     let mut errors: Vec<RunErrorSummary> = Vec::new();
 
-    // step_seq → agent label; populated on StepStarted, consumed on
-    // every event that carries `step_seq` so we can route to the
-    // right AgentBreakdown.
     let mut step_agent: BTreeMap<u32, String> = BTreeMap::new();
 
     for record in &records {
@@ -253,7 +246,6 @@ mod tests {
             SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(path))
                 .await
                 .unwrap();
-        // Group payloads per trajectory and append in order.
         let mut by_traj: BTreeMap<TrajectoryId, Vec<serde_json::Value>> = BTreeMap::new();
         for (t, p) in records {
             by_traj.entry(t).or_default().push(p);

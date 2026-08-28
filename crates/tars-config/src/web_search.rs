@@ -138,7 +138,6 @@ mod tests {
             injected.google_cse.as_ref().unwrap().api_key,
             "resolved-secret"
         );
-        // And it now builds into a runnable backend.
         assert!(injected.build().is_ok());
     }
 

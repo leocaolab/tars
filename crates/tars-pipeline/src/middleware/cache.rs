@@ -1,4 +1,4 @@
-//! Cache-lookup middleware (Doc 02 §4.4 + Doc 03).
+//! Cache-lookup middleware.
 //!
 //! Sits **above** Routing/Retry in the canonical onion: a cache hit
 //! must short-circuit before either of those layers gets to spend
@@ -6,29 +6,11 @@
 //! scopes, so IAM rejection has to happen before we even compute the
 //! key.
 //!
-//! ## On hit
 //!
-//! Replays the cached response as a synthetic [`ChatEvent`] stream
-//! via [`tars_types::ChatResponse::into_events`]. Outer middleware
-//! (Telemetry, etc.) cannot tell the replay from a fresh stream —
-//! the only signal is `ChatEvent::Started.cache_hit`.
-//!
-//! ## On miss
-//!
-//! Calls the inner service, then wraps the returned stream so the
-//! [`tars_types::ChatResponse`] is reconstructed as events flow past
-//! the consumer. When the terminal `Finished` event arrives we
-//! validate the stop-reason for cacheability (Doc 03 §5.1) and write
-//! to the registry. Both the consumer's stream consumption and the
-//! cache write happen in the same task — no `tokio::spawn`, no
-//! "cache write missed because the user dropped the stream early".
-//!
-//! ## On non-cacheable request
-//!
-//! `CacheKeyFactory::compute` returns
-//! `CacheError::{NonDeterministic, UnresolvedTier, UncacheableEnsemble}`
-//! → middleware skips the entire cache flow and just delegates to
-//! inner. Logged at `debug` so this is observable but not noisy.
+//! Invariants:
+//! - Sits above Routing/Retry (hit must short-circuit) but below IAM.
+//! - Cache replay is indistinguishable from fresh stream (only `cache_hit` flag differs).
+//! - Cache write occurs in the consumer's stream-drain task (not spawned), ensuring writes are bound to the caller's lifetime.
 
 use std::sync::Arc;
 
@@ -160,7 +142,7 @@ impl Middleware for CacheLookupMiddleware {
                     error = %e,
                     key = %key.hex(),
                     label = %key.debug_label,
-                    "cache: lookup failed; treating as miss (Doc 03 §4.3)",
+                    "cache: lookup failed; treating as miss",
                 );
             }
         }
@@ -180,14 +162,11 @@ impl Middleware for CacheLookupMiddleware {
 
 const POLICY_ATTR: &str = "cache.policy";
 
-/// Outcome of [`read_policy_raw`]: surfaces the three distinguishable
-/// cases the previous `-> CachePolicy` shape collapsed into one
-/// (`arc scan --judge` finding `ARC-L5-SW-10`).
+/// Outcome of [`read_policy_raw`]: surfaces the distinguishable
+/// failure cases.
 ///
-/// Callers that want the historical "graceful degrade" behavior use
-/// [`read_policy`], which logs the failure mode at the appropriate
-/// level and returns `CachePolicy::default()`. Callers that want to
-/// fail strictly on malformed config use [`read_policy_raw`] directly.
+/// Callers wanting graceful degradation use [`read_policy`]. Callers
+/// wanting strict validation use [`read_policy_raw`].
 #[derive(Debug)]
 enum PolicySource {
     /// Caller didn't set `"cache.policy"`. Default applies.
@@ -279,8 +258,7 @@ fn wrap_stream_for_write(
                 }
                 Err(e) => {
                     // Capture the actual error so the skip below is
-                    // diagnosable — a bare `had_error` flag dropped the
-                    // ProviderError on the floor.
+                    // diagnosable.
                     tracing::debug!(
                         error = %e,
                         key = %key.hex(),
@@ -302,7 +280,7 @@ fn wrap_stream_for_write(
         if !is_cacheable_outcome(&response) {
             tracing::debug!(
                 stop = ?response.stop_reason,
-                "cache: skipping write — non-cacheable stop reason (Doc 03 §5.1)",
+                "cache: skipping write — non-cacheable stop reason",
             );
             return;
         }
@@ -316,7 +294,7 @@ fn wrap_stream_for_write(
         };
         let label = key.debug_label.clone();
         let key_hex = key.hex();
-        // Cache write is fire-and-forget by design (Doc 03 §4.3): the
+        // Cache write is fire-and-forget by design: the
         // response has already streamed to the client, so a write
         // failure can't be surfaced to the caller. We log loud with
         // enough context (key hex, label, stop reason) for an operator
@@ -334,7 +312,7 @@ fn wrap_stream_for_write(
     }
 }
 
-/// Doc 03 §5.1: only fully-successful turns are cached. MaxTokens is
+/// Only fully-successful turns are cached. MaxTokens is
 /// truncated; Cancelled/ContentFilter/StopSequence/Other lack semantic
 /// completeness; only EndTurn and ToolUse round-trip cleanly.
 fn is_cacheable_outcome(response: &ChatResponse) -> bool {
@@ -375,9 +353,6 @@ pub fn set_cache_policy(ctx: &RequestContext, policy: &CachePolicy) {
             return;
         }
     };
-    // Audit `tars-pipeline-src-cache-5`: lock poisoning was
-    // previously a silent no-op — the caller's explicit policy
-    // wouldn't apply, but the function returned as if it had.
     // Log loud so a poisoned-lock incident leaves a trace; the
     // function still doesn't return Result because a "tell me your
     // cache preference" call shouldn't be on the request critical
@@ -638,8 +613,7 @@ mod tests {
         let _ = json!(null); // keep the import live in this minimal test
     }
 
-    // ── Audit `tars-pipeline-src-cache-5`: `read_policy` falls back
-    // to default when the `cache.policy` attribute is malformed. ────
+    // ── `read_policy` falls back to default when attribute is malformed ────
     #[test]
     fn read_policy_with_malformed_attribute_falls_back_to_default() {
         let ctx = ctx();
@@ -654,8 +628,7 @@ mod tests {
         assert_eq!(p.l3, d.l3);
     }
 
-    // ── Audit `tars-pipeline-src-cache-1`: `read_policy` falls back
-    // to default if `ctx.attributes` is RwLock-poisoned. ─────────────
+    // ── `read_policy` falls back to default if `ctx.attributes` is RwLock-poisoned ──
     #[test]
     fn read_policy_with_poisoned_lock_falls_back_to_default() {
         let ctx = ctx();
@@ -677,8 +650,7 @@ mod tests {
         assert_eq!(p.l3, d.l3);
     }
 
-    // ── Audit `tars-pipeline-src-cache-1` (set side): same poisoned
-    // lock, `set_cache_policy` is a no-op (does not panic). ──────────
+    // ── `set_cache_policy` is a no-op on poisoned lock (does not panic) ──
     #[test]
     fn set_cache_policy_with_poisoned_lock_is_a_noop() {
         let ctx = ctx();
@@ -692,8 +664,7 @@ mod tests {
         set_cache_policy(&ctx, &CachePolicy::off());
     }
 
-    // ── Audit `tars-pipeline-src-cache-6`: registry lookup error is
-    // treated as a miss; inner service is still called. ─────────────
+    // ── registry lookup error is treated as a miss ──
     #[tokio::test]
     async fn registry_lookup_error_is_treated_as_miss() {
         use tars_cache::{CacheError, CacheKey, CachedResponse};
@@ -747,10 +718,7 @@ mod tests {
         }
     }
 
-    // ── Audit `tars-pipeline-src-cache-4`: a stream that opens
-    // successfully but yields an error mid-stream must NOT be
-    // written to the cache. Drives `wrap_stream_for_write` directly
-    // so we control the Ok/Err mix the mock can't express. ──────────
+    // ── a stream that yields an error mid-stream must NOT be written to cache ──
     #[tokio::test]
     async fn mid_stream_error_skips_cache_write() {
         use futures::stream;
@@ -795,7 +763,7 @@ mod tests {
         );
     }
 
-    // ── read_policy_raw — typed distinguishability (ARC-L5-SW-10) ──
+
 
     #[test]
     fn read_policy_raw_distinguishes_unset_set_malformed() {

@@ -18,23 +18,20 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SecretRef {
-    /// Plaintext embedded in config. Test/dev only — production should
+    /// Test/dev only — production should
     /// emit a startup warning if any inline secret is observed.
     Inline { value: SecretString },
-    /// `$VAR` resolved from process env at first use.
     Env { var: String },
-    /// File on disk; entire contents are the secret (trimmed of trailing
+    /// Entire contents are the secret (trimmed of trailing
     /// newline). Useful for K8s secret mounts.
     File { path: PathBuf },
 }
 
 impl SecretRef {
-    /// Sugar for the env-var variant.
     pub fn env(var: impl Into<String>) -> Self {
         Self::Env { var: var.into() }
     }
 
-    /// Sugar for the inline variant; keep usage to tests.
     pub fn inline(value: impl Into<String>) -> Self {
         Self::Inline {
             value: SecretString::new(value.into()),
@@ -78,13 +75,12 @@ impl SecretString {
         Self(value.into())
     }
 
-    /// Borrow the raw value. Be deliberate: anything you do with this
+    /// Be deliberate: anything you do with this
     /// reference can leak the secret if mishandled.
     pub fn expose(&self) -> &str {
         &self.0
     }
 
-    /// Move the raw value out. Same warning as [`Self::expose`].
     pub fn into_inner(self) -> String {
         self.0
     }

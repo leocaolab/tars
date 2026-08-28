@@ -1,5 +1,3 @@
-//! Injectable wall-clock for TTL-expiry decisions.
-//!
 //! The SQLite L2 cache decides whether a row is expired by comparing
 //! `expires_at_ms` against "now". Reaching for `SystemTime::now()` inline
 //! makes that comparison depend on the real clock — untestable without
@@ -9,13 +7,10 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Source of "now" in Unix-epoch milliseconds.
 pub trait Clock: Send + Sync {
-    /// Milliseconds since the Unix epoch.
     fn now_ms(&self) -> i64;
 }
 
-/// The real wall clock — the only [`Clock`] used in production.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemClock;
 
@@ -28,7 +23,6 @@ impl Clock for SystemClock {
     }
 }
 
-/// Convenience: the default production clock behind an `Arc<dyn Clock>`.
 pub(crate) fn system_clock() -> Arc<dyn Clock> {
     Arc::new(SystemClock)
 }

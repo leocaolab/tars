@@ -7,7 +7,7 @@
 //! side effect lands exactly where the orchestrator scoped it, not in the
 //! process cwd.
 //!
-//! Side effect: **Reversible** (Doc 04 §4.4) — a write can be rolled back
+//! Side effect: **Reversible** — a write can be rolled back
 //! by restoring the prior bytes; the Session/worktree owns that snapshot.
 
 use std::path::{Path, PathBuf};

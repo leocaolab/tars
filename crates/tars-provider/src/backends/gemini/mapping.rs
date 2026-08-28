@@ -48,8 +48,6 @@ pub(super) fn parse_usage(u: &serde_json::Map<String, Value>) -> Usage {
     }
 }
 
-/// UTF-8-safe truncation; appends an ellipsis if anything was dropped.
-/// Re-exported from the shared HTTP base so both backends share one copy.
 pub(super) use crate::http_base::truncate;
 
 /// Minimal URL-encode. We control the input (resolved API key), so a

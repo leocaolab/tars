@@ -1,17 +1,14 @@
 //! Production [`SubprocessRunner`]: spawns the delegate CLI for real,
-//! wraps it in `tars-sandbox` (Doc 29), and parses its
+//! wraps it in `tars-sandbox`, and parses its
 //! `--output-format json` payload. The stream-json path lives in
 //! [`super::streaming`]; the buffered path is right here. Holds the
 //! JSON-shape helpers (`extract_result_text`, `extract_usage`,
 //! `truncate`) shared with the streaming code.
 //!
-//! Lifted verbatim from `claude_cli/subprocess.rs` (Doc 32 §7) so the
+//! Lifted verbatim from `claude_cli/subprocess.rs` so the
 //! spawn + OS-sandbox wrap + line-drain are the ONE shared machinery for
 //! every `CliDialect`. The `security_delegate_cli` integration test drives
-//! this `run` directly. Since the default-confine change (Doc 32 FR-3) a
-//! delegate is OS-sandboxed **unconditionally** — the jail root is the
-//! worktree cwd (else the process cwd) — so confinement no longer depends on
-//! the legacy `TARS_CLAUDE_SANDBOX` env gate. The workspace-write jail follows
+//! this `run` directly. The workspace-write jail follows
 //! the codex model: writable = worktree + real `$TMPDIR` + `/tmp` + the CLI's
 //! own state dir, with `<worktree>/.git` write-protected.
 
@@ -31,7 +28,7 @@ use super::argv::{SubprocessInvocation, SubprocessRunner, build_argv_with, strea
 use super::streaming::run_streaming;
 
 /// Resolve the effective OS-confinement + jail root for a delegate spawn
-/// (Doc 32 FR-3 / NFR-2). A CLI delegate is a **black-box coding agent** (it
+///. A CLI delegate is a **black-box coding agent** (it
 /// reads/writes files and runs bash), so it is OS-sandboxed **by default** — it
 /// is never run unconfined. Returns the `(effective_policy, jail_root)` to hand
 /// to [`tars_sandbox::SandboxPolicy::wrap`].
@@ -47,6 +44,7 @@ use super::streaming::run_streaming;
 ///    `[sandbox]`/`--sandbox`) is honored as-is; a `WorkspaceWrite` with no
 ///    configured roots is rooted at the jail root (matching `resolve_step_sandbox`
 ///    for tools).
+///
 /// 3. **`DangerFullAccess`** — the [`SandboxPolicy`](tars_sandbox::SandboxPolicy)
 ///    default AND the explicit `--sandbox danger-full-access` — is **downgraded**
 ///    to a `workspace-write` jail rooted at the jail root. This is the default-
@@ -54,31 +52,24 @@ use super::streaming::run_streaming;
 ///    (the common case) and an explicit "full access" alike become a worktree
 ///    write-jail. The downgrade is **logged** (truth, not silence). The caller's
 ///    network toggle is carried through.
-///
-/// The legacy `TARS_CLAUDE_SANDBOX=1` env gate is no longer read: confinement is
-/// now unconditional, so setting it is a redundant no-op (it "still works" in
-/// that the delegate is confined either way).
 fn resolve_effective_policy(
     policy: &tars_sandbox::SandboxPolicy,
     cwd: Option<&Path>,
 ) -> Result<(tars_sandbox::SandboxPolicy, PathBuf), ProviderError> {
     use tars_sandbox::{SandboxMode, SandboxPolicy};
 
-    // 1. Jail root: worktree cwd, else process cwd (SAFE fallback), else fail closed.
     let jail_root: PathBuf = match cwd {
         Some(c) => c.to_path_buf(),
         None => std::env::current_dir().map_err(|e| {
             ProviderError::Internal(format!(
                 "CLI delegate sandbox: no worktree cwd supplied and the process cwd is \
                  unresolvable ({e}) — refusing to run a black-box delegate unconfined \
-                 (fail-closed, Doc 32 FR-3)"
+                 (fail-closed, FR-3)"
             ))
         })?,
     };
 
     let effective = match policy.mode {
-        // 2. Explicit confining policy — honored as-is; fill an empty
-        //    workspace-write root set with the jail root.
         SandboxMode::WorkspaceWrite => {
             let mut p = policy.clone();
             if p.writable_roots.is_empty() {
@@ -87,20 +78,19 @@ fn resolve_effective_policy(
             p
         }
         SandboxMode::ReadOnly => policy.clone(),
-        // 3. Default / explicit full-access → downgraded to a worktree write-jail.
         SandboxMode::DangerFullAccess => {
             if cwd.is_some() {
                 tracing::debug!(
                     jail_root = %jail_root.display(),
                     "CLI delegate: DangerFullAccess downgraded to a workspace-write jail on \
-                     the worktree — a black-box delegate is always OS-sandboxed (Doc 32 FR-3)"
+                     the worktree — a black-box delegate is always OS-sandboxed"
                 );
             } else {
                 tracing::info!(
                     jail_root = %jail_root.display(),
                     "CLI delegate: no confining [sandbox] policy and no worktree cwd — \
                      confining the black-box delegate to a workspace-write jail rooted at \
-                     the process cwd (default-confine, Doc 32 FR-3)"
+                     the process cwd (default-confine, FR-3)"
                 );
             }
             let mut p = SandboxPolicy::workspace_write(&jail_root);
@@ -112,7 +102,7 @@ fn resolve_effective_policy(
 }
 
 /// Build the OS-sandboxed [`Command`] for a delegate CLI — the ONE shared spawn
-/// primitive every `CliDialect`'s runner reuses (Doc 32 §5 C2 / FR-3). Given the
+/// primitive every `CliDialect`'s runner reuses. Given the
 /// already-built argv, it:
 ///
 /// - Wraps the exec in `tars-sandbox`'s OS jail per the effective policy +
@@ -128,14 +118,12 @@ fn resolve_effective_policy(
 ///   PLUS the real `$TMPDIR`, `/tmp` ([`tars_sandbox::default_tmp_writable_roots`]),
 ///   and the CLI's own `state_dirs` (codex's `~/.codex`, opencode's
 ///   `~/.local/share/opencode`, …). A black-box coding agent needs its scratch +
-///   state dir; the old jail denied them (redirecting `TMPDIR` into the worktree),
-///   which broke codex's app-server socket and opencode's log. Non-existent
+///   state dir. Non-existent
 ///   entries are skipped so the wrap's canonicalize can't fail on them. `.git`
 ///   under the worktree stays write-protected — that deny lives in
 ///   [`tars_sandbox::SandboxPolicy::wrap`].
 /// - Strips the dangerous env vars CASE-INSENSITIVELY; passes everything else,
-///   INCLUDING the real `$TMPDIR` (no longer redirected into the worktree — the
-///   jail now allows the real one, so the child and the jail agree).
+///   INCLUDING the real `$TMPDIR`.
 ///
 /// The caller sets stdio + the prompt channel (stdin vs an argv token) and
 /// spawns — that part varies per CLI, the jail does not. `state_dirs` come from
@@ -178,10 +166,7 @@ pub(crate) fn build_sandboxed_command(
     cmd.current_dir(&jail_root); // the delegate's Read/Edit/Bash default to the jail root
 
     // Strip the dangerous env vars CASE-INSENSITIVELY. Pass through everything
-    // else — INCLUDING the real `$TMPDIR`/`TMP`/`TEMP`. The jail now grants the
-    // real `$TMPDIR` (codex model), so the delegate's scratch and the jail's
-    // writable set agree; we no longer redirect the child's tmp into the
-    // worktree (that redirect was the workaround for the old tmp-denying jail).
+    // else — INCLUDING the real `$TMPDIR`/`TMP`/`TEMP`.
     cmd.env_clear();
     for (k, v) in std::env::vars() {
         if !stripped_env.contains(&k.to_uppercase()) {
@@ -207,8 +192,8 @@ impl SubprocessRunner for RealSubprocessRunner {
 
         let argv = build_argv_with(&inv, streaming);
 
-        // Exec sandbox (Doc 29) + env-strip + spawn: the shared primitive.
-        // The delegate is jailed by DEFAULT (Doc 32 FR-3) — its process tree is
+        // Exec sandbox + env-strip + spawn: the shared primitive.
+        // The delegate is jailed by DEFAULT — its process tree is
         // write-confined to the worktree cwd (else the process cwd) so it cannot
         // write beyond it (claude runs with `bypassPermissions`, so its own
         // confinement is off — the OS jail is the only structural boundary).
@@ -275,15 +260,10 @@ impl SubprocessRunner for RealSubprocessRunner {
         // dropping `stdin` here closes the pipe so the child sees EOF
         drop(stdin);
 
-        // Streaming branch — `TARS_CLAUDE_CLI_STREAM=1`: read stdout line
-        // by line as NDJSON events, tee a pretty per-event summary to
-        // stderr, return the reconstructed `result` event so callers see
-        // the same shape as buffered mode.
         if streaming {
             return run_streaming(&mut child, &inv).await;
         }
 
-        // Wait with timeout.
         let output = match tokio::time::timeout(inv.timeout, child.wait_with_output()).await {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
@@ -352,15 +332,12 @@ impl SubprocessRunner for RealSubprocessRunner {
     }
 }
 
-/// The ONE shared buffered runner for every non-streaming CLI delegate (Doc 32
+/// The ONE shared buffered runner for every non-streaming CLI delegate
 /// C2 / FR-6). It owns the invariant machinery — build the argv (from the
 /// dialect), OS-sandbox the spawn ([`build_sandboxed_command`]), feed the prompt
 /// per [`PromptChannel`], drain stdout/stderr concurrently under the timeout,
 /// then reconstruct stdout into a [`Value`] per the dialect's declared
-/// [`OutputFraming`]. The FOUR framings the 5 legacy runners hand-rolled
-/// (single object / prefix-stripped object / JSONL→array / raw text) are now a
-/// single `match`, so a new buffered CLI needs only a [`CliDialect`] (argv +
-/// parse + declared framing) — **no bespoke runner**.
+/// [`OutputFraming`].
 ///
 /// claude is NOT served here: its `stream-json` NDJSON path ([`super::streaming`])
 /// plus the child-reaper / process-group teardown it needs (claude forks
@@ -417,7 +394,6 @@ impl SubprocessRunner for SharedCliRunner {
 
         let label = cli_label(&inv.executable);
 
-        // Argv comes from the dialect (no per-CLI argv duplication in the runner).
         let argv = self.dialect.argv(&inv);
         // The dialect declares its own state/cache/log/socket dirs (codex's
         // `~/.codex`, opencode's `~/.local/share/opencode`); the jail makes them
@@ -515,7 +491,6 @@ impl SubprocessRunner for SharedCliRunner {
             ));
         }
 
-        // Reconstruct stdout per the dialect's declared framing.
         let stdout = String::from_utf8_lossy(&stdout_buf);
         match self.dialect.output_framing() {
             OutputFraming::SingleObject { strip_prefix } => {
@@ -607,7 +582,7 @@ mod tests {
     use std::path::PathBuf;
     use tars_sandbox::{SandboxMode, SandboxPolicy};
 
-    // Default-confine (Doc 32 FR-3): a delegate is OS-sandboxed unconditionally.
+    // Default-confine: a delegate is OS-sandboxed unconditionally.
     // An explicit `ReadOnly`/`WorkspaceWrite` policy is honored; the default /
     // explicit `DangerFullAccess` is DOWNGRADED to a workspace-write jail. These
     // cases are deterministic regardless of `TARS_CLAUDE_SANDBOX` (no longer read).
@@ -703,10 +678,9 @@ mod tests {
 
     #[test]
     fn confining_policy_without_cwd_falls_back_to_process_cwd() {
-        // Frozen-bug fix (Doc 32 FR-3): a confining policy with no worktree cwd
-        // USED to run unconfined (return None). That was the hole. Now the jail
-        // root falls back to the process cwd — the delegate is still confined,
-        // never run unconfined. The policy's own roots are preserved.
+        // A confining policy with no worktree cwd falls back to the process cwd
+        // — the delegate is still confined, never run unconfined.
+        // The policy's own roots are preserved.
         let policy = SandboxPolicy::workspace_write(&PathBuf::from("/x"));
         let (eff, root) = resolve_effective_policy(&policy, None).expect("SAFE fallback ⇒ Ok");
         assert_eq!(eff.mode, SandboxMode::WorkspaceWrite);
@@ -718,8 +692,7 @@ mod tests {
     fn danger_full_access_downgrades_to_workspace_write_on_worktree() {
         // The default (and explicit `--sandbox danger-full-access`) policy is
         // DOWNGRADED to a workspace-write jail rooted at the worktree — a
-        // black-box delegate is never unconfined (Doc 32 FR-3). Deterministic
-        // regardless of the legacy env gate (no longer read).
+        // black-box delegate is never unconfined.
         let cwd = PathBuf::from("/repo/wt");
         let (eff, root) = resolve_effective_policy(&SandboxPolicy::default(), Some(&cwd)).unwrap();
         assert_eq!(eff.mode, SandboxMode::WorkspaceWrite);

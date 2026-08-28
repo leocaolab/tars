@@ -16,7 +16,6 @@ use crate::backends::openai::OpenAiProviderBuilder;
 use crate::http_base::{HttpProviderBase, HttpProviderExtras};
 use crate::provider::LlmProvider;
 
-/// Default vLLM base URL — matches Python `DEFAULT_BASE_URL`.
 pub const DEFAULT_BASE_URL: &str = "http://localhost:8000/v1";
 
 /// Coerce `Some("")` (or `None`) to the default base URL.
@@ -52,8 +51,6 @@ fn normalize_auth(auth: Auth) -> Auth {
 
 /// Build a provider configured for a vLLM server.
 ///
-/// `auth` is normalized: an empty / whitespace-only inline string
-/// becomes `Auth::None` (vLLM by default doesn't authenticate).
 pub fn vllm(
     id: impl Into<tars_types::ProviderId>,
     base_url: Option<String>,
@@ -77,7 +74,6 @@ pub fn vllm(
         .build(http, auth_resolver)
 }
 
-/// Convenience for the common case: localhost:8000, no auth.
 pub fn vllm_local(
     id: impl Into<tars_types::ProviderId>,
     http: Arc<HttpProviderBase>,
@@ -191,8 +187,6 @@ mod tests {
         let http =
             HttpProviderBase::default_arc().expect("Failed to create default HTTP provider base");
         let p = vllm_local("vllm_test", http, basic());
-        // Capability profile should match `local_openai_compat_capabilities`.
-        // (URL/auth correctness is covered by the normalize_* unit tests.)
         let caps = p.capabilities();
         assert!(matches!(
             caps.prompt_cache,

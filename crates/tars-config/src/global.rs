@@ -1,4 +1,4 @@
-//! Process-global immutable [`Config`] singleton (Doc 06 — process isolation).
+//! Process-global immutable [`Config`] singleton.
 //!
 //! One tenant per process, so a single global immutable config is *correct*:
 //! [`init_tars`] once at the composition root, [`Config::get`] everywhere,
@@ -54,7 +54,7 @@ impl Config {
     /// Panics if [`init_tars`] / [`Config::set`] has not run — a startup-contract
     /// violation (a programming error, not a runtime condition). The composition
     /// root must install before anything calls `get`. This is the one sanctioned
-    /// panic in the config layer (Doc 06 §C1: `get` is infallible by design).
+    /// panic in the config layer.
     pub fn get() -> &'static Config {
         CONFIG
             .get()
@@ -67,7 +67,6 @@ impl Config {
         CONFIG.get()
     }
 
-    /// Whether the global config has been installed.
     pub fn is_loaded() -> bool {
         CONFIG.get().is_some()
     }

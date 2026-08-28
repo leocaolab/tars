@@ -48,10 +48,7 @@ impl Usage {
     }
 
     /// Sum of input + output + thinking. Used for context-window budget
-    /// validation. Audit `tars-types-src-usage-26`: previously omitted
-    /// `thinking_tokens`, so requests near the model's context limit could
-    /// look fine to the budget gate and then fail at the provider when
-    /// the provider tallied separately-reported reasoning tokens.
+    /// validation.
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens
             .saturating_add(self.output_tokens)

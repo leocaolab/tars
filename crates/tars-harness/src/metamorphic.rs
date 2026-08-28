@@ -1,5 +1,5 @@
 //! `MetamorphicRelation` + `GoldenMatch` + `Mutation` — the remaining
-//! oracle-free test dimensions from Doc 18 (§4.2 / §4.4 / §4.3).
+//! oracle-free test dimensions from (§4.2 / §4.4 / §4.3).
 //!
 //! These are **library traits + generic helpers**. The CLI run-modes
 //! that exercise them against a live LLM (`tars eval metamorphic` etc.)
@@ -12,26 +12,18 @@ use crate::check::CheckResult;
 
 // ─── §4.2 Metamorphic relations ───────────────────────────────────────
 
-/// A relation between a base run and a transformed run. `transform`
-/// produces a new request from the base; `relation_holds` checks the
-/// two responses satisfy the expected relation. No oracle: you never
-/// need the right answer, only how it must behave under the transform.
+/// No oracle: you never need the right answer, only how it must behave under the transform.
 pub trait MetamorphicRelation: Send + Sync {
     fn name(&self) -> &str;
-    /// Derive the transformed request from the base.
     fn transform(&self, base: &ChatRequest) -> ChatRequest;
-    /// Check the relation between the base output and the transformed
-    /// output.
     fn relation_holds(&self, base: &ChatResponse, transformed: &ChatResponse) -> CheckResult;
 }
 
 /// Invariance relation built from a text transform + an equivalence
 /// predicate: after transforming the input, the output must stay
 /// "equivalent" by the caller's definition. Covers paraphrase /
-/// reorder / rename / vary-distance (Doc 18 §4.2 INV).
-/// Rewrites the input text before re-running the request.
+/// reorder / rename / vary-distance.
 type TransformFn = Box<dyn Fn(&str) -> String + Send + Sync>;
-/// Compares base vs. transformed output text (equivalence or direction).
 type RelationFn = Box<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 pub struct InvarianceRelation {
@@ -53,8 +45,7 @@ impl InvarianceRelation {
         }
     }
 
-    /// Determinism check: transform is identity, equivalence is exact
-    /// string equality. "Same input twice → same output."
+    /// "Same input twice → same output."
     pub fn determinism() -> Self {
         Self::new("determinism", |s| s.to_string(), |a, b| a == b)
     }
@@ -66,8 +57,6 @@ impl MetamorphicRelation for InvarianceRelation {
     }
 
     fn transform(&self, base: &ChatRequest) -> ChatRequest {
-        // Rewrite the last user text via transform_text; other turns
-        // pass through. Most invariance tests perturb the user prompt.
         let mut req = base.clone();
         if let Some(last_user_text) = req.messages.iter_mut().rev().find_map(|m| match m {
             tars_types::Message::User { content } => {
@@ -98,9 +87,8 @@ impl MetamorphicRelation for InvarianceRelation {
 }
 
 /// Directional relation: after the transform, the output must change a
-/// known way. Caller supplies the directional predicate over (base,
-/// transformed). Covers add-constraint → shrink, negate → flip, etc.
-/// (Doc 18 §4.2 DIR).
+/// known way. Covers add-constraint → shrink, negate → flip, etc.
+///.
 pub struct DirectionalRelation {
     name: String,
     transform_text: TransformFn,
@@ -166,8 +154,6 @@ pub enum GoldenMatch {
 }
 
 impl GoldenMatch {
-    /// Compare `output` against `golden`. Returns a [`CheckResult`]:
-    /// pass = matches golden (no drift), fail = drifted.
     pub fn compare(&self, golden: &str, output: &str) -> CheckResult {
         match self {
             GoldenMatch::Exact => {
@@ -222,19 +208,15 @@ fn json_shape(v: &serde_json::Value) -> String {
 // ─── §4.3 Mutation ─────────────────────────────────────────────────────
 
 /// A system mutation paired with the check it's expected to break.
-/// Mutation testing for the eval suite (Doc 18 §4.3b): apply the
+/// Mutation testing for the eval suite: apply the
 /// mutation, re-run the eval, and confirm the named check's violation
 /// rate rose. If it didn't, the eval is blind to that regression class.
 ///
-/// The mutation operates on a prompt string (the most common system
-/// knob); `expected_to_break` names the check that should start
-/// failing. The harness that applies + re-runs lives at the CLI/eval
+/// The harness that applies + re-runs lives at the CLI/eval
 /// layer; this trait is the contract.
 pub trait Mutation: Send + Sync {
     fn name(&self) -> &str;
-    /// Mutate a prompt (e.g. delete a "cite sources" instruction).
     fn mutate_prompt(&self, prompt: &str) -> String;
-    /// The check id that this mutation should cause to start failing.
     fn expected_to_break(&self) -> &str;
 }
 

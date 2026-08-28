@@ -45,19 +45,16 @@ use crate::key::CacheKey;
 use crate::policy::CachePolicy;
 use crate::registry::{CacheRegistry, CachedResponse};
 
-/// Embedded versioned schema (`migrations/cache/`). Applied once at open
-/// on the cache's own pool; `_sqlx_migrations` is the version-of-record.
+/// Applied once at open on the cache's own pool;
+/// `_sqlx_migrations` is the version-of-record.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("migrations/cache");
 
-/// Every-N-writes interval at which we sweep expired rows. Cheap (a
-/// single indexed DELETE) but we don't need it on every write.
+/// Cheap (a single indexed DELETE) but we don't need it on every write.
 const SWEEP_EVERY_N_WRITES: u64 = 64;
 
-/// Per-row default L2 TTL when the policy carries no override. The
-/// persistent layer is fine with 24h since the file lives across runs.
+/// The persistent layer is fine with 24h since the file lives across runs.
 const DEFAULT_L2_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Per-row default TTL for the in-process moka L1 mirror.
 const DEFAULT_L1_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug)]
@@ -82,25 +79,20 @@ impl SqliteCacheRegistryConfig {
 #[derive(Clone)]
 pub struct SqliteCacheRegistry {
     l1: MokaCache<[u8; 32], Arc<CachedResponse>>,
-    /// The database backing L2. Cheap to clone.
+    /// Cheap to clone.
     l2: Db,
     l2_ttl: Duration,
     write_count: Arc<std::sync::atomic::AtomicU64>,
-    /// Injected wall-clock used for every TTL-expiry decision, so
-    /// expiry is testable without sleeping. Defaults to [`SystemClock`].
+    /// Used for every TTL-expiry decision, so expiry is testable without sleeping.
     clock: Arc<dyn Clock>,
 }
 
-/// Default L1 max entries when constructing on an injected [`Db`] without a
-/// tuning config (the value `SqliteCacheRegistryConfig::new` also uses).
 const DEFAULT_L1_MAX_ENTRIES: u64 = 10_000;
 
 impl SqliteCacheRegistry {
-    /// Construct on an **injected** [`Db`] — the composition root opens it once
+    /// The composition root opens it once
     /// and hands it in; the cache carries a handle, never a path. Runs this
-    /// cache's migrator on it and builds the L1 moka mirror. Uses the real
-    /// [`SystemClock`] and the default tuning knobs; call
-    /// [`Self::new_with_clock`] to inject a clock and tuning.
+    /// cache's migrator on it and builds the L1 moka mirror.
     pub async fn new(db: Db) -> Result<Arc<Self>, CacheError> {
         Self::new_with_clock(
             db,
@@ -112,8 +104,6 @@ impl SqliteCacheRegistry {
         .await
     }
 
-    /// Like [`Self::new`], but with an injected [`Clock`] driving all
-    /// TTL-expiry decisions and explicit L1/L2 tuning knobs.
     pub async fn new_with_clock(
         db: Db,
         clock: Arc<dyn Clock>,
@@ -139,16 +129,11 @@ impl SqliteCacheRegistry {
         }))
     }
 
-    /// Open (creating if needed) the cache file at `config.path`. The parent
-    /// directory must exist. Thin wrapper over the DI seam: open the file pool
-    /// via [`Db::open_sqlite`] + [`new_with_clock`](Self::new_with_clock). Uses the
-    /// real [`SystemClock`]; call [`Self::open_with_clock`] to inject a clock.
+    /// The parent directory must exist.
     pub async fn open(config: SqliteCacheRegistryConfig) -> Result<Arc<Self>, CacheError> {
         Self::open_with_clock(config, system_clock()).await
     }
 
-    /// Like [`Self::open`], but with an injected [`Clock`] driving all
-    /// TTL-expiry decisions.
     pub async fn open_with_clock(
         config: SqliteCacheRegistryConfig,
         clock: Arc<dyn Clock>,
@@ -166,16 +151,12 @@ impl SqliteCacheRegistry {
         .await
     }
 
-    /// Open an in-memory SQLite cache — useful for tests that want
-    /// L2 semantics without touching the filesystem. Uses the real
-    /// [`SystemClock`]; call [`Self::in_memory_with_clock`] to inject one.
+    /// Useful for tests that want L2 semantics without touching the filesystem.
     pub async fn in_memory() -> Result<Arc<Self>, CacheError> {
         Self::in_memory_with_clock(system_clock()).await
     }
 
-    /// Like [`Self::in_memory`], but with an injected [`Clock`] driving
-    /// all TTL-expiry decisions — lets a test advance time and assert
-    /// expiry without sleeping.
+    /// Lets a test advance time and assert expiry without sleeping.
     pub async fn in_memory_with_clock(clock: Arc<dyn Clock>) -> Result<Arc<Self>, CacheError> {
         let pool = Db::sqlite_in_memory()
             .await
@@ -190,7 +171,6 @@ impl SqliteCacheRegistry {
         .await
     }
 
-    /// Current time in epoch-ms according to the injected clock.
     fn now_ms(&self) -> i64 {
         self.clock.now_ms()
     }
@@ -327,23 +307,18 @@ impl CacheRegistry for SqliteCacheRegistry {
     }
 
     fn entry_count(&self) -> u64 {
-        // Cheap approximation — moka knows its own size; SQLite count
-        // would need a query. This number is a diagnostic hint, not a
+        // This number is a diagnostic hint, not a
         // correctness signal, so L1's view is "good enough".
         self.l1.entry_count()
     }
 }
 
-/// Path the `tars-cli` (and other Personal-mode binaries) use by
-/// default. Returns `None` only on platforms with no XDG-equivalent
+/// Returns `None` only on platforms with no XDG-equivalent
 /// cache dir, in which case callers should fall back to in-memory.
 pub fn default_personal_cache_path() -> Option<PathBuf> {
     dirs::cache_dir().map(|d| d.join("tars").join("cache.sqlite"))
 }
 
-/// Open the cache at `path`, creating the parent directory if needed.
-/// Convenience wrapper for callers that just want "give me a working
-/// cache, you handle the housekeeping".
 pub async fn open_at_path(path: &Path) -> Result<Arc<SqliteCacheRegistry>, CacheError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

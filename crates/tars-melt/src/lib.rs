@@ -1,47 +1,28 @@
-//! tars-melt — telemetry initialization. Doc 08 + Doc 14 M0 / M5.
+//! tars-melt — telemetry initialization.
 //!
-//! M1 scope (this crate): one-line `tracing` subscriber install with a
+//! One-line `tracing` subscriber install with a
 //! pretty / JSON formatter switch and an `EnvFilter`. Just enough for
 //! every `tars-*` binary (`tars-cli`) to
-//! emit consistent structured logs to stderr without each binary
-//! re-implementing the same `tracing_subscriber::fmt()` boilerplate.
-//!
-//! M5 will grow:
-//! - OTel `tracing-opentelemetry` layer (composes via `with()`)
-//! - Metrics registry (Prometheus exporter etc.)
-//! - `SecretField<T>` for per-record redaction (today
-//!   `tars_types::SecretString` already covers the only consumer —
-//!   API keys / bearer tokens — so the generic version is YAGNI)
-//! - Cardinality validator for label sets
-//! - Trace head + tail sampling
+//! emit consistent structured logs to stderr.
 //!
 //! ## Why a `TelemetryGuard` when the work is one-shot
 //!
-//! `tracing_subscriber` install is a one-shot global; nothing to
-//! drain. But once we add the OTel exporter (M5), it'll need a
-//! `Drop`-time flush so the last batch of spans actually leaves the
-//! process. Returning a `TelemetryGuard` now lets every caller bind
-//! it (`let _guard = tars_melt::init(cfg)?`) and stops being a
-//! breaking change later. Today the guard is a typed `()`.
+//! `tracing_subscriber` install is a one-shot global. Returning a
+//! `TelemetryGuard` now lets every caller bind it and provides a
+//! hook for a future `Drop`-time flush (e.g. for an OTel exporter).
 
 use thiserror::Error;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-/// The read-able **E-pillar** event store (Doc 08 §3, Doc 17):
-/// `PipelineEventLog` + `LlmRecordStore`. Public as
-/// `tars_melt::event::{...}`.
 pub mod event;
 
 /// The append-only trajectory **event model** (`AgentEvent` + the
 /// idempotency / prompt-hash helpers). Lives with telemetry because
 /// its sole roll-up consumer, [`run_report`], is observability — not
-/// runtime. Public as `tars_melt::agent_event::{...}`.
+/// runtime.
 pub mod agent_event;
 
-/// `build_run_report` — replay a trajectory's [`agent_event`] log and
-/// roll it into a [`tars_types::run_report::RunReport`]. Telemetry /
-/// observability, joined to the E-pillar stores above.
 pub mod run_report;
 
 #[cfg(feature = "otlp")]
@@ -79,8 +60,6 @@ impl TelemetryFormat {
 
 #[derive(Clone, Debug)]
 pub struct TelemetryConfig {
-    /// EnvFilter directive string. Same shape as `RUST_LOG`:
-    /// `"warn"`, `"tars=debug,warn"`, `"tars_provider=trace"`, …
     pub level: String,
     pub format: TelemetryFormat,
     /// Service identifier baked into every record (`service=`).
@@ -187,8 +166,8 @@ pub enum TelemetryError {
     OtlpExport { endpoint: String, reason: String },
 }
 
-/// RAII handle for the installed telemetry stack. M1: empty marker.
-/// M5: holds the OTel exporter shutdown channel so `Drop` flushes the
+/// RAII handle for the installed telemetry stack. empty marker.
+/// holds the OTel exporter shutdown channel so `Drop` flushes the
 /// last batch of spans.
 #[must_use = "drop the guard at process exit so the OTel exporter can flush"]
 pub struct TelemetryGuard {
@@ -215,8 +194,7 @@ impl TelemetryGuard {
         }
     }
 
-    /// Guard owning the OTLP tracer + meter providers; both flushed on
-    /// drop so the last span/metric batch leaves the process.
+    /// Both flushed on drop so the last span/metric batch leaves the process.
     #[cfg(feature = "otlp")]
     fn with_providers(
         tracer_provider: opentelemetry_sdk::trace::TracerProvider,
@@ -446,7 +424,7 @@ mod tests {
     ///
     /// For shape verification (does JSON formatter actually emit JSON?)
     /// we'd want a custom MakeWriter that captures bytes. Out of scope
-    /// for M1 — the upstream `tracing-subscriber` test suite covers
+    /// for — the upstream `tracing-subscriber` test suite covers
     /// that. We just need to know *our wiring* doesn't panic.
     #[test]
     fn init_or_warn_does_not_panic_first_or_second_call() {

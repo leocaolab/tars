@@ -63,7 +63,6 @@ pub(super) struct GeminiAdapterWithKey {
 #[async_trait]
 impl HttpAdapter for GeminiAdapterWithKey {
     fn build_url(&self, model: &str) -> Result<Url, ProviderError> {
-        // streamGenerateContent + alt=sse for SSE framing.
         let trimmed = self.inner.base_url.trim_end_matches('/');
         Url::parse(&format!(
             "{trimmed}/{API_VERSION}/models/{model}:streamGenerateContent?alt=sse&key={}",
@@ -335,7 +334,6 @@ impl HttpAdapter for GeminiAdapter {
         let supports_off = model_supports_thinking_off(model);
         match param {
             tars_config::ThinkingParam::Budget => {
-                // Off → 0, Auto → -1 (dynamic), Budget(b) → b.
                 let budget: i64 = match req.thinking {
                     tars_types::ThinkingMode::Off => 0,
                     tars_types::ThinkingMode::Auto => -1,
@@ -437,7 +435,6 @@ impl HttpAdapter for GeminiAdapter {
             .unwrap_or("")
             .to_string();
 
-        // Safety filter: candidates is None / missing.
         let candidates = match v.get("candidates").and_then(|c| c.as_array()) {
             Some(arr) => arr,
             None => {

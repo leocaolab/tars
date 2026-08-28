@@ -63,8 +63,6 @@ impl GeminiProviderBuilder {
     }
 }
 
-/// Assembled from the provider DB (`data/provider.toml`) for Gemini's
-/// default model.
 fn default_capabilities() -> ProviderProfile {
     tars_config::capabilities_for("gemini", "")
 }
@@ -101,8 +99,6 @@ impl LlmProvider for GeminiProvider {
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
-        // Gemini puts the key in the query string. We pre-build the URL
-        // with the key folded in, and don't set any auth headers.
         let resolved = match auth {
             ResolvedAuth::ApiKey(k) => {
                 if k.is_empty() {
@@ -128,7 +124,6 @@ impl LlmProvider for GeminiProvider {
                 ResolvedAuthWithKey::Key(k) => k,
             },
         });
-        // Auth resolves to None below — the key is already in the URL.
         stream_via_adapter(
             self.http.clone(),
             adapter_with_key,

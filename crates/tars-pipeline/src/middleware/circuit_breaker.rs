@@ -1,8 +1,8 @@
-//! Per-provider circuit breaker. Doc 02 §4.7 + Doc 14 M2 §8.1.
+//! Per-provider circuit breaker.
 //!
 //! ## Where it fits
 //!
-//! In the canonical pipeline (Doc 02 §2):
+//! In the canonical pipeline:
 //! ```text
 //! Routing > CircuitBreaker > Retry > Provider
 //! ```
@@ -21,22 +21,14 @@
 //!
 //! ## Failure-rate vs consecutive-failures
 //!
-//! Doc 14 §8.1 calls for a "basic failure-rate" breaker. The simpler
-//! version of that — and the one we ship here — is **consecutive
-//! failures**: open after N back-to-back errors, reset the counter on
-//! any success. No sliding window, no per-bucket bookkeeping. Easy to
-//! reason about and the right shape for the typical "provider went
-//! down for 30s" failure mode. We can grow to a real time-windowed
-//! rate later if a deployment surfaces a use case (intermittent
-//! 30%-failure-rate providers, etc.).
+//! The breaker tracks **consecutive failures**: it opens after N back-to-back
+//! errors and resets the counter on any success. No sliding window.
 //!
 //! ## Mid-stream failures
 //!
 //! The breaker only sees the **open** result of `provider.stream(...)`.
 //! Mid-stream errors (network drop after the first byte) don't currently
-//! count toward the failure tally. Doc 01 §3.2 already discusses why
-//! mid-stream retry is out of scope; the same reasoning applies to
-//! mid-stream breaker accounting. Open-time failures are the dominant
+//! count toward the failure tally. Open-time failures are the dominant
 //! failure mode for HTTP backends.
 
 use std::sync::Arc;
@@ -55,8 +47,7 @@ use tars_types::{
 pub struct CircuitBreakerConfig {
     /// Open after this many consecutive open-time failures.
     pub failure_threshold: u32,
-    /// How long an Open breaker stays Open before transitioning to
-    /// HalfOpen. Doc 02 §4.7 suggests 30s as the standard tradeoff
+    /// HalfOpen. A 30s cooldown is a common tradeoff
     /// between "give the provider time to recover" and "don't keep a
     /// healthy provider locked out".
     pub cooldown: Duration,
@@ -211,14 +202,13 @@ impl CircuitBreaker {
     }
 
     fn check(&self, now: Instant) -> Decision {
-        // Poison handling (per `arc scan --judge` ARC-L5-SW-11): a
+        // Poison handling: a
         // poisoned mutex means a prior task panicked while holding
         // breaker state — by definition the breaker can't make a
         // sound decision from that state. Fail-safe to `Reject` with
         // a short cooldown rather than silently `into_inner()` the
-        // (possibly inconsistent) state and `Allow`. The previous
-        // commit's "graceful degradation by recovering" was wrong:
-        // the breaker's job is to reject when the inner is
+        // (possibly inconsistent) state and `Allow`. The
+        // breaker's job is to reject when the inner is
         // unhealthy, and a panicked state IS an unhealthy state.
         // Logged so an operator notices the panic that caused this.
         let mut state = match self.state.lock() {

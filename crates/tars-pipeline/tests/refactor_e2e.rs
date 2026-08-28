@@ -1,8 +1,6 @@
-//! End-to-end tests for the refactors in commits cf818a5 / 426b2fb /
-//! 979dd4d / bf1b61f — beyond the per-batch unit tests, these exercise
-//! the boundary contracts that matter to consumers: typed equality on
-//! `ProviderErrorKind` sets, how `PerCallBudgetMiddleware::try_*` behaves
-//! wrapped into a real pipeline, and what `read_policy_raw` /
+//! End-to-end tests exercising boundary contracts that matter to consumers:
+//! typed equality on `ProviderErrorKind` sets, how `PerCallBudgetMiddleware::try_*`
+//! behaves wrapped into a real pipeline, and what `read_policy_raw` /
 //! `CircuitBreaker::check` return under intentionally-induced lock poisoning.
 
 use std::collections::HashSet;
@@ -34,7 +32,7 @@ fn retry_attempt_construction_carries_typed_kind() {
     assert_eq!(back.error_kind, ProviderErrorKind::Network);
 }
 
-// ── ARC-L5-EF-9 — BudgetConfigError end-to-end ─────────────────────
+
 
 #[test]
 fn try_new_propagates_bad_pricing_from_capabilities() {
@@ -57,8 +55,6 @@ fn try_new_propagates_bad_pricing_from_capabilities() {
 
 #[test]
 fn try_new_with_valid_capabilities_round_trips_through_wrap() {
-    // The fallible constructor returns Ok with a real middleware that
-    // can then be layered onto a service and used normally.
     use tars_types::ProviderProfile;
     let caps = ProviderProfile::text_only_baseline(Pricing {
         input_per_million: 3.0,
@@ -71,10 +67,9 @@ fn try_new_with_valid_capabilities_round_trips_through_wrap() {
     let _wrapped = tars_pipeline::LlmService::builder_with_inner(inner)
         .layer(mw)
         .build();
-    // No panic = invariant holds: try_new returned a working middleware.
 }
 
-// ── ARC-L5-SW-10 — CachePolicy distinguishability in real callers ──
+
 
 /// `read_policy_raw` is private, but `CachePolicy::default()` going
 /// through serde must round-trip cleanly — that's the contract callers
@@ -109,16 +104,12 @@ fn malformed_cache_policy_attribute_does_not_panic_attribute_write() {
     assert!(decoded.is_ok(), "default CachePolicy must round-trip");
 }
 
-// ── ARC-L5-SW-11 — CircuitBreaker fail-safe under real panic ───────
+
 
 #[test]
 fn circuit_breaker_check_under_poisoned_state_fails_safe() {
     use tars_pipeline::CircuitBreaker;
 
-    // Build a real breaker; the mutex it holds is inaccessible from
-    // here, but we can poison it via the canonical Rust idiom: spawn
-    // a thread that takes the lock and panics. The breaker is wrapped
-    // around a mock provider so we have a valid `Arc<dyn LlmProvider>`.
     let mock = MockProvider::new("inner", CannedResponse::text("hi"));
     let breaker = CircuitBreaker::wrap(
         mock as Arc<dyn LlmProvider>,
@@ -142,7 +133,7 @@ fn circuit_breaker_check_under_poisoned_state_fails_safe() {
     let _id = breaker.id().clone();
 }
 
-// ── Bonus — typed kind round-trips through arc-style telemetry ─────
+
 
 #[test]
 fn provider_error_kind_set_contains_uses_typed_equality() {
@@ -155,7 +146,7 @@ fn provider_error_kind_set_contains_uses_typed_equality() {
     assert!(!kinds.contains(&ProviderErrorKind::Auth));
 }
 
-// ── Bonus — RwLock poisoning + recovery sanity check (SW-10 model) ─
+
 
 #[test]
 fn rwlock_poisoning_canonical_pattern() {
@@ -174,8 +165,7 @@ fn rwlock_poisoning_canonical_pattern() {
     let _ = h.join();
     let err = lock.read().unwrap_err();
     // The salvaged value is still inspectable via into_inner(); the
-    // important property for SW-11's argument is that we OBSERVE the
-    // poison.
+    // important property is that we OBSERVE the poison.
     let g = err.into_inner();
     assert_eq!(*g, 42);
 }

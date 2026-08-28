@@ -43,10 +43,7 @@ pub trait OpenAiDialect: Send + Sync {
         false
     }
 
-    /// Canonical [`ChatRequest`] → provider wire JSON.
     ///
-    /// Default = the standard OpenAI chat/completions body built by
-    /// [`OpenAiAdapter::build_request_default`].
     fn build_request(
         &self,
         adapter: &OpenAiAdapter,
@@ -56,10 +53,7 @@ pub trait OpenAiDialect: Send + Sync {
         adapter.build_request_default(req, model)
     }
 
-    /// One streaming SSE `data:` line → 0..N canonical [`ChatEvent`]s.
     ///
-    /// Default = the standard delta/tool-call/finish parsing in
-    /// [`OpenAiAdapter::parse_event_default`].
     fn parse_event(
         &self,
         adapter: &OpenAiAdapter,
@@ -69,7 +63,7 @@ pub trait OpenAiDialect: Send + Sync {
         adapter.parse_event_default(raw, buf)
     }
 
-    /// Provider `usage` object → canonical [`Usage`].
+    ///
     ///
     /// Default = [`parse_openai_usage`] (reads `prompt_tokens`,
     /// `completion_tokens`, nested `cached_tokens`, and
@@ -80,17 +74,14 @@ pub trait OpenAiDialect: Send + Sync {
         parse_openai_usage(usage)
     }
 
-    /// One non-streaming chat-completion body → canonical [`ChatResponse`]
-    /// (the batch / one-shot path).
     ///
-    /// Default = [`openai_chat_completion_to_chat_response`].
     fn parse_response(&self, raw: &Value) -> Result<ChatResponse, ProviderError> {
         let mut r = openai_chat_completion_to_chat_response(raw)?;
         self.finalize(&mut r);
         Ok(r)
     }
 
-    /// Last look at a finished response, whichever path assembled it.
+    ///
     ///
     /// A dialect's quirks do not all fit in one SSE event. DeepSeek's native tool-call
     /// markup arrives in CHUNKS, so nothing per-event can lift it; it can only be
@@ -105,8 +96,7 @@ pub trait OpenAiDialect: Send + Sync {
     fn finalize(&self, _r: &mut ChatResponse) {}
 }
 
-/// Standard OpenAI (and every openai_compat endpoint without a quirk) —
-/// all trait defaults.
+///
 pub struct StandardDialect;
 
 impl OpenAiDialect for StandardDialect {}

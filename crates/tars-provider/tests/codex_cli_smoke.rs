@@ -30,7 +30,6 @@ async fn codex_cli_say_hi_against_real_binary() {
     }
 
     let provider = CodexCliProviderBuilder::new("codex_smoke")
-        // Default sandbox=ReadOnly; default skip_git_repo_check=true.
         // 2-minute timeout — "say hi" should be fast but codex's agent
         // loop has its own startup overhead.
         .timeout(std::time::Duration::from_secs(120))

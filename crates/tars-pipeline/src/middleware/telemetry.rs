@@ -1,18 +1,8 @@
-//! Telemetry middleware — basic tracing for M1.
+//! Telemetry middleware — basic tracing.
 //!
-//! Doc 02 §4.1 calls for an OTel root span, child spans per layer, and
-//! metric emission. M1 keeps it lean: structured `tracing` events at
-//! call open / call complete / stream finish / stream error. The full
-//! OTel exporter wiring lives in `tars-melt` (M5), which can subscribe
-//! to the same `tracing` events without changing this layer.
-//!
-//! What we record per call (single inbound + a few outbound events):
-//!
-//! - `llm.call.start` — model, message count, tenant, trace id
-//! - `llm.call.opened` — elapsed-to-first-byte in ms (open success)
-//! - `llm.call.failed` — elapsed-to-error in ms (open failure)
-//! - `llm.call.finished` — elapsed-to-finish, stop_reason, usage tokens
-//! - `llm.call.stream_error` — mid-stream provider error
+//! Emits structured `tracing` events at call open / call complete /
+//! stream finish / stream error.
+
 
 use std::time::Instant;
 
@@ -219,7 +209,7 @@ mod tests {
     use tracing_subscriber::Registry;
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
-    /// Captured fields for one tracing event.
+
     type EventFields = BTreeMap<String, String>;
 
     #[derive(Default, Clone)]
@@ -232,7 +222,7 @@ mod tests {
                 .expect("captured events lock poisoned")
                 .clone()
         }
-        /// Returns the first event whose `event` field matches `name`.
+
         fn find(&self, name: &str) -> Option<EventFields> {
             self.snapshot()
                 .into_iter()
@@ -384,7 +374,7 @@ mod tests {
         assert!(finished.contains_key("output_tokens"));
         assert!(finished.contains_key("elapsed_ms"));
 
-        // No error events on the happy path.
+
         assert!(captured.find("llm.call.failed").is_none());
         assert!(captured.find("llm.call.stream_error").is_none());
     }

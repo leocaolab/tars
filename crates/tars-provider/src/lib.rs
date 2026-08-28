@@ -5,12 +5,7 @@
 //! basic operation and `complete` defaults to "consume the stream and
 //! aggregate".
 //!
-//! Module map:
-//! - [`provider`] — trait + types
-//! - [`auth`]     — `Auth` enum + `AuthResolver` trait + basic resolvers
-//! - [`http_base`] — shared `HttpAdapter` infra (reqwest client, retry, SSE)
-//! - [`tool_buffer`] — accumulates streaming tool calls
-//! - [`backends`] — concrete provider implementations
+//!
 //!
 //! See `docs/architecture/01-llm-provider.md`.
 

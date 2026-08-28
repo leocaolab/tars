@@ -1,36 +1,23 @@
-//! Shared CLI-delegate backend (Doc 32 §5 C2).
+//! Shared CLI-delegate backend.
 //!
 //! [`AgentCliBackend`] is the ONE `LlmProvider` that shells out to a
-//! black-box coding-agent CLI, feeds it a prompt, OS-sandboxes the spawn
-//! (`tars-sandbox`, Doc 29), and maps the CLI's output onto canonical
+//! black-box coding-agent CLI, feeds it a prompt, OS-sandboxes the spawn,
+//! and maps the CLI's output onto canonical
 //! [`ChatEvent`]s. Everything that varies per CLI lives behind a
-//! [`CliDialect`]; the backend itself contains **no per-CLI branching**
-//! (FR-1). Adding a CLI = one `CliDialect` impl.
+//! [`CliDialect`]; the backend itself contains **no per-CLI branching**.
+//! Adding a CLI = one `CliDialect` impl.
 //!
-//! ## What is shared here (lifted from `claude_cli`, Doc 32 §7)
-//! - [`argv`] — [`SubprocessInvocation`] + [`SubprocessRunner`] + the argv
-//!   constructors + the env-strip table.
-//! - [`subprocess`] — [`RealSubprocessRunner`]: the real spawn, the
-//!   `tars-sandbox` write-jail (gated on `TARS_CLAUDE_SANDBOX`), the
-//!   TMPDIR-in-worktree redirect, the stdin prompt, and the buffered JSON
-//!   parse.
-//! - [`streaming`] — the stream-json NDJSON line-drain.
-//!
-//! ## Seam boundaries (as-built)
 //! The OS-jail wrap is a **shared primitive** (`build_sandboxed_command` in
-//! [`subprocess`]). A delegate is confined **by default** (Doc 32 FR-3): an
+//! [`subprocess`]). A delegate is confined **by default**: an
 //! unset/`DangerFullAccess` policy is downgraded to a workspace-write jail on
 //! the worktree cwd (else the process cwd), and an explicit `[sandbox]`/
-//! `--sandbox` `ReadOnly`/`WorkspaceWrite` policy is honored. The legacy
-//! `TARS_CLAUDE_SANDBOX` env gate is no longer needed (nor read).
+//! `--sandbox` `ReadOnly`/`WorkspaceWrite` policy is honored.
 //!
-//! The near-duplicate per-CLI runners the earlier as-built gap booked (Doc 32
-//! §9) are **consolidated**: codex / opencode / antigravity now share
+//! codex / opencode / antigravity share
 //! ONE [`SharedCliRunner`](subprocess::SharedCliRunner) — a single
 //! spawn/prompt-channel/drain skeleton parameterized by the dialect's declared
-//! [`OutputFraming`] (single-object / prefix-stripped / JSONL→array / raw-text).
-//! A new buffered CLI = a `CliDialect` (argv + parse + declared framing), **no
-//! bespoke runner** (FR-6). claude keeps its own
+//! [`OutputFraming`].
+//! claude keeps its own
 //! [`RealSubprocessRunner`](subprocess::RealSubprocessRunner) because its
 //! `stream-json` NDJSON path ([`streaming`]) + child-reaper / process-group
 //! teardown are genuinely different; the `security_delegate_cli` test drives it.
@@ -116,19 +103,11 @@ impl LlmProvider for AgentCliBackend {
         model: &str,
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
-        // 1. Per-CLI invocation (argv flags, serialized prompt, env-strip,
-        //    cwd). The dialect owns everything CLI-specific.
         let inv = self.dialect.invocation(&req, model, &ctx)?;
         let model = inv.model.clone();
 
-        // 2. Spawn + OS-sandbox + drain — the shared machinery. The runner
-        //    reconstructs the CLI's answer into a single JSON value
-        //    (buffered blob or the stream-json `result` event).
         let payload = self.runner.run(inv).await?;
 
-        // 3. Map the CLI answer → content events per the dialect's output
-        //    mode. `Started` is prepended by the backend (it knows the
-        //    requested model); the dialect owns only the content parse.
         let content = match self.dialect.output_mode() {
             OutputMode::JsonEvents => self.dialect.parse_line(&payload)?,
             OutputMode::Text => {
@@ -161,9 +140,8 @@ impl LlmProvider for AgentCliBackend {
     }
 }
 
-/// Clamp the assistant text carried by `content` to `max_output_tokens`
-/// (interpreted as `*4` chars, matching the pre-refactor claude path). When
-/// any truncation happens, the terminal `Finished` is re-stamped
+/// Clamp the assistant text carried by `content` to `max_output_tokens`.
+/// When any truncation happens, the terminal `Finished` is re-stamped
 /// `MaxTokens`. A no-op when no budget is set or nothing exceeds it.
 fn clamp_to_output_budget(
     mut content: Vec<ChatEvent>,
@@ -203,8 +181,7 @@ mod tests {
     use serde_json::{Value, json};
     use tars_types::Usage;
 
-    /// Records the invocation and returns a canned payload — the FakeRunner
-    /// pattern from the pre-refactor claude_cli suite.
+    /// Records the invocation and returns a canned payload.
     struct FakeRunner {
         payload: Value,
         recorded: std::sync::Mutex<Option<SubprocessInvocation>>,
@@ -242,9 +219,8 @@ mod tests {
         (backend, runner)
     }
 
-    /// E2E-1: claude through `AgentCliBackend` + `ClaudeCliDialect` produces
-    /// the same event stream (Started → Delta → Finished) as the pre-refactor
-    /// provider, with the argv the dialect emits driving the invocation.
+    /// claude through `AgentCliBackend` + `ClaudeCliDialect` produces
+    /// the event stream (Started → Delta → Finished) with the argv the dialect emits driving the invocation.
     #[tokio::test]
     async fn claude_dialect_through_backend_emits_started_delta_finished() {
         let payload = json!({
@@ -283,8 +259,7 @@ mod tests {
             other => panic!("expected Finished, got {other:?}"),
         }
 
-        // The invocation the runner received carries the claude argv the
-        // dialect builds — the same tokens the old runner spawned.
+        // The invocation the runner received carries the claude argv the dialect builds.
         let inv = runner.recorded.lock().unwrap().clone().unwrap();
         assert_eq!(inv.model, "opus");
         let argv = backend.dialect.argv(&inv);
@@ -308,12 +283,7 @@ mod tests {
         assert_eq!(resp.stop_reason, Some(StopReason::MaxTokens));
     }
 
-    // Dead-subprocess error propagation and the Text-mode (antigravity)
-    // Started→Delta→Finished decode are cross-dialect invariants now driven for
-    // ALL 5 dialects in `tests/cli_conformance.rs` (D-12), so their claude/
-    // antigravity-specific copies are retired from here. The claude success +
-    // argv-recording E2E above and the budget-clamp tests are backend-specific
-    // and stay.
+
 
     #[test]
     fn clamp_is_noop_without_budget() {

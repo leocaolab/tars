@@ -1,4 +1,4 @@
-//! Routing config — Doc 01 §12 + Doc 02 §4.6 wired through TOML.
+//! Routing config — §12 + §4.6 wired through TOML.
 //!
 //! Ships `tiers` — the `ModelTier → Vec<ProviderId>` lookup consumed at
 //! service-construction / role-resolution time (a role naming a tier

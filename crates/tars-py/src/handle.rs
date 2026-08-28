@@ -120,7 +120,7 @@ fn resolve_global_role(role: &str) -> PyResult<(String, Arc<dyn LlmProvider>)> {
 }
 
 /// A context manager that establishes a `RequestContext` for the calls inside
-/// its `with` block (Doc 12 §6.2). Each `complete()` inside re-scopes
+/// its `with` block. Each `complete()` inside re-scopes
 /// `RUN_CONTEXT` from it.
 #[pyfunction]
 #[pyo3(signature = (session = None, tags = None, tenant = None, trace = None))]

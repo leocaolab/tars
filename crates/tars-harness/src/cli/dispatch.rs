@@ -1,22 +1,6 @@
 //! Shared dispatch wiring used by every subcommand that talks to an
 //! LLM (`tars run`, `tars plan`, future `tars chat`).
 //!
-//! Three responsibilities:
-//!
-//! 1. **Common flags** as the [`DispatchArgs`] struct that
-//!    subcommands `#[command(flatten)]` into their own arg structs —
-//!    keeps `--provider / --tier / --model / --cache-path / --breaker
-//!    / --events-path / --no-cache / --no-trajectory` semantics
-//!    identical across subcommands.
-//! 2. **Provider dispatch** — turn config + flags into a
-//!    [`Dispatch`] struct (the bottom-of-pipeline `LlmService` plus
-//!    the bookkeeping every caller needs: model label for
-//!    `req.model`, cost-attribution provider, cache origin id,
-//!    diagnostic label).
-//! 3. **Cache + registry construction** — same fallback logic
-//!    (XDG default → SQLite → in-memory on failure) every subcommand
-//!    needs.
-//!
 //! The actual pipeline composition (which middleware layers in which
 //! order) stays per-subcommand because subcommands have legitimate
 //! reasons to differ — e.g., a future `tars chat` will want
@@ -32,9 +16,7 @@ use tars_pipeline::{CircuitBreaker, CircuitBreakerConfig};
 use tars_provider::registry::ProviderRegistry;
 use tars_types::ProviderId;
 
-/// Flags every LLM-calling subcommand shares. Flatten with
-/// `#[command(flatten)] pub dispatch: DispatchArgs` on each
-/// subcommand's args struct.
+/// Flags every LLM-calling subcommand shares.
 #[derive(Args, Debug, Clone)]
 pub struct DispatchArgs {
     /// Provider id to route through. Required iff config has > 1

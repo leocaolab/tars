@@ -1,13 +1,7 @@
-//! [`CacheRegistry`] trait + the in-process L1 implementation.
-//!
 //! The L1 implementation uses [`moka::future::Cache`] which gives us:
 //! - size-based eviction (entries, not bytes — close enough at this scale)
 //! - per-entry TTL via `expire_after_create` policy
 //! - lock-free reads
-//!
-//! L2 (persistent) and L3 (provider-side handles) are separate
-//! `CacheRegistry` impls with the same trait surface — see
-//! [`crate::SqliteCacheRegistry`] for L2.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -22,41 +16,24 @@ use crate::error::CacheError;
 use crate::key::CacheKey;
 use crate::policy::CachePolicy;
 
-/// What we put into the cache. Wraps the response with enough metadata
-/// to (a) replay correctly and (b) tell observers "you saved $X".
-///
-/// `cached_at` uses `tars_types::systemtime_millis` so the on-wire/
-/// on-disk format stays portable across platforms (default `SystemTime`
-/// serde uses a tagged `(secs, nanos)` struct that isn't a stable
-/// format — pre-Unix-epoch times even error out on some platforms).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CachedResponse {
     pub response: ChatResponse,
     #[serde(with = "tars_types::systemtime_millis")]
     pub cached_at: SystemTime,
     pub origin_provider: ProviderId,
-    /// Usage figures from the original (cache-miss) call. Lets the
-    /// "cost saved" stat be honest about what the cache replaced.
+    /// Lets the "cost saved" stat be honest about what the cache replaced.
     pub original_usage: Usage,
 }
 
-/// Multi-level cache. M1 only has an in-memory L1 implementor
-/// ([`MemoryCacheRegistry`]); future L2/L3 backends will be additional
-/// types implementing this same trait.
 #[async_trait]
 pub trait CacheRegistry: Send + Sync + 'static {
-    /// Look up a previously cached response for `key`. `Ok(None)` =
-    /// miss; errors are typed but the middleware degrades them to
-    /// misses.
     async fn lookup(
         &self,
         key: &CacheKey,
         policy: &CachePolicy,
     ) -> Result<Option<CachedResponse>, CacheError>;
 
-    /// Store a successful response. Caller is responsible for the
-    /// "should we cache this?" decision — the registry just persists
-    /// what it's given.
     async fn write(
         &self,
         key: CacheKey,
@@ -64,22 +41,18 @@ pub trait CacheRegistry: Send + Sync + 'static {
         policy: &CachePolicy,
     ) -> Result<(), CacheError>;
 
-    /// Drop a single entry. Used for explicit business-driven
-    /// invalidation (the upstream code knows the cached answer is now
-    /// stale — e.g. a doc was edited).
+    /// Used for explicit business-driven invalidation (the upstream code
+    /// knows the cached answer is now stale — e.g. a doc was edited).
     async fn invalidate(&self, key: &CacheKey) -> Result<(), CacheError>;
 
-    /// Best-effort entry count (for diagnostics; may lag actual state
-    /// on heavily-concurrent workloads).
     fn entry_count(&self) -> u64;
 }
 
 #[derive(Clone, Debug)]
 pub struct MemoryCacheRegistryConfig {
-    /// Hard upper bound on entries. Eviction policy is W-TinyLFU
-    /// (moka default) — surprisingly resilient to scan-style workloads.
+    /// Eviction policy is W-TinyLFU (moka default) — surprisingly resilient
+    /// to scan-style workloads.
     pub max_entries: u64,
-    /// Default TTL when the policy carries no per-request override.
     pub default_ttl: Duration,
 }
 

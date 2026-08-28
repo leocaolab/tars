@@ -50,7 +50,6 @@ fn happy_path_body() -> String {
 }
 
 /// Build a registry from a TOML snippet pointed at the wiremock URL.
-/// Mirrors what the eventual `tars-cli` will do at startup.
 fn registry_from_toml(toml_str: &str) -> ProviderRegistry {
     let cfg = ConfigManager::load_from_str(toml_str).expect("config parses");
     let http = HttpProviderBase::default_arc().expect("http base");
@@ -59,10 +58,8 @@ fn registry_from_toml(toml_str: &str) -> ProviderRegistry {
 
 // ── 1. Happy path ───────────────────────────────────────────────────────────
 //
-// Wiremock returns one full streaming response. The pipeline (Telemetry +
-// Retry → real OpenAI HTTP adapter at the provider terminal) parses it and we
-// assert the final Finished event carries the usage from the SSE bytes
-// (proves the parser ran inside the pipeline, not just on a fake stream).
+// Proves the real parser ran inside the pipeline (not a fake stream) by
+// asserting the final event carries usage from the SSE bytes.
 
 #[tokio::test]
 async fn happy_path_pipeline_parses_real_sse_into_usage() {
@@ -122,23 +119,20 @@ async fn happy_path_pipeline_parses_real_sse_into_usage() {
     assert_eq!(usage.input_tokens, 7);
     assert_eq!(usage.output_tokens, 1);
 
-    // Wiremock saw exactly one POST.
+
     let received = server.received_requests().await.unwrap();
     assert_eq!(received.len(), 1, "expected single upstream POST");
 }
 
 // ── 2. RetryMiddleware genuinely retries the HTTP request ───────────────────
 //
-// First POST: 503 → maps to ProviderError::ModelOverloaded (Retriable).
-// Second POST: 200 + valid SSE.
-// We assert wiremock saw 2 POSTs and the final stream completes cleanly.
+// 503 maps to ProviderError::ModelOverloaded (Retriable).
 
 #[tokio::test]
 async fn retry_middleware_actually_replays_http_call_on_5xx() {
     let server = MockServer::start().await;
 
-    // Higher-priority mock returns 503 for the first hit only.
-    // (wiremock priorities: lower number wins; default is 5.)
+
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(503).set_body_string("model overloaded"))
@@ -147,7 +141,7 @@ async fn retry_middleware_actually_replays_http_call_on_5xx() {
         .mount(&server)
         .await;
 
-    // Fallback mock returns 200 + SSE for everything else.
+
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(
@@ -183,7 +177,7 @@ async fn retry_middleware_actually_replays_http_call_on_5xx() {
         .await
         .expect("retry recovers and opens stream");
 
-    // Drain the stream — must complete without error.
+
     let mut got_finished = false;
     while let Some(ev) = stream.next().await {
         if matches!(ev.expect("event"), ChatEvent::Finished { .. }) {
@@ -202,11 +196,8 @@ async fn retry_middleware_actually_replays_http_call_on_5xx() {
 
 // ── 3. Registry → Pipeline wiring (config-driven) ───────────────────────────
 //
-// Smaller smoke test: the only assertion is that the type chain
-// (TOML → ProvidersConfig → ProviderRegistry → Arc<dyn LlmProvider>
-// → LlmService default chain) actually compiles + runs through to a
-// successful svc.call(). Catches Arc/dyn/trait-object mismatches that
-// compile in isolation but break when composed.
+// Catches Arc/dyn/trait-object mismatches that compile in isolation but
+// break when composed.
 
 #[tokio::test]
 async fn registry_built_from_toml_can_drive_pipeline_call() {

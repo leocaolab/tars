@@ -1,13 +1,6 @@
 //! Tool calling — the Provider-layer view.
 //!
-//! This is *not* the same as Doc 05's `Tool` trait. Doc 05's `Tool` is
-//! a callable thing the Runtime invokes. This module is just the
-//! request/response shape that the Provider exchanges with the LLM:
-//!
-//! - [`ToolSpec`] — definition we send *to* the LLM in `request.tools`
-//! - [`ToolCall`] — call the LLM emits, returned in `ChatEvent::ToolCallEnd`
-//!
-//! Doc 04's Agent layer translates between Doc 05 `Tool`s and these
+//! The request/response shape that the Provider exchanges with the LLM.
 //! Provider-level structs.
 
 use serde::{Deserialize, Serialize};
@@ -26,7 +19,7 @@ pub struct ToolSpec {
     /// call [`validate`](Self::validate) at the provider boundary.
     pub name: String,
     /// What the tool does — the model uses this to decide *when* to call it.
-    /// Per Doc 05 §3.3, this should explain "when to use", not just "what".
+    /// Per §3.3, this should explain "when to use", not just "what".
     pub description: String,
     /// JSON Schema for the input arguments object.
     pub input_schema: JsonSchema,
@@ -78,7 +71,7 @@ pub enum ToolChoice {
 /// **Crucial invariant**: `arguments` is always parsed JSON. Provider
 /// adapters that receive string-encoded args (OpenAI) parse them
 /// before constructing this struct. The Pipeline / Agent layer never
-/// has to worry about double-decoding (Doc 01 §8).
+/// has to worry about double-decoding.
 #[derive(Clone, Debug, Serialize)]
 pub struct ToolCall {
     /// Provider-side ID for correlating the call with its result message.

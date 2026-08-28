@@ -260,11 +260,10 @@ fn build_one(
             capabilities,
         } => {
             // A named definition (e.g. `deepseek`, keyed by the provider id)
-            // resolves its real caps from the provider DB — `deepseek` states
-            // `json_object` there directly, so the old StrictSchema→JsonObject
-            // patch is gone. An anonymous user instance (a local vLLM the DB
-            // doesn't name) falls back to `text_only_baseline`. Either way the
-            // user's `[capabilities]` overrides win last.
+            // resolves its real caps from the provider DB. An anonymous user
+            // instance (a local vLLM the DB doesn't name) falls back to
+            // `text_only_baseline`. Either way the user's `[capabilities]`
+            // overrides win last.
             let mut caps = tars_config::capabilities_for(id.as_str(), default_model);
             capabilities.apply_to(&mut caps);
             let builder = OpenAiProviderBuilder::new(id, auth.clone())
@@ -444,8 +443,6 @@ fn build_one(
                 .build()
         }
 
-        // opencode: the shared AgentCliBackend driven by an OpenCodeDialect; its
-        // runner spawns through the tars-sandbox OS jail.
         ProviderConfig::Opencode {
             executable,
             timeout_secs,
@@ -460,8 +457,6 @@ fn build_one(
             Arc::new(AgentCliBackend::new(id, caps, dialect, runner))
         }
 
-        // Antigravity: the shared AgentCliBackend driven by an AntigravityDialect
-        // (an OutputMode::Text dialect); sandboxed.
         ProviderConfig::Antigravity {
             executable,
             timeout_secs,
@@ -610,7 +605,6 @@ mod tests {
         )
         .unwrap();
         let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
-        // Identity transform — every provider passes through unchanged.
         let mapped = reg.map_providers(|_id, p| p);
         // Count is incidental (user + builtins); just verify both
         // user entries survived the round-trip.

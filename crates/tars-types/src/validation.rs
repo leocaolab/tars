@@ -4,7 +4,7 @@
 //! Pipeline-internal types). The data types here are what flow
 //! between caller code and the validator chain — they need to be
 //! constructible / inspectable without taking a `tars-pipeline`
-//! dependency. See [Doc 15 — Output Validation](../../../docs/architecture/15-output-validation.md).
+//! dependency. See [— Output Validation](../../../docs/architecture/15-output-validation.md).
 //!
 //! Threaded through:
 //!
@@ -26,19 +26,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::providers::response::ChatResponse;
 
-/// Typed, machine-matchable reason a validator rejected a response.
-///
 /// Mirrors the `CompatibilityReason { kind, message, detail }` shape
-/// (B-31 v4) so a caller's fix-stage can match on a discriminant +
-/// structured detail instead of grepping the message string — the
-/// brittle contract B-31 v1 already retired for the routing path.
-/// Built-in validators emit the typed variants; caller-supplied
-/// validators (Python user callbacks, the internal adapter's
-/// crash-fallback) go through [`ValidationReason::Custom`].
-///
-/// `#[non_exhaustive]` so a future built-in validator can add a variant
-/// without breaking caller `match` arms — the `Custom` catch-all plus
-/// [`ValidationReason::kind`] keep older callers functional.
+/// so a caller's fix-stage can match on a discriminant +
+/// structured detail instead of grepping the message string.
 ///
 /// Derives serde (externally tagged, snake_case) because — unlike its
 /// sibling [`crate::CompatibilityReason`], which is matched only at the
@@ -50,26 +40,16 @@ use crate::providers::response::ChatResponse;
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ValidationReason {
-    /// `response.text` was expected to parse as JSON but didn't.
-    /// `parse_error` is the underlying `serde_json` message.
     JsonShape { parse_error: String },
 
-    /// A required response field (`text` / `thinking`) was empty or
-    /// whitespace-only. `field` is the field label.
     NotEmpty { field: String },
 
-    /// A response field exceeded its configured character budget.
     MaxLength {
         field: String,
         length: usize,
         max: usize,
     },
 
-    /// Caller-supplied rejection — Python user validators and the
-    /// adapter's crash-fallback land here. `kind` is a free-form
-    /// caller-chosen discriminant (e.g. `"user"`, `"internal"`),
-    /// `message` is human-readable, `detail` an optional structured
-    /// payload the caller can branch on.
     Custom {
         kind: String,
         message: String,
@@ -78,9 +58,7 @@ pub enum ValidationReason {
 }
 
 impl ValidationReason {
-    /// Stable machine-matchable discriminant string. For built-in
-    /// variants it's a fixed snake_case tag; for [`Self::Custom`] it's
-    /// the caller-chosen `kind`. Use this in caller fix-stages instead
+    /// Use this in caller fix-stages instead
     /// of substring-matching [`fmt::Display`] output.
     pub fn kind(&self) -> &str {
         match self {
@@ -93,9 +71,9 @@ impl ValidationReason {
 }
 
 impl fmt::Display for ValidationReason {
-    /// Human-readable message. Built-in variants reproduce the exact
-    /// strings the W1 string-only `reason` carried, so log scrapers /
-    /// error messages are unchanged across the v2 migration.
+    /// Built-in variants reproduce the exact strings the W1 string-only
+    /// `reason` carried, so log scrapers / error messages are unchanged
+    /// across the v2 migration.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::JsonShape { parse_error } => {
@@ -113,24 +91,16 @@ impl fmt::Display for ValidationReason {
     }
 }
 
-/// What a validator decides to do with a response. Distinct from
-/// [`crate::CompatibilityCheck`] — that one is about routing's
-/// pre-flight feature match; this one is about *post-call* output
+/// Distinct from [`crate::CompatibilityCheck`] — that one is about
+/// routing's pre-flight feature match; this one is about *post-call* output
 /// inspection.
-///
-/// `#[non_exhaustive]` so we can add e.g. `Defer` (re-run validator
-/// after a future event) later without breaking match arms.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ValidationOutcome {
-    /// Response is fine as-is. No metrics recorded; nothing changes.
     Pass,
 
-    /// Response transformed in-place. The new Response is what
-    /// downstream sees (subsequent validators in the chain operate on
-    /// `response`, not the pre-Filter version). `dropped` is a
-    /// free-form audit list — what got removed/changed — for
-    /// telemetry, not control flow.
+    /// The new Response is what downstream sees (subsequent validators
+    /// in the chain operate on `response`, not the pre-Filter version).
     Filter {
         response: ChatResponse,
         dropped: Vec<String>,
@@ -150,7 +120,7 @@ pub enum ValidationOutcome {
     /// Callers that genuinely need to re-ask the model should do so
     /// at their own layer with explicit prompt variation.
     ///
-    /// `reason` is a typed [`ValidationReason`] (B-20.v2) — callers
+    /// `reason` is a typed [`ValidationReason`] — callers
     /// match on `reason.kind()` + structured detail rather than parsing
     /// a message string.
     Reject { reason: ValidationReason },

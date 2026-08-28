@@ -1,26 +1,9 @@
 //! `tars events` — inspect the **pipeline event store** written by
-//! `EventEmitterMiddleware` (Doc 17). Distinct from `tars trajectory`,
+//! `EventEmitterMiddleware`. Distinct from `tars trajectory`,
 //! which reads trajectory `AgentEvent` logs from a different file.
-//!
-//! Subcommands:
-//!
-//! - `tars events list [--tenant X] [--since 1d] [--tag T] [--limit N]`
-//!   — one-line-per-event summary (timestamp, tenant, model, result).
-//! - `tars events show <event_id> [--with-bodies]` — full JSON payload;
-//!   `--with-bodies` resolves request_ref / response_ref against the
-//!   record store and prints the bytes.
-//! - `tars events reasons [--tenant X] [--since 1d] [--tag T] [--json]`
-//!   — aggregate validation-reject reasons by `kind` over the window
-//!   ("which reason fired most"), reading the `validation_reason`
-//!   (B-20.v2) off each event. The cohort view that turns the persisted
-//!   reject detail into an answerable question.
 //!
 //! Default `--store-dir` is `~/.tars/events/`; matches the convention
 //! `Pipeline.from_default(event_store_dir=...)` uses.
-//!
-//! These are diagnostic tools, not part of the typed API. For
-//! programmatic access (tests / dogfood scripts), open the SQLite
-//! files directly or use `tars_melt::event::SqlitePipelineEventLog`.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -53,7 +36,7 @@ enum EventsCommand {
     /// Show one event's full payload, optionally with body content.
     Show(ShowArgs),
     /// Aggregate validation-reject reasons by kind — "which reason
-    /// fired most" over a window. Reads `validation_reason` (B-20.v2)
+    /// fired most" over a window. Reads `validation_reason`
     /// off the events; an empty result means no rejects in the window.
     Reasons(ReasonsArgs),
 }
@@ -319,9 +302,7 @@ struct ReasonStat {
     sample: String,
 }
 
-/// Pure aggregation core — group rejects by reason kind, count, and
-/// attach a sample message. Returns `(total_rejects, stats)` sorted by
-/// count desc (kind asc as a stable tie-break). Split out from the
+/// Split out from the
 /// printing so it can be unit-tested without a store or stdout.
 fn aggregate_reasons(events: &[PipelineEvent]) -> (usize, Vec<ReasonStat>) {
     use std::collections::HashMap;
@@ -411,7 +392,6 @@ async fn print_body(records: &dyn LlmRecordStore, r: &ContentRef, header: &str) 
     println!("\n=== {header} ===");
     match records.fetch(r).await? {
         Some(bytes) => {
-            // Try pretty-printing as JSON; fall back to lossy UTF-8.
             match serde_json::from_slice::<serde_json::Value>(&bytes) {
                 Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
                 Err(_) => println!("{}", String::from_utf8_lossy(&bytes)),

@@ -1,20 +1,10 @@
 //! [`CodexCliDialect`] — the codex-cli behavior expressed as a
-//! [`CliDialect`] (Doc 32 §5 C3, M1). Reproduces the pre-migration
-//! `codex_cli` behavior byte-for-byte: the `codex exec --json --model X
-//! --sandbox <mode> -c approval_policy="never" [--skip-git-repo-check] -`
-//! argv (prompt on stdin), codex's JSONL [`ThreadEvent`] stream, and the
-//! `agent_message`/`reasoning`/`turn.completed` → `ChatEvent` mapping.
+//! [`CliDialect`].
 //!
-//! ## M1 changes
-//! - codex's **private spawn/stream loop** (`codex_cli.rs:253-342`) is retired;
-//!   codex now spawns through the shared
-//!   [`SharedCliRunner`](super::super::subprocess::SharedCliRunner) + OS-jail
-//!   primitive, so it gets the `tars-sandbox` write-jail **on top of** its own
-//!   `--sandbox` flag (defense-in-depth — the `--sandbox` token stays in the argv).
-//! - The shared runner buffers codex's JSONL (declared
-//!   [`OutputFraming::JsonLinesArray`]) into a `Value::Array` of raw lines that
-//!   [`CodexCliDialect::parse_line`] maps through [`map_thread_event`] — the
-//!   same per-line translation as before.
+//! codex spawns through the shared
+//! [`SharedCliRunner`](super::super::subprocess::SharedCliRunner) + OS-jail
+//! primitive, so it gets the `tars-sandbox` write-jail **on top of** its own
+//! `--sandbox` flag (defense-in-depth — the `--sandbox` token stays in the argv).
 
 use std::time::Duration;
 
@@ -112,7 +102,6 @@ pub(crate) fn build_codex_argv(
     if skip_git_repo_check {
         argv.push("--skip-git-repo-check".into());
     }
-    // `-` tells codex to read the prompt from stdin.
     argv.push("-".into());
     argv
 }
@@ -147,7 +136,6 @@ impl CliDialect for CodexCliDialect {
     }
 
     fn prompt_channel(&self) -> PromptChannel {
-        // `codex exec … -` — the prompt is written to stdin.
         PromptChannel::Stdin
     }
 
@@ -156,17 +144,13 @@ impl CliDialect for CodexCliDialect {
     }
 
     fn output_framing(&self) -> OutputFraming {
-        // codex emits a JSONL event stream; the shared runner buffers it into a
-        // `Value::Array` of raw lines that `parse_line` maps per event.
         OutputFraming::JsonLinesArray
     }
 
     fn state_dirs(&self) -> Vec<std::path::PathBuf> {
         // codex's own home (`$CODEX_HOME`, default `~/.codex`) holds its config,
         // sessions and logs. Its app-server socket lives under `$TMPDIR`, which
-        // the delegate spawn grants centrally — that socket was the live
-        // `Operation not permitted (os error 1)` under the old TMPDIR-in-worktree
-        // jail. Grant `~/.codex` too (skipped if absent).
+        // the delegate spawn grants centrally. Grant `~/.codex` too (skipped if absent).
         let home = std::env::var_os("CODEX_HOME")
             .map(std::path::PathBuf::from)
             .or_else(|| tars_types::env::home_dir().map(|h| h.join(".codex")));
@@ -174,12 +158,7 @@ impl CliDialect for CodexCliDialect {
     }
 
     fn parse_line(&self, raw: &Value) -> Result<Vec<ChatEvent>, ProviderError> {
-        // The runner reconstructs codex's JSONL stream into a `Value::Array` of
-        // raw lines (each a JSON string). Map each line through the same
-        // translation the pre-migration streaming path used: skip blank /
-        // unknown lines, surface a malformed CRITICAL event, and stop at the
-        // first error. The backend prepends `Started`, so we own only the
-        // content + terminal `Finished`.
+        // Skip blank / unknown lines, surface a malformed CRITICAL event, and stop at the first error.
         let lines = raw.as_array().ok_or_else(|| {
             ProviderError::Parse(format!(
                 "codex runner payload must be a JSONL array, got: {}",
@@ -226,8 +205,6 @@ impl CliDialect for CodexCliDialect {
                 }
             };
             for ev in map_thread_event(event) {
-                // On the first error, propagate it (matching the pre-migration
-                // stream, which yielded the error and returned).
                 out.push(ev?);
             }
         }
@@ -351,7 +328,7 @@ fn convert_usage(u: &CodexUsage) -> Usage {
 }
 
 /// Flatten our message history into the single text blob `codex exec` reads
-/// from stdin. Same `[role]\n content` shape as the other CLI delegates.
+/// from stdin.
 fn serialize_messages_for_cli(req: &ChatRequest) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(req.messages.len());
     if let Some(sys) = &req.system {
@@ -412,8 +389,6 @@ mod tests {
             )
             .unwrap();
         let argv = d.argv(&inv);
-        // `codex exec --json --model gpt-5 --sandbox read-only -c
-        // approval_policy="never" --skip-git-repo-check -`
         assert_eq!(argv[0], "exec");
         assert_eq!(argv[1], "--json");
         assert_eq!(argv[2], "--model");
@@ -446,9 +421,6 @@ mod tests {
         let argv = build_codex_argv("gpt-5", d.sandbox, d.skip_git_repo_check);
         assert!(!argv.iter().any(|a| a == "--skip-git-repo-check"));
     }
-
-    // The (channel, mode, framing) declaration and env-strip contract are
-    // cross-dialect invariants folded into `tests/cli_conformance.rs` (D-12).
 
     #[test]
     fn serializer_includes_system_then_each_role_block() {
@@ -483,8 +455,6 @@ mod tests {
         assert!(inv.prompt.contains("[assistant]\nfirst assistant"));
         assert!(inv.prompt.ends_with("[user]\nsecond user"));
     }
-
-    // ── parse_line over a JSONL array (the runner's reconstructed shape) ──
 
     fn parse_line(lines: &[&str]) -> Result<Vec<ChatEvent>, ProviderError> {
         let arr = Value::Array(lines.iter().map(|l| Value::String(l.to_string())).collect());
@@ -567,8 +537,6 @@ mod tests {
             other => panic!("expected CliSubprocessDied, got {other:?}"),
         }
     }
-
-    // ── map_thread_event unit coverage (pure fn, unchanged from codex_cli) ──
 
     #[test]
     fn agent_message_completed_yields_one_delta() {

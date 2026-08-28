@@ -888,7 +888,7 @@ impl Pipeline {
     /// middleware stack than the `from_*` shortcuts give.
     ///
     /// The canonical onion **order is fixed** (it's load-bearing — e.g.
-    /// Validation must sit outside Cache; see Doc 02 / B-20 W4), so the
+    /// Validation must sit outside Cache), so the
     /// builder lets you *configure* and *opt out of* layers, not reorder
     /// them. What it adds over `from_default`:
     ///
@@ -1611,8 +1611,7 @@ fn build_request(
     })
 }
 
-/// Convert one Python `{role, content}` dict to a `Message`. Content
-/// must be a string in this v1 (multimodal blocks come later).
+/// Content must be a string (multimodal blocks unsupported).
 fn message_from_py(item: &Bound<'_, PyAny>) -> PyResult<Message> {
     let dict = item.downcast::<PyDict>().map_err(|_| {
         PyValueError::new_err("each message must be a dict with `role` and `content` keys")
@@ -1644,10 +1643,7 @@ fn message_from_py(item: &Bound<'_, PyAny>) -> PyResult<Message> {
     }
 }
 
-/// Drain the LLM stream into a [`Response`]. Stamps `tags` onto
-/// `RequestContext.tags` — propagated to `PipelineEvent.tags` for
-/// SQL rollups (`WHERE 'dogfood_X' = ANY(tags)`). Pass empty `tags`
-/// for the no-cohort path. Releases the GIL while waiting on the
+/// Empty `tags` is the no-cohort path. Releases the GIL while waiting on the
 /// async runtime so other Python threads keep working.
 fn run_complete_tagged(
     py: Python<'_>,
@@ -1659,7 +1655,7 @@ fn run_complete_tagged(
     // Read the active `with handle.context(...)` off the thread-local BEFORE
     // releasing the GIL / entering the runtime — the task-local does not
     // survive the FFI hop, so the binding re-establishes the scope per call
-    // (Doc 12 §6.2). `None` (no active context, or a direct
+    //. `None` (no active context, or a direct
     // `Pipeline.complete` outside a handle) keeps the prior test-default
     // behaviour, so existing call sites are unchanged.
     let active_ctx = context::current();
@@ -1745,9 +1741,7 @@ fn run_complete_tagged(
     })
 }
 
-/// Snapshot the shared telemetry into the immutable Python-facing
-/// `Telemetry` struct. Public for use by Session's per-call response
-/// path too.
+
 pub(crate) fn read_telemetry(handle: &tars_types::SharedTelemetry) -> Telemetry {
     let acc = match handle.lock() {
         Ok(g) => g.clone(),
@@ -1809,10 +1803,6 @@ fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Load a committed bless file and check a completion's text against it.
-/// `text` is decoded as JSON (chatty-tolerant), then each blessed field is
-/// asserted. Returns
-/// `{"passed": bool, "drifts": [{"selector","expected","actual","reason"}]}`.
 /// `expected`/`actual` are JSON-encoded strings so any value shape survives.
 #[pyfunction]
 fn bless_check<'py>(py: Python<'py>, path: String, text: String) -> PyResult<Bound<'py, PyDict>> {
@@ -1849,7 +1839,7 @@ fn _tars_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(eval::write_score, m)?)?;
     m.add_function(wrap_pyfunction!(eval::read_calls, m)?)?;
     m.add_function(wrap_pyfunction!(default_config_path_py, m)?)?;
-    // Config + runtime-handle spine (Doc 12 §6).
+    // Config + runtime-handle spine.
     m.add_function(wrap_pyfunction!(handle::init, m)?)?;
     m.add_function(wrap_pyfunction!(handle::is_initialized, m)?)?;
     m.add_function(wrap_pyfunction!(handle::tars_home, m)?)?;

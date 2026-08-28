@@ -46,15 +46,7 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-// ─── fs helpers (ARC-L5-COH-20) ──────────────────────────────────────
-//
-// `arc scan --judge` flagged scattered `std::fs` usage in this file.
-// Batch 7 extracted `write_pretty_json` + `ensure_dir`; this commit
-// (Task #18) finishes the consolidation by adding three read helpers
-// so every production fs call site goes through a wrapper with a
-// uniform error-context wording (`writing <path>`, `reading <path>`,
-// `creating dir <path>`, `listing <path>`). Result: the eval-loop
-// body shows the *eval logic*, not the I/O-error-context boilerplate.
+// ─── fs helpers ────────────────────────────────────────────────────────
 
 /// `fs::write` of a serialized pretty-JSON body with a uniform error
 /// message (`writing <path>`). Used by every eval artifact write.
@@ -208,7 +200,7 @@ fn build_invariant(spec: &str) -> Result<Arc<dyn Invariant>> {
     Ok(inv)
 }
 
-/// A `trajectory-match` check (Doc 26). Unlike an [`Invariant`], it needs
+/// A `trajectory-match` check. Unlike an [`Invariant`], it needs
 /// **per-case** reference data (`expected_tools`) that the `(req, resp)`
 /// signature can't carry, so it's evaluated in `run_eval`'s case loop rather
 /// than through the global `CheckRunner`.
@@ -219,7 +211,7 @@ struct TrajectorySpec {
     mode: MatchMode,
     /// Per-case pass threshold on the score (default 1.0 = strict).
     threshold: f64,
-    /// `args-judge` mode (Doc 26 M3' pt2): like `args`, but byte-different
+    /// `args-judge` mode: like `args`, but byte-different
     /// arguments are LLM-judged for semantic equivalence (needs a judge).
     judge: bool,
 }
@@ -297,7 +289,7 @@ impl TrajectorySpec {
         }
     }
 
-    /// `args-judge` variant of [`eval_case`] (Doc 26 M3' pt2): scores via the
+    /// `args-judge` variant of [`eval_case`]: scores via the
     /// LLM arg-equivalence judge. `None` = no `expected_tools` (skipped).
     async fn eval_case_judged(
         &self,
@@ -393,7 +385,7 @@ pub struct EvalCaseReport {
     pub checks: Vec<CaseCheckResult>,
     /// Tool names the model selected, in call order (from
     /// `ChatResponse.tool_calls`). Persisted so `eval diff --trajectory`
-    /// (Doc 26 P2) can compare runs without re-inferring. Empty when the
+    /// can compare runs without re-inferring. Empty when the
     /// case made no tool calls. `#[serde(default)]` keeps older reports
     /// readable.
     #[serde(default)]
@@ -402,9 +394,7 @@ pub struct EvalCaseReport {
 
 /// One invariant check's outcome for one eval case.
 ///
-/// Sum-as-product fix for the original `(name, passed: bool, detail:
-/// Option<String>)` shape (`arc scan --judge` findings `ARC-L5-B-8` /
-/// `ARC-L5-B-6`). The typed enum makes "fail without reason"
+/// The typed enum makes "fail without reason"
 /// unrepresentable while keeping the documented "pass with note" path
 /// available (validator-skipped notes, etc).
 ///
@@ -417,14 +407,6 @@ pub struct EvalCaseReport {
 ///   {"outcome": "passed", "name": "x", "note": null}
 ///   {"outcome": "failed", "name": "y", "reason": "bad"}
 /// ```
-///
-/// `ARC-L5-B-6` killed the bespoke `CaseCheckResultWire` adapter that
-/// preserved the legacy flat `{"name", "passed", "detail"}` shape:
-/// the wire DTO + custom `Serialize`/`Deserialize` were permanent
-/// tech debt for a back-compat surface that doesn't apply to new
-/// runs. Old `report.json` / `manifest.json` artifacts can be
-/// migrated in place via [`migrate_legacy_check_results_in_dir`] (CLI:
-/// `tars eval migrate-checks <dir>`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum CaseCheckResult {
@@ -466,8 +448,7 @@ impl CaseCheckResult {
 
 // ─── Legacy-shape migration ────────────────────────────────────────
 //
-// `CaseCheckResultWire` is gone, but report.json / manifest.json
-// files written before ARC-L5-B-6 carry the old flat shape:
+// Legacy report.json / manifest.json files carry the old flat shape:
 //
 //   {"name": "x", "passed": true, "detail": null}
 //   {"name": "y", "passed": false, "detail": "bad"}
@@ -606,12 +587,12 @@ pub enum EvalCaseStatus {
     Error,
 }
 
-// ─── eval bless (Doc 28) ──────────────────────────────────────────────
+// ─── eval bless ──────────────────────────────────────────────
 
 /// `tars eval bless <run>` — the approval loop over an eval run's per-case
 /// outputs. With `--select` it *records* (captures the selected fields into
 /// `<case>/output.bless.json`); without, it *checks* each case's output against
-/// its committed bless and reports drift (the Doc 18 §4.4 golden loop).
+/// its committed bless and reports drift (the §4.4 golden loop).
 pub fn run_bless(cfg: EvalBlessConfig) -> Result<()> {
     let manifest = load_manifest(&cfg.run)?;
     let selectors: Vec<&str> = cfg.select.iter().map(String::as_str).collect();
@@ -702,7 +683,7 @@ pub async fn run_judge(cfg: EvalJudgeConfig) -> Result<()> {
     let manifest = load_manifest(&cfg.run)?;
 
     // Anti-incest: the judge's provider must differ from the provider
-    // that produced the run (Doc 18 §7 / Panickssery 2024).
+    // that produced the run.
     ensure_anti_incest(&cfg.judge, &[manifest.provider_id.as_str()]).map_err(|e| {
         anyhow::anyhow!(
             "{e}\nthe run was produced by `{}`; pick a different --judge provider",
@@ -822,7 +803,7 @@ fn p50(mut v: Vec<u64>) -> u64 {
     v[v.len() / 2]
 }
 
-/// Head-to-head tool-trajectory comparison of two runs (Doc 26 P2).
+/// Head-to-head tool-trajectory comparison of two runs.
 struct TrajDiff {
     paired: u32,
     a_only: u32,
@@ -1245,27 +1226,23 @@ fn delta_pp_higher_better(a: f64, b: f64) -> String {
 }
 
 pub async fn run_eval(cfg: EvalRunConfig) -> Result<()> {
-    // 1. Provider selection — the caller resolved config → registry →
-    //    provider_id (same path `tars run` uses) and handed them in.
     let provider_id = cfg.provider_id.clone();
     let provider = cfg
         .registry
         .get(&provider_id)
         .ok_or_else(|| anyhow::anyhow!("provider {provider_id} missing from registry"))?;
 
-    // 2. Build pipeline using the canonical default chain. Cache
-    //    namespace is unique-per-run so cases don't unexpectedly hit
-    //    each other across runs (and we still get intra-run cache
-    //    benefits if cases share prompts — rare but free).
+    // Cache namespace is unique-per-run so cases don't unexpectedly hit
+    // each other across runs (and we still get intra-run cache
+    // benefits if cases share prompts — rare but free).
     let pipeline = LlmService::default_chain(
         provider,
         cfg.model.clone().unwrap_or_default(),
         ChainOpts::new(provider_id.clone()),
     );
 
-    // 2b. Build checks from --check specs. trajectory-match:* specs are
-    //     case-parameterized (need per-case expected_tools), so they're split
-    //     out from the global invariant CheckRunner and evaluated in the loop.
+    // trajectory-match:* specs are case-parameterized (need per-case expected_tools), 
+    // so they're split out from the global invariant CheckRunner and evaluated in the loop.
     let mut invariants: Vec<Arc<dyn Invariant>> = Vec::with_capacity(cfg.checks.len());
     let mut traj_specs: Vec<TrajectorySpec> = Vec::new();
     for spec in &cfg.checks {
@@ -1280,12 +1257,6 @@ pub async fn run_eval(cfg: EvalRunConfig) -> Result<()> {
     let mut check_names: Vec<String> = check_runner.names().iter().map(|s| s.to_string()).collect();
     check_names.extend(traj_specs.iter().map(|t| t.name().to_string()));
 
-    // 2c. Agent mode (Doc 26 M2'') is RETIRED. It ran on the deleted `WorkerAgent`
-    //     model, whose per-call tool-step return has no equivalent in the new
-    //     Agent/board model (an `LlmAgent` runs THROUGH the board and surfaces an
-    //     `Outcome`, not a struct of cross-call tool steps). The `--agent` flag and
-    //     its companions still parse, but selecting the retired path is a hard error;
-    //     porting it to the new model is a separate task.
     if cfg.agent {
         anyhow::bail!(
             "--agent eval is retired: it ran on the deleted WorkerAgent model; \
@@ -1296,8 +1267,6 @@ pub async fn run_eval(cfg: EvalRunConfig) -> Result<()> {
         anyhow::bail!("--tool / --agent-max-iterations require --agent");
     }
 
-    // 2d. Arg-equivalence judge (Doc 26 M3' pt2): built only when a
-    //     trajectory-match:args-judge check is requested.
     let arg_judge = if traj_specs.iter().any(|t| t.judge) {
         let jp = cfg.judge_provider.as_deref().ok_or_else(|| {
             anyhow::anyhow!("trajectory-match:args-judge requires --judge-provider")
@@ -1330,7 +1299,6 @@ pub async fn run_eval(cfg: EvalRunConfig) -> Result<()> {
         None
     };
 
-    // 3. Discover cases.
     let cases = load_corpus(&cfg.corpus)
         .with_context(|| format!("loading corpus from {}", cfg.corpus.display()))?;
     if cases.is_empty() {
@@ -1346,15 +1314,14 @@ pub async fn run_eval(cfg: EvalRunConfig) -> Result<()> {
         cfg.model.as_deref().unwrap_or("(provider default)"),
     );
 
-    // 4. Output directory.
     let output_dir = match cfg.output.clone() {
         Some(p) => p,
         None => PathBuf::from(format!("benchmarks/runs/eval/{}", utc_now_stamp())),
     };
     ensure_dir(&output_dir)?;
 
-    // 5. Per-case loop. Failures are recorded into the report, not
-    //    propagated — the value of an eval is seeing the distribution.
+    // Failures are recorded into the report, not propagated — the value 
+    // of an eval is seeing the distribution.
     let started_at_ms = utc_now_millis();
     let mut reports: Vec<EvalCaseReport> = Vec::with_capacity(cases.len());
     let mut total_usage = Usage::default();
@@ -1404,7 +1371,6 @@ pub async fn run_eval(cfg: EvalRunConfig) -> Result<()> {
         reports.push(report.summary);
     }
 
-    // 6. Aggregate per-check violation rates across all cases.
     let check_summaries: Vec<CheckSummary> = check_names
         .iter()
         .map(|name| {
@@ -1431,7 +1397,6 @@ pub async fn run_eval(cfg: EvalRunConfig) -> Result<()> {
         })
         .collect();
 
-    // 7. Manifest.
     let ended_at_ms = utc_now_millis();
     let manifest = EvalRunManifest {
         corpus_path: cfg
@@ -1490,14 +1455,14 @@ struct Case {
     system: Option<String>,
     #[allow(dead_code)]
     expected: Option<String>,
-    /// Reference tool trajectory for `--check trajectory-match:*` (Doc 26).
+    /// Reference tool trajectory for `--check trajectory-match:*`.
     /// `None` when the case carries no `expected_tools.json` → the check is
     /// skipped for this case (never a silent pass).
     expected_tools: Option<Vec<ToolStep>>,
 }
 
 /// One entry of `expected_tools.json` — either a bare tool name or a
-/// `{name, args}` object. Args are accepted for forward-compat (Doc 26 P3
+/// `{name, args}` object. Args are accepted for forward-compat (P3
 /// `args` mode) but unused by P1's name-only scoring.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
@@ -1583,7 +1548,7 @@ async fn run_completion_case(
     (response, tool_steps, error)
 }
 
-/// Build the read-only, sandboxed tool registry for `--agent` mode (Doc 26
+/// Build the read-only, sandboxed tool registry for `--agent` mode
 /// §15.2). Only the allow-listed read-only builtins, each jailed to `sandbox`;
 /// `bash`/`edit_file`/`write_file` are refused.
 ///
@@ -1613,7 +1578,7 @@ fn build_agent_registry(tools: &[String], sandbox: &Path) -> Result<ToolRegistry
             "list_dir" => Arc::new(ListDirTool::with_root(sandbox).ok_or_else(jail_err)?),
             "bash" | "edit_file" | "write_file" => anyhow::bail!(
                 "--tool `{name}` is refused in eval: only READ-ONLY tools may run \
-                 against untrusted corpus cases (Doc 26 §15.2)"
+                 against untrusted corpus cases"
             ),
             other => anyhow::bail!(
                 "unknown --tool `{other}`. Allowed (read-only): read_file, grep, glob, list_dir"
@@ -1684,7 +1649,7 @@ async fn run_one_case(
             Vec::new()
         };
 
-    // Case-parameterized trajectory-match checks (Doc 26): each scores the
+    // Case-parameterized trajectory-match checks: each scores the
     // selected tools against this case's expected_tools. A case with no
     // expected_tools is skipped (eval_case → None), not failed.
     if status == EvalCaseStatus::Ok {
@@ -1861,7 +1826,7 @@ mod tests {
             .collect()
     }
 
-    // ── trajectory-match: spec parsing (Doc 26 FR-6) ──────────────────
+    // ── trajectory-match: spec parsing ──────────────────
 
     #[test]
     fn trajectory_spec_parses_modes_threshold_and_bare() {
@@ -1906,7 +1871,7 @@ mod tests {
         assert!(!plain.judge);
     }
 
-    // ── trajectory-match: per-case scoring (Doc 26 E2E-1/2/5) ─────────
+    // ── trajectory-match: per-case scoring ─────────
 
     #[test]
     fn trajectory_eval_case_passes_on_match() {
@@ -1939,7 +1904,7 @@ mod tests {
         );
     }
 
-    // ── agent mode registry (Doc 26 M2'' §15.2 security boundary) ─────
+    // ── agent mode registry ─────
 
     #[test]
     fn agent_registry_allows_readonly_tools_jailed_to_sandbox() {
@@ -2033,7 +1998,7 @@ mod tests {
         );
     }
 
-    // ── corpus expected_tools.json (Doc 26 FR-5) ──────────────────────
+    // ── corpus expected_tools.json ──────────────────────
 
     #[test]
     fn read_expected_tools_accepts_names_and_objects_and_missing() {
@@ -2070,7 +2035,7 @@ mod tests {
         assert!(read_expected_tools(&bad).is_err());
     }
 
-    // ── head-to-head eval diff --trajectory (Doc 26 E2E-6) ───────────
+    // ── head-to-head eval diff --trajectory ───────────
 
     fn ecase(id: &str, traj: &[&str], check: Option<(&str, bool)>) -> EvalCaseReport {
         let checks = match check {

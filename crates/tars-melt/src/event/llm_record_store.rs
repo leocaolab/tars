@@ -1,7 +1,7 @@
 //! [`LlmRecordStore`] — tenant-scoped CAS for the per-call `LlmRecord`
 //! (ChatRequest / ChatResponse content) referenced from
 //! `PipelineEvent`. See
-//! [Doc 17 §6.1](../../../docs/architecture/17-pipeline-event-store.md).
+//! [§6.1](../../../docs/architecture/17-pipeline-event-store.md).
 //!
 //! `LlmRecordStore::fetch(&ContentRef)` resolves records; `ContentRef`
 //! itself carries `tenant_id`, so the store can't be tricked into
@@ -87,7 +87,6 @@ impl SqliteLlmRecordStore {
         Self::new(db).await
     }
 
-    /// In-memory store for tests (its own single-connection in-memory pool).
     pub async fn in_memory() -> Result<Arc<Self>, StoreError> {
         let db = Db::sqlite_in_memory()
             .await
@@ -235,7 +234,6 @@ mod tests {
         let s = store().await;
         let r = cref("t1", b"hello");
         s.put(&r, Bytes::from_static(b"hello")).await.unwrap();
-        // Second put with same key is a no-op (CAS).
         s.put(&r, Bytes::from_static(b"hello")).await.unwrap();
         let got = s.fetch(&r).await.unwrap().expect("still there");
         assert_eq!(&got[..], b"hello");
@@ -250,10 +248,9 @@ mod tests {
         s.put(&a, Bytes::from_static(body)).await.unwrap();
         // Even though body bytes are identical and hash matches,
         // different tenant prefix = cache miss for tenant-b. This is
-        // the explicit Doc 17 §6 contract — Doc 06 isolation trumps
+        // the explicit §6 contract — isolation trumps
         // dedup.
         assert!(s.fetch(&b).await.unwrap().is_none());
-        // tenant-a still hits.
         assert!(s.fetch(&a).await.unwrap().is_some());
     }
 
@@ -276,7 +273,6 @@ mod tests {
         let s = store().await;
         let r = cref("t1", b"old");
         s.put(&r, Bytes::from_static(b"old")).await.unwrap();
-        // Cutoff in the future — should drop everything.
         let future = SystemTime::now() + Duration::from_secs(60);
         let n = s.purge_before(future).await.unwrap();
         assert_eq!(n, 1);

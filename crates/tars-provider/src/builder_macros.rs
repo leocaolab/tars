@@ -46,7 +46,6 @@
 /// `use tars_provider::builder_setter;`.
 #[macro_export]
 macro_rules! builder_setter {
-    // Concrete value: `self.field = v;`
     ($(#[$m:meta])* $name:ident : $ty:ty) => {
         $(#[$m])*
         pub fn $name(mut self, v: $ty) -> Self {
@@ -55,7 +54,6 @@ macro_rules! builder_setter {
         }
     };
 
-    // `impl Into<T>` (string-y fields): `self.field = v.into();`
     ($(#[$m:meta])* $name:ident : into $ty:ty) => {
         $(#[$m])*
         pub fn $name(mut self, v: impl Into<$ty>) -> Self {
@@ -64,7 +62,6 @@ macro_rules! builder_setter {
         }
     };
 
-    // Optional fields: `self.field = Some(v);`
     ($(#[$m:meta])* $name:ident : opt $ty:ty) => {
         $(#[$m])*
         pub fn $name(mut self, v: $ty) -> Self {
@@ -73,10 +70,6 @@ macro_rules! builder_setter {
         }
     };
 
-    // Optional + `impl Into<T>`: `self.field = Some(v.into());` —
-    // the union of `into` and `opt`, used by string-typed
-    // `Option<String>` fields (e.g. ClaudeSdkProviderBuilder's
-    // `script_path` / `default_model`).
     ($(#[$m:meta])* $name:ident : into_opt $ty:ty) => {
         $(#[$m])*
         pub fn $name(mut self, v: impl Into<$ty>) -> Self {
@@ -88,8 +81,6 @@ macro_rules! builder_setter {
 
 #[cfg(test)]
 mod tests {
-    // The macro is exercised across the crate's builders. A standalone
-    // smoke test pins the three variants compile + behave as advertised.
 
     #[derive(Default)]
     struct DummyBuilder {

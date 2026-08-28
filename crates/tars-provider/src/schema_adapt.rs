@@ -147,8 +147,6 @@ fn resolve_node(
                         });
                     }
                 };
-                // Replace the whole `{"$ref": ...}` node with the target,
-                // then recurse into it (the target may itself carry refs).
                 *node = target;
                 active.push(name.to_string());
                 resolve_node(node, defs, active)?;
@@ -170,7 +168,6 @@ fn resolve_node(
 }
 
 fn adapt_node(node: &mut Value, dialect: SchemaDialect) {
-    // Vllm and Passthrough are no-ops: the schema is sent verbatim.
     if matches!(dialect, SchemaDialect::Vllm | SchemaDialect::Passthrough) {
         return;
     }
@@ -283,7 +280,6 @@ fn adapt_node(node: &mut Value, dialect: SchemaDialect) {
                         map.insert("additionalProperties".into(), Value::Bool(false));
                     }
                 }
-                // Unreachable: Vllm/Passthrough returned at the top.
                 SchemaDialect::Vllm | SchemaDialect::Passthrough => {}
             }
 

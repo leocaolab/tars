@@ -1,4 +1,4 @@
-//! Provider-level error model. See Doc 01 §11.
+//! Provider-level error model. See §11.
 //!
 //! These errors are *typed*: every Provider implementation maps its own
 //! transport-layer errors into one of these variants so the Pipeline /
@@ -47,7 +47,7 @@ pub enum ProviderError {
     /// without contacting the provider until `until`.
     /// Class is Retriable so a fallback chain (a caller composing
     /// several `LlmService`s) skips to the next candidate immediately.
-    /// Doc 02 §4.7.
+    /// §4.7.
     #[error("circuit open until {until:?}")]
     CircuitOpen { until: std::time::Instant },
 
@@ -99,7 +99,7 @@ pub enum ProviderError {
     /// that need to re-ask the model with prompt variation should
     /// catch `ValidationFailed` at their own layer.
     ///
-    /// `reason` is a typed [`ValidationReason`] (B-20.v2); its
+    /// `reason` is a typed [`ValidationReason`]; its
     /// `Display` reproduces the message string while `reason.kind()` +
     /// structured detail let callers branch programmatically.
     #[error("validation failed: {validator}: {reason}")]

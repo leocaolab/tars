@@ -4,7 +4,7 @@
 //!
 //! Feature-gated behind `tars-provider`'s `bedrock` feature and kept out
 //! of `default-members`, so the heavy AWS SDK subtree never enters a build
-//! that doesn't ask for Bedrock (Doc 31 §4).
+//! that doesn't ask for Bedrock.
 //!
 //! Module map:
 //! - [`mapping`]  — pure `ChatRequest` ↔ Converse converters (no I/O)
@@ -12,16 +12,15 @@
 //! - [`error`]    — SDK error → typed [`tars_types::ProviderError`]
 //! - [`stream`]   — pure `ConverseStream` event → canonical `ChatEvent`
 //! - [`client`]   — keyless lazy SigV4 client; aggregate `complete_response`
-//!   plus the incremental `stream_response` (M1)
+//!   plus the incremental `stream_response`
 //!
 //! This crate holds only the AWS-specific logic and returns canonical
 //! `tars-types` values; it does **not** depend on `tars-provider`. The
 //! thin `impl LlmProvider` that adapts [`BedrockClient`] to the provider
 //! trait lives in `tars-provider` behind its `bedrock` feature, keeping
-//! the crate graph acyclic (Doc 31 §4; see [`client`] docs).
+//! the crate graph acyclic.
 //!
-//! M0 was non-streaming (`converse()`); M1 adds true incremental
-//! `ConverseStream` (`client::stream_response` + [`stream`]).
+//! the crate graph acyclic.
 
 pub mod client;
 pub mod document;

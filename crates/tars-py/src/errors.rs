@@ -22,7 +22,7 @@
 //! - `retry_after: float | None` — seconds, when the provider hinted one
 //! - `is_retriable: bool`        — convenience for fallback logic
 //!
-//! Some variants add their own typed attributes (B-20.v2):
+//! Some variants add their own typed attributes:
 //! `ValidationFailed` carries `validator: str` and
 //! `validation_reason: {kind, message, detail}` so a fix-stage branches
 //! on `validation_reason["kind"]` rather than parsing the message.
@@ -152,7 +152,7 @@ fn build_provider_exc(
             value.setattr("tool_name", name)?;
         }
         ProviderError::ValidationFailed { validator, reason } => {
-            // `validation_reason: {kind, message, detail}` (B-20.v2) —
+            // `validation_reason: {kind, message, detail}` —
             // lets the caller's fix-stage branch on `reason["kind"]` +
             // structured `detail` instead of grepping the message.
             // `validator` is also surfaced for "which check failed".

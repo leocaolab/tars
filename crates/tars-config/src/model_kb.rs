@@ -236,8 +236,7 @@ impl Default for ProviderCapabilities {
 
 /// One provider's full definition (`[providers.<name>]`): how tars reaches it
 /// (`interface`), how it bills, its provider-level capabilities, and its
-/// models. This is `data/models.toml`'s old per-provider block widened with
-/// the provider-level facts the KB was missing.
+/// models.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderDef {
     /// How tars reaches and drives this provider.
@@ -345,8 +344,7 @@ impl ProviderDef {
     }
 }
 
-/// Back-compat alias — the block widened from "just models" to a full
-/// provider definition, but the old name is still used in a couple of places.
+/// Back-compat alias.
 pub type ProviderModels = ProviderDef;
 
 /// Map a KB input modality onto the coarser routing [`Modality`]. `Pdf` has no
@@ -488,12 +486,10 @@ mod tests {
 
     #[test]
     fn find_matches_id_and_aliases() {
-        // Exact id.
         assert_eq!(
             MODEL_KB.find("gemini-3.5-flash").unwrap().id,
             "gemini-3.5-flash"
         );
-        // Alias resolves to the canonical entry.
         let by_alias = MODEL_KB.find("deepseek-reasoner").unwrap();
         assert_eq!(by_alias.id, "deepseek-v4-flash");
         assert!(MODEL_KB.find("no-such-model").is_none());
@@ -501,7 +497,6 @@ mod tests {
 
     #[test]
     fn thinking_only_flag_is_data_driven() {
-        // `*-pro` family is thinking-only.
         assert!(MODEL_KB.find("gemini-2.5-pro").unwrap().is_thinking_only());
         assert!(
             MODEL_KB
@@ -509,7 +504,6 @@ mod tests {
                 .unwrap()
                 .is_thinking_only()
         );
-        // flash family is optional (can turn thinking off).
         assert!(
             !MODEL_KB
                 .find("gemini-3.5-flash")

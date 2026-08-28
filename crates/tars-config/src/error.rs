@@ -14,10 +14,6 @@ pub enum ConfigError {
         source: std::io::Error,
     },
 
-    /// Audit `tars-config-src-error-1`: original variant stored
-    /// `message: String` and lost the underlying serde / toml error
-    /// chain. Storing the boxed source restores `e.source()` walks
-    /// (anyhow, miette, … all consume that chain to render context).
     #[error("config parse error in {path:?}: {source}")]
     Parse {
         path: PathBuf,

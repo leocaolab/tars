@@ -62,8 +62,6 @@ impl Default for HttpProviderConfig {
     }
 }
 
-/// Shared base for HTTP-based providers.
-///
 /// Holds the (single, shared) reqwest client. Adapters consume an
 /// `Arc<HttpProviderBase>` so they don't re-create the client per
 /// request.
@@ -115,7 +113,6 @@ pub trait HttpAdapter: Send + Sync + 'static {
     /// passed explicitly (bound at service construction).
     fn translate_request(&self, req: &ChatRequest, model: &str) -> Result<Value, ProviderError>;
 
-    /// Parse one decoded SSE event into zero or more [`ChatEvent`]s.
     /// Adapter has access to the [`ToolCallBuffer`] for stateful
     /// accumulation. Return `Ok(events)` — events are emitted in order.
     fn parse_event(
@@ -147,7 +144,6 @@ pub trait HttpAdapter: Send + Sync + 'static {
     }
 }
 
-/// Decoded SSE event passed to [`HttpAdapter::parse_event`].
 #[derive(Clone, Debug)]
 pub struct SseEvent {
     /// `event:` field; defaults to `"message"` per the spec.
@@ -156,10 +152,6 @@ pub struct SseEvent {
     pub data: String,
 }
 
-/// The streaming workhorse. Build a request via the adapter, POST it,
-/// decode the SSE stream, drive the adapter's `parse_event` for each
-/// frame, and emit a flat [`LlmEventStream`].
-///
 /// Idle-timeout-protected: each `stream.next()` is wrapped in
 /// `tokio::time::timeout(stream_idle_timeout, ...)`. A server that
 /// stops sending bytes mid-stream is detected and surfaced as a
@@ -371,7 +363,6 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duratio
     if let Ok(secs) = raw.parse::<u64>() {
         return Some(Duration::from_secs(secs));
     }
-    // HTTP-date format (RFC 7231 §7.1.1.1). httpdate-style parser.
     let target = httpdate::parse_http_date(raw).ok()?;
     let now = std::time::SystemTime::now();
     Some(target.duration_since(now).unwrap_or(Duration::ZERO))

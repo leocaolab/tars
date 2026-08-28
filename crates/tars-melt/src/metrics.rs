@@ -21,7 +21,6 @@ use tracing_subscriber::layer::Context;
 
 use crate::TelemetryError;
 
-/// Build a batch OTLP meter provider for the given endpoint.
 pub(crate) fn build_meter_provider(
     endpoint: &str,
     service: &str,
@@ -47,9 +46,7 @@ pub(crate) fn build_meter_provider(
         .build())
 }
 
-/// `tracing` layer that records OTel metrics off the pipeline's
-/// `llm.call.*` events. Holds the instruments so each event is a cheap
-/// `add`/`record`.
+/// Holds the instruments so each event is a cheap `add`/`record`.
 pub(crate) struct MetricsBridge {
     calls: Counter<u64>,
     latency_ms: Histogram<u64>,
@@ -157,7 +154,7 @@ const DEFAULT_CARDINALITY_BUDGET: usize = 100;
 const OVERFLOW_BUCKET: &str = "__over_cardinality__";
 
 /// Caps the distinct-value count of a metric attribute key at runtime —
-/// the M5 "cardinality validator". A high-cardinality label (an id or a
+/// the "cardinality validator". A high-cardinality label (an id or a
 /// runaway model string leaked into an attribute) is the classic way to
 /// melt a Prometheus backend; this bounds the damage to the budget plus
 /// one overflow series, and warns once so the misconfig is visible.
@@ -178,9 +175,6 @@ impl CardinalityGuard {
         }
     }
 
-    /// The value to actually use as the attribute: the real `value` while
-    /// `key` is under budget (or has already seen it), else
-    /// [`OVERFLOW_BUCKET`]. Warns once per key on first overflow.
     fn bucket(&self, key: &'static str, value: &str) -> String {
         {
             let mut seen = self
@@ -280,12 +274,9 @@ mod tests {
     #[test]
     fn cardinality_guard_caps_runaway_label() {
         let guard = CardinalityGuard::new(2);
-        // First two distinct values pass through unchanged.
         assert_eq!(guard.bucket("model", "a"), "a");
         assert_eq!(guard.bucket("model", "b"), "b");
-        // A repeat of an already-seen value is always allowed (no growth).
         assert_eq!(guard.bucket("model", "a"), "a");
-        // The third *new* value overflows into the sentinel.
         assert_eq!(guard.bucket("model", "c"), OVERFLOW_BUCKET);
         assert_eq!(guard.bucket("model", "d"), OVERFLOW_BUCKET);
         // Budget is per-key: a different key has its own allowance.

@@ -1,4 +1,4 @@
-//! Delegate-CLI security integration test (M5b/M6b, path = `claude_cli`).
+//! Delegate-CLI security integration test.
 //!
 //! A mock "claude"-like CLI binary is driven through the **real production
 //! subprocess path** ([`RealSubprocessRunner`]) with the OS write-jail on
@@ -6,7 +6,7 @@
 //! operation (JSON round-trip, worktree write) still works. This proves the
 //! WIRING (the real `run` path actually applies `tars_sandbox`) together with
 //! CONTAINMENT — the "synthesized mock agent through the real path" the design
-//! calls for (tracking doc §3 fixer/merge row, M6(b); guardrails 2/5/6).
+//! calls for.
 //!
 //! We deliberately do NOT call `SandboxPolicy::wrap` directly — the whole point
 //! is to exercise `RealSubprocessRunner::run`, the production seam.
@@ -41,8 +41,7 @@ const TEST_NAME: &str = "delegate_cli_escape_blocked_through_real_run_path";
 #[test]
 fn delegate_cli_escape_blocked_through_real_run_path() {
     if std::env::var(CHILD_MARKER).is_ok() {
-        // We ARE the sandboxed child (env set by the parent's re-exec below):
-        // run the real assertions against `RealSubprocessRunner`.
+
         run_child_body();
         return;
     }
@@ -254,9 +253,7 @@ fn fresh_dir(name: &str) -> PathBuf {
 /// target. The codex-model jail's writable set is: the worktree, real `$TMPDIR`,
 /// `/tmp`, and the CLI's own state dir (`~/.claude` for claude). `$HOME` at large
 /// is denied, so a dir under `$HOME` OTHER than the state dir is a genuine
-/// "outside" (`.tars-sandbox-it`, not `.claude`) — UNLIKE `$TMPDIR`,
-/// which this test used to use back when the jail denied tmp (a policy we have
-/// deliberately reversed to match codex, so the target had to move here).
+/// "outside" (`.tars-sandbox-it`, not `.claude`).
 fn fresh_denied_dir(name: &str) -> PathBuf {
     let home = std::env::var_os("HOME").expect("HOME must be set for the escape test");
     let p = PathBuf::from(home).join(".tars-sandbox-it").join(name);

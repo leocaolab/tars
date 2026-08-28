@@ -185,9 +185,6 @@ impl LlmProvider for ClaudeSdkProvider {
 }
 
 impl ClaudeSdkProvider {
-    /// Issue one chat request. Acquires (or spawns) the session,
-    /// registers a pending oneshot, writes the request line, awaits
-    /// the matching reply with the configured timeout.
     async fn call(
         &self,
         req: &ChatRequest,
@@ -292,8 +289,7 @@ impl ClaudeSdkProvider {
         }
     }
 
-    /// Hand out the warm session, or spawn one if there isn't a live
-    /// child yet. Held under a single async-Mutex so a 4-concurrent
+    /// Held under a single async-Mutex so a 4-concurrent
     /// `arc review` racing to the first call can't double-spawn.
     async fn ensure_session(&self) -> Result<Arc<Session>, ProviderError> {
         let mut guard = self.session.lock().await;
@@ -305,8 +301,7 @@ impl ClaudeSdkProvider {
         Ok(s)
     }
 
-    /// Evict `dead` from the session cache so the next `ensure_session`
-    /// respawns. Only clears if the cached session is *still* the one
+    /// Only clears if the cached session is *still* the one
     /// that died — under concurrency another caller may have already
     /// noticed the crash and respawned a fresh child, and we must not
     /// throw that healthy session away.
@@ -380,9 +375,6 @@ impl ClaudeSdkProvider {
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
-        // Reader task: drain stdout line-by-line, demux each line to
-        // the matching pending oneshot by `id`. On EOF, drain the map
-        // with an error so callers in flight don't hang forever.
         let pending_for_reader = pending.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
@@ -399,7 +391,6 @@ impl ClaudeSdkProvider {
                         }
                     }
                     Ok(None) => {
-                        // Clean EOF — child exited.
                         break;
                     }
                     Err(e) => {
@@ -431,8 +422,6 @@ impl ClaudeSdkProvider {
     }
 }
 
-/// One in-flight reply being routed. Pulled out of `spawn_session` so
-/// the reader loop stays readable.
 async fn dispatch_reply_line(line: &str, pending: PendingMap) -> Result<(), ProviderError> {
     let raw: ReplyLine = serde_json::from_str(line)
         .map_err(|e| ProviderError::Parse(format!("decode reply: {e}")))?;
@@ -481,10 +470,6 @@ struct Session {
     _reaper_guard: Option<crate::child_reaper::ReaperGuard>,
 }
 
-/// Resolve a default `server.mjs` location when the user omits
-/// `script_path` from config. Returns `Some(path)` for the first
-/// existing candidate, `None` if none of them resolve.
-///
 /// Search order (first hit wins):
 /// 1. `$TARS_CLAUDE_SDK_SCRIPT` — explicit override for unusual layouts.
 /// 2. `tools/claude-daemon/server.mjs` walking up from CWD — catches
@@ -519,8 +504,7 @@ fn find_default_script_path() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Flatten the ChatRequest into the single `prompt` string the daemon
-/// expects. Multi-turn dialogues are tagged with `[role]` headers —
+/// Multi-turn dialogues are tagged with `[role]` headers —
 /// same shape as `claude_cli.rs::serialize_messages_for_cli`, so a
 /// finding generated under one backend reads the same way under the
 /// other.
@@ -604,8 +588,7 @@ struct ChatLine<'a> {
     thinking: Option<&'a str>,
 }
 
-/// Reply lines carry the `id` alongside either reply fields or an
-/// `error` envelope. We accept both shapes in one struct so the
+/// We accept both shapes in one struct so the
 /// dispatcher doesn't have to peek before parsing — a `None` text +
 /// `Some` error means failure, otherwise success.
 #[derive(Debug, Deserialize)]

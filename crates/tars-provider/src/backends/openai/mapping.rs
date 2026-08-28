@@ -1,6 +1,4 @@
-//! Pure helpers for OpenAI: batch status / result translation,
-//! one-shot chat-completion → `ChatResponse` rebuilding, usage
-//! parsing, and tool-call buffer draining. All stateless, no I/O.
+//! Pure helpers for OpenAI.
 
 use reqwest::header::AUTHORIZATION;
 use reqwest::header::HeaderMap;
@@ -38,8 +36,7 @@ pub(super) fn openai_auth_only_headers(auth: &ResolvedAuth) -> Result<HeaderMap,
     Ok(h)
 }
 
-/// OpenAI's `status` field on the batch object, translated to our
-/// vendor-neutral [`BatchStatus`].
+///
 ///
 /// OpenAI vocab:
 ///   validating | in_progress | finalizing → InProgress
@@ -110,7 +107,7 @@ pub(super) fn translate_openai_batch_status(v: &Value) -> Result<BatchStatus, Pr
     }
 }
 
-/// Parse OpenAI's output file JSONL into [`BatchResultItem`]s.
+///
 ///
 /// Each per-line completion body is decoded through the caller's
 /// [`OpenAiDialect`] (`dialect.parse_response`), so a variant's response
@@ -186,9 +183,7 @@ pub(super) fn parse_openai_batch_results(
     Ok(items)
 }
 
-/// Convert one OpenAI chat-completion response body into [`ChatResponse`]
-/// by replaying through [`ChatResponseBuilder`]. Same shape as the
-/// streaming end-state, just delivered all-at-once.
+///
 ///
 /// **Known gap**: tool_calls in batch responses are skipped.
 pub(super) fn openai_chat_completion_to_chat_response(
@@ -236,7 +231,7 @@ pub(super) fn openai_chat_completion_to_chat_response(
 
     let u = body.get("usage").cloned().unwrap_or_else(|| json!({}));
     let usage_u64 = |k: &str| u.get(k).and_then(|n| n.as_u64()).unwrap_or(0);
-    // OpenAI nested cached count: usage.prompt_tokens_details.cached_tokens
+    //
     let cached = u
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
@@ -291,7 +286,7 @@ pub(super) fn parse_openai_usage(usage: &serde_json::Map<String, Value>) -> Usag
     }
 }
 
-/// Drain whatever indices the buffer has into ToolCallEnd events.
+///
 ///
 /// Propagates finalize errors (malformed args) rather than swallowing them,
 /// so consumers never see an inconsistent state. Indices that were never

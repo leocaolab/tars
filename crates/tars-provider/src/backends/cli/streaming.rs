@@ -6,9 +6,6 @@
 //! its own file because it carries the most
 //! complexity (event taxonomy + line-by-line reader + stderr drain)
 //! and isn't on the happy path of the buffered runner.
-//!
-//! Lifted verbatim from `claude_cli/streaming.rs` (Doc 32 §7) as part of
-//! the shared CLI-delegate machinery.
 
 use serde_json::Value;
 
@@ -189,9 +186,7 @@ pub(crate) async fn run_streaming(
         return Err(cli_subprocess_died(status.code(), truncated));
     }
 
-    // Strip the `type` wrapper from the result event so callers see the
-    // same shape as buffered `--output-format json` mode (which returns
-    // the result object directly, not wrapped in {type: "result", ...}).
+    // Strip the `type` wrapper from the result event.
     let mut result = final_result.ok_or_else(|| {
         ProviderError::Parse(
             "stream-json mode: child exited without emitting a `result` event".into(),
@@ -354,10 +349,6 @@ mod tests {
     /// A wedged child holds stdout open and writes nothing, so the NDJSON
     /// reader never sees EOF. The invocation timeout must still fire, kill the
     /// child, and return — bounding BOTH the drain and the child's exit.
-    ///
-    /// Before the fix, the timeout wrapped only `child.wait()` and the pair was
-    /// `join!`-ed. `join!` waits for every future, so the reader's forever-pending
-    /// await swallowed the elapsed timer and this test hung.
     #[tokio::test]
     async fn timeout_fires_while_child_holds_stdout_open() {
         let mut child = tokio::process::Command::new("sh")

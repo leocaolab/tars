@@ -94,9 +94,7 @@ mod tests {
         let content = b"hello world";
         let a = ContentRef::from_content(TenantId::new("tenant-a"), content);
         let b = ContentRef::from_content(TenantId::new("tenant-b"), content);
-        // Hash is identical (content-only)…
         assert_eq!(a.content_hash(), b.content_hash());
-        // …but the refs are not equal because tenant_id differs.
         assert_ne!(a, b);
     }
 

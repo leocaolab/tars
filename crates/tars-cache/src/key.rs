@@ -1,6 +1,3 @@
-//! Cache key — the SHA-256 fingerprint of every input that can
-//! possibly affect the LLM response.
-//!
 //! Tenant id and IAM scopes **must** participate in the hash; otherwise
 //! principals with overlapping prompts but different read-rights will
 //! collide.
@@ -14,10 +11,7 @@ use tars_types::{ChatRequest, ContentBlock, ImageData, Message, RequestContext};
 
 use crate::error::CacheError;
 
-/// Stable lookup key for a single (request, principal) pair.
-///
-/// `fingerprint` is the SHA-256 of every cacheable input; `debug_label`
-/// is a human-readable summary that **does not** participate in the
+/// `debug_label` is a human-readable summary that **does not** participate in the
 /// hash and is safe to put in logs.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct CacheKey {
@@ -26,8 +20,6 @@ pub struct CacheKey {
 }
 
 impl CacheKey {
-    /// Lowercase hex string of the fingerprint — useful for logs that
-    /// want a stable identifier.
     pub fn hex(&self) -> String {
         let mut s = String::with_capacity(64);
         for b in &self.fingerprint {
@@ -38,9 +30,6 @@ impl CacheKey {
     }
 }
 
-/// The attribute key callers use to thread IAM scopes through
-/// [`RequestContext::attributes`]. Looked up at hash time. Format:
-/// JSON array of strings.
 pub const IAM_SCOPES_ATTR: &str = "iam.allowed_scopes";
 
 #[derive(Clone, Debug)]
@@ -60,12 +49,6 @@ impl CacheKeyFactory {
         self.hasher_version
     }
 
-    /// Build the key. Returns:
-    /// - `Ok(key)` — request is cacheable
-    /// - `Err(CacheError::NonDeterministic)` — request shouldn't be
-    ///   cached (middleware skips lookup/write)
-    /// - `Err(CacheError::Serialize)` — JSON serialisation failure
-    ///   (tools, structured-output schema, tool-call args)
     pub fn compute(
         &self,
         req: &ChatRequest,
@@ -173,10 +156,8 @@ fn thinking_tag(t: &tars_types::ThinkingMode) -> String {
     }
 }
 
-/// Read IAM scopes from `ctx.attributes` under [`IAM_SCOPES_ATTR`].
 /// Missing or malformed → empty list.
 ///
-/// An upstream IAM middleware is expected to populate this attribute.
 /// Without one, missing scopes are treated as "no restrictions" — sound
 /// only for single-tenant (Personal) mode; a multi-tenant deployment
 /// without IAM is a fail-open bug, to be hardened to fail-closed when
@@ -291,14 +272,10 @@ fn hash_content_block(h: &mut Sha256, block: &ContentBlock) {
     }
 }
 
-/// Stable JSON encoding. We rely on serde_json's default
+/// We rely on serde_json's default
 /// (BTreeMap-backed) `Map`, which sorts keys alphabetically. If the
 /// workspace ever turns on the `preserve_order` feature this becomes
 /// non-deterministic.
-///
-/// Generic over `T: Serialize` so typed call sites
-/// (`ToolCall::arguments`, request bodies) skip the intermediate
-/// `Value` allocation.
 fn canonical_json<T: Serialize>(v: &T) -> Result<Vec<u8>, CacheError> {
     serde_json::to_vec(v).map_err(CacheError::Serialize)
 }

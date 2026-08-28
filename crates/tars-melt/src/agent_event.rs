@@ -1,20 +1,20 @@
-//! [`AgentEvent`] — append-only event log unit (Doc 04 §3.2).
+//! [`AgentEvent`] — append-only event log unit.
 //!
-//! Eight variants for M3 first cut. Each event is **small** by design
+//! Eight variants for first cut. Each event is **small** by design
 //! — large payloads (full LLM responses, image bytes, RAG context)
 //! get stored separately and referenced by id once `ContentStore`
 //! lands. Today we use plain `String` summaries; the struct shape
 //! lets that field grow into a typed `ContentRef` later without
 //! changing call sites.
 //!
-//! ## Why these eight, and not Doc 04's full set
+//! ## Why these eight, and not the full set
 //!
-//! Doc 04 §3.2 lists ten variants including `CompensationExecuted`,
+//! §3.2 lists ten variants including `CompensationExecuted`,
 //! `LlmResponseCaptured` (separate from `StepCompleted`), and
 //! `Checkpoint`. The split between `LlmResponseCaptured` /
 //! `StepCompleted` matters when "we changed the parser, replay
 //! against the raw bytes" is a real workflow. We don't have that
-//! workflow yet, so the M3 first cut has a single
+//! workflow yet, so the first cut has a single
 //! [`AgentEvent::LlmCallCaptured`] that records both intent + result
 //! summaries. When the parser-rewind story becomes concrete we split
 //! it and bump `payload` schema-version (currently zero — the
@@ -36,7 +36,7 @@ use tars_types::{ProviderId, TrajectoryId, Usage};
 
 /// Unique key for an Agent step's external operations. Hash of
 /// `(trajectory_id, step_seq, input_summary)` so replay can dedupe
-/// LLM calls / tool invocations / DB writes. Doc 04 §3.2 invariant 3.
+/// LLM calls / tool invocations / DB writes. §3.2 invariant 3.
 ///
 /// Stored inline on `StepStarted`; downstream operations carry it as
 /// metadata when they hit external systems.
@@ -94,7 +94,6 @@ pub fn hash_system_prompt(system: Option<&str>) -> Option<String> {
     Some(format!("{:x}", h.finalize()))
 }
 
-/// Append-only event log unit. See module docs for what's in / out.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -102,7 +101,7 @@ pub enum AgentEvent {
     /// Trajectory came into existence. `parent` is set on branches
     /// (replan / fork / recovery); `None` on a root trajectory.
     /// `reason` is a free-form string today; will become a typed
-    /// `BranchReason` enum (Doc 04 §3.1) when something cares about
+    /// `BranchReason` enum when something cares about
     /// the discriminator.
     TrajectoryStarted {
         traj: TrajectoryId,
@@ -130,7 +129,7 @@ pub enum AgentEvent {
     /// One agent step is starting. `step_seq` is monotonic
     /// per-trajectory (1-indexed). `agent` is a free-form id (e.g.
     /// `"orchestrator"`, `"worker:code_review"`); will become a
-    /// typed `AgentRole` (Doc 04 §4) when the agent registry lands.
+    /// typed `AgentRole` when the agent registry lands.
     /// `idempotency_key` lets replay dedupe external operations
     /// triggered by this step.
     StepStarted {
@@ -192,7 +191,7 @@ pub enum AgentEvent {
 
     // ── External-call captures (replay primitives) ──────────────────
     /// One LLM call within a step. Records what we asked + what we
-    /// got back at a summary level. Doc 04 §3.2 envisages a separate
+    /// got back at a summary level. §3.2 envisages a separate
     /// `LlmResponseCaptured` variant carrying the *raw* response for
     /// parser-rewind replay; we'll split when that workflow exists.
     ///
@@ -231,24 +230,21 @@ pub enum AgentEvent {
         #[serde(default)]
         system_prompt_hash: Option<String>,
         /// Tool names the step's agent invoked, in call order, across
-        /// every internal LLM call of the step (Doc 26 M2 — the
+        /// every internal LLM call of the step (— the
         /// cross-call tool trajectory). Empty for steps that called no
         /// tools. `#[serde(default)]` keeps older event rows readable.
         #[serde(default)]
         tool_calls: Vec<String>,
-        /// The arguments for each call in `tool_calls`, positionally aligned
-        /// (Doc 26 M3'). Lets `trajectory-match:args` check arguments off the
-        /// recorded trajectory, not just names. `#[serde(default)]` →
-        /// pre-M3' rows read back with empty args.
+        /// The arguments for each call in `tool_calls`, positionally aligned.
+        /// Lets `trajectory-match:args` check arguments off the
+        /// recorded trajectory, not just names. `#[serde(default)]` allows
+        /// older rows to read back with empty args.
         #[serde(default)]
         tool_call_args: Vec<serde_json::Value>,
     },
 }
 
 impl AgentEvent {
-    /// Trajectory id this event belongs to. Every variant carries
-    /// one — exposed as a method so projections / filters don't have
-    /// to match the full enum.
     pub fn trajectory_id(&self) -> &TrajectoryId {
         match self {
             Self::TrajectoryStarted { traj, .. }
@@ -276,7 +272,7 @@ impl AgentEvent {
 
 /// The cross-call tool trajectory of a recorded run: the tool names from
 /// every `LlmCallCaptured` event, concatenated in event (step) order
-/// (Doc 26 M2). Feed the result to `tars-harness`'s `trajectory_match` to
+///. Feed the result to `tars-harness`'s `trajectory_match` to
 /// score a multi-call agent's tool use.
 ///
 /// Events come from the trajectory store in append order, which is step
@@ -437,16 +433,14 @@ mod tests {
                 parent: None,
                 reason: "root".into(),
             },
-            cap(1, &["search", "read_file"]), // a worker step that made 2 calls
-            cap(2, &[]),                      // a step with no tool calls
+            cap(1, &["search", "read_file"]),
+            cap(2, &[]),
             cap(3, &["edit_file"]),
         ];
-        // Cross-call sequence = every LlmCallCaptured's tools, in order.
         assert_eq!(
             tool_sequence(&events),
             vec!["search", "read_file", "edit_file"]
         );
-        // No LLM events → empty.
         assert!(tool_sequence(&events[..1]).is_empty());
     }
 
@@ -464,7 +458,6 @@ mod tests {
             tool_call_args: Vec::new(),
         };
         let v = serde_json::to_value(&ev).unwrap();
-        // Field is present + populated on serialize.
         assert!(v["system_prompt_hash"].is_string());
         let back: AgentEvent = serde_json::from_value(v).unwrap();
         match back {

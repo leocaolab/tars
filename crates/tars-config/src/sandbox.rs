@@ -133,7 +133,6 @@ mod tests {
             cfg.sandbox.is_none(),
             "no [sandbox] ⇒ None ⇒ unconfined default"
         );
-        // And the resolver turns None + no flag into today's behaviour.
         let pol = resolve_policy(cfg.sandbox.as_ref(), None);
         assert_eq!(pol.mode, SandboxMode::DangerFullAccess);
     }
@@ -176,8 +175,6 @@ mod tests {
 
     #[test]
     fn present_section_defaults_mode_to_workspace_write() {
-        // `[sandbox]` present but no `mode` ⇒ opt-in to confinement ⇒
-        // workspace-write, NOT danger-full-access.
         let cfg = ConfigManager::load_from_str("[sandbox]\nnetwork = true\n").unwrap();
         assert_eq!(cfg.sandbox.unwrap().mode, SandboxModeConfig::WorkspaceWrite);
     }
@@ -200,7 +197,6 @@ mod tests {
             writable_roots = ["/repo/wt"]
         "#;
         let cfg = ConfigManager::load_from_str(toml).unwrap();
-        // Flag says read-only; TOML said workspace-write.
         let pol = resolve_policy(cfg.sandbox.as_ref(), Some(SandboxMode::ReadOnly));
         assert_eq!(pol.mode, SandboxMode::ReadOnly, "flag mode wins");
         assert!(!pol.network, "TOML network kept");

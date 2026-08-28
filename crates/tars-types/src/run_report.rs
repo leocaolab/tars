@@ -7,7 +7,7 @@
 //!
 //! See `docs/eval-and-arc-llm-roadmap.md §1.1` for the design intent —
 //! per-run aggregation is what production agent serving actually needs
-//! (vs Doc 16 §7.1's per-call deterministic dimension scoring, which
+//! (vs §7.1's per-call deterministic dimension scoring, which
 //! arc's year of experience showed to be the wrong shape).
 //!
 //! # V1 scope and known gap
@@ -54,9 +54,7 @@ pub struct RunReport {
     pub summary: Option<String>,
 
     // ── wall clock (from EventRecord.timestamp_ms) ──────────────────
-    /// Wall-clock at TrajectoryStarted.
     pub started_at_ms: i64,
-    /// Wall-clock at terminal event, if any.
     pub ended_at_ms: Option<i64>,
     /// `ended_at_ms - started_at_ms` when both known; otherwise the
     /// time from `started_at` to the last observed event.
@@ -73,44 +71,30 @@ pub struct RunReport {
     // ── step accounting ────────────────────────────────────────────
     pub step_count: u32,
     pub failed_step_count: u32,
-    /// Steps that were skipped at runtime — either their
-    /// `StepCondition` evaluated false, or a transitively-depended-on
-    /// step was itself skipped (cascade). Tracked separately from
+    /// Skipped steps don't burn LLM budget — they appear
+    /// only as [`AgentEvent::StepSkipped`] (no `StepStarted` /
+    /// `StepCompleted` pair). Tracked separately from
     /// `step_count` so consumers can distinguish "this plan had 5
     /// steps, 3 ran and 2 were skipped" from "this plan had 5 steps,
-    /// all ran". Skipped steps don't burn LLM budget — they appear
-    /// only as [`AgentEvent::StepSkipped`] (no `StepStarted` /
-    /// `StepCompleted` pair).
-    ///
-    /// Defaulted on deserialise so reports persisted before this
-    /// field existed continue to read.
+    /// all ran".
     #[serde(default)]
     pub skipped_step_count: u32,
 
     // ── LLM call accounting (from LlmCallCaptured.usage) ───────────
     pub llm_call_count: u32,
-    /// Sum of every captured `Usage`. Matches what consumers report
-    /// today as "input_tokens / output_tokens / cached_input_tokens
-    /// / thinking_tokens" without per-call breakdown.
     pub tokens: Usage,
 
     // ── breakdowns ─────────────────────────────────────────────────
-    /// Per-provider rollup, keyed by `ProviderId.as_str()`.
     pub by_provider: BTreeMap<String, ProviderBreakdown>,
-    /// Per-agent rollup, keyed by `StepStarted.agent` (free-form
-    /// today; e.g. `"orchestrator"`, `"worker:code_review"`).
     pub by_agent: BTreeMap<String, AgentBreakdown>,
 
     // ── errors ─────────────────────────────────────────────────────
     pub errors: Vec<RunErrorSummary>,
 }
 
-/// Reason a [`RunReport`] failed its internal-consistency check.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunReportError {
-    /// `failed_step_count > step_count` at the report level.
     FailedExceedsTotal { failed: u32, total: u32 },
-    /// `failed_step_count > step_count` inside a per-agent breakdown.
     AgentFailedExceedsTotal {
         agent: String,
         failed: u32,
@@ -140,9 +124,7 @@ impl std::fmt::Display for RunReportError {
 impl std::error::Error for RunReportError {}
 
 impl RunReport {
-    /// Reject internally inconsistent reports: `failed_step_count` must
-    /// never exceed `step_count`, at the top level or in any per-agent
-    /// breakdown. Public fields make a malformed report constructible,
+    /// Public fields make a malformed report constructible,
     /// so consumers that care (eval comparison, dashboards) can call
     /// this defensively before trusting the ratios.
     pub fn validate(&self) -> Result<(), RunReportError> {
@@ -186,9 +168,7 @@ pub struct AgentBreakdown {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunErrorSummary {
     pub step_seq: u32,
-    /// `"retriable" / "permanent" / …` from `StepFailed.classification`.
     pub classification: String,
-    /// `StepFailed.error` string (sometimes long; consumers may truncate).
     pub error: String,
 }
 

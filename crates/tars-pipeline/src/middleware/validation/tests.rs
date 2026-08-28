@@ -344,12 +344,12 @@ async fn validation_empty_chain_passes_through_without_drain() {
     assert!(rec.filtered_response.is_none());
 }
 
-// ── B-20.W4 — Cache × Validator interaction contract (regression gate) ──
+// ── Cache × Validator interaction contract ──
 //
-// W4 (2026-05-08) moved Validation OUTSIDE Cache. New onion:
+// Validation sits OUTSIDE Cache. Onion:
 //   Telemetry → Validation → Cache → Retry → Provider
 //
-// Doc 15 §2 contract these tests pin:
+// Contract these tests pin:
 //   1. cache stores raw Provider events (pre-Filter)
 //   2. cache hit re-runs the validator chain
 //
@@ -357,7 +357,7 @@ async fn validation_empty_chain_passes_through_without_drain() {
 // Cache around the Provider, then wrap Validation around Cache.
 
 #[tokio::test]
-async fn b20_w4_cache_stores_raw_not_post_filter() {
+async fn cache_stores_raw_not_post_filter() {
     use tars_cache::{CacheKeyFactory, CachePolicy, CacheRegistry, MemoryCacheRegistry};
     use tars_types::{ChatResponseBuilder, ProviderId};
 
@@ -366,13 +366,13 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
     // Provider returns "hello world" (raw). MaxLength filter truncates
     // to 5 chars → caller sees "hello". Cache, sitting OUTSIDE Validation
     // in the real Pipeline, must still store the raw "hello world" per
-    // Doc 15 §2 — otherwise multi-caller cache sharing produces silent
+    // §2 — otherwise multi-caller cache sharing produces silent
     // corruption and changing validator config across runs becomes a
     // cache-invalidating change (also a SemVer-break risk).
     let registry: Arc<dyn CacheRegistry> = MemoryCacheRegistry::default_arc();
     let mock = MockProvider::new("mock_origin", CannedResponse::text("hello world"));
 
-    // Production onion (W4): Validation OUTSIDE Cache. Cache wraps the
+    // Production onion: Validation OUTSIDE Cache. Cache wraps the
     // provider; Validation wraps Cache. Cache sees raw provider events,
     // not the post-Filter version Validation re-emits to its caller.
     let factory = CacheKeyFactory::new(1);
@@ -408,10 +408,8 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
         "caller should see post-Filter; if this fails the test setup is wrong, not the bug"
     );
 
-    // Read the cache directly. Per Doc 15 §2 it must hold the RAW
-    // pre-Filter response — i.e. "hello world". Currently the
-    // ValidationMiddleware re-emit-on-Filter path leaks post-Filter
-    // events into the cache.
+    // Read the cache directly. It must hold the RAW
+    // pre-Filter response — i.e. "hello world".
     let key = factory
         .compute(&req, "test-model", &ctx)
         .expect("cacheable");
@@ -424,7 +422,7 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
 
     assert_eq!(
         cached.response.text, "hello world",
-        "B-20.W4 contract: with Validation OUTSIDE Cache (W4 onion), \
+        ": with Validation OUTSIDE Cache, \
          Cache must store raw Provider events. Multi-caller cache \
          sharing across distinct validator chains depends on this; \
          changing validator config on a Pipeline must not invalidate \
@@ -433,15 +431,15 @@ async fn b20_w4_cache_stores_raw_not_post_filter() {
 }
 
 #[tokio::test]
-async fn b20_w4_cache_hit_reruns_validator_chain() {
+async fn cache_hit_reruns_validator_chain() {
     use tars_cache::{CacheKeyFactory, MemoryCacheRegistry};
     use tars_types::ProviderId;
 
     use crate::middleware::cache::CacheLookupMiddleware;
 
-    // Doc 15 §2 contract: validators are pure → cheap to rerun → cache
-    // hits MUST rerun the chain. With W4's onion (Validation OUTSIDE
-    // Cache), Validation always runs — hit or miss — because Cache's
+    // Contract: validators are pure → cheap to rerun → cache
+    // hits MUST rerun the chain. With Validation OUTSIDE
+    // Cache, Validation always runs — hit or miss — because Cache's
     // short-circuit only short-circuits Cache and below, not the layers
     // wrapping it.
     let registry: Arc<dyn tars_cache::CacheRegistry> = MemoryCacheRegistry::default_arc();
@@ -491,7 +489,7 @@ async fn b20_w4_cache_hit_reruns_validator_chain() {
             .layers
             .iter()
             .any(|l| l == "validation"),
-        "B-20.W4 contract: validators rerun on cache hit. With Validation \
+        ": validators rerun on cache hit. With Validation \
          OUTSIDE Cache, Validation runs every call regardless of hit/miss; \
          layer trace must contain 'validation' on the hit too."
     );

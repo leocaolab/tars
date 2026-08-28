@@ -1,5 +1,3 @@
-//! Resolve where to load config from.
-//!
 //! Order: explicit `--config <PATH>` flag → `$TARS_CONFIG` env var
 //! (already merged into the flag by clap) → XDG default.
 
@@ -9,9 +7,7 @@ use anyhow::{Context, Result};
 use tars_config::{Config, ConfigManager};
 
 pub fn default_config_path() -> Option<PathBuf> {
-    // dirs::config_dir() respects $XDG_CONFIG_HOME, falls back to
-    // ~/.config on Linux, ~/Library/Application Support on macOS,
-    // %APPDATA% on Windows.
+
     dirs::config_dir().map(|d| d.join("tars").join("config.toml"))
 }
 
@@ -88,8 +84,7 @@ default_model = "Qwen/Qwen2.5-Coder-32B-Instruct"
         let mut f = tempfile::NamedTempFile::new().unwrap();
         write!(f, "{MINIMAL_VALID_TOML}").unwrap();
         let cfg = load(Some(f.path().to_path_buf())).expect("valid config should load");
-        // Post-merge: user provider + ambient builtins. Check the
-        // user-declared count, which the loader stamps on Config.
+
         assert_eq!(cfg.user_provider_ids.len(), 1);
     }
 

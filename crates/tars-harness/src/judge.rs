@@ -2,23 +2,6 @@
 //! orchestrator. Implements the offline binary-classification eval
 //! phase described in `docs/eval-and-arc-llm-roadmap.md §1.2`.
 //!
-//! Three pieces:
-//!
-//! - [`Judge`] — async trait. One method: judge a [`JudgeItem`] and
-//!   return a [`JudgeVerdict`]. Implementors choose how (LLM call,
-//!   deterministic rule, human-in-the-loop, etc.).
-//!
-//! - [`LlmJudge`] — reference impl backed by any
-//!   `LlmService`. Wraps the canonical pipeline (with
-//!   cache / retry / telemetry) and parses the response into TP / FP
-//!   / Unsure via a prompt template.
-//!
-//! - [`run_judge_pass`] — top-level orchestrator. Iterates items,
-//!   asks the judge for each, aggregates into a [`JudgeReport`].
-//!   Caller is responsible for invoking [`ensure_anti_incest`]
-//!   first (it's not auto-called — the orchestrator doesn't know
-//!   the critic's provider ids).
-//!
 //! ## Anti-incest
 //!
 //! Arc's production lesson, re-encoded as a runtime check: a judge
@@ -83,8 +66,7 @@ pub fn ensure_anti_incest(judge_id: &str, critic_provider_ids: &[&str]) -> Resul
     Ok(())
 }
 
-/// Iterate `items`, ask `judge` for each, return a [`JudgeReport`]
-/// with aggregates + per-item verdicts.
+/// Iterate items and return a [`JudgeReport`] with aggregates + per-item verdicts.
 ///
 /// **Note**: this is sequential. Parallel batching is intentionally
 /// not in V1 — judges run against rate-limited APIs and the simplest
@@ -259,8 +241,6 @@ fn parse_verdict(text: &str) -> Result<JudgeVerdict, JudgeError> {
     } else if upper.starts_with("FP") || upper.contains("FALSE POSITIVE") {
         Ok(JudgeVerdict::FalsePositive)
     } else if upper.starts_with("UNSURE") {
-        // Extract the reason if the model put it after `UNSURE:` or
-        // `UNSURE — ...`.
         let reason = first_line
             .trim_start_matches(|c: char| c.is_ascii_alphabetic())
             .trim_start_matches(|c: char| c == ':' || c == '—' || c == '-' || c.is_whitespace())

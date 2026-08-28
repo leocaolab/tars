@@ -115,7 +115,6 @@ pub fn summarise_claude_session_log(path: &Path) -> Result<String, std::io::Erro
         if line.contains("\"type\":\"user\"") && line.contains("tool_result") {
             tool_results += 1;
         }
-        // Pull the timestamp out crudely.
         if let Some(idx) = line.find("\"timestamp\":\"") {
             let start = idx + "\"timestamp\":\"".len();
             if let Some(end_rel) = line[start..].find('"') {

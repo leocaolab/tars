@@ -1,8 +1,4 @@
 //! End-to-end OpenAI provider tests against a wiremock-backed server.
-//!
-//! These exercise the streaming path: we serve a canned SSE stream
-//! from wiremock and assert that our adapter decodes it into the right
-//! sequence of [`ChatEvent`]s.
 
 use futures::StreamExt;
 use wiremock::matchers::{header, method, path};
@@ -14,7 +10,7 @@ use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
 use tars_types::{ChatEvent, ChatRequest, RequestContext, StopReason};
 
-/// Standard OpenAI SSE shape: zero or more `data:` chunks ending with `data: [DONE]`.
+
 fn sse_body(events: &[&str]) -> String {
     let mut s = String::new();
     for ev in events {
@@ -31,14 +27,10 @@ async fn streaming_text_response_decodes_to_events() {
     let server = MockServer::start().await;
 
     let body = sse_body(&[
-        // First chunk: model + role
         r#"{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#,
-        // Content chunks
         r#"{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello, "},"finish_reason":null}]}"#,
         r#"{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"world!"},"finish_reason":null}]}"#,
-        // Final chunk with stop reason
         r#"{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
-        // Usage chunk (per stream_options.include_usage)
         r#"{"id":"c1","object":"chat.completion.chunk","model":"gpt-4o","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}"#,
     ]);
 
@@ -88,7 +80,7 @@ async fn streaming_text_response_decodes_to_events() {
     assert_eq!(u.output_tokens, 3);
 }
 
-/// DeepSeek's reasoner (`deepseek-v4-pro`, formerly `deepseek-reasoner`)
+/// DeepSeek's reasoner (`deepseek-v4-pro`)
 /// streams its chain-of-thought in `delta.reasoning_content`, separate
 /// from the final `delta.content`. The OpenAI-compat adapter must surface
 /// that as `ThinkingDelta` — this is what makes the built-in `deepseek`

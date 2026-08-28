@@ -1,5 +1,4 @@
-//! `tars-sandbox` — the OS exec-confinement mechanism (Doc 22 §4-5, the
-//! "crown jewel" lift from codex's `sandboxing`/`linux-sandbox`).
+//! `tars-sandbox` — the OS exec-confinement mechanism.
 //!
 //! **Where it lives and why.** `tars-tools` (BashTool) and `tars-provider`
 //! (claude_cli subprocess) are siblings — both depend only on `tars-types`,
@@ -21,7 +20,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// What the delegate/tool's side effects are confined to (codex's three modes).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SandboxMode {
     /// No writes anywhere (reviewer / read-only agents, e.g. a deepseek review).
@@ -29,24 +27,20 @@ pub enum SandboxMode {
     /// Write only under `writable_roots` (the worktree). Read broad. The safe
     /// default for a fixer/merge.
     WorkspaceWrite,
-    /// No confinement — today's behaviour. Explicit escape hatch.
+    /// Explicit escape hatch.
     #[default]
     DangerFullAccess,
 }
 
-/// The confinement policy threaded through `ToolContext.sandbox`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SandboxPolicy {
     pub mode: SandboxMode,
-    /// Directories writes are allowed under (typically `[worktree]`).
     pub writable_roots: Vec<PathBuf>,
-    /// Whether network egress is permitted (the delegate LLM CLI needs its API).
+    /// The delegate LLM CLI needs its API.
     pub network: bool,
 }
 
 impl Default for SandboxPolicy {
-    /// Unrestricted — preserves today's behaviour until a caller opts into a
-    /// confining mode (backward-compatible with the old tars-tools stub).
     fn default() -> Self {
         Self {
             mode: SandboxMode::DangerFullAccess,
@@ -56,8 +50,7 @@ impl Default for SandboxPolicy {
     }
 }
 
-/// Failure building a sandbox invocation. Callers map this into their own error
-/// (`ToolError` / `ProviderError`) and MUST fail-closed on it.
+/// Callers MUST fail-closed on it.
 #[derive(Debug)]
 pub enum SandboxError {
     /// A path could not be canonicalized (missing root, non-UTF8, …).
@@ -77,8 +70,6 @@ impl std::fmt::Display for SandboxError {
 impl std::error::Error for SandboxError {}
 
 impl SandboxPolicy {
-    /// Workspace-write jail rooted at `workdir` (the fixer/merge worktree),
-    /// network on (the delegate needs its API).
     pub fn workspace_write(workdir: &Path) -> Self {
         Self {
             mode: SandboxMode::WorkspaceWrite,
@@ -87,7 +78,6 @@ impl SandboxPolicy {
         }
     }
 
-    /// Read-only jail (reviewer): no writable roots.
     pub fn read_only(network: bool) -> Self {
         Self {
             mode: SandboxMode::ReadOnly,
@@ -96,10 +86,7 @@ impl SandboxPolicy {
         }
     }
 
-    /// Wrap `(program, args)` per the mode, working dir `workdir`. Returns
-    /// `(wrapper_program, full_argv)` to spawn. For [`DangerFullAccess`] the
-    /// command is returned unwrapped. Fail-closed on a confining mode that has
-    /// no platform impl.
+    /// Fail-closed on a confining mode that has no platform impl.
     ///
     /// [`DangerFullAccess`]: SandboxMode::DangerFullAccess
     pub fn wrap(
@@ -142,7 +129,7 @@ impl SandboxPolicy {
         {
             let _ = (program, args, &work, &writable);
             Err(SandboxError::Unsupported(format!(
-                "{} — refusing to run unconfined (Doc 22/29)",
+                "{} — refusing to run unconfined",
                 std::env::consts::OS
             )))
         }
@@ -153,21 +140,14 @@ fn canon(p: &Path) -> Result<PathBuf, SandboxError> {
     std::fs::canonicalize(p).map_err(|e| SandboxError::Path(format!("{}: {e}", p.display())))
 }
 
-/// The extra writable roots a **workspace-write delegate jail** grants beyond
-/// the workspace itself, matching codex's `WorkspaceWrite`
-/// ([`get_writable_roots_with_cwd`]): the real per-user `$TMPDIR` and `/tmp`.
-/// A CLI delegate (codex's app-server socket, opencode's temp scratch, any
-/// coding agent's `mktemp`) needs these — the old tars jail wrongly denied
-/// them, redirecting `TMPDIR` into the worktree instead. Each entry is included
-/// only when it exists as a directory, so a caller can append the result to
-/// `writable_roots` and hand it straight to [`SandboxPolicy::wrap`] without a
-/// canonicalize failure. `.git` is NOT relevant here — [`SandboxPolicy::wrap`]
-/// write-protects `<workdir>/.git` on top of whatever roots it is given.
+/// A CLI delegate needs the real per-user `$TMPDIR` and `/tmp`.
+/// Each entry is included only when it exists as a directory, so a caller can
+/// append the result to `writable_roots` and hand it straight to
+/// [`SandboxPolicy::wrap`] without a canonicalize failure.
 ///
 /// [`get_writable_roots_with_cwd`]: https://developers.openai.com/codex/config-reference
 pub fn default_tmp_writable_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    // $TMPDIR (per-user on macOS: `/var/folders/…/T`). Skip empty/unset.
     if let Some(tmpdir) = std::env::var_os("TMPDIR")
         && !tmpdir.is_empty()
     {
@@ -184,14 +164,6 @@ pub fn default_tmp_writable_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// codex-style Seatbelt write-jail: allow broadly, deny all writes, re-allow
-/// writes under the workspace roots (+ std streams / tty), then re-deny
-/// `<workdir>/.git`. The writable roots are exactly what the caller supplies —
-/// for a CLI-delegate spawn that is the worktree **plus** the real `$TMPDIR`,
-/// `/tmp`, and the CLI's own state dir (see
-/// [`default_tmp_writable_roots`] + the delegate spawn), matching codex's
-/// `WorkspaceWrite`. `$HOME` at large stays read-only (nothing re-allows it).
-///
 /// **`.git` write-protection** (codex + claude both do this): even though `.git`
 /// lives under the writable worktree, an agent must not be able to rewrite git
 /// hooks/config to gain host execution. The final `(deny file-write* (subpath
@@ -209,8 +181,6 @@ pub fn seatbelt_profile(writable: &[PathBuf], network: bool, workdir: &Path) -> 
     }
     p.push_str("  (literal \"/dev/null\") (literal \"/dev/stdout\") (literal \"/dev/stderr\")\n");
     p.push_str("  (regex #\"^/dev/tty\"))\n");
-    // Re-deny the repo's git dir (last match wins), even though it sits under a
-    // writable worktree root. Deny both `.git` itself and its subtree.
     let git = workdir.join(".git");
     p.push_str(&format!(
         "(deny file-write* (subpath \"{}\"))\n",
@@ -219,8 +189,6 @@ pub fn seatbelt_profile(writable: &[PathBuf], network: bool, workdir: &Path) -> 
     p
 }
 
-/// Linux bubblewrap write-jail: whole fs read-only, workspace roots read-write,
-/// private tmpfs `/tmp`, workspace as cwd.
 #[cfg(any(target_os = "linux", test))]
 pub fn bwrap_argv(
     program: &str,
@@ -287,12 +255,8 @@ mod tests {
         assert!(prof.contains("(deny file-write*)"));
         assert!(prof.contains("(subpath \"/wt\")"));
         assert!(!prof.contains("(deny network*)"));
-        // The profile renders EXACTLY the roots it is handed — /tmp + $TMPDIR are
-        // added by the delegate spawn as writable roots (codex model), NOT baked
-        // into the profile, so a bare `[/wt]` profile still names neither.
         assert!(!prof.contains("/private/tmp"));
         assert!(!prof.contains("/var/folders"));
-        // `.git` under the writable worktree is re-denied (last match wins).
         assert!(prof.contains("(deny file-write* (subpath \"/wt/.git\"))"));
         // The `.git` deny is AFTER the allow block so Seatbelt's last-match-wins
         // ordering makes it override the worktree allow.
@@ -301,8 +265,6 @@ mod tests {
 
     #[test]
     fn seatbelt_renders_extra_writable_roots() {
-        // The delegate spawn appends /tmp + $TMPDIR + state dirs as roots; the
-        // profile must re-allow each as a subpath.
         let prof = seatbelt_profile(
             &[
                 PathBuf::from("/wt"),

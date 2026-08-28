@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use serde_json::Value;
 use tars_types::{ProviderError, StopReason, Usage};
 
-/// Per-call slot for accumulating streaming tool args.
 #[derive(Debug, Default)]
 struct CallAccum {
     id: String,
@@ -65,8 +64,6 @@ impl ToolCallBuffer {
         self.pending_stop_reason = Some(reason);
     }
 
-    /// Take (and clear) the previously stashed stop reason. Returns
-    /// `None` if nothing was stashed.
     pub fn take_pending_stop(&mut self) -> Option<StopReason> {
         self.pending_stop_reason.take()
     }
@@ -91,7 +88,6 @@ impl ToolCallBuffer {
         self.last_usage = Some(usage);
     }
 
-    /// Recover the last-seen finish state, defaulting any missing piece.
     pub fn recovered_finish_state(&self) -> (StopReason, Usage) {
         (
             self.last_stop_reason.unwrap_or(StopReason::Other),
@@ -107,7 +103,6 @@ impl ToolCallBuffer {
         self.finished_emitted = true;
     }
 
-    /// Whether `mark_finished` was called previously on this buffer.
     pub fn finished_emitted(&self) -> bool {
         self.finished_emitted
     }
@@ -157,11 +152,6 @@ impl ToolCallBuffer {
         entry.started = true;
     }
 
-    /// Finalize the call at `index`. Three-stage parse:
-    ///
-    /// 1. `serde_json::from_str` strict
-    /// 2. fall back to repair for trailing-comma / unclosed-string cases
-    /// 3. otherwise propagate `ProviderError::Parse`
     pub fn finalize(&mut self, index: usize) -> Result<(String, String, Value), ProviderError> {
         // Peek before remove — if parsing fails, leave the buffer intact so
         // the caller can wait for more deltas and retry instead of losing
@@ -197,7 +187,6 @@ impl ToolCallBuffer {
                 if trimmed.is_empty() {
                     Value::Object(Default::default())
                 } else {
-                    // Try wrapping naked key:value into braces (rare).
                     let braced = format!("{{{trimmed}}}");
                     serde_json::from_str::<Value>(&braced).map_err(|repair_err| {
                         // Keep both errors so debugging malformed provider
@@ -211,7 +200,6 @@ impl ToolCallBuffer {
             }
         };
 
-        // Parsing succeeded — now consume the buffer.
         let acc = self
             .inflight
             .remove(&index)

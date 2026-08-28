@@ -1,29 +1,13 @@
 //! OpenAI Codex CLI as an LLM Provider — ChatGPT-subscription path.
 //!
-//! Since Doc 32 M1 this module is the **codex construction surface** on top of
+//! Since this module is the **codex construction surface** on top of
 //! the shared CLI-delegate machinery in [`crate::backends::cli`]. It shells out
 //! to `codex exec --json --model X --sandbox <mode> -c approval_policy="never"
 //! [--skip-git-repo-check] -`, feeds the prompt on stdin, strips the
 //! API-billing env vars so codex falls through to the ChatGPT OAuth path, and
 //! maps codex's JSONL `ThreadEvent`s onto canonical `ChatEvent`s.
 //!
-//! ## What M1 changed
-//!
-//! codex used to re-invent its **own** spawn/stream loop
-//! (`codex_cli.rs:253-342`) — a third private subprocess path with no
-//! `tars-sandbox`. That private spawn is **retired**. The runtime provider is
-//! now the shared [`AgentCliBackend`](crate::backends::cli::AgentCliBackend)
-//! driven by a [`CodexCliDialect`](crate::backends::cli::CodexCliDialect) and the
-//! shared [`SharedCliRunner`](crate::backends::cli::SharedCliRunner), which
-//! spawns through the shared `tars-sandbox` OS-jail primitive. codex keeps its
-//! OWN `--sandbox` flag (its internal jail) and now ALSO runs inside the
-//! tars-sandbox process jail — defense-in-depth (Doc 29 / FR-3).
-//!
-//! The codex JSONL is buffered by the runner and mapped per-line by
-//! [`CodexCliDialect::parse_line`], so the `agent_message`/`reasoning`/
-//! `turn.completed` → `ChatEvent` translation is byte-for-byte; the eager
-//! `AgentCliBackend` emits the events after the turn completes rather than
-//! live (fine for the spawn-per-call consumer).
+
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,7 +92,6 @@ fn default_capabilities() -> ProviderProfile {
     tars_config::capabilities_for("codex_cli", "")
 }
 
-/// Convenience builder.
 pub fn codex_cli(id: impl Into<ProviderId>) -> Arc<CodexCliProvider> {
     CodexCliProviderBuilder::new(id).build()
 }

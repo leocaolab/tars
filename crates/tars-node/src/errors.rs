@@ -1,4 +1,4 @@
-//! Typed-error → JS mapping for the handle-based surface (Doc 12 §7.3).
+//! Typed-error → JS mapping for the handle-based surface.
 //!
 //! The doc contract is a **discriminable class hierarchy**
 //! (`TarsError → TarsConfigError / TarsProviderError / TarsUnknownRole / …`),

@@ -1,5 +1,5 @@
 //! Pipeline-level event types — one event per `Pipeline.call` boundary.
-//! See [Doc 17](../../../docs/architecture/17-pipeline-event-store.md).
+//!
 //!
 //! Distinct from `tars_types::ChatEvent` (streaming-token contract,
 //! per-token granularity) and from `tars-runtime`'s `AgentEvent`
@@ -233,8 +233,6 @@ mod tests {
 
     #[test]
     fn unknown_variant_deserialises_into_other() {
-        // Simulate a future schema version emitting a variant we don't
-        // know yet. Old readers must accept this, not panic.
         let payload = serde_json::json!({
             "type": "future_event_type_we_dont_know",
             "some_field": 42,
@@ -260,11 +258,7 @@ mod tests {
 
     #[test]
     fn validation_reason_omitted_from_wire_when_none() {
-        // Backward-compat: the overwhelming majority of events carry no
-        // reject reason; the field must not appear in their JSON so the
-        // persisted form is byte-identical to blobs written before the
-        // field existed.
-        let ev = fake_finished(); // validation_reason: None
+        let ev = fake_finished();
         let v = serde_json::to_value(&ev).unwrap();
         assert!(
             v.get("validation_reason").is_none(),
@@ -274,8 +268,6 @@ mod tests {
 
     #[test]
     fn old_event_without_validation_reason_deserialises_to_none() {
-        // An event blob persisted before the field existed must still
-        // deserialize (field is `#[serde(default)]`).
         let mut v = serde_json::to_value(fake_finished()).unwrap();
         v.as_object_mut().unwrap().remove("validation_reason");
         let back: LlmCallFinished = serde_json::from_value(v).expect("de without field");

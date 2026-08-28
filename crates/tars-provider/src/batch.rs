@@ -226,7 +226,6 @@ impl BatchSubmitter for MockBatchSubmitter {
                 })
                 .collect();
         }
-        // Default: echo each input as a text response.
         Ok(job
             .items
             .iter()
@@ -383,7 +382,6 @@ mod tests {
             )
             .await
             .unwrap();
-        // Simulate progress polling.
         m.set_status(&id, BatchStatus::Submitted).await;
         assert!(!m.status(&id, &ctx()).await.unwrap().is_terminal());
         m.set_status(
@@ -420,8 +418,6 @@ mod tests {
 
     #[tokio::test]
     async fn provider_default_returns_none_for_batch_submitter() {
-        // Default LlmProvider impl returns None — backends that don't
-        // override stay sync-only.
         use crate::backends::mock::{CannedResponse, MockProvider};
         use crate::provider::LlmProvider;
 

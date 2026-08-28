@@ -1,4 +1,4 @@
-//! Middleware pipeline framework — Doc 02.
+//! Middleware pipeline framework
 //!
 //! An [`LlmService`] is a concrete, reusable callable: **one provider +
 //! one model + an ordered list of [`Middleware`] layers**. It is the one
@@ -36,9 +36,7 @@
 //! Call order **is** chain order: the first `.layer(...)` is OUTERMOST
 //! (runs first inbound, last outbound); the provider is innermost.
 //!
-//! Canonical order (Doc 02 §2). Unchanged except that **Routing and
-//! Fallback are gone** — provider selection is no longer a pipeline
-//! concern:
+//! Canonical order. Provider selection is not a pipeline concern:
 //!
 //! ```text
 //! Telemetry (outermost)
@@ -51,13 +49,12 @@
 //!                          └─ Provider call (innermost)
 //! ```
 //!
-//! (Doc 02 §2 drew the breaker *above* Retry; the code puts it below —
-//! see [`CircuitBreaker`] — so an open breaker rejects each attempt
-//! before the provider is hit and Retry reacts to that rejection.)
+//! (The breaker is put *below* Retry — see [`CircuitBreaker`] —
+//! so an open breaker rejects each attempt before the provider is hit
+//! and Retry reacts to that rejection.)
 //!
 //! What `LlmService::default_chain` / `LlmService::chain_over` actually
-//! assemble today (each layer conditional on its `ChainOpts` field),
-//! with the rest filling in as their dependencies come online:
+//! assemble (each layer conditional on its `ChainOpts` field):
 //!
 //! ```text
 //! EventEmitter → Telemetry → Validation → Cache Lookup → Retry → [CircuitBreaker] provider

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Provider-side translation:
 /// - **OpenAI**: `response_format = { type: "json_schema", strict, schema }`
 /// - **Gemini**: `responseSchema = schema` + `responseMimeType = "application/json"`
-/// - **Anthropic**: emulated via a forced `tool_choice` (Doc 01 §9)
+/// - **Anthropic**: emulated via a forced `tool_choice`
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JsonSchema {
     /// The schema document. Must be a JSON object at the root.

@@ -262,7 +262,7 @@ impl Tool for WebSearchTool {
     }
 }
 
-/// Format the search hits into a compact, numbered title/url/snippet list.
+
 fn render_results(query: &str, results: Vec<SearchResult>) -> ToolResult {
     let title = format!("Searched {query:?} ({} results)", results.len());
     let mut body = format!("Results for {query:?}:\n");
@@ -279,16 +279,9 @@ fn render_results(query: &str, results: Vec<SearchResult>) -> ToolResult {
 // Typed error → legible tool result
 // ---------------------------------------------------------------------------
 
-/// Adapt a sisurf [`WebError`] into an `is_error` [`ToolResult`], **branching
-/// on the variant** so each failure mode gets its own legible, actionable
-/// message — never a `format!("{:?}")` blob or a blanket `.to_string()`.
-///
-/// [`WebError::NoBrowser`] in particular stays a first-class case: the agent is
-/// told a headless browser was needed and how to recover, so it can adapt (ask
-/// the user to install Chrome, or accept the static fallback) rather than
-/// re-guessing at an opaque string. Where a variant carries a typed `#[source]`
-/// (`Fetch`, `Browser`), we render *that source's* own `Display` — the real
-/// reason — instead of inventing a sentinel.
+/// Converts [`WebError`] into an `is_error` [`ToolResult`].
+/// Branches on the variant so each failure mode gets its own legible, actionable message.
+/// `NoBrowser` stays a first-class case so the agent can adapt (ask user to install Chrome).
 fn web_error_result(tool: &str, err: WebError) -> ToolResult {
     let (title, body) = match err {
         WebError::NoBrowser { hint } => (

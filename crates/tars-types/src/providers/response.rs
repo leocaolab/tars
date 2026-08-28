@@ -22,7 +22,7 @@ pub struct ChatResponse {
     pub stop_reason: Option<StopReason>,
     pub usage: Usage,
     pub cache_hit: CacheHitInfo,
-    /// Per-call validator outcomes (Doc 15). Empty when the pipeline
+    /// Per-call validator outcomes. Empty when the pipeline
     /// didn't include `ValidationMiddleware`. `#[serde(default)]` so
     /// pre-validation AgentEventLog dumps still deserialize cleanly.
     #[serde(default, skip_serializing_if = "is_empty_validation_summary")]
@@ -78,7 +78,7 @@ impl ChatResponse {
             stop_reason,
             usage,
             cache_hit: _,          // overridden by argument
-            validation_summary: _, // discard: validators rerun on hit (Doc 15 §4)
+            validation_summary: _, // discard: validators rerun on hit
             created: _,            // re-stamped when the replayed stream re-finishes
         } = self;
 

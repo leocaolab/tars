@@ -7,7 +7,7 @@
 //!    pre-created handle).
 //! 2. [`ProviderCacheHandle`] — opaque reference to a Provider-side
 //!    cache object (Gemini cachedContent, Anthropic cache_control
-//!    block, …). Strict invariants (Doc 03 §10):
+//!    block, …). Strict invariants:
 //!      - never serialized to clients
 //!      - tenant_namespace is mandatory
 //!      - validated by the Provider on use
@@ -37,7 +37,7 @@ pub enum CacheDirective {
 
 /// Opaque handle to a Provider-side cache object.
 ///
-/// **Security**: `external_id` is a bearer-style "claim ticket" (Doc 03
+/// **Security**: `external_id` is a bearer-style "claim ticket"
 /// §10.4) — handed back to the provider it grants access to whatever
 /// content it wraps. Never expose to clients/logs in plaintext.
 ///
@@ -69,15 +69,10 @@ impl ProviderCacheHandle {
     /// `external_id` to fetch / reference cached content. Audit
     /// `tars-types-src-cache-9` (encapsulation of security invariants).
     ///
-    /// **Forward-compat, no production caller yet** — the consumer is
-    /// the D-1 `ExplicitCacheProvider` impl (Doc 03 §2.2 L3) which
-    /// ships in a separate tars-provider work item. Kept `pub` so
-    /// that implementer can import + call without re-deriving the
+    /// **Forward-compat** — kept `pub` so
+    /// implementers can import + call without re-deriving the
     /// four security checks (cross-tenant rejection, expiry, time
-    /// skew, empty external_id). `arc scan --judge` flagging this as
-    /// "no production callers" is the expected scanner blind spot:
-    /// it counts an in-crate caller in tests but treats a
-    /// not-yet-written external caller as "dead". Hold until D-1.
+    /// skew, empty external_id).
     pub fn validate_for_use(&self, expected_tenant: &TenantId) -> Result<(), &'static str> {
         if self.tenant_namespace != *expected_tenant {
             return Err("ProviderCacheHandle: cross-tenant use rejected");
@@ -120,7 +115,7 @@ pub struct CacheHitInfo {
     pub used_explicit_handle: bool,
     /// True when the *response* was served entirely from L1/L2 cache —
     /// no provider call happened. Distinct from `cached_input_tokens`,
-    /// which only marks L3 / provider-implicit prefix discounts. M1
+    /// which only marks L3 / provider-implicit prefix discounts.
     /// cache middleware sets this on full L1 replay.
     #[serde(default)]
     pub replayed_from_cache: bool,

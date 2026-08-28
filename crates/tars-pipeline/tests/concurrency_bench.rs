@@ -80,8 +80,7 @@ impl LlmProvider for LatencyMock {
 
 /// Drive `n` concurrent real `LlmService::call`s, each draining its stream. An
 /// optional `Semaphore` gate models the tars-runtime executor's `max_concurrent`
-/// cap (`tokio::sync::Semaphore`, executor.rs) — the concurrency limiter tars
-/// actually has today (there is NO proactive rate/TPM limiter — #41 is unbuilt).
+/// cap (`tokio::sync::Semaphore`, executor.rs).
 async fn drive(
     svc: Arc<LlmService>,
     n: usize,
@@ -292,10 +291,9 @@ async fn drive_split(a: Arc<LlmService>, b: Arc<LlmService>, n: usize) -> Durati
     start.elapsed()
 }
 
-/// The account-sharing fix, behaviorally: two services over ONE shared account
-/// bucket must deliver a COMBINED rate of ~1×TPM; two services with PRIVATE
-/// buckets (the pre-fix behavior) deliver ~2×TPM. This is the airtight proof that
-/// `shared()` fixes the N×TPM quota blow-out that per-instance buckets caused.
+/// Two services over ONE shared account bucket must deliver a COMBINED rate
+/// of ~1×TPM; two services with PRIVATE buckets deliver ~2×TPM. This proves
+/// that `shared()` correctly throttles across instances.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shared_bucket_binds_combined_rate() {
     let latency = Duration::from_millis(5);
@@ -322,7 +320,7 @@ async fn shared_bucket_binds_combined_rate() {
         n,
     )
     .await;
-    // Two services, PRIVATE buckets (the pre-fix N×TPM bug).
+    // Two services, PRIVATE buckets.
     let private_wall = drive_split(
         build(TpmRateLimiter::new(cfg())),
         build(TpmRateLimiter::new(cfg())),

@@ -24,7 +24,7 @@ pub struct ToolContext {
     /// considers the default (usually `std::env::current_dir`).
     pub cwd: Option<PathBuf>,
     /// OS-confinement policy a sandboxed tool reads. Default = unrestricted
-    /// (seam only today; the lift is Doc 22 T2).
+    /// (seam only today; the lift is T2).
     pub sandbox: SandboxPolicy,
     /// Extra READ-ONLY roots a search/read tool may reach in addition to
     /// `cwd`. Empty = reads are confined to `cwd` (the default). A coding
@@ -172,7 +172,7 @@ pub trait Tool: Send + Sync + 'static {
     fn name(&self) -> &str;
 
     /// What the tool does — the model uses this to decide *when* to
-    /// call it. Doc 05 §3.3: explain when to use, not just what.
+    /// call it. §3.3: explain when to use, not just what.
     /// Aim for one or two sentences.
     fn description(&self) -> &str;
 
