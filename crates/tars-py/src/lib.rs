@@ -37,6 +37,7 @@
 
 mod context;
 mod errors;
+mod eval;
 mod handle;
 mod validation;
 
@@ -1845,6 +1846,8 @@ fn bless_check<'py>(py: Python<'py>, path: String, text: String) -> PyResult<Bou
 fn _tars_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(bless_check, m)?)?;
+    m.add_function(wrap_pyfunction!(eval::write_score, m)?)?;
+    m.add_function(wrap_pyfunction!(eval::read_calls, m)?)?;
     m.add_function(wrap_pyfunction!(default_config_path_py, m)?)?;
     // Config + runtime-handle spine (Doc 12 §6).
     m.add_function(wrap_pyfunction!(handle::init, m)?)?;

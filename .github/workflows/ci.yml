@@ -40,7 +40,17 @@ jobs:
       # not run — which is the one outcome a security test must never have.
       - name: Install bubblewrap (Linux write-jail)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          # Ubuntu 23.10+ ships an AppArmor profile that forbids unprivileged
+          # user namespaces, which is exactly what `bwrap --unshare-user` needs:
+          # without this it fails with "setting up uid map: Permission denied".
+          # A CI runner is a throwaway VM, so re-enabling it here costs nothing
+          # and is the difference between running the jail test and pretending to.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --dev-bind / / --unshare-user true \
+            && echo "bwrap userns: OK" \
+            || echo "bwrap userns: still blocked — the jail tests will say so"
 
       # Skip tars-py here — it links libpython at test time, which
       # this image doesn't satisfy without extra setup. Coverage
