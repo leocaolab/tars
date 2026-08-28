@@ -438,6 +438,89 @@ impl ResponseJsonExt for ChatResponse {
         decode_json(&self.text, mode)
     }
 }
+/// Best-effort recovery of the COMPLETE leading object elements of a truncated
+/// JSON array. Walks the array from its opening `[`, tracking brace
+/// depth + JSON string state, and returns every element that is fully balanced —
+/// dropping only the incomplete tail element the truncation cut off. Bare
+/// (non-object) elements are skipped: elements are expected to be objects, and a
+/// half-written scalar isn't worth guessing at. Returns an empty vec when there is no
+/// recoverable array or no complete element.
+pub fn salvage_json_array(raw: &str, array_key: Option<&str>) -> Vec<Value> {
+    let Some(arr_start) = find_json_array_start(raw, array_key) else {
+        return Vec::new();
+    };
+    let bytes = raw.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0i32; // brace/bracket depth INSIDE the findings array
+    let mut in_str = false;
+    let mut escaped = false;
+    let mut elem_start: Option<usize> = None;
+    let mut i = arr_start;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => in_str = true,
+            b'{' | b'[' => {
+                if depth == 0 && elem_start.is_none() {
+                    elem_start = Some(i); // an object/array element begins
+                }
+                depth += 1;
+            }
+            b'}' | b']' => {
+                if depth == 0 {
+                    // This closes the findings array itself — done.
+                    break;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(s) = elem_start.take() {
+                        // Braces are ASCII, so `s..=i` is a valid char boundary.
+                        if let Ok(v) = serde_json::from_str::<Value>(&raw[s..=i]) {
+                            out.push(v);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Locate the byte index just AFTER the `[` that opens the JSON array.
+/// Prefers the envelope form (`"key": [ … ]`); falls
+/// back to a bare top-level array (`[ … ]`) ONLY when the reply starts with `[`
+/// (after stripping whitespace). `None` when there is no
+/// safely-identifiable array to recover from.
+pub fn find_json_array_start(raw: &str, array_key: Option<&str>) -> Option<usize> {
+    if let Some(key) = array_key {
+        let search = format!("\"{}\"", key);
+        if let Some(fpos) = raw.find(&search) {
+            // The next `[` after the key opens the array (colon + whitespace between).
+            if let Some(rel) = raw[fpos..].find('[') {
+                return Some(fpos + rel + 1);
+            }
+        }
+    }
+    // Fallback: only if the reply is a bare top-level array.
+    let trimmed = raw.trim_start();
+    if trimmed.starts_with('[') {
+        return raw.find('[').map(|br| br + 1);
+    }
+    None
+}
 
 #[cfg(test)]
 mod tests {
@@ -455,15 +538,17 @@ mod tests {
 
     #[test]
     fn strict_mode_parses_clean_json_directly() {
-        let p: Point =
-            decode_json(r#"{"x":1,"y":2}"#, StructuredOutputMode::StrictSchema).unwrap();
+        let p: Point = decode_json(r#"{"x":1,"y":2}"#, StructuredOutputMode::StrictSchema).unwrap();
         assert_eq!(p, Point { x: 1, y: 2 });
     }
 
     #[test]
     fn strict_mode_tolerates_surrounding_whitespace() {
-        let p: Point =
-            decode_json("  \n{\"x\":3,\"y\":4}\n ", StructuredOutputMode::StrictSchema).unwrap();
+        let p: Point = decode_json(
+            "  \n{\"x\":3,\"y\":4}\n ",
+            StructuredOutputMode::StrictSchema,
+        )
+        .unwrap();
         assert_eq!(p, Point { x: 3, y: 4 });
     }
 
@@ -484,7 +569,10 @@ mod tests {
             StructuredOutputMode::StrictSchema,
         )
         .unwrap_err();
-        assert!(matches!(err, TarsJsonError::InvalidJson { .. }), "got {err:?}");
+        assert!(
+            matches!(err, TarsJsonError::InvalidJson { .. }),
+            "got {err:?}"
+        );
     }
 
     // ── decode_json: chatty (None) fence-scrape fallback ────────────
@@ -559,7 +647,10 @@ mod tests {
             StructuredOutputMode::ToolUseEmulation,
         ] {
             let err = decode_json::<Point>("   \n\t ", mode).unwrap_err();
-            assert!(matches!(err, TarsJsonError::EmptyStream), "mode {mode:?} → {err:?}");
+            assert!(
+                matches!(err, TarsJsonError::EmptyStream),
+                "mode {mode:?} → {err:?}"
+            );
         }
     }
 
@@ -575,9 +666,8 @@ mod tests {
 
     #[test]
     fn none_mode_valid_json_wrong_shape_is_schema_error() {
-        let err =
-            decode_json::<Point>(r#"answer: {"foo":1,"bar":2}"#, StructuredOutputMode::None)
-                .unwrap_err();
+        let err = decode_json::<Point>(r#"answer: {"foo":1,"bar":2}"#, StructuredOutputMode::None)
+            .unwrap_err();
         assert!(matches!(err, TarsJsonError::Schema { .. }), "got {err:?}");
     }
 
@@ -590,9 +680,12 @@ mod tests {
 
     #[test]
     fn strict_mode_malformed_json_is_invalid_json() {
-        let err =
-            decode_json::<Point>(r#"{"x":1,"y":}"#, StructuredOutputMode::StrictSchema).unwrap_err();
-        assert!(matches!(err, TarsJsonError::InvalidJson { .. }), "got {err:?}");
+        let err = decode_json::<Point>(r#"{"x":1,"y":}"#, StructuredOutputMode::StrictSchema)
+            .unwrap_err();
+        assert!(
+            matches!(err, TarsJsonError::InvalidJson { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -747,17 +840,24 @@ mod tests {
     fn clamp_off_by_default_overflow_int_is_schema_error() {
         // u64::MAX doesn't fit i64 → Schema error when clamp is off.
         let text = r#"{"id": 18446744073709551615}"#;
-        let err =
-            decode::<HasId>(text, StructuredOutputMode::StrictSchema, DecodeOpts::default())
-                .unwrap_err();
+        let err = decode::<HasId>(
+            text,
+            StructuredOutputMode::StrictSchema,
+            DecodeOpts::default(),
+        )
+        .unwrap_err();
         assert!(matches!(err, TarsJsonError::Schema { .. }), "got {err:?}");
     }
 
     #[test]
     fn clamp_on_recovers_overflow_int_to_i64_max() {
         let text = r#"{"id": 18446744073709551615}"#;
-        let h: HasId =
-            decode(text, StructuredOutputMode::StrictSchema, DecodeOpts::clamping()).unwrap();
+        let h: HasId = decode(
+            text,
+            StructuredOutputMode::StrictSchema,
+            DecodeOpts::clamping(),
+        )
+        .unwrap();
         assert_eq!(h, HasId { id: i64::MAX });
     }
 
@@ -772,9 +872,20 @@ mod tests {
         impl JsonAgentResponse for Mix {}
         // a in range, b float, c negative — none should be clamped.
         let text = r#"{"a": 42, "b": 3.5, "c": -100}"#;
-        let m: Mix =
-            decode(text, StructuredOutputMode::StrictSchema, DecodeOpts::clamping()).unwrap();
-        assert_eq!(m, Mix { a: 42, b: 3.5, c: -100 });
+        let m: Mix = decode(
+            text,
+            StructuredOutputMode::StrictSchema,
+            DecodeOpts::clamping(),
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            Mix {
+                a: 42,
+                b: 3.5,
+                c: -100
+            }
+        );
     }
 
     #[test]
@@ -828,7 +939,10 @@ mod tests {
             {"id": 3, "msg": "third"}
         ]}"#;
         let items = salvage_json_array(raw, Some("findings"));
-        assert!(!items.is_empty(), "the complete object before the broken syntax survives");
+        assert!(
+            !items.is_empty(),
+            "the complete object before the broken syntax survives"
+        );
         assert_eq!(items[0]["msg"], json!("fully formed"));
     }
 
@@ -873,89 +987,4 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["obj"], json!(true));
     }
-}
-
-
-/// Best-effort recovery of the COMPLETE leading object elements of a truncated
-/// JSON array. Walks the array from its opening `[`, tracking brace
-/// depth + JSON string state, and returns every element that is fully balanced —
-/// dropping only the incomplete tail element the truncation cut off. Bare
-/// (non-object) elements are skipped: elements are expected to be objects, and a 
-/// half-written scalar isn't worth guessing at. Returns an empty vec when there is no
-/// recoverable array or no complete element.
-pub fn salvage_json_array(raw: &str, array_key: Option<&str>) -> Vec<Value> {
-    let Some(arr_start) = find_json_array_start(raw, array_key) else {
-        return Vec::new();
-    };
-    let bytes = raw.as_bytes();
-    let mut out = Vec::new();
-    let mut depth = 0i32; // brace/bracket depth INSIDE the findings array
-    let mut in_str = false;
-    let mut escaped = false;
-    let mut elem_start: Option<usize> = None;
-    let mut i = arr_start;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if c == b'\\' {
-                escaped = true;
-            } else if c == b'"' {
-                in_str = false;
-            }
-            i += 1;
-            continue;
-        }
-        match c {
-            b'"' => in_str = true,
-            b'{' | b'[' => {
-                if depth == 0 && elem_start.is_none() {
-                    elem_start = Some(i); // an object/array element begins
-                }
-                depth += 1;
-            }
-            b'}' | b']' => {
-                if depth == 0 {
-                    // This closes the findings array itself — done.
-                    break;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    if let Some(s) = elem_start.take() {
-                        // Braces are ASCII, so `s..=i` is a valid char boundary.
-                        if let Ok(v) = serde_json::from_str::<Value>(&raw[s..=i]) {
-                            out.push(v);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Locate the byte index just AFTER the `[` that opens the JSON array.
-/// Prefers the envelope form (`"key": [ … ]`); falls
-/// back to a bare top-level array (`[ … ]`) ONLY when the reply starts with `[`
-/// (after stripping whitespace). `None` when there is no
-/// safely-identifiable array to recover from.
-pub fn find_json_array_start(raw: &str, array_key: Option<&str>) -> Option<usize> {
-    if let Some(key) = array_key {
-        let search = format!("\"{}\"", key);
-        if let Some(fpos) = raw.find(&search) {
-            // The next `[` after the key opens the array (colon + whitespace between).
-            if let Some(rel) = raw[fpos..].find('[') {
-                return Some(fpos + rel + 1);
-            }
-        }
-    }
-    // Fallback: only if the reply is a bare top-level array.
-    let trimmed = raw.trim_start();
-    if trimmed.starts_with('[') {
-        return raw.find('[').map(|br| br + 1);
-    }
-    None
 }

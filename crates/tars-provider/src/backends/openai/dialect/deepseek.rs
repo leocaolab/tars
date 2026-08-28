@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 
 use tars_types::{ChatRequest, ProviderError, ThinkingMode};
 
-use super::OpenAiDialect;
 use super::super::adapter::OpenAiAdapter;
+use super::OpenAiDialect;
 
 /// DeepSeek (`api.deepseek.com` and openai_compat gateways fronting it).
 ///
@@ -107,7 +107,11 @@ mod tests {
         assert_eq!(enabled["thinking"]["type"], "enabled");
 
         let budget = DeepSeekDialect
-            .build_request(&adapter, &req(ThinkingMode::Budget(1024)), "deepseek-v4-flash")
+            .build_request(
+                &adapter,
+                &req(ThinkingMode::Budget(1024)),
+                "deepseek-v4-flash",
+            )
             .unwrap();
         assert_eq!(budget["thinking"]["type"], "enabled");
 
@@ -173,8 +177,12 @@ pub(crate) fn lift_dsml(text: &str) -> (String, Vec<tars_types::ToolCall>) {
         let after = &rest[i + "<｜｜DSML｜｜invoke name=\"".len()..];
         let Some(q) = after.find('"') else { break };
         let name = &after[..q];
-        let Some(open_end) = after.find('>') else { break };
-        let Some(close) = after.find(concat!("</｜｜DSML｜｜", "invoke>")) else { break };
+        let Some(open_end) = after.find('>') else {
+            break;
+        };
+        let Some(close) = after.find(concat!("</｜｜DSML｜｜", "invoke>")) else {
+            break;
+        };
         let body = &after[open_end + 1..close];
 
         let mut args = serde_json::Map::new();
@@ -184,7 +192,9 @@ pub(crate) fn lift_dsml(text: &str) -> (String, Vec<tars_types::ToolCall>) {
             let Some(q2) = a.find('"') else { break };
             let key = a[..q2].to_string();
             let Some(ge) = a.find('>') else { break };
-            let Some(pe) = a.find(concat!("</｜｜DSML｜｜", "parameter>")) else { break };
+            let Some(pe) = a.find(concat!("</｜｜DSML｜｜", "parameter>")) else {
+                break;
+            };
             args.insert(key, Value::String(a[ge + 1..pe].to_string()));
             p = &a[pe..];
         }
@@ -234,7 +244,10 @@ mod dsml_tests {
         assert_eq!(calls[0].arguments["path"], "crates/tars-types/src");
         assert_eq!(calls[1].name, "read");
         assert_eq!(calls[1].arguments["path"], "migrations/0001.sql");
-        assert_eq!(text, "I need the failure shape first.", "the words, without the markup: {text:?}");
+        assert_eq!(
+            text, "I need the failure shape first.",
+            "the words, without the markup: {text:?}"
+        );
     }
 
     /// An answer with no markup is returned untouched — this runs on every
@@ -267,13 +280,22 @@ mod dsml_tests {
     #[test]
     fn finalize_lifts_markup_out_of_an_assembled_response() {
         use tars_types::ChatResponse;
-        let mut r = ChatResponse { text: ANSWER.to_string(), ..Default::default() };
+        let mut r = ChatResponse {
+            text: ANSWER.to_string(),
+            ..Default::default()
+        };
         DeepSeekDialect.finalize(&mut r);
 
         assert_eq!(r.tool_calls.len(), 2, "{:?}", r.tool_calls);
         assert_eq!(r.tool_calls[0].name, "grep");
-        assert_eq!(r.tool_calls[0].arguments["pattern"], "struct JournaledReason");
-        assert_eq!(r.text, "I need the failure shape first.", "the words, not the markup");
+        assert_eq!(
+            r.tool_calls[0].arguments["pattern"],
+            "struct JournaledReason"
+        );
+        assert_eq!(
+            r.text, "I need the failure shape first.",
+            "the words, not the markup"
+        );
     }
 
     /// An ordinary streamed answer is untouched — `finalize` runs on every DeepSeek
@@ -282,7 +304,10 @@ mod dsml_tests {
     fn finalize_leaves_an_ordinary_response_alone() {
         use tars_types::ChatResponse;
         let plain = "Let me read the file.\n\n{\"action\":\"fs_read\",\"path\":\"a.rs\"}";
-        let mut r = ChatResponse { text: plain.to_string(), ..Default::default() };
+        let mut r = ChatResponse {
+            text: plain.to_string(),
+            ..Default::default()
+        };
         DeepSeekDialect.finalize(&mut r);
         assert!(r.tool_calls.is_empty());
         assert_eq!(r.text, plain);
@@ -299,5 +324,4 @@ mod dsml_tests {
         let r = DeepSeekDialect.parse_response(&body).expect("parses");
         assert_eq!(r.tool_calls.len(), 2, "{:?}", r.tool_calls);
     }
-
 }

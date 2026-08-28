@@ -21,11 +21,11 @@ use tars_types::{Auth, ProviderId};
 use crate::auth::AuthResolver;
 use crate::backends::anthropic::AnthropicProviderBuilder;
 use crate::backends::cassette::CassetteProvider;
+use crate::backends::claude_cli::ClaudeCliProviderBuilder;
+use crate::backends::claude_sdk::ClaudeSdkProviderBuilder;
 use crate::backends::cli::{
     AgentCliBackend, AntigravityDialect, AntigravityEffort, OpenCodeDialect, SharedCliRunner,
 };
-use crate::backends::claude_cli::ClaudeCliProviderBuilder;
-use crate::backends::claude_sdk::ClaudeSdkProviderBuilder;
 use crate::backends::codex_cli::{CodexCliProviderBuilder, SandboxMode};
 use crate::backends::gemini::GeminiProviderBuilder;
 use crate::backends::llamacpp::llamacpp;
@@ -59,7 +59,9 @@ pub enum RegistryError {
     /// `ProviderRegistry::init` ran before the config was installed. The
     /// composition root must call `tars_config::init_tars` (or `Config::set`)
     /// first.
-    #[error("tars config not initialized — call tars_config::init_tars() before ProviderRegistry::init()")]
+    #[error(
+        "tars config not initialized — call tars_config::init_tars() before ProviderRegistry::init()"
+    )]
     ConfigNotInitialized,
     /// `ProviderRegistry::init` already ran in this process. Reported rather
     /// than silently ignored: a second initializer would otherwise run against
@@ -154,9 +156,7 @@ impl ProviderRegistry {
         for (id, entry) in base.into_iter().chain(cassettes) {
             let provider = match entry {
                 ProviderConfig::Cassette {
-                    path,
-                    record_from,
-                    ..
+                    path, record_from, ..
                 } => build_cassette(id.clone(), path, record_from.as_deref(), force_record, &map),
                 _ => build_one(id.clone(), entry, http.clone(), auth_resolver.clone())?,
             };
@@ -364,10 +364,12 @@ fn build_one(
             region,
             model,
             profile,
-        } => crate::backends::bedrock::BedrockProviderBuilder::new(id, region.clone(), model.clone())
-            .profile(profile.clone())
-            .capabilities(tars_config::capabilities_for("bedrock", model))
-            .build(),
+        } => {
+            crate::backends::bedrock::BedrockProviderBuilder::new(id, region.clone(), model.clone())
+                .profile(profile.clone())
+                .capabilities(tars_config::capabilities_for("bedrock", model))
+                .build()
+        }
 
         // Same variant, feature OFF: fail with an actionable message
         // instead of silently dropping the provider.
@@ -568,7 +570,10 @@ fn build_cassette(
             tracing::info!(path, record_from = src, "cassette recording");
             return CassetteProvider::record_seeded(id, inner.clone(), Some(pb), seed);
         }
-        tracing::warn!(record_from = src, "cassette record_from not found; replaying empty");
+        tracing::warn!(
+            record_from = src,
+            "cassette record_from not found; replaying empty"
+        );
     }
     CassetteProvider::replay(id, HashMap::new())
 }
@@ -666,8 +671,8 @@ mod tests {
         use futures::StreamExt;
         use tars_types::{ChatEvent, ChatRequest, RequestContext};
 
-        let path = std::env::temp_dir()
-            .join(format!("tars_cassette_cfg_{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("tars_cassette_cfg_{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let cfg_str = format!(
             r#"
@@ -686,7 +691,8 @@ mod tests {
         async fn ask(p: Arc<dyn LlmProvider>, prompt: &str) -> String {
             p.stream(
                 ChatRequest::user(prompt),
-                "test-model", RequestContext::test_default(),
+                "test-model",
+                RequestContext::test_default(),
             )
             .await
             .unwrap()
@@ -804,7 +810,8 @@ mod tests {
         let resp = provider
             .complete(
                 ChatRequest::user("ping"),
-                "test-model", RequestContext::test_default(),
+                "test-model",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -886,7 +893,10 @@ mod tests {
             reg.default_model(&ProviderId::new("oc")),
             Some("anthropic/claude-sonnet-4-5")
         );
-        assert_eq!(reg.default_model(&ProviderId::new("agy")), Some("gemini-2.5-pro"));
+        assert_eq!(
+            reg.default_model(&ProviderId::new("agy")),
+            Some("gemini-2.5-pro")
+        );
     }
 
     #[test]

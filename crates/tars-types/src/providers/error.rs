@@ -142,7 +142,11 @@ pub enum ProviderError {
 fn identical_leading_bytes(want: &str, baseline: Option<&str>) -> usize {
     match baseline {
         None => 0,
-        Some(b) => want.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count(),
+        Some(b) => want
+            .bytes()
+            .zip(b.bytes())
+            .take_while(|(x, y)| x == y)
+            .count(),
     }
 }
 
@@ -176,9 +180,7 @@ impl ProviderError {
             | CassetteMiss { .. }
             | Internal(_)
             | CliSubprocessDied { .. }
-            | TimedOut { .. } => {
-                ErrorClass::MaybeRetriable
-            }
+            | TimedOut { .. } => ErrorClass::MaybeRetriable,
         }
     }
 

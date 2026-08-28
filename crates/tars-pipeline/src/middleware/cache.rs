@@ -409,7 +409,7 @@ mod tests {
     use tars_cache::MemoryCacheRegistry;
     use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{ProviderProfile, Pricing, Usage};
+    use tars_types::{Pricing, ProviderProfile, Usage};
 
     /// A counting wrapper around a MockProvider so we can assert the
     /// inner provider was (or wasn't) called.
@@ -462,7 +462,9 @@ mod tests {
         });
         let factory = CacheKeyFactory::new(1);
         let mw = CacheLookupMiddleware::new(registry, factory, ProviderId::new("mock_origin"));
-        let pipeline = LlmService::builder(counting, "test-model").layer(mw).build();
+        let pipeline = LlmService::builder(counting, "test-model")
+            .layer(mw)
+            .build();
         (pipeline, counter)
     }
 
@@ -757,7 +759,9 @@ mod tests {
         let factory = CacheKeyFactory::new(1);
         let req = deterministic_request("midstream");
         let ctx = ctx();
-        let key = factory.compute(&req, "test-model", &ctx).expect("compute key");
+        let key = factory
+            .compute(&req, "test-model", &ctx)
+            .expect("compute key");
 
         let events: Vec<Result<ChatEvent, ProviderError>> = vec![
             Ok(ChatEvent::started("m")),

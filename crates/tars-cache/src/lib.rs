@@ -35,4 +35,3 @@ pub use registry::{CacheRegistry, CachedResponse, MemoryCacheRegistry, MemoryCac
 pub use sqlite::{
     SqliteCacheRegistry, SqliteCacheRegistryConfig, default_personal_cache_path, open_at_path,
 };
-

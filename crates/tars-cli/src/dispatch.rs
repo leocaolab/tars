@@ -174,5 +174,4 @@ mod tests {
         let err = pick_provider(&c, None).unwrap_err();
         assert!(err.to_string().contains("multiple"));
     }
-
 }

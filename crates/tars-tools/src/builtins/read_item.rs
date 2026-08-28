@@ -151,7 +151,9 @@ pub trait ItemFinder: Send + Sync {
 pub struct RustItems;
 
 /// The declaration keywords worth asking for by name.
-const KINDS: &[&str] = &["fn", "struct", "enum", "trait", "impl", "type", "const", "static", "mod"];
+const KINDS: &[&str] = &[
+    "fn", "struct", "enum", "trait", "impl", "type", "const", "static", "mod",
+];
 
 impl ItemFinder for RustItems {
     fn handles(&self, path: &Path) -> bool {
@@ -161,7 +163,11 @@ impl ItemFinder for RustItems {
     fn support(&self) -> Support {
         // `refs` is textual, and says so at its own definition. It is supported in
         // the sense that asking is meaningful; completeness is the compiler's job.
-        Support { items: true, imports: true, refs: true }
+        Support {
+            items: true,
+            imports: true,
+            refs: true,
+        }
     }
 
     fn refs(&self, source: &str, name: &str) -> Vec<Ref> {
@@ -182,7 +188,11 @@ impl ItemFinder for RustItems {
                 } else {
                     RefKind::Mention
                 };
-                Some(Ref { kind, line: i as u32 + 1, text: t.to_string() })
+                Some(Ref {
+                    kind,
+                    line: i as u32 + 1,
+                    text: t.to_string(),
+                })
             })
             .collect()
     }
@@ -251,7 +261,12 @@ impl ItemFinder for RustItems {
             }
         }
 
-        Outline { headline, imports, items, lines: lines.len() as u32 }
+        Outline {
+            headline,
+            imports,
+            items,
+            lines: lines.len() as u32,
+        }
     }
 
     fn find(&self, source: &str, name: &str) -> Option<Item> {
@@ -284,7 +299,9 @@ impl ItemFinder for RustItems {
         let lines: Vec<&str> = source.lines().collect();
         let (decl, kind) = lines.iter().enumerate().find_map(|(i, l)| {
             let t = l.trim_start();
-            KINDS.iter().find_map(|k| declares(t, k, name).then(|| (i, *k)))
+            KINDS
+                .iter()
+                .find_map(|k| declares(t, k, name).then_some((i, *k)))
         })?;
 
         // Everything attached above it. A doc comment and its attributes are part of
@@ -314,10 +331,14 @@ impl RustItems {
     /// The declaration keyword and name on this line, if it declares something.
     fn declaration(trimmed: &str) -> Option<(&'static str, String)> {
         for kind in KINDS {
-            let Some(at) = trimmed.find(kind) else { continue };
+            let Some(at) = trimmed.find(kind) else {
+                continue;
+            };
             if !trimmed[..at].split_whitespace().all(|w| {
-                matches!(w, "pub" | "async" | "unsafe" | "const" | "extern" | "default")
-                    || w.starts_with("pub(")
+                matches!(
+                    w,
+                    "pub" | "async" | "unsafe" | "const" | "extern" | "default"
+                ) || w.starts_with("pub(")
             }) {
                 continue;
             }
@@ -390,10 +411,12 @@ fn declares(trimmed: &str, kind: &str, name: &str) -> bool {
         return false;
     };
     // Only modifiers may precede it — otherwise this is a use, not a declaration.
-    if !trimmed[..at]
-        .split_whitespace()
-        .all(|w| matches!(w, "pub" | "async" | "unsafe" | "const" | "extern" | "default") || w.starts_with("pub("))
-    {
+    if !trimmed[..at].split_whitespace().all(|w| {
+        matches!(
+            w,
+            "pub" | "async" | "unsafe" | "const" | "extern" | "default"
+        ) || w.starts_with("pub(")
+    }) {
         return false;
     }
     let rest = trimmed[at + kind.len()..].trim_start();
@@ -475,9 +498,17 @@ pub type Line = u32;
     fn a_function_comes_back_with_its_doc_comment_and_nothing_after_it() {
         let it = RustItems.find(SRC, "blame").expect("found");
         assert_eq!(it.kind, "fn");
-        assert!(it.text.starts_with("    /// Who last touched"), "{}", it.text);
+        assert!(
+            it.text.starts_with("    /// Who last touched"),
+            "{}",
+            it.text
+        );
         assert!(it.text.trim_end().ends_with('}'), "{}", it.text);
-        assert!(!it.text.contains("blame_range"), "stopped at its own end: {}", it.text);
+        assert!(
+            !it.text.contains("blame_range"),
+            "stopped at its own end: {}",
+            it.text
+        );
     }
 
     /// A brace inside a string literal is not a brace. Counting it would end the
@@ -486,7 +517,11 @@ pub type Line = u32;
     fn a_brace_inside_a_string_does_not_close_the_block() {
         let it = RustItems.find(SRC, "blame").unwrap();
         assert!(it.text.contains("a } brace in a string"));
-        assert!(it.text.contains("vec![rel.to_string()"), "kept going past it: {}", it.text);
+        assert!(
+            it.text.contains("vec![rel.to_string()"),
+            "kept going past it: {}",
+            it.text
+        );
     }
 
     /// `blame` must not return `blame_range`. Matching on `contains` would.
@@ -549,7 +584,10 @@ pub type Line = u32;
     #[test]
     fn a_use_of_a_name_is_not_mistaken_for_its_definition() {
         let src = "fn caller() {\n    other.blame(1);\n}\n";
-        assert!(RustItems.find(src, "blame").is_none(), "a call site is not a definition");
+        assert!(
+            RustItems.find(src, "blame").is_none(),
+            "a call site is not a definition"
+        );
     }
 
     /// An unbalanced file yields nothing rather than the rest of the file.
@@ -558,7 +596,7 @@ pub type Line = u32;
         let src = "pub fn broken() {\n    let x = 1;\n";
         assert!(RustItems.find(src, "broken").is_none());
     }
-/// Against a real 39 KB file, on the case that motivated this.
+    /// Against a real 39 KB file, on the case that motivated this.
     ///
     /// A refactor of `RepoScope::blame` needs `RepoScope::blame`. Reading the file to
     /// get it costs 39,576 bytes; guessing a window around the `grep` hit is what an
@@ -571,11 +609,26 @@ pub type Line = u32;
             return; // not a checkout with that crate; nothing to assert against
         };
 
-        let it = RustItems.find(&src, "RepoScope::blame").expect("the function is there");
+        let it = RustItems
+            .find(&src, "RepoScope::blame")
+            .expect("the function is there");
         assert_eq!(it.kind, "fn");
-        assert!(it.text.len() < src.len() / 20, "{} of {} bytes", it.text.len(), src.len());
-        assert!(it.text.contains("pub fn blame("), "the signature: {}", it.text);
-        assert!(it.text.trim_end().ends_with('}'), "and all of the body: {}", it.text);
+        assert!(
+            it.text.len() < src.len() / 20,
+            "{} of {} bytes",
+            it.text.len(),
+            src.len()
+        );
+        assert!(
+            it.text.contains("pub fn blame("),
+            "the signature: {}",
+            it.text
+        );
+        assert!(
+            it.text.trim_end().ends_with('}'),
+            "and all of the body: {}",
+            it.text
+        );
         assert!(
             it.text.contains("///"),
             "with the doc comment that says why it is shaped that way"
@@ -583,8 +636,13 @@ pub type Line = u32;
 
         // A type, a free function, and a private helper all resolve the same way.
         for name in ["BlameLine", "patch_paths", "RepoScope::safe_rev"] {
-            let found = RustItems.find(&src, name).unwrap_or_else(|| panic!("{name} not found"));
-            assert!(found.start_line > 0 && found.end_line >= found.start_line, "{name}");
+            let found = RustItems
+                .find(&src, name)
+                .unwrap_or_else(|| panic!("{name} not found"));
+            assert!(
+                found.start_line > 0 && found.end_line >= found.start_line,
+                "{name}"
+            );
         }
     }
 
@@ -595,25 +653,47 @@ pub type Line = u32;
     #[test]
     fn an_outline_of_a_real_file_lists_what_can_be_asked_for() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tars-git/src/repo.rs");
-        let Ok(src) = std::fs::read_to_string(path) else { return };
+        let Ok(src) = std::fs::read_to_string(path) else {
+            return;
+        };
 
         let o = RustItems.outline(&src);
-        assert!(o.headline.as_deref().unwrap_or("").contains("RepoScope"), "{:?}", o.headline);
+        assert!(
+            o.headline.as_deref().unwrap_or("").contains("RepoScope"),
+            "{:?}",
+            o.headline
+        );
         assert!(o.lines > 900);
-        assert!(o.imports.iter().any(|i| i.contains("std::path")), "{:?}", o.imports);
+        assert!(
+            o.imports.iter().any(|i| i.contains("std::path")),
+            "{:?}",
+            o.imports
+        );
 
         let names: Vec<&str> = o.items.iter().map(|i| i.name.as_str()).collect();
         // Qualified, because that is what a caller writes and therefore what it
         // should be asked for by.
-        for want in
-            ["RepoScope", "RepoScope::blame", "RepoScope::apply", "BlameLine", "patch_paths"]
-        {
+        for want in [
+            "RepoScope",
+            "RepoScope::blame",
+            "RepoScope::apply",
+            "BlameLine",
+            "patch_paths",
+        ] {
             assert!(names.contains(&want), "{want} missing from {names:?}");
         }
 
         // Signatures only. An outline carrying bodies is the wall of text it replaces.
-        let rendered: usize = o.items.iter().map(|i| i.signature.len() + i.name.len()).sum();
-        assert!(rendered < src.len() / 10, "{rendered} of {} bytes", src.len());
+        let rendered: usize = o
+            .items
+            .iter()
+            .map(|i| i.signature.len() + i.name.len())
+            .sum();
+        assert!(
+            rendered < src.len() / 10,
+            "{rendered} of {} bytes",
+            src.len()
+        );
         assert!(
             !o.items.iter().any(|i| i.signature.contains('\n')),
             "a signature is one line"
@@ -643,8 +723,16 @@ impl T {
     }
 }
 ";
-        let names: Vec<String> = RustItems.outline(src).items.iter().map(|i| i.name.clone()).collect();
-        assert!(names.contains(&"T::method".to_string()), "qualified by its type: {names:?}");
+        let names: Vec<String> = RustItems
+            .outline(src)
+            .items
+            .iter()
+            .map(|i| i.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"T::method".to_string()),
+            "qualified by its type: {names:?}"
+        );
         assert!(!names.contains(&"helper".to_string()), "nested: {names:?}");
         assert!(names.contains(&"impl T".to_string()), "{names:?}");
 
@@ -691,7 +779,11 @@ struct Holder { f: fn() -> u32 }
     #[test]
     fn a_longer_name_is_not_reported_as_a_reference() {
         let src = "fn blame_range() {}\nlet y = blame_range();\n";
-        assert!(RustItems.refs(src, "blame").is_empty(), "{:?}", RustItems.refs(src, "blame"));
+        assert!(
+            RustItems.refs(src, "blame").is_empty(),
+            "{:?}",
+            RustItems.refs(src, "blame")
+        );
         assert_eq!(RustItems.refs(src, "blame_range").len(), 2);
     }
 
@@ -700,13 +792,16 @@ struct Holder { f: fn() -> u32 }
     #[test]
     fn references_in_a_real_file_separate_the_definition_from_the_uses() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tars-git/src/repo.rs");
-        let Ok(src) = std::fs::read_to_string(path) else { return };
+        let Ok(src) = std::fs::read_to_string(path) else {
+            return;
+        };
 
         let refs = RustItems.refs(&src, "blame");
-        let defs: Vec<&Ref> = refs.iter().filter(|r| r.kind == RefKind::Definition).collect();
+        let defs: Vec<&Ref> = refs
+            .iter()
+            .filter(|r| r.kind == RefKind::Definition)
+            .collect();
         assert_eq!(defs.len(), 1, "one definition: {defs:#?}");
         assert!(refs.len() > 1, "and uses besides it: {}", refs.len());
     }
 }
-
-

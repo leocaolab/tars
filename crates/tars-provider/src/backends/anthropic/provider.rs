@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ProviderProfile, ChatRequest,
-    ProviderError, ProviderId, RequestContext,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ChatRequest, ProviderError, ProviderId,
+    ProviderProfile, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver};
@@ -113,7 +113,15 @@ impl LlmProvider for AnthropicProvider {
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
-        stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, model, ctx).await
+        stream_via_adapter(
+            self.http.clone(),
+            self.adapter.clone(),
+            auth,
+            req,
+            model,
+            ctx,
+        )
+        .await
     }
 
     fn as_batch_submitter(self: Arc<Self>) -> Option<Arc<dyn BatchSubmitter>> {

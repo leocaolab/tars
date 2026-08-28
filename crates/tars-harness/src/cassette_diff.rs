@@ -233,7 +233,14 @@ impl RequestDiff {
             removed: changes.iter().filter(|c| c.op == Op::Removed).count(),
             identical_bytes,
         };
-        Self { kind: "cassette-request-diff", version: 1, fingerprint: fp, baseline_selected_by: by, changes, summary }
+        Self {
+            kind: "cassette-request-diff",
+            version: 1,
+            fingerprint: fp,
+            baseline_selected_by: by,
+            changes,
+            summary,
+        }
     }
 
     /// Build from the provider's typed miss.
@@ -265,7 +272,10 @@ impl RequestDiff {
         Some(Self::build(
             want_canon,
             baseline_canon.as_deref()?,
-            Fingerprints { want: want_fp.clone(), baseline: baseline_fp.clone()? },
+            Fingerprints {
+                want: want_fp.clone(),
+                baseline: baseline_fp.clone()?,
+            },
             by,
         ))
     }
@@ -337,7 +347,10 @@ fn fold_value(sign: &str, v: &str, path: &str, artifact: &str) -> String {
         return lines.iter().map(|l| format!("  {sign} {l}\n")).collect();
     }
     let hidden = lines.len() - EDGE * 2;
-    let chars: usize = lines[EDGE..lines.len() - EDGE].iter().map(|l| l.len()).sum();
+    let chars: usize = lines[EDGE..lines.len() - EDGE]
+        .iter()
+        .map(|l| l.len())
+        .sum();
     let mut s = String::new();
     for l in &lines[..EDGE] {
         s.push_str(&format!("  {sign} {l}\n"));

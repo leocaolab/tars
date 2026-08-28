@@ -54,8 +54,8 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 
 use tars_provider::backends::cli::{
-    AgentCliBackend, AntigravityDialect, AntigravityEffort, ClaudeCliDialect, ClaudeCliTools, CliDialect,
-    CodexCliDialect, OpenCodeDialect, OutputFraming, OutputMode, PromptChannel,
+    AgentCliBackend, AntigravityDialect, AntigravityEffort, ClaudeCliDialect, ClaudeCliTools,
+    CliDialect, CodexCliDialect, OpenCodeDialect, OutputFraming, OutputMode, PromptChannel,
     SandboxMode, SubprocessInvocation, SubprocessRunner,
 };
 use tars_provider::provider::LlmProvider;
@@ -105,7 +105,10 @@ impl SubprocessRunner for DeadRunner {
 }
 
 /// Build an `AgentCliBackend` around a scenario's dialect + a runner.
-fn backend(dialect: Arc<dyn CliDialect>, runner: Arc<dyn SubprocessRunner>) -> Arc<AgentCliBackend> {
+fn backend(
+    dialect: Arc<dyn CliDialect>,
+    runner: Arc<dyn SubprocessRunner>,
+) -> Arc<AgentCliBackend> {
     Arc::new(AgentCliBackend::new(
         "cli_conf".into(),
         ProviderProfile::text_only_baseline(Pricing::default()),
@@ -148,7 +151,9 @@ mod scenarios {
             (
                 PromptChannel::Stdin,
                 OutputMode::JsonEvents,
-                OutputFraming::SingleObject { strip_prefix: false },
+                OutputFraming::SingleObject {
+                    strip_prefix: false,
+                },
             )
         }
         pub fn stripped_env() -> &'static [&'static str] {

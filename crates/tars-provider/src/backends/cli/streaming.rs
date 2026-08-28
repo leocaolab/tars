@@ -12,8 +12,8 @@
 
 use serde_json::Value;
 
-use tars_types::ProviderError;
 use super::cli_subprocess_died;
+use tars_types::ProviderError;
 
 use super::argv::SubprocessInvocation;
 use super::subprocess::truncate;
@@ -39,18 +39,18 @@ pub(crate) async fn run_streaming(
 ) -> Result<Value, ProviderError> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| {
-            cli_subprocess_died(None, "stream-json: stdout pipe missing on spawned child".into())
-        })?;
-    let stderr_pipe = child
-        .stderr
-        .take()
-        .ok_or_else(|| {
-            cli_subprocess_died(None, "stream-json: stderr pipe missing on spawned child".into())
-        })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        cli_subprocess_died(
+            None,
+            "stream-json: stdout pipe missing on spawned child".into(),
+        )
+    })?;
+    let stderr_pipe = child.stderr.take().ok_or_else(|| {
+        cli_subprocess_died(
+            None,
+            "stream-json: stderr pipe missing on spawned child".into(),
+        )
+    })?;
 
     // Drain stderr in a separate task so the child can't block on a full
     // pipe (claude prints rate limit / debug to stderr).
@@ -104,7 +104,10 @@ pub(crate) async fn run_streaming(
                 }
                 Ok(None) => break, // EOF
                 Err(e) => {
-                    return Err(cli_subprocess_died(None, format!("stream read failed: {e}")));
+                    return Err(cli_subprocess_died(
+                        None,
+                        format!("stream read failed: {e}"),
+                    ));
                 }
             }
         }
@@ -362,7 +365,10 @@ mod tests {
             started.elapsed()
         );
         let msg = err.to_string();
-        assert!(msg.contains("timed out"), "expected a timeout error, got: {msg}");
+        assert!(
+            msg.contains("timed out"),
+            "expected a timeout error, got: {msg}"
+        );
         // We killed the child; it did not die on its own — the abort is a
         // `TimedOut`, NOT a `CliSubprocessDied`, and `budget` is the invocation
         // budget the call was given (200ms here).

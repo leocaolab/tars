@@ -194,7 +194,6 @@ impl SqliteCacheRegistry {
     fn now_ms(&self) -> i64 {
         self.clock.now_ms()
     }
-
 }
 
 #[async_trait]

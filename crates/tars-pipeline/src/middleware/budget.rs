@@ -40,7 +40,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 
 use tars_provider::LlmEventStream;
-use tars_types::{ProviderProfile, ChatRequest, Pricing, ProviderError, RequestContext};
+use tars_types::{ChatRequest, Pricing, ProviderError, ProviderProfile, RequestContext};
 
 use crate::middleware::Middleware;
 use crate::service::Next;
@@ -89,7 +89,10 @@ impl PerCallBudgetMiddleware {
     /// Fallible construction from a provider's capability snapshot.
     /// Returns [`BudgetConfigError`] when `cap_usd` or
     /// `capabilities.pricing` would silently break budgeting.
-    pub fn try_new(cap_usd: f64, capabilities: &ProviderProfile) -> Result<Self, BudgetConfigError> {
+    pub fn try_new(
+        cap_usd: f64,
+        capabilities: &ProviderProfile,
+    ) -> Result<Self, BudgetConfigError> {
         validate_cap(cap_usd)?;
         validate_pricing(&capabilities.pricing)?;
         Ok(Self {

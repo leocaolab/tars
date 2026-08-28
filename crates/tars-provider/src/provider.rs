@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, Stream, StreamExt};
 
 use tars_types::{
-    ProviderProfile, ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, CostUsd,
-    ProviderError, ProviderId, RequestContext, Usage,
+    ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, CostUsd, ProviderError, ProviderId,
+    ProviderProfile, RequestContext, Usage,
 };
 
 /// Convenience alias for the streaming return type. `'static` because

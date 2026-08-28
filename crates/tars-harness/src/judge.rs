@@ -27,7 +27,6 @@
 //! the agent itself made. `ensure_anti_incest(judge_id, &critic_provider_ids)`
 //! refuses to run when the prefix matches.
 
-
 use async_trait::async_trait;
 use futures::StreamExt;
 use thiserror::Error;

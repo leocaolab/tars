@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use url::Url;
 
 use tars_types::{
-    ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason,
-    StructuredOutputMode, Usage,
+    ChatEvent, ChatRequest, ContentBlock, Message, ProviderError, StopReason, StructuredOutputMode,
+    Usage,
 };
 
 use crate::auth::ResolvedAuth;
@@ -223,7 +223,6 @@ impl OpenAiAdapter {
         req: &ChatRequest,
         model: &str,
     ) -> Result<Value, ProviderError> {
-
         // OpenAI rejects `{"role":"user","content":[]}` with a 400 — fail
         // fast with a typed error rather than waste a round trip.
         for m in &req.messages {
@@ -720,9 +719,8 @@ mod tests {
             thinking: Default::default(),
             enable_chat_template_thinking: None,
         };
-        let mk = |mode| {
-            OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), mode)
-        };
+        let mk =
+            |mode| OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), mode);
 
         // StrictSchema (OpenAI proper) → json_schema.
         let strict = mk(StructuredOutputMode::StrictSchema)
@@ -779,7 +777,10 @@ mod tests {
         // Even with a `deepseek` base_url, the default StandardDialect path
         // emits no `thinking` — the base_url string does not gate this.
         for (base, mode) in [
-            ("https://api.deepseek.com", StructuredOutputMode::JsonObjectMode),
+            (
+                "https://api.deepseek.com",
+                StructuredOutputMode::JsonObjectMode,
+            ),
             (DEFAULT_BASE_URL, StructuredOutputMode::StrictSchema),
         ] {
             let body = OpenAiAdapter::new(base.into(), HttpProviderExtras::default(), mode)
@@ -796,7 +797,11 @@ mod tests {
     fn translate_request_dedups_system_when_req_system_set() {
         // When the caller sets both req.system and an inline System message,
         // the inline System is skipped so only one system block is emitted.
-        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
+        let a = OpenAiAdapter::new(
+            DEFAULT_BASE_URL.into(),
+            HttpProviderExtras::default(),
+            StructuredOutputMode::StrictSchema,
+        );
         let req = ChatRequest {
             system: Some("explicit system".into()),
             messages: vec![
@@ -829,7 +834,11 @@ mod tests {
 
     #[test]
     fn classify_401_is_auth() {
-        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
+        let a = OpenAiAdapter::new(
+            DEFAULT_BASE_URL.into(),
+            HttpProviderExtras::default(),
+            StructuredOutputMode::StrictSchema,
+        );
         let err = a.classify_error(
             StatusCode::UNAUTHORIZED,
             &empty_headers(),
@@ -840,7 +849,11 @@ mod tests {
 
     #[test]
     fn classify_429_is_rate_limited() {
-        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
+        let a = OpenAiAdapter::new(
+            DEFAULT_BASE_URL.into(),
+            HttpProviderExtras::default(),
+            StructuredOutputMode::StrictSchema,
+        );
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &empty_headers(), "");
         assert!(matches!(
             err,
@@ -850,7 +863,11 @@ mod tests {
 
     #[test]
     fn classify_429_with_retry_after_seconds_populates_field() {
-        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
+        let a = OpenAiAdapter::new(
+            DEFAULT_BASE_URL.into(),
+            HttpProviderExtras::default(),
+            StructuredOutputMode::StrictSchema,
+        );
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::RETRY_AFTER, "42".parse().unwrap());
         let err = a.classify_error(StatusCode::TOO_MANY_REQUESTS, &headers, "");
@@ -864,7 +881,11 @@ mod tests {
 
     #[test]
     fn classify_400_context_length_is_typed() {
-        let a = OpenAiAdapter::new(DEFAULT_BASE_URL.into(), HttpProviderExtras::default(), StructuredOutputMode::StrictSchema);
+        let a = OpenAiAdapter::new(
+            DEFAULT_BASE_URL.into(),
+            HttpProviderExtras::default(),
+            StructuredOutputMode::StrictSchema,
+        );
         let body = r#"{"error":{"message":"context_length_exceeded: too many tokens"}}"#;
         let err = a.classify_error(StatusCode::BAD_REQUEST, &empty_headers(), body);
         assert!(matches!(err, ProviderError::ContextTooLong { .. }));

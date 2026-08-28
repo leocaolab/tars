@@ -109,7 +109,12 @@ async fn escape_blocked_async() {
     //    shaped JSON so `RealSubprocessRunner::run` parses it. The escape
     //    attempts are `|| :`-guarded so the script still exits 0 and emits its
     //    JSON even when the jail denies the writes (EPERM). ──
-    let script = mock_cli_script(&outside_create, &outside_victim, &inside_file, &claude_probe);
+    let script = mock_cli_script(
+        &outside_create,
+        &outside_victim,
+        &inside_file,
+        &claude_probe,
+    );
     // The mock lives INSIDE the worktree so the exec'd binary is reachable under
     // BOTH jails: macOS Seatbelt exposes the whole fs (read is broad, so anywhere
     // works), but Linux bubblewrap is a mount namespace whose `--tmpfs /tmp` masks

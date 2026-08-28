@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ProviderProfile, ChatRequest,
-    ProviderError, ProviderId, RequestContext,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ChatRequest, ProviderError, ProviderId,
+    ProviderProfile, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver};
@@ -220,9 +220,15 @@ impl LlmProvider for OpenAiProvider {
         ctx: RequestContext,
     ) -> Result<LlmEventStream, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, &ctx).await?;
-        let inner =
-            stream_via_adapter(self.http.clone(), self.adapter.clone(), auth, req, model, ctx)
-                .await?;
+        let inner = stream_via_adapter(
+            self.http.clone(),
+            self.adapter.clone(),
+            auth,
+            req,
+            model,
+            ctx,
+        )
+        .await?;
         Ok(whole_text(inner, self.dialect.clone()))
     }
 
@@ -515,8 +521,8 @@ mod dialect_seam_tests {
     fn provider_defaults_to_standard_dialect_and_routes_through_it() {
         let http =
             HttpProviderBase::default_arc().expect("failed to create default HTTP provider base");
-        let provider = OpenAiProviderBuilder::new("openai", Auth::None)
-            .build(http, crate::auth::basic());
+        let provider =
+            OpenAiProviderBuilder::new("openai", Auth::None).build(http, crate::auth::basic());
 
         let req = ChatRequest {
             system: None,
@@ -534,7 +540,10 @@ mod dialect_seam_tests {
         };
 
         let via_dialect = provider.adapter.translate_request(&req, "gpt-4o").unwrap();
-        let direct = provider.adapter.build_request_default(&req, "gpt-4o").unwrap();
+        let direct = provider
+            .adapter
+            .build_request_default(&req, "gpt-4o")
+            .unwrap();
         assert_eq!(
             via_dialect, direct,
             "default dialect must produce the standard body byte-for-byte",
@@ -590,8 +599,8 @@ mod dialect_seam_tests {
     fn non_deepseek_base_url_emits_no_thinking() {
         use tars_types::ThinkingMode;
         let http = HttpProviderBase::default_arc().expect("http base");
-        let provider = OpenAiProviderBuilder::new("openai", Auth::None)
-            .build(http, crate::auth::basic());
+        let provider =
+            OpenAiProviderBuilder::new("openai", Auth::None).build(http, crate::auth::basic());
 
         let body = provider
             .adapter
@@ -699,7 +708,10 @@ mod whole_text_stream_tests {
 
         assert_eq!(r.tool_calls.len(), 1, "{:?}", r.tool_calls);
         assert_eq!(r.tool_calls[0].name, "fs_read");
-        assert_eq!(r.tool_calls[0].arguments["path"], "crates/tars-git/src/repo.rs");
+        assert_eq!(
+            r.tool_calls[0].arguments["path"],
+            "crates/tars-git/src/repo.rs"
+        );
         assert!(
             !r.text.contains("DSML"),
             "markup reached the consumer: {:?}",

@@ -44,7 +44,7 @@ use tokio::sync::Mutex;
 
 use tars_provider::LlmEventStream;
 use tars_types::{
-    ProviderProfile, ChatEvent, ChatRequest, Pricing, ProviderError, RequestContext, TenantId,
+    ChatEvent, ChatRequest, Pricing, ProviderError, ProviderProfile, RequestContext, TenantId,
 };
 
 use crate::middleware::Middleware;
@@ -421,7 +421,7 @@ mod tests {
 
     use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{ProviderProfile, ProviderId, StopReason, Usage};
+    use tars_types::{ProviderId, ProviderProfile, StopReason, Usage};
 
     fn priced(input: f64, output: f64) -> Pricing {
         Pricing {
@@ -612,9 +612,12 @@ mod tests {
         }
 
         let mw = TenantBudgetMiddleware::from_parts(store.clone(), priced(3.0, 15.0), 1000);
-        let svc = LlmService::builder(Arc::new(ImmediateError) as Arc<dyn LlmProvider>, "test-model")
-            .layer(mw)
-            .build();
+        let svc = LlmService::builder(
+            Arc::new(ImmediateError) as Arc<dyn LlmProvider>,
+            "test-model",
+        )
+        .layer(mw)
+        .build();
 
         let err = svc
             .call(req("hi", Some(100)), ctx_for("acme"))

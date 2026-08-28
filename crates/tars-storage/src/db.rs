@@ -85,12 +85,16 @@ impl Db {
             .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(Duration::from_secs(5))
             .pragma("temp_store", "MEMORY");
-        let pool =
-            SqlitePoolOptions::new().connect_with(opts).await.map_err(|source| DbError::Open {
+        let pool = SqlitePoolOptions::new()
+            .connect_with(opts)
+            .await
+            .map_err(|source| DbError::Open {
                 path: path.display().to_string(),
                 source,
             })?;
-        Ok(Self { backend: Backend::Sqlite(pool) })
+        Ok(Self {
+            backend: Backend::Sqlite(pool),
+        })
     }
 
     /// An in-memory SQLite database, for tests and ephemeral use.
@@ -100,15 +104,23 @@ impl Db {
     /// a test would see its own writes disappear at random.
     pub async fn sqlite_in_memory() -> Result<Self, DbError> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
-            .map_err(|source| DbError::Open { path: ":memory:".into(), source })?
+            .map_err(|source| DbError::Open {
+                path: ":memory:".into(),
+                source,
+            })?
             .pragma("temp_store", "MEMORY");
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .min_connections(1)
             .connect_with(opts)
             .await
-            .map_err(|source| DbError::Open { path: ":memory:".into(), source })?;
-        Ok(Self { backend: Backend::Sqlite(pool) })
+            .map_err(|source| DbError::Open {
+                path: ":memory:".into(),
+                source,
+            })?;
+        Ok(Self {
+            backend: Backend::Sqlite(pool),
+        })
     }
 
     /// Apply a store's embedded migration set. The migrator's own
@@ -147,12 +159,20 @@ mod tests {
     #[tokio::test]
     async fn in_memory_keeps_one_connection_so_writes_do_not_vanish() {
         let db = Db::sqlite_in_memory().await.unwrap();
-        sqlx::query("CREATE TABLE t (x INTEGER)").execute(db.sqlite()).await.unwrap();
+        sqlx::query("CREATE TABLE t (x INTEGER)")
+            .execute(db.sqlite())
+            .await
+            .unwrap();
         // A second connection would be a second, empty database — this INSERT and
         // the SELECT below have to land on the same one.
-        sqlx::query("INSERT INTO t (x) VALUES (1)").execute(db.sqlite()).await.unwrap();
-        let n: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM t").fetch_one(db.sqlite()).await.unwrap();
+        sqlx::query("INSERT INTO t (x) VALUES (1)")
+            .execute(db.sqlite())
+            .await
+            .unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(db.sqlite())
+            .await
+            .unwrap();
         assert_eq!(n, 1);
     }
 
@@ -161,10 +181,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_sqlite(dir.path().join("t.db")).await.unwrap();
         let cloned = db.clone();
-        sqlx::query("CREATE TABLE t (x INTEGER)").execute(db.sqlite()).await.unwrap();
-        sqlx::query("INSERT INTO t (x) VALUES (1)").execute(cloned.sqlite()).await.unwrap();
-        let n: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM t").fetch_one(db.sqlite()).await.unwrap();
+        sqlx::query("CREATE TABLE t (x INTEGER)")
+            .execute(db.sqlite())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t (x) VALUES (1)")
+            .execute(cloned.sqlite())
+            .await
+            .unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
+            .fetch_one(db.sqlite())
+            .await
+            .unwrap();
         assert_eq!(n, 1, "a clone must see the original's schema and rows");
     }
 
@@ -172,15 +200,22 @@ mod tests {
     async fn opening_a_file_wal_lets_a_reader_and_a_writer_coexist() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open_sqlite(dir.path().join("t.db")).await.unwrap();
-        let mode: String =
-            sqlx::query_scalar("PRAGMA journal_mode").fetch_one(db.sqlite()).await.unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(db.sqlite())
+            .await
+            .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
     }
 
     #[tokio::test]
     async fn open_names_the_path_it_could_not_open() {
-        let err = Db::open_sqlite("/nonexistent-dir-for-this-test/t.db").await.unwrap_err();
+        let err = Db::open_sqlite("/nonexistent-dir-for-this-test/t.db")
+            .await
+            .unwrap_err();
         assert!(matches!(err, DbError::Open { .. }), "{err:?}");
-        assert!(format!("{err}").contains("nonexistent-dir-for-this-test"), "{err}");
+        assert!(
+            format!("{err}").contains("nonexistent-dir-for-this-test"),
+            "{err}"
+        );
     }
 }

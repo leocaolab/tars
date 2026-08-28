@@ -213,7 +213,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tars_provider::LlmProvider;
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_types::{ProviderProfile, Pricing, ProviderId, StopReason, Usage};
+    use tars_types::{Pricing, ProviderId, ProviderProfile, StopReason, Usage};
     use tracing::Subscriber;
     use tracing::field::{Field, Visit};
     use tracing_subscriber::Registry;
@@ -303,10 +303,7 @@ mod tests {
             .layer(TelemetryMiddleware::new())
             .build();
         let mut s = Arc::new(pipeline)
-            .call(
-                ChatRequest::user("x"),
-                RequestContext::test_default(),
-            )
+            .call(ChatRequest::user("x"), RequestContext::test_default())
             .await
             .unwrap();
         let mut got_finished = false;
@@ -330,10 +327,7 @@ mod tests {
             .layer(TelemetryMiddleware::new())
             .build();
         let err = match Arc::new(pipeline)
-            .call(
-                ChatRequest::user("x"),
-                RequestContext::test_default(),
-            )
+            .call(ChatRequest::user("x"), RequestContext::test_default())
             .await
         {
             Ok(_) => panic!("expected open-time error"),
@@ -357,10 +351,7 @@ mod tests {
 
         let ((), captured) = with_capture(|_| async {
             let mut s = Arc::new(pipeline)
-                .call(
-                    ChatRequest::user("x"),
-                    RequestContext::test_default(),
-                )
+                .call(ChatRequest::user("x"), RequestContext::test_default())
                 .await
                 .unwrap();
             while let Some(ev) = s.next().await {
@@ -407,10 +398,7 @@ mod tests {
 
         let (_err, captured) = with_capture(|_| async {
             Arc::new(pipeline)
-                .call(
-                    ChatRequest::user("x"),
-                    RequestContext::test_default(),
-                )
+                .call(ChatRequest::user("x"), RequestContext::test_default())
                 .await
                 .err()
                 .expect("expected open-time error")
@@ -491,10 +479,7 @@ mod tests {
 
         let (collected, captured) = with_capture(|_| async {
             let mut s = Arc::new(pipeline)
-                .call(
-                    ChatRequest::user("x"),
-                    RequestContext::test_default(),
-                )
+                .call(ChatRequest::user("x"), RequestContext::test_default())
                 .await
                 .expect("stream should open successfully");
             let mut out = Vec::new();
@@ -560,10 +545,7 @@ mod tests {
 
         let ((), captured) = with_capture(|_| async {
             let mut s = Arc::new(pipeline)
-                .call(
-                    ChatRequest::user("x"),
-                    RequestContext::test_default(),
-                )
+                .call(ChatRequest::user("x"), RequestContext::test_default())
                 .await
                 .unwrap();
             while let Some(ev) = s.next().await {

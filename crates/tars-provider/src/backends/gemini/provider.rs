@@ -8,8 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use tars_types::{
-    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ProviderProfile, ChatRequest,
-    ProviderError, ProviderId, RequestContext,
+    BatchItemId, BatchJobId, BatchResultItem, BatchStatus, ChatRequest, ProviderError, ProviderId,
+    ProviderProfile, RequestContext,
 };
 
 use crate::auth::{Auth, AuthResolver, ResolvedAuth};

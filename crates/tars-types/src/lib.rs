@@ -33,11 +33,12 @@ pub mod telemetry;
 pub mod validation;
 
 pub use ids::{
-    AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId,
-    TenantId, TraceId, TrajectoryId,
+    AgentId, BatchItemId, BatchJobId, L3HandleId, PrincipalId, ProviderId, SessionId, TenantId,
+    TraceId, TrajectoryId,
 };
 pub use principal::{Principal, PrincipalKind, Scope};
 pub use providers::auth::Auth;
+pub use providers::batch::{BatchResultItem, BatchStatus};
 pub use providers::cache::{CacheDirective, CacheHitInfo, ProviderCacheHandle, systemtime_millis};
 pub use providers::chat::{
     CapabilityRequirements, ChatRequest, CompatibilityCheck, CompatibilityReason, ContentBlock,
@@ -55,11 +56,8 @@ pub use providers::response::{ChatResponse, ChatResponseBuilder};
 pub use providers::schema::JsonSchema;
 pub use providers::tools::{ToolCall, ToolChoice, ToolSpec};
 pub use providers::usage::{CostUsd, Pricing, Usage};
-pub use providers::batch::{BatchResultItem, BatchStatus};
 pub use run_context::{RUN_CONTEXT, spawn_with_context};
-pub use run_report::{
-    AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus,
-};
+pub use run_report::{AgentBreakdown, ProviderBreakdown, RunErrorSummary, RunReport, RunStatus};
 pub use secret::{SecretRef, SecretString};
 pub use telemetry::{RetryAttempt, SharedTelemetry, TelemetryAccumulator, new_shared_telemetry};
 pub use validation::{

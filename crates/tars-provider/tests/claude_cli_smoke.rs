@@ -31,8 +31,7 @@ async fn claude_cli_say_hi_against_real_binary() {
 
     // `sonnet` is the alias to the latest Sonnet model; `opus` and
     // `haiku` work too. Subscription tier limits which is available.
-    let req = ChatRequest::user("Say exactly: hello from claude. Nothing else.",
-    );
+    let req = ChatRequest::user("Say exactly: hello from claude. Nothing else.");
 
     println!("\n── claude_cli smoke: spawning real `claude -p` ──");
     let mut stream = Arc::clone(&provider)

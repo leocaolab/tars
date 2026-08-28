@@ -208,11 +208,14 @@ impl Tool for GrepTool {
         let parsed: GrepArgs =
             serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
 
-        let search_root =
-            match self.resolve(parsed.path.as_deref(), ctx.cwd.as_deref(), &ctx.readable_roots) {
-                Ok(p) => p,
-                Err(result) => return Ok(result),
-            };
+        let search_root = match self.resolve(
+            parsed.path.as_deref(),
+            ctx.cwd.as_deref(),
+            &ctx.readable_roots,
+        ) {
+            Ok(p) => p,
+            Err(result) => return Ok(result),
+        };
 
         let pattern = parsed.pattern.clone();
         let glob = parsed.glob.clone();
@@ -226,7 +229,15 @@ impl Tool for GrepTool {
         // runtime, and race it against cancellation so a dropped turn returns
         // promptly (the blocking task also checks `cancel` cooperatively).
         let handle = tokio::task::spawn_blocking(move || {
-            run_search(root_for_blocking, &pattern, glob.as_deref(), ci, cap, ctxn, &cancel)
+            run_search(
+                root_for_blocking,
+                &pattern,
+                glob.as_deref(),
+                ci,
+                cap,
+                ctxn,
+                &cancel,
+            )
         });
         let joined = tokio::select! {
             biased;
@@ -237,8 +248,14 @@ impl Tool for GrepTool {
         let outcome = match joined {
             Ok(Ok(o)) => o,
             Ok(Err(SearchError::Cancelled)) => return Err(ToolError::Cancelled),
-            Ok(Err(SearchError::BadInput(msg))) => return Ok(ToolResult::titled_error("invalid search", msg)),
-            Err(join_err) => return Err(ToolError::Execute(format!("grep task panicked: {join_err}"))),
+            Ok(Err(SearchError::BadInput(msg))) => {
+                return Ok(ToolResult::titled_error("invalid search", msg));
+            }
+            Err(join_err) => {
+                return Err(ToolError::Execute(format!(
+                    "grep task panicked: {join_err}"
+                )));
+            }
         };
 
         if outcome.matches.is_empty() {
@@ -281,8 +298,8 @@ fn run_search(
     cancel: &CancellationToken,
 ) -> Result<SearchOutcome, SearchError> {
     use grep::regex::RegexMatcherBuilder;
-    use grep::searcher::sinks::UTF8;
     use grep::searcher::SearcherBuilder;
+    use grep::searcher::sinks::UTF8;
 
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(case_insensitive)
@@ -429,7 +446,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!r.is_error);
-        assert!(r.content.contains("a.rs:2: let x = TARGET;"), "got: {}", r.content);
+        assert!(
+            r.content.contains("a.rs:2: let x = TARGET;"),
+            "got: {}",
+            r.content
+        );
         assert!(!r.content.contains("b.rs"));
     }
 
@@ -473,7 +494,8 @@ mod tests {
             .unwrap();
         assert!(!r.is_error, "got: {}", r.content);
         assert!(
-            r.content.contains("static_layer.rs:1: fn parse_ruff_output() {}"),
+            r.content
+                .contains("static_layer.rs:1: fn parse_ruff_output() {}"),
             "parent .gitignore must NOT blind a search of the requested root; got: {}",
             r.content
         );
@@ -493,7 +515,11 @@ mod tests {
             .await
             .unwrap();
         assert!(r.content.contains("keep.rs"));
-        assert!(!r.content.contains("skip.txt"), "glob should exclude .txt: {}", r.content);
+        assert!(
+            !r.content.contains("skip.txt"),
+            "glob should exclude .txt: {}",
+            r.content
+        );
     }
 
     /// The same glob, one directory down.
@@ -520,8 +546,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!r.is_error, "got: {}", r.content);
-        assert!(r.content.contains("keep.rs"), "nested .rs must be found; got: {}", r.content);
-        assert!(!r.content.contains("skip.txt"), "glob should exclude .txt: {}", r.content);
+        assert!(
+            r.content.contains("keep.rs"),
+            "nested .rs must be found; got: {}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("skip.txt"),
+            "glob should exclude .txt: {}",
+            r.content
+        );
     }
 
     /// An alternation is an ordinary regex and must match like one.
@@ -582,7 +616,11 @@ mod tests {
             .await
             .unwrap();
         assert!(r.content.contains("tracked.rs"));
-        assert!(!r.content.contains("ignored.rs"), "gitignore'd file must be skipped: {}", r.content);
+        assert!(
+            !r.content.contains("ignored.rs"),
+            "gitignore'd file must be skipped: {}",
+            r.content
+        );
     }
 
     #[tokio::test]
@@ -684,7 +722,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!r.is_error, "granted readable_root must be searchable: {}", r.content);
+        assert!(
+            !r.is_error,
+            "granted readable_root must be searchable: {}",
+            r.content
+        );
         assert!(r.content.contains("config.rs"));
     }
 
@@ -710,7 +752,13 @@ mod tests {
     async fn a_window_makes_the_hit_answerable_without_a_second_turn() {
         let dir = tempfile::tempdir().unwrap();
         let body: String = (1..=40)
-            .map(|i| if i == 20 { "pub enum EventKind {\n".to_string() } else { format!("line {i}\n") })
+            .map(|i| {
+                if i == 20 {
+                    "pub enum EventKind {\n".to_string()
+                } else {
+                    format!("line {i}\n")
+                }
+            })
             .collect();
         std::fs::write(dir.path().join("t.rs"), body).unwrap();
 
@@ -727,8 +775,14 @@ mod tests {
             .await
             .unwrap();
         let text = out.content;
-        assert!(text.contains(">   20 pub enum EventKind {"), "the hit is marked: {text}");
-        assert!(text.contains("   17 line 17"), "and three lines before it: {text}");
+        assert!(
+            text.contains(">   20 pub enum EventKind {"),
+            "the hit is marked: {text}"
+        );
+        assert!(
+            text.contains("   17 line 17"),
+            "and three lines before it: {text}"
+        );
         assert!(text.contains("   23 line 23"), "and three after: {text}");
         assert!(!text.contains("line 16"), "and no more than asked: {text}");
     }
@@ -762,8 +816,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!r.is_error, "default path must not escape its own jail: {}", r.content);
-        assert!(r.content.contains("hit.rs"), "it searched the jail: {}", r.content);
+        assert!(
+            !r.is_error,
+            "default path must not escape its own jail: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("hit.rs"),
+            "it searched the jail: {}",
+            r.content
+        );
     }
 }
-

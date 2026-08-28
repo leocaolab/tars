@@ -155,10 +155,7 @@ async fn open_events(dir: &std::path::Path) -> Result<std::sync::Arc<dyn Pipelin
             path.display()
         );
     }
-    Ok(SqlitePipelineEventLog::open(
-        SqlitePipelineEventLogConfig::new(path),
-    )
-    .await?)
+    Ok(SqlitePipelineEventLog::open(SqlitePipelineEventLogConfig::new(path)).await?)
 }
 
 async fn open_records(dir: &std::path::Path) -> Result<std::sync::Arc<dyn LlmRecordStore>> {

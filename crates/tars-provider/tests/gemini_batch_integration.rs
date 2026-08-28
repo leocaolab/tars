@@ -47,10 +47,8 @@ async fn submit_returns_not_implemented_invalid_request() {
     let submitter = provider.as_batch_submitter().unwrap();
     let err = submitter
         .submit(
-            vec![(
-                BatchItemId::new("x"),
-                ChatRequest::user("hi"),
-            )], "test-model",
+            vec![(BatchItemId::new("x"), ChatRequest::user("hi"))],
+            "test-model",
             &tars_types::RequestContext::test_default(),
         )
         .await

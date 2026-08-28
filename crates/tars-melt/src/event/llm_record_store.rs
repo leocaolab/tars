@@ -72,7 +72,9 @@ impl SqliteLlmRecordStore {
     /// root opens it once via [`crate::pool::open`] and hands it in; the store
     /// carries a pool, never a path. Runs this store's migrator on the pool.
     pub async fn new(db: Db) -> Result<Arc<Self>, StoreError> {
-        db.migrate(&MIGRATOR).await.map_err(|e| StoreError::backend_source("schema migration", e))?;
+        db.migrate(&MIGRATOR)
+            .await
+            .map_err(|e| StoreError::backend_source("schema migration", e))?;
         Ok(Arc::new(Self { db }))
     }
 
@@ -92,7 +94,6 @@ impl SqliteLlmRecordStore {
             .map_err(|e| StoreError::backend_source("opening in-memory llm record store", e))?;
         Self::new(db).await
     }
-
 }
 
 /// Current wall-clock time as milliseconds since the Unix epoch, for

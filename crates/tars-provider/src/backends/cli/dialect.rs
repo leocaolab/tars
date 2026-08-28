@@ -109,7 +109,9 @@ pub trait CliDialect: Send + Sync {
     /// declares its framing too but is served by the streaming-capable
     /// [`RealSubprocessRunner`](super::subprocess::RealSubprocessRunner).
     fn output_framing(&self) -> OutputFraming {
-        OutputFraming::SingleObject { strip_prefix: false }
+        OutputFraming::SingleObject {
+            strip_prefix: false,
+        }
     }
 
     /// `JsonEvents`: one reconstructed JSON value → the content

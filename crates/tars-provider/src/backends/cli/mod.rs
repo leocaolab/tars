@@ -46,7 +46,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use tars_types::{
-    ProviderProfile, ChatEvent, ChatRequest, ProviderError, ProviderId, RequestContext, StopReason,
+    ChatEvent, ChatRequest, ProviderError, ProviderId, ProviderProfile, RequestContext, StopReason,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
@@ -60,8 +60,8 @@ pub use dialects::opencode::OpenCodeDialect;
 pub use subprocess::{RealSubprocessRunner, SharedCliRunner};
 
 /// Construct a [`ProviderError::CliSubprocessDied`] carrying the real exit code
-/// + captured stderr (the truth — never a sentinel). The CLI backends funnel
-/// every dead-subprocess report through here.
+/// and the captured stderr — the truth, never a sentinel. The CLI backends
+/// funnel every dead-subprocess report through here.
 pub(crate) fn cli_subprocess_died(exit_code: Option<i32>, stderr: String) -> ProviderError {
     ProviderError::CliSubprocessDied { exit_code, stderr }
 }
@@ -152,7 +152,8 @@ impl LlmProvider for AgentCliBackend {
         //    WE clipped — otherwise a cut reply looks like a natural end.
         let content = clamp_to_output_budget(content, req.max_output_tokens);
 
-        let mut events: Vec<Result<ChatEvent, ProviderError>> = Vec::with_capacity(content.len() + 1);
+        let mut events: Vec<Result<ChatEvent, ProviderError>> =
+            Vec::with_capacity(content.len() + 1);
         events.push(Ok(ChatEvent::started(model)));
         events.extend(content.into_iter().map(Ok));
 
@@ -257,7 +258,8 @@ mod tests {
         let events: Vec<ChatEvent> = Arc::clone(&backend)
             .stream(
                 ChatRequest::user("hi"),
-                "opus", RequestContext::test_default(),
+                "opus",
+                RequestContext::test_default(),
             )
             .await
             .unwrap()
@@ -265,7 +267,9 @@ mod tests {
             .collect()
             .await;
 
-        assert!(matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "opus"));
+        assert!(
+            matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "opus")
+        );
         assert!(matches!(&events[1], ChatEvent::Delta { text } if text == "hello from claude"));
         match &events[2] {
             ChatEvent::Finished { stop_reason, usage } => {
@@ -324,6 +328,8 @@ mod tests {
         ];
         let out = clamp_to_output_budget(content, None);
         assert!(matches!(&out[0], ChatEvent::Delta { text } if text.len() == 100));
-        assert!(matches!(&out[1], ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn));
+        assert!(
+            matches!(&out[1], ChatEvent::Finished { stop_reason, .. } if *stop_reason == StopReason::EndTurn)
+        );
     }
 }

@@ -112,7 +112,10 @@ impl Tool for BashTool {
         // `wrap` returns as a passthrough — so behaviour is unchanged until a
         // caller threads a confining `SandboxMode` (M4). Fail-closed: a
         // requested-but-unbuildable sandbox errors here, never spawns bare.
-        let workdir = ctx.cwd.clone().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let workdir = ctx
+            .cwd
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let (program, argv) = ctx
             .sandbox
             .wrap("sh", &["-c".to_string(), parsed.command.clone()], &workdir)
@@ -228,13 +231,22 @@ mod tests {
             .execute(json!({ "command": "echo ok > inside.txt" }), jailed())
             .await
             .unwrap();
-        assert!(wt.join("inside.txt").exists(), "write inside worktree must succeed");
+        assert!(
+            wt.join("inside.txt").exists(),
+            "write inside worktree must succeed"
+        );
 
         // write OUTSIDE worktree → blocked by the sandbox
         let _ = BashTool::new()
-            .execute(json!({ "command": format!("echo pwned > {}", outside.display()) }), jailed())
+            .execute(
+                json!({ "command": format!("echo pwned > {}", outside.display()) }),
+                jailed(),
+            )
             .await;
-        assert!(!outside.exists(), "sandbox MUST block bash writes outside the worktree");
+        assert!(
+            !outside.exists(),
+            "sandbox MUST block bash writes outside the worktree"
+        );
 
         let _ = std::fs::remove_dir_all(&wt);
         let _ = std::fs::remove_file(&outside);

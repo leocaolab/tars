@@ -402,8 +402,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!inside.is_error, "write inside writable_root must succeed: {}", inside.content);
-        assert_eq!(std::fs::read_to_string(dir.path().join("sub/ok.txt")).unwrap(), "hi");
+        assert!(
+            !inside.is_error,
+            "write inside writable_root must succeed: {}",
+            inside.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sub/ok.txt")).unwrap(),
+            "hi"
+        );
 
         // Absolute path outside every writable root: rejected, no file created.
         let escapee = outside.path().join("escape.txt");
@@ -415,7 +422,11 @@ mod tests {
             .await
             .unwrap();
         assert!(r.is_error, "write outside writable_root must be rejected");
-        assert!(r.content.contains("outside the allowed write root"), "got: {}", r.content);
+        assert!(
+            r.content.contains("outside the allowed write root"),
+            "got: {}",
+            r.content
+        );
         assert!(!escapee.exists(), "rejected write must not create the file");
     }
 
@@ -426,7 +437,10 @@ mod tests {
         let r = tool
             .execute(
                 json!({ "path": "in_workspace.txt", "content": "x" }),
-                ctx_sandboxed(Some(dir.path().to_path_buf()), SandboxPolicy::read_only(false)),
+                ctx_sandboxed(
+                    Some(dir.path().to_path_buf()),
+                    SandboxPolicy::read_only(false),
+                ),
             )
             .await
             .unwrap();
@@ -449,7 +463,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!r.is_error, "default policy must not restrict: {}", r.content);
+        assert!(
+            !r.is_error,
+            "default policy must not restrict: {}",
+            r.content
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "ok");
     }
 
@@ -475,7 +493,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(r.is_error, "write through a symlink pointing outside must be denied");
-        assert!(!outside.path().join("pwned.txt").exists(), "no bytes may land outside");
+        assert!(
+            r.is_error,
+            "write through a symlink pointing outside must be denied"
+        );
+        assert!(
+            !outside.path().join("pwned.txt").exists(),
+            "no bytes may land outside"
+        );
     }
 }

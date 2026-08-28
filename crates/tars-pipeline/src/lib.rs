@@ -113,6 +113,6 @@ pub use service::{LlmService, Next};
 
 // Re-export the few tars-types items that show up in middleware
 // signatures so callers don't need a separate `use tars_types::…`.
+pub use sync::{complete_async, complete_sync, shared_runtime};
 pub use tars_provider::LlmEventStream;
 pub use tars_types::{ChatEvent, ChatRequest, ProviderError, RequestContext};
-pub use sync::{complete_async, complete_sync, shared_runtime};

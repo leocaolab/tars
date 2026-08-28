@@ -600,10 +600,7 @@ impl ProviderConfig {
         use ProviderConfig::*;
         use tars_types::InterfaceKind as Ik;
         match self {
-            ClaudeCli { .. }
-            | CodexCli { .. }
-            | Opencode { .. }
-            | Antigravity { .. } => Ik::Cli,
+            ClaudeCli { .. } | CodexCli { .. } | Opencode { .. } | Antigravity { .. } => Ik::Cli,
             Openai { .. }
             | OpenaiCompat { .. }
             | Anthropic { .. }

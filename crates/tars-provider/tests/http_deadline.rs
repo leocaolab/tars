@@ -90,7 +90,10 @@ async fn an_already_expired_deadline_does_not_run_the_call() {
     .await
     .expect("an expired deadline must return immediately");
 
-    assert!(result.is_err(), "an expired budget must not produce a response");
+    assert!(
+        result.is_err(),
+        "an expired budget must not produce a response"
+    );
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "expired deadline must fail fast, took {:?}",

@@ -22,10 +22,10 @@ use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use tars_provider::LlmEventStream;
 use tars_melt::event::{
     CallResult, ContentRef, LlmCallFinished, LlmRecordStore, PipelineEvent, PipelineEventLog,
 };
+use tars_provider::LlmEventStream;
 use tars_types::{
     ChatEvent, ChatRequest, ChatResponseBuilder, ProviderError, RequestContext, ValidationReason,
 };
@@ -201,7 +201,10 @@ impl Middleware for EventEmitterMiddleware {
                     // the body write fails the ref would dangle, so skip
                     // emitting the event entirely (best-effort, but never
                     // a broken reference).
-                    if let Err(err) = records.put(&body_ref, Bytes::from(req_body_for_write)).await {
+                    if let Err(err) = records
+                        .put(&body_ref, Bytes::from(req_body_for_write))
+                        .await
+                    {
                         tracing::warn!(
                             error = %err,
                             "event_emitter: request body write failed on error path; \
@@ -493,8 +496,11 @@ mod tests {
     use super::*;
     use crate::LlmService;
     use std::time::Duration;
+    use tars_melt::event::{
+        LlmRecordStore, PipelineEventLog, PipelineEventQuery, SqliteLlmRecordStore,
+        SqlitePipelineEventLog,
+    };
     use tars_provider::backends::mock::{CannedResponse, MockProvider};
-    use tars_melt::event::{LlmRecordStore, PipelineEventLog, PipelineEventQuery, SqliteLlmRecordStore, SqlitePipelineEventLog};
     use tars_types::{ChatRequest, RequestContext};
 
     async fn drain(s: tars_provider::LlmEventStream) -> Vec<ChatEvent> {
@@ -592,7 +598,7 @@ mod tests {
         let svc = LlmService::builder(provider, "m")
             .layer(EventEmitterMiddleware::new(events.clone(), records.clone()))
             .layer(ValidationMiddleware::new(vec![
-                Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>
+                Arc::new(NotEmptyValidator::new()) as Arc<dyn OutputValidator>,
             ]))
             .build();
 

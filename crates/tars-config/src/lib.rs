@@ -39,11 +39,11 @@ pub use builtin::{
     default_openai, default_vllm, merge_builtin_with_user,
 };
 pub use error::ConfigError;
+pub use global::resolve_home;
 pub use global::{
     get_boarddb_path, get_bodydb_path, get_cachedb_path, get_durabledb_path, get_eventdb_path,
     get_pipelinedb_path,
 };
-pub use global::resolve_home;
 pub use manager::{Config, ConfigManager};
 pub use model_kb::{
     BillingModel, KbModality, MODEL_KB, ModelEntry, ModelKb, ModelStatus, ModelTier,

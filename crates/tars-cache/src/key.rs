@@ -351,10 +351,18 @@ mod tests {
     fn different_tenants_never_collide_even_with_same_prompt() {
         let f = CacheKeyFactory::new(1);
         let a = f
-            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("tenantA", &["read"]))
+            .compute(
+                &det_req("hi"),
+                "gpt-4o",
+                &ctx_with_scopes("tenantA", &["read"]),
+            )
             .unwrap();
         let b = f
-            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("tenantB", &["read"]))
+            .compute(
+                &det_req("hi"),
+                "gpt-4o",
+                &ctx_with_scopes("tenantB", &["read"]),
+            )
             .unwrap();
         assert_ne!(a.fingerprint, b.fingerprint, "tenant must be in the hash");
     }
@@ -365,10 +373,18 @@ mod tests {
         // against overlapping data must not share a cache slot.
         let f = CacheKeyFactory::new(1);
         let a = f
-            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["scope:a"]))
+            .compute(
+                &det_req("hi"),
+                "gpt-4o",
+                &ctx_with_scopes("t1", &["scope:a"]),
+            )
             .unwrap();
         let b = f
-            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["scope:b"]))
+            .compute(
+                &det_req("hi"),
+                "gpt-4o",
+                &ctx_with_scopes("t1", &["scope:b"]),
+            )
             .unwrap();
         assert_ne!(a.fingerprint, b.fingerprint);
     }
@@ -378,10 +394,18 @@ mod tests {
         // Sorted before hashing → ["a","b"] and ["b","a"] should collide.
         let f = CacheKeyFactory::new(1);
         let a = f
-            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["a", "b"]))
+            .compute(
+                &det_req("hi"),
+                "gpt-4o",
+                &ctx_with_scopes("t1", &["a", "b"]),
+            )
             .unwrap();
         let b = f
-            .compute(&det_req("hi"), "gpt-4o", &ctx_with_scopes("t1", &["b", "a"]))
+            .compute(
+                &det_req("hi"),
+                "gpt-4o",
+                &ctx_with_scopes("t1", &["b", "a"]),
+            )
             .unwrap();
         assert_eq!(a.fingerprint, b.fingerprint);
     }
@@ -391,14 +415,18 @@ mod tests {
         let f = CacheKeyFactory::new(1);
         let mut r = det_req("hi");
         r.temperature = Some(0.7);
-        let err = f.compute(&r, "gpt-4o", &ctx_with_scopes("t", &[])).unwrap_err();
+        let err = f
+            .compute(&r, "gpt-4o", &ctx_with_scopes("t", &[]))
+            .unwrap_err();
         assert!(matches!(err, CacheError::NonDeterministic));
 
         // Default (None) is also non-cacheable — the provider's default
         // temperature is unknown.
         let mut r = det_req("hi");
         r.temperature = None;
-        let err = f.compute(&r, "gpt-4o", &ctx_with_scopes("t", &[])).unwrap_err();
+        let err = f
+            .compute(&r, "gpt-4o", &ctx_with_scopes("t", &[]))
+            .unwrap_err();
         assert!(matches!(err, CacheError::NonDeterministic));
     }
 
@@ -408,8 +436,12 @@ mod tests {
         let f2 = CacheKeyFactory::new(2);
         let ctx = ctx_with_scopes("t", &[]);
         assert_ne!(
-            f1.compute(&det_req("hi"), "gpt-4o", &ctx).unwrap().fingerprint,
-            f2.compute(&det_req("hi"), "gpt-4o", &ctx).unwrap().fingerprint,
+            f1.compute(&det_req("hi"), "gpt-4o", &ctx)
+                .unwrap()
+                .fingerprint,
+            f2.compute(&det_req("hi"), "gpt-4o", &ctx)
+                .unwrap()
+                .fingerprint,
         );
     }
 
@@ -418,8 +450,12 @@ mod tests {
         let f = CacheKeyFactory::new(1);
         let ctx = ctx_with_scopes("t", &[]);
         assert_ne!(
-            f.compute(&det_req("hi"), "gpt-4o", &ctx).unwrap().fingerprint,
-            f.compute(&det_req("ho"), "gpt-4o", &ctx).unwrap().fingerprint,
+            f.compute(&det_req("hi"), "gpt-4o", &ctx)
+                .unwrap()
+                .fingerprint,
+            f.compute(&det_req("ho"), "gpt-4o", &ctx)
+                .unwrap()
+                .fingerprint,
         );
     }
 

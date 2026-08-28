@@ -162,7 +162,8 @@ async fn streaming_tool_call_assembles_args_from_partial_json() {
     let resp = provider
         .complete(
             ChatRequest::user("search rust"),
-            "test-model", RequestContext::test_default(),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
         .expect("complete ok");
@@ -233,9 +234,9 @@ async fn thinking_blocks_decode_as_thinking_deltas() {
 
     let resp = provider
         .complete(
-            ChatRequest::user("think then answer",
-            ),
-            "test-model", RequestContext::test_default(),
+            ChatRequest::user("think then answer"),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
         .expect("complete ok");
@@ -264,7 +265,8 @@ async fn http_401_maps_to_auth_error() {
     let err = match provider
         .stream(
             ChatRequest::user("hi"),
-            "test-model", RequestContext::test_default(),
+            "test-model",
+            RequestContext::test_default(),
         )
         .await
     {

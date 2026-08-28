@@ -98,7 +98,9 @@ impl SqlitePipelineEventLog {
     /// root opens it once via [`crate::pool::open`] and hands it in; the store
     /// carries a pool, never a path. Runs this store's migrator on the pool.
     pub async fn new(db: Db) -> Result<Arc<Self>, StoreError> {
-        db.migrate(&MIGRATOR).await.map_err(|e| StoreError::backend_source("schema migration", e))?;
+        db.migrate(&MIGRATOR)
+            .await
+            .map_err(|e| StoreError::backend_source("schema migration", e))?;
         Ok(Arc::new(Self { db }))
     }
 
@@ -121,7 +123,6 @@ impl SqlitePipelineEventLog {
             .map_err(|e| StoreError::backend_source("opening in-memory pipeline event store", e))?;
         Self::new(db).await
     }
-
 }
 
 const DEFAULT_QUERY_LIMIT: u32 = 10_000;
@@ -193,7 +194,10 @@ impl PipelineEventLog for SqlitePipelineEventLog {
         }
 
         // One transaction for the batch: either all events land or none do.
-        let mut tx = self.db.sqlite().begin()
+        let mut tx = self
+            .db
+            .sqlite()
+            .begin()
             .await
             .map_err(|e| StoreError::backend_source("begin tx", e))?;
         for (id, ty, ts, tenant, blob) in &rows {
@@ -289,14 +293,16 @@ impl PipelineEventLog for SqlitePipelineEventLog {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{CallResult, ContentRef, LlmCallFinished};
     use super::*;
     use std::time::Duration;
-    use super::super::{CallResult, ContentRef, LlmCallFinished};
     use tars_types::{ProviderId, TelemetryAccumulator, Usage, ValidationSummary};
     use uuid::Uuid;
 
     async fn store() -> Arc<SqlitePipelineEventLog> {
-        SqlitePipelineEventLog::in_memory().await.expect("open store")
+        SqlitePipelineEventLog::in_memory()
+            .await
+            .expect("open store")
     }
 
     fn fake_event(tenant: &str, ts: SystemTime) -> PipelineEvent {

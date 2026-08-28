@@ -254,6 +254,21 @@ async fn main() -> ExitCode {
     }
 }
 
+/// `tars harness` — the harness owns its flags and its dispatch; this binary
+/// owns the one thing that is a binary's job, which is where `--config` points.
+async fn run_harness(
+    args: tars_harness::cli::HarnessArgs,
+    config: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    let cfg = config_loader::load(config)?;
+    let resolve = |requested: Option<&str>| {
+        let registry = dispatch::build_registry_with_breaker(&cfg, /* breaker */ true)?;
+        let pid = dispatch::pick_provider(&cfg, requested)?;
+        Ok((registry, pid))
+    };
+    tars_harness::cli::execute(args, &resolve).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,19 +304,4 @@ mod tests {
         let err = Cli::try_parse_from(["tars", "--log-format", "yaml", "events", "list"]);
         assert!(err.is_err(), "clap must reject unsupported values");
     }
-}
-
-/// `tars harness` — the harness owns its flags and its dispatch; this binary
-/// owns the one thing that is a binary's job, which is where `--config` points.
-async fn run_harness(
-    args: tars_harness::cli::HarnessArgs,
-    config: Option<std::path::PathBuf>,
-) -> anyhow::Result<()> {
-    let cfg = config_loader::load(config)?;
-    let resolve = |requested: Option<&str>| {
-        let registry = dispatch::build_registry_with_breaker(&cfg, /* breaker */ true)?;
-        let pid = dispatch::pick_provider(&cfg, requested)?;
-        Ok((registry, pid))
-    };
-    tars_harness::cli::execute(args, &resolve).await
 }

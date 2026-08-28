@@ -480,4 +480,3 @@ mod tests {
         assert!(EnvFilter::try_new("=== not a directive ===").is_err());
     }
 }
-

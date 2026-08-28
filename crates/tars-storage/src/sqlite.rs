@@ -16,14 +16,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::db::Db;
 use async_trait::async_trait;
 use sqlx::Row;
-use crate::db::Db;
 
 use tars_types::TrajectoryId;
 
+use crate::agent_event_log::{AgentEventLog, EventRecord};
 use crate::error::StorageError;
-use crate::agent_event_log::{EventRecord, AgentEventLog};
 
 /// Embedded versioned schema (`migrations/agent_event_log/`). Applied once at
 /// open on the store's own pool; `_sqlx_migrations` is the version-of-record
@@ -98,7 +98,10 @@ impl AgentEventLog for SqliteAgentEventLog {
 
         // Compute the next sequence_no inside the transaction so a concurrent
         // writer to the same trajectory can't race us.
-        let mut tx = self.db.sqlite().begin()
+        let mut tx = self
+            .db
+            .sqlite()
+            .begin()
             .await
             .map_err(|e| StorageError::backend_source("begin transaction", e))?;
 
@@ -471,7 +474,10 @@ mod tests {
         assert_eq!(v, 1, "baseline stamped in _sqlx_migrations");
 
         // And the adopted store is fully live.
-        store.append(&traj("legacy"), &[json!({"new": 2})]).await.unwrap();
+        store
+            .append(&traj("legacy"), &[json!({"new": 2})])
+            .await
+            .unwrap();
         assert_eq!(store.read_all(&traj("legacy")).await.unwrap().len(), 2);
     }
 

@@ -31,11 +31,11 @@
 //! half of what is in this crate is testing machinery that no eval run touches.
 
 pub mod arg_judge;
-pub mod cli;
 pub mod bless;
 pub mod cassette_diff;
-pub mod eval;
 pub mod check;
+pub mod cli;
+pub mod eval;
 pub mod judge;
 pub mod judge_stats;
 pub mod metamorphic;
@@ -46,9 +46,7 @@ pub use check::{CheckResult, CheckRunner, Invariant, MembershipInvariant, Valida
 pub use judge::{
     DEFAULT_JUDGE_PROMPT, Judge, JudgeError, LlmJudge, ensure_anti_incest, run_judge_pass,
 };
-pub use judge_stats::{
-    JudgeItem, JudgeReport, JudgeVerdict, JudgedItem, McNemarResult, mcnemar,
-};
+pub use judge_stats::{JudgeItem, JudgeReport, JudgeVerdict, JudgedItem, McNemarResult, mcnemar};
 pub use metamorphic::{
     DeleteSubstringMutation, DirectionalRelation, GoldenMatch, InvarianceRelation,
     MetamorphicRelation, Mutation, MutationVerdict, mutation_caught,

@@ -94,50 +94,6 @@ pub fn resolve_home(flag: Option<PathBuf>) -> Option<PathBuf> {
         .or_else(|| dirs::home_dir().map(|h| h.join(".tars")))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_home_flag_wins_over_everything() {
-        let explicit = PathBuf::from("/custom/tars/home");
-        assert_eq!(resolve_home(Some(explicit.clone())), Some(explicit));
-    }
-
-    #[test]
-    fn resolve_home_falls_back_to_dot_tars() {
-        // Only meaningful when the test env leaves $TARS_HOME unset — otherwise
-        // the env layer (correctly) takes precedence and this assertion is moot.
-        if std::env::var_os("TARS_HOME").is_none() {
-            let home = resolve_home(None).expect("HOME should resolve in test env");
-            assert!(
-                home.ends_with(".tars"),
-                "default home should end with .tars, got {home:?}"
-            );
-        }
-    }
-
-    /// A second install reports rather than silently dropping the caller's
-    /// config. Both doors share the one cell, so whichever runs first wins and
-    /// the loser is *told* — the property `Config::set(..) -> ()` could not
-    /// express.
-    #[test]
-    fn second_install_is_reported_not_swallowed() {
-        // This test owns the global for the whole process; the first call may
-        // lose to another test's install, which is itself the condition under
-        // test. Assert on the invariant, not on who won.
-        let first = Config::set(Config::default());
-        let second = Config::set(Config::default());
-        assert!(
-            matches!(second, Err(ConfigError::AlreadyInitialized)),
-            "a second install must error, got {second:?}"
-        );
-        if first.is_ok() {
-            assert!(Config::is_loaded(), "the winning install is visible");
-        }
-    }
-}
-
 // ─── per-db path accessors ─────────────────────────────────────────────────
 //
 // The db location is the CONSUMER's: it resolves its workspace store dir and
@@ -181,4 +137,48 @@ pub fn get_durabledb_path() -> PathBuf {
 /// `<store_dir>/board.sqlite` — task queue + trajectory board.
 pub fn get_boarddb_path() -> PathBuf {
     store_dir().join("board.sqlite")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_home_flag_wins_over_everything() {
+        let explicit = PathBuf::from("/custom/tars/home");
+        assert_eq!(resolve_home(Some(explicit.clone())), Some(explicit));
+    }
+
+    #[test]
+    fn resolve_home_falls_back_to_dot_tars() {
+        // Only meaningful when the test env leaves $TARS_HOME unset — otherwise
+        // the env layer (correctly) takes precedence and this assertion is moot.
+        if std::env::var_os("TARS_HOME").is_none() {
+            let home = resolve_home(None).expect("HOME should resolve in test env");
+            assert!(
+                home.ends_with(".tars"),
+                "default home should end with .tars, got {home:?}"
+            );
+        }
+    }
+
+    /// A second install reports rather than silently dropping the caller's
+    /// config. Both doors share the one cell, so whichever runs first wins and
+    /// the loser is *told* — the property `Config::set(..) -> ()` could not
+    /// express.
+    #[test]
+    fn second_install_is_reported_not_swallowed() {
+        // This test owns the global for the whole process; the first call may
+        // lose to another test's install, which is itself the condition under
+        // test. Assert on the invariant, not on who won.
+        let first = Config::set(Config::default());
+        let second = Config::set(Config::default());
+        assert!(
+            matches!(second, Err(ConfigError::AlreadyInitialized)),
+            "a second install must error, got {second:?}"
+        );
+        if first.is_ok() {
+            assert!(Config::is_loaded(), "the winning install is visible");
+        }
+    }
 }

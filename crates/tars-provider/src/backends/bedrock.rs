@@ -18,7 +18,7 @@ use async_trait::async_trait;
 
 use tars_bedrock::BedrockClient;
 use tars_types::{
-    ProviderProfile, ChatRequest, ChatResponse, ProviderError, ProviderId, RequestContext,
+    ChatRequest, ChatResponse, ProviderError, ProviderId, ProviderProfile, RequestContext,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};

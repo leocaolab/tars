@@ -14,9 +14,9 @@
 //! back; the M/L/T egress is fired independently (Doc 08 §3).
 
 pub mod content_ref;
-pub mod pipeline_events;
 mod llm_record_store;
 mod pipeline_event_log;
+pub mod pipeline_events;
 
 pub use content_ref::ContentRef;
 pub use llm_record_store::{LlmRecordStore, SqliteLlmRecordStore, SqliteLlmRecordStoreConfig};

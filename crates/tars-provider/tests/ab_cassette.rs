@@ -36,18 +36,22 @@ fn cassette_path() -> PathBuf {
 /// Rebuild the exact `ChatRequest` the binding recorded, so its fingerprint
 /// matches the cassette entry.
 fn pinned_request() -> ChatRequest {
-    let mut req =
-        ChatRequest::user(USER).with_system(SYSTEM);
+    let mut req = ChatRequest::user(USER).with_system(SYSTEM);
     req.max_output_tokens = Some(200);
     req
 }
 
 async fn replay_text() -> String {
-    let provider = CassetteProvider::replay_from_file("cassette_schema", &cassette_path())
-        .expect("cassette file should exist (committed) — run the py example with \
-                 TARS_CASSETTE_RECORD=1 to record it");
+    let provider = CassetteProvider::replay_from_file("cassette_schema", &cassette_path()).expect(
+        "cassette file should exist (committed) — run the py example with \
+                 TARS_CASSETTE_RECORD=1 to record it",
+    );
     let stream = Arc::clone(&provider)
-        .stream(pinned_request(), "test-model", RequestContext::test_default())
+        .stream(
+            pinned_request(),
+            "test-model",
+            RequestContext::test_default(),
+        )
         .await
         .expect("replay should not error");
     stream
@@ -135,8 +139,10 @@ async fn bless_check_or_bless_round_trips_in_a_tempdir() {
     // create
     tars_harness::Bless::check_or_bless(&path, &v, &["$.severity"], None, true).unwrap();
     // load + check passes
-    assert!(tars_harness::Bless::check_or_bless(&path, &v, &["$.severity"], None, false)
-        .unwrap()
-        .is_pass());
+    assert!(
+        tars_harness::Bless::check_or_bless(&path, &v, &["$.severity"], None, false)
+            .unwrap()
+            .is_pass()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -104,12 +104,22 @@ pub async fn query_read_only(
     let mut conn = opts
         .connect()
         .await
-        .map_err(|source| ReadOnlyQueryError::Open { path: path.to_path_buf(), source })?;
+        .map_err(|source| ReadOnlyQueryError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
     // Prepared before it is run, so the column list survives a query that
     // matches nothing.
-    let stmt = conn.prepare(sql).await.map_err(ReadOnlyQueryError::Prepare)?;
-    let columns: Vec<String> = stmt.columns().iter().map(|c| c.name().to_string()).collect();
+    let stmt = conn
+        .prepare(sql)
+        .await
+        .map_err(ReadOnlyQueryError::Prepare)?;
+    let columns: Vec<String> = stmt
+        .columns()
+        .iter()
+        .map(|c| c.name().to_string())
+        .collect();
 
     let mut rows = Vec::new();
     let mut truncated = false;
@@ -129,7 +139,11 @@ pub async fn query_read_only(
         }
     }
 
-    Ok(QueryResult { columns, rows, truncated })
+    Ok(QueryResult {
+        columns,
+        rows,
+        truncated,
+    })
 }
 
 fn cell(v: SqliteValueRef<'_>, column: &str) -> Result<Cell, ReadOnlyQueryError> {
@@ -147,11 +161,17 @@ fn cell(v: SqliteValueRef<'_>, column: &str) -> Result<Cell, ReadOnlyQueryError>
     Ok(match declared.as_str() {
         "INTEGER" => Cell::Integer(<i64 as Decode<Sqlite>>::decode(v).map_err(failed)?),
         "REAL" => Cell::Real(<f64 as Decode<Sqlite>>::decode(v).map_err(failed)?),
-        "BLOB" => Cell::Blob { bytes: <&[u8] as Decode<Sqlite>>::decode(v).map_err(failed)?.len() },
+        "BLOB" => Cell::Blob {
+            bytes: <&[u8] as Decode<Sqlite>>::decode(v).map_err(failed)?.len(),
+        },
         // TEXT, and whatever else a view or an expression reports itself as: the
         // value is a string either way, and carrying it beats refusing over a
         // type name we did not anticipate.
-        _ => Cell::Text(<&str as Decode<Sqlite>>::decode(v).map_err(failed)?.to_string()),
+        _ => Cell::Text(
+            <&str as Decode<Sqlite>>::decode(v)
+                .map_err(failed)?
+                .to_string(),
+        ),
     })
 }
 
@@ -161,13 +181,16 @@ mod tests {
 
     async fn db_with(dir: &Path, name: &str, ddl: &str) -> PathBuf {
         let p = dir.join(name);
-        let opts = SqliteConnectOptions::new().filename(&p).create_if_missing(true);
+        let opts = SqliteConnectOptions::new()
+            .filename(&p)
+            .create_if_missing(true);
         let mut c = opts.connect().await.unwrap();
         c.execute(ddl).await.unwrap();
         p
     }
 
-    const FIXTURE: &str = "CREATE TABLE t (seq INTEGER PRIMARY KEY, name TEXT, ratio REAL, body BLOB, absent TEXT);
+    const FIXTURE: &str =
+        "CREATE TABLE t (seq INTEGER PRIMARY KEY, name TEXT, ratio REAL, body BLOB, absent TEXT);
          INSERT INTO t (name, ratio, body, absent) VALUES ('a', 1.5, x'DEADBEEF', NULL);
          INSERT INTO t (name, ratio, body, absent) VALUES ('b', 2.5, x'BEEF', NULL);";
 
@@ -175,9 +198,13 @@ mod tests {
     async fn sqlites_own_types_survive_the_trip() {
         let d = tempfile::tempdir().unwrap();
         let p = db_with(d.path(), "t.db", FIXTURE).await;
-        let r = query_read_only(&p, "SELECT seq, name, ratio, body, absent FROM t ORDER BY seq", 10)
-            .await
-            .unwrap();
+        let r = query_read_only(
+            &p,
+            "SELECT seq, name, ratio, body, absent FROM t ORDER BY seq",
+            10,
+        )
+        .await
+        .unwrap();
         assert_eq!(r.columns, ["seq", "name", "ratio", "body", "absent"]);
         assert_eq!(r.rows[0][0], Cell::Integer(1));
         assert_eq!(r.rows[0][1], Cell::Text("a".into()));
@@ -196,7 +223,10 @@ mod tests {
         assert!(r.truncated, "a listing cut at the ceiling must say so");
 
         let all = query_read_only(&p, "SELECT seq FROM t", 10).await.unwrap();
-        assert!(!all.truncated, "a listing that IS the table must not claim it was cut");
+        assert!(
+            !all.truncated,
+            "a listing that IS the table must not claim it was cut"
+        );
     }
 
     /// An empty answer still says which columns it is empty of.
@@ -204,7 +234,9 @@ mod tests {
     async fn no_matching_rows_still_carries_the_column_list() {
         let d = tempfile::tempdir().unwrap();
         let p = db_with(d.path(), "t.db", FIXTURE).await;
-        let r = query_read_only(&p, "SELECT seq, name FROM t WHERE seq = 999", 10).await.unwrap();
+        let r = query_read_only(&p, "SELECT seq, name FROM t WHERE seq = 999", 10)
+            .await
+            .unwrap();
         assert!(r.rows.is_empty());
         assert_eq!(r.columns, ["seq", "name"]);
     }
@@ -214,11 +246,20 @@ mod tests {
     async fn a_write_is_refused_by_the_database_itself() {
         let d = tempfile::tempdir().unwrap();
         let p = db_with(d.path(), "t.db", FIXTURE).await;
-        let e = query_read_only(&p, "DELETE FROM t", 10).await.expect_err("read-only");
+        let e = query_read_only(&p, "DELETE FROM t", 10)
+            .await
+            .expect_err("read-only");
         let msg = format!("{e:?}").to_lowercase();
-        assert!(msg.contains("readonly") || msg.contains("read-only"), "{e:?}");
+        assert!(
+            msg.contains("readonly") || msg.contains("read-only"),
+            "{e:?}"
+        );
         let after = query_read_only(&p, "SELECT seq FROM t", 10).await.unwrap();
-        assert_eq!(after.rows.len(), 2, "the refused write really did not happen");
+        assert_eq!(
+            after.rows.len(),
+            2,
+            "the refused write really did not happen"
+        );
     }
 
     /// A malformed statement fails at prepare, carrying SQLite's own words —
@@ -227,7 +268,9 @@ mod tests {
     async fn a_syntax_error_is_a_prepare_failure_in_sqlites_words() {
         let d = tempfile::tempdir().unwrap();
         let p = db_with(d.path(), "t.db", FIXTURE).await;
-        let e = query_read_only(&p, "SELECT FROM WHERE", 10).await.expect_err("malformed");
+        let e = query_read_only(&p, "SELECT FROM WHERE", 10)
+            .await
+            .expect_err("malformed");
         assert!(matches!(e, ReadOnlyQueryError::Prepare(_)), "{e:?}");
         assert!(format!("{e}").to_lowercase().contains("syntax"), "{e}");
     }
@@ -237,7 +280,9 @@ mod tests {
     async fn a_missing_file_is_an_open_failure_that_names_it() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("nope.db");
-        let e = query_read_only(&p, "SELECT 1", 10).await.expect_err("absent");
+        let e = query_read_only(&p, "SELECT 1", 10)
+            .await
+            .expect_err("absent");
         assert!(matches!(e, ReadOnlyQueryError::Open { .. }), "{e:?}");
         assert!(format!("{e}").contains("nope.db"), "{e}");
     }
@@ -251,7 +296,11 @@ mod tests {
         let r = query_read_only(&p, "SELECT name FROM sqlite_master WHERE type='table'", 10)
             .await
             .unwrap();
-        assert!(r.rows.iter().any(|row| row[0] == Cell::Text("t".into())), "{:?}", r.rows);
+        assert!(
+            r.rows.iter().any(|row| row[0] == Cell::Text("t".into())),
+            "{:?}",
+            r.rows
+        );
     }
 
     /// A read-only open must not leave a migration table behind — nor any other
@@ -261,7 +310,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = db_with(d.path(), "t.db", FIXTURE).await;
         let _ = query_read_only(&p, "SELECT 1", 10).await.unwrap();
-        let r = query_read_only(&p, "SELECT name FROM sqlite_master", 50).await.unwrap();
+        let r = query_read_only(&p, "SELECT name FROM sqlite_master", 50)
+            .await
+            .unwrap();
         let names: Vec<&Cell> = r.rows.iter().map(|row| &row[0]).collect();
         assert!(
             !names.contains(&&Cell::Text("_sqlx_migrations".into())),

@@ -13,9 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tars_types::{
-    ProviderProfile, ProviderId,
-};
+use tars_types::{ProviderId, ProviderProfile};
 
 use crate::backends::cli::{
     AgentCliBackend, ClaudeCliDialect, ClaudeCliEffort, ClaudeCliTools, RealSubprocessRunner,
@@ -178,7 +176,8 @@ mod tests {
         let resp = provider
             .complete(
                 ChatRequest::user("hi"),
-                "opus", RequestContext::test_default(),
+                "opus",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -212,7 +211,8 @@ mod tests {
             .clone()
             .complete(
                 ChatRequest::user("x"),
-                "opus", RequestContext::test_default(),
+                "opus",
+                RequestContext::test_default(),
             )
             .await
         {
@@ -229,7 +229,8 @@ mod tests {
         let resp = provider
             .complete(
                 ChatRequest::user("hi"),
-                "opus", RequestContext::test_default(),
+                "opus",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -257,7 +258,8 @@ mod tests {
         let _ = provider
             .complete(
                 ChatRequest::user("x").with_system("be brief"),
-                "opus", RequestContext::test_default(),
+                "opus",
+                RequestContext::test_default(),
             )
             .await
             .unwrap();
@@ -332,7 +334,8 @@ mod tests {
             let _ = provider
                 .complete(
                     ChatRequest::user("hi"),
-                    "opus", RequestContext::test_default(),
+                    "opus",
+                    RequestContext::test_default(),
                 )
                 .await;
         });
@@ -366,7 +369,8 @@ mod tests {
             let _ = provider
                 .complete(
                     ChatRequest::user("hi"),
-                    "opus", RequestContext::test_default().with_cwd(wt.clone()),
+                    "opus",
+                    RequestContext::test_default().with_cwd(wt.clone()),
                 )
                 .await;
         });
