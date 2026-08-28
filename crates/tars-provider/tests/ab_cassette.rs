@@ -40,6 +40,9 @@ fn pinned_request() -> ChatRequest {
     req.max_output_tokens = Some(200);
     req
 }
+/// The model this cassette was recorded under. It participates in the
+/// fingerprint, so it is part of the request, not a label.
+const PINNED_MODEL: &str = "qwen/qwen3-coder-30b";
 
 async fn replay_text() -> String {
     let provider = CassetteProvider::replay_from_file("cassette_schema", &cassette_path()).expect(
@@ -49,7 +52,13 @@ async fn replay_text() -> String {
     let stream = Arc::clone(&provider)
         .stream(
             pinned_request(),
-            "test-model",
+            // The model is part of the cassette key, so a replay has to name the
+            // one that answered. `record_from = "qwen_coder_local"` in
+            // examples/tars.toml is what recorded this, and the Python test that
+            // replays the same file names it too — a placeholder here would key
+            // to a different fingerprint and the two tests could never share a
+            // recording.
+            PINNED_MODEL,
             RequestContext::test_default(),
         )
         .await

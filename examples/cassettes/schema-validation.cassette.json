@@ -29,139 +29,142 @@
     }
   },
   "recordings": {
-    "2d33e40029c334ff": [
-      {
-        "type": "started",
-        "actual_model": "qwen/qwen3-coder-30b",
-        "cache_hit": {
-          "cached_input_tokens": 0,
-          "used_explicit_handle": false,
-          "replayed_from_cache": false
+    "cdc565a7b80f419c": {
+      "request": "model=qwen/qwen3-coder-30b\u0000{\"system\":\"You output ONLY a JSON object. No prose, no code fence.\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Rate the severity (0-10 integer) of this bug and summarize it in one sentence. Return an object with keys `severity` and `summary`.\\n\\nBUG: unwrap() on a None in the request handler panics the whole worker on malformed input.\"}]}],\"tool_choice\":{\"kind\":\"auto\"},\"max_output_tokens\":200}",
+      "events": [
+        {
+          "type": "started",
+          "actual_model": "qwen/qwen3-coder-30b",
+          "cache_hit": {
+            "cached_input_tokens": 0,
+            "used_explicit_handle": false,
+            "replayed_from_cache": false
+          }
+        },
+        {
+          "type": "delta",
+          "text": "{\n"
+        },
+        {
+          "type": "delta",
+          "text": "  \""
+        },
+        {
+          "type": "delta",
+          "text": "severity"
+        },
+        {
+          "type": "delta",
+          "text": "\":"
+        },
+        {
+          "type": "delta",
+          "text": " 8"
+        },
+        {
+          "type": "delta",
+          "text": ",\n"
+        },
+        {
+          "type": "delta",
+          "text": "  \""
+        },
+        {
+          "type": "delta",
+          "text": "summary"
+        },
+        {
+          "type": "delta",
+          "text": "\":"
+        },
+        {
+          "type": "delta",
+          "text": " \""
+        },
+        {
+          "type": "delta",
+          "text": "Un"
+        },
+        {
+          "type": "delta",
+          "text": "wrap"
+        },
+        {
+          "type": "delta",
+          "text": " of"
+        },
+        {
+          "type": "delta",
+          "text": " None"
+        },
+        {
+          "type": "delta",
+          "text": " value"
+        },
+        {
+          "type": "delta",
+          "text": " in"
+        },
+        {
+          "type": "delta",
+          "text": " request"
+        },
+        {
+          "type": "delta",
+          "text": " handler"
+        },
+        {
+          "type": "delta",
+          "text": " causes"
+        },
+        {
+          "type": "delta",
+          "text": " worker"
+        },
+        {
+          "type": "delta",
+          "text": " panic"
+        },
+        {
+          "type": "delta",
+          "text": " leading"
+        },
+        {
+          "type": "delta",
+          "text": " to"
+        },
+        {
+          "type": "delta",
+          "text": " complete"
+        },
+        {
+          "type": "delta",
+          "text": " service"
+        },
+        {
+          "type": "delta",
+          "text": " failure"
+        },
+        {
+          "type": "delta",
+          "text": "\"\n"
+        },
+        {
+          "type": "delta",
+          "text": "}"
+        },
+        {
+          "type": "finished",
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 79,
+            "output_tokens": 32,
+            "cached_input_tokens": 0,
+            "cache_creation_tokens": 0,
+            "thinking_tokens": 0
+          }
         }
-      },
-      {
-        "type": "delta",
-        "text": "{\n"
-      },
-      {
-        "type": "delta",
-        "text": "  \""
-      },
-      {
-        "type": "delta",
-        "text": "severity"
-      },
-      {
-        "type": "delta",
-        "text": "\":"
-      },
-      {
-        "type": "delta",
-        "text": " 8"
-      },
-      {
-        "type": "delta",
-        "text": ",\n"
-      },
-      {
-        "type": "delta",
-        "text": "  \""
-      },
-      {
-        "type": "delta",
-        "text": "summary"
-      },
-      {
-        "type": "delta",
-        "text": "\":"
-      },
-      {
-        "type": "delta",
-        "text": " \""
-      },
-      {
-        "type": "delta",
-        "text": "Un"
-      },
-      {
-        "type": "delta",
-        "text": "wrap"
-      },
-      {
-        "type": "delta",
-        "text": " of"
-      },
-      {
-        "type": "delta",
-        "text": " None"
-      },
-      {
-        "type": "delta",
-        "text": " value"
-      },
-      {
-        "type": "delta",
-        "text": " in"
-      },
-      {
-        "type": "delta",
-        "text": " request"
-      },
-      {
-        "type": "delta",
-        "text": " handler"
-      },
-      {
-        "type": "delta",
-        "text": " causes"
-      },
-      {
-        "type": "delta",
-        "text": " worker"
-      },
-      {
-        "type": "delta",
-        "text": " panic"
-      },
-      {
-        "type": "delta",
-        "text": " leading"
-      },
-      {
-        "type": "delta",
-        "text": " to"
-      },
-      {
-        "type": "delta",
-        "text": " complete"
-      },
-      {
-        "type": "delta",
-        "text": " service"
-      },
-      {
-        "type": "delta",
-        "text": " failure"
-      },
-      {
-        "type": "delta",
-        "text": "\"\n"
-      },
-      {
-        "type": "delta",
-        "text": "}"
-      },
-      {
-        "type": "finished",
-        "stop_reason": "end_turn",
-        "usage": {
-          "input_tokens": 79,
-          "output_tokens": 32,
-          "cached_input_tokens": 0,
-          "cache_creation_tokens": 0,
-          "thinking_tokens": 0
-        }
-      }
-    ]
+      ]
+    }
   }
 }
