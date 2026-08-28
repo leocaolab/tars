@@ -123,6 +123,22 @@ impl Db {
         })
     }
 
+    /// Adopt a pool the caller already opened.
+    ///
+    /// For a consumer whose database holds its OWN tables alongside a store from
+    /// here — one file, one pool, one set of WAL settings. Opening a second
+    /// handle on the same file would work and would still be two pools, two
+    /// connection budgets, and two places the settings could disagree.
+    ///
+    /// The caller owns what it opened: this does not re-apply pragmas or run any
+    /// migration. Whatever [`open_sqlite`](Self::open_sqlite) would have set,
+    /// the caller is asserting it already did.
+    pub fn from_sqlite_pool(pool: SqlitePool) -> Self {
+        Self {
+            backend: Backend::Sqlite(pool),
+        }
+    }
+
     /// Apply a store's embedded migration set. The migrator's own
     /// `_sqlx_migrations` table is the version-of-record.
     pub async fn migrate(&self, migrator: &sqlx::migrate::Migrator) -> Result<(), DbError> {
