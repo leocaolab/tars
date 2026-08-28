@@ -22,6 +22,8 @@ workspace = true
 [dependencies]
 tars-types = { path = "../tars-types" }
 tars-utils = { path = "../tars-utils" }
+# `bless_check` — the golden-file approval loop, exposed to Python.
+tars-harness = { path = "../tars-harness" }
 tars-config = { path = "../tars-config" }
 tars-provider = { path = "../tars-provider" }
 tars-pipeline = { path = "../tars-pipeline" }

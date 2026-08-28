@@ -17,6 +17,10 @@ use tars_types::ProviderError;
 
 use super::argv::SubprocessInvocation;
 use super::subprocess::truncate;
+/// How long the stderr drain may keep running after the child was killed. The
+/// pipe's write end can outlive the process we signalled (a forked shell leaves
+/// it to the grandchild), so this is a ceiling on diagnostics, not on the child.
+const STDERR_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Drive `claude -p --output-format stream-json` and log events via
 /// `tracing` while reconstructing the `result` event for the return value.
@@ -131,7 +135,22 @@ pub(crate) async fn run_streaming(
         if let Err(e) = child.start_kill() {
             tracing::warn!(error = %e, "claude_cli stream: failed to kill child after timeout");
         }
-        let stderr_buf = stderr_task.await.unwrap_or_default();
+        // Bounded, because killing the child is not the same as everything that
+        // holds its stderr going away: a shell that forked leaves the grandchild
+        // alive with the pipe's write end inherited, and `read_to_end` then waits
+        // for an EOF that never comes. Awaiting it unbounded here would hang the
+        // one path whose whole job is to bound this call. A second of diagnostics
+        // is worth waiting for; a wedged pipe is not.
+        let stderr_buf = tokio::time::timeout(STDERR_DRAIN_GRACE, stderr_task)
+            .await
+            .unwrap_or_else(|_| {
+                tracing::warn!(
+                    "claude_cli stream: stderr still open {STDERR_DRAIN_GRACE:?} after the kill \
+                     — reporting the timeout without it"
+                );
+                Ok(Vec::new())
+            })
+            .unwrap_or_default();
         let stderr_s = truncate(&String::from_utf8_lossy(&stderr_buf), 500);
         // We killed the child; it didn't die on its own. Report the wall-clock
         // abort as `TimedOut`, not `CliSubprocessDied` (whose name would blame

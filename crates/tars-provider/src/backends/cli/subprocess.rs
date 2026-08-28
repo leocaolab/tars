@@ -240,7 +240,12 @@ impl SubprocessRunner for RealSubprocessRunner {
         #[cfg(unix)]
         cmd.process_group(0);
 
-        let mut child = cmd.spawn().map_err(|e| spawn_error(&inv.executable, e))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            // Ask the Command what it was about to run: under a write-jail that is
+            // the wrapper, not the delegate.
+            let program = cmd.as_std().get_program().to_string_lossy().into_owned();
+            spawn_error(&program, &inv.executable, e)
+        })?;
 
         // Register the PID so a SIGINT/SIGTERM reaper in the host can
         // SIGKILL this child's process group. The guard deregisters on
@@ -380,17 +385,27 @@ fn cli_label(executable: &str) -> String {
         .unwrap_or_else(|| executable.to_string())
 }
 
-/// Map a spawn failure to a typed [`ProviderError`] carrying the executable +
-/// cause (CLAUDE.md #1). Shared by both runners.
-fn spawn_error(executable: &str, e: std::io::Error) -> ProviderError {
+/// Map a spawn failure to a typed [`ProviderError`] carrying the cause.
+///
+/// `program` is what was HANDED TO `execvp`, which under a write-jail is the
+/// wrapper (`bwrap` / `sandbox-exec`) and not the delegate. Naming the delegate
+/// there sent readers to look for a missing `claude` when the missing binary was
+/// bubblewrap — so when the two differ, both are named and it is said which is
+/// which.
+fn spawn_error(program: &str, delegate: &str, e: std::io::Error) -> ProviderError {
+    let what = if program == delegate {
+        format!("`{program}`")
+    } else {
+        format!("`{program}` (the sandbox wrapper for `{delegate}`)")
+    };
     match e.kind() {
         std::io::ErrorKind::NotFound => {
-            cli_subprocess_died(None, format!("`{executable}` not found in PATH"))
+            cli_subprocess_died(None, format!("{what} not found in PATH"))
         }
         std::io::ErrorKind::PermissionDenied => {
-            cli_subprocess_died(None, format!("`{executable}` not executable: {e}"))
+            cli_subprocess_died(None, format!("{what} not executable: {e}"))
         }
-        _ => cli_subprocess_died(None, format!("spawn failed: {e}")),
+        _ => cli_subprocess_died(None, format!("spawn failed for {what}: {e}")),
     }
 }
 
@@ -429,7 +444,12 @@ impl SubprocessRunner for SharedCliRunner {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-        let mut child = cmd.spawn().map_err(|e| spawn_error(&inv.executable, e))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            // Ask the Command what it was about to run: under a write-jail that is
+            // the wrapper, not the delegate.
+            let program = cmd.as_std().get_program().to_string_lossy().into_owned();
+            spawn_error(&program, &inv.executable, e)
+        })?;
 
         if feed_stdin {
             let mut stdin = child.stdin.take().ok_or_else(|| {
