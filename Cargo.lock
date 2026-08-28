@@ -4803,36 +4803,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tars-cli"
-version = "1.9.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dirs",
- "dotenvy",
- "futures",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tars-cache",
- "tars-config",
- "tars-harness",
- "tars-melt",
- "tars-pipeline",
- "tars-provider",
- "tars-storage",
- "tars-tools",
- "tars-types",
- "tars-utils",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "tars-config"
 version = "1.9.0"
 dependencies = [
@@ -4873,12 +4843,20 @@ version = "1.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "clap",
+ "dirs",
+ "dotenvy",
  "futures",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tars-cache",
+ "tars-config",
+ "tars-melt",
  "tars-pipeline",
  "tars-provider",
+ "tars-storage",
  "tars-tools",
  "tars-types",
  "tars-utils",
@@ -4887,6 +4865,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5000,6 +4979,7 @@ dependencies = [
  "serde_json",
  "tars-cache",
  "tars-config",
+ "tars-harness",
  "tars-melt",
  "tars-pipeline",
  "tars-provider",

@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use tars_config::{ConfigManager, ProviderConfig};
 use tars_types::{Auth, SecretRef};
 
-use crate::model_query::{Outcome, Plan, plan_for, query};
-use crate::models::provider_type_of;
+use crate::cli::model_query::{Outcome, Plan, plan_for, query};
+use crate::cli::models::provider_type_of;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(6);
 

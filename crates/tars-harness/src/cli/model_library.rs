@@ -130,7 +130,7 @@ impl ModelLibrary {
 }
 
 /// Set-difference of two model id lists (both assumed sorted+deduped, as
-/// [`crate::model_query::parse_models`] returns). Pure — the tested seam.
+/// [`crate::cli::model_query::parse_models`] returns). Pure — the tested seam.
 ///
 /// Returns `(added, removed)`: ids in `new` but not `old`, and in `old`
 /// but not `new`.

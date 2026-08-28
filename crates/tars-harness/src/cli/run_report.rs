@@ -19,7 +19,7 @@ use tars_melt::run_report::{RunReportError, build_run_report};
 use tars_storage::AgentEventLog;
 use tars_types::{RunReport, RunStatus, TrajectoryId};
 
-use crate::event_store as event_store_path;
+use crate::cli::event_store as event_store_path;
 
 #[derive(Args, Debug)]
 pub struct RunReportArgs {

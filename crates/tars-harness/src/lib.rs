@@ -1,4 +1,9 @@
-//! tars-harness — how tars is tested and scored.
+//! tars-harness — the `tars` command line, and how tars is tested and scored.
+//!
+//! The binary lives here (`src/bin/tars.rs`) with its commands under [`cli`].
+//! It used to be a crate of its own, which bought a `Cargo.toml` and cost a
+//! boundary: the harness's own flags sat on one side of it and the machinery
+//! they drive on the other, so adding a flag meant editing two crates.
 //!
 //! Everything here sits *over* the transport (`tars-types` +
 //! `tars-pipeline::LlmService`) and knows nothing about the agent runtime. Two
@@ -29,6 +34,10 @@
 //!
 //! The name is `harness`, not `eval`: eval is one module here, and more than
 //! half of what is in this crate is testing machinery that no eval run touches.
+//!
+//! - [`cli`]: the arg definitions for every `tars` subcommand, and the thin
+//!   dispatch behind each one. The machinery they call lives in the modules
+//!   above and in the layers below.
 
 pub mod arg_judge;
 pub mod bless;

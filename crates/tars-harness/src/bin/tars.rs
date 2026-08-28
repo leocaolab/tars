@@ -16,20 +16,6 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use tars_melt::{TelemetryConfig, TelemetryFormat};
 
-mod bench;
-mod config_loader;
-mod dispatch;
-mod event_store;
-mod events;
-mod init;
-mod model_library;
-mod model_query;
-mod models;
-mod probe;
-mod providers_cmd;
-mod run_report;
-mod trajectory;
-
 #[derive(Parser, Debug)]
 #[command(
     name = "tars",
@@ -116,36 +102,36 @@ enum Command {
     /// Sanity-check a CLI provider (`claude_cli` / `codex_cli` / `antigravity`) — sends
     /// a fixed "say hi" prompt and dumps every event so you can see what the
     /// subprocess actually returns.
-    Probe(probe::ProbeArgs),
+    Probe(tars_harness::cli::probe::ProbeArgs),
     /// Benchmark a provider — N iterations, reports TTFB / total / decode tok/s
     /// as mean / p50 / p99. Useful for comparing local model throughput.
-    Bench(bench::BenchArgs),
+    Bench(tars_harness::cli::bench::BenchArgs),
     /// Inspect the trajectory event log written by `tars run` / `tars plan` / `tars run-task`.
-    Trajectory(trajectory::TrajectoryArgs),
+    Trajectory(tars_harness::cli::trajectory::TrajectoryArgs),
     /// Aggregate one trajectory's events into a per-run summary
     /// (status, wall clock, llm calls, token totals, per-agent /
     /// per-provider breakdown, errors). See
     /// `docs/eval-and-arc-llm-roadmap.md §1.1`.
-    RunReport(run_report::RunReportArgs),
+    RunReport(tars_harness::cli::run_report::RunReportArgs),
     /// Testing + scoring: corpus replay, judge, diff, bless.
     /// See `docs/eval-and-arc-llm-roadmap.md §1.3`.
     #[command(subcommand_value_name = "COMMAND")]
-    Harness(tars_harness::cli::HarnessArgs),
+    Harness(tars_harness::cli::harness::HarnessArgs),
     /// Discover provider models over a persisted model library.
     /// `tars models` reads the library (fast/offline); `tars models update`
     /// refreshes it from the live provider APIs and flags stale defaults.
-    Models(models::ModelsArgs),
+    Models(tars_harness::cli::models::ModelsArgs),
     /// List configured providers with key-env health and optional
     /// (`--check`) reachability probing.
-    Providers(providers_cmd::ProvidersArgs),
+    Providers(tars_harness::cli::providers_cmd::ProvidersArgs),
     /// Bootstrap a starter user-level config at `~/.tars/config.toml`.
     /// Idempotent (`--force` to overwrite). New users run this first.
-    Init(init::InitArgs),
+    Init(tars_harness::cli::init::InitArgs),
     /// Inspect the **pipeline event store** (LLM call records written
     /// by `EventEmitterMiddleware`). Distinct from `tars trajectory`,
     /// which reads agent-decision events.
     #[command(subcommand_value_name = "COMMAND")]
-    Events(events::EventsArgs),
+    Events(tars_harness::cli::events::EventsArgs),
 }
 
 #[tokio::main]
@@ -191,8 +177,8 @@ async fn main() -> ExitCode {
     };
 
     let result: Result<()> = match cli.command {
-        Command::Probe(args) => probe::execute(args, cli.config).await,
-        Command::Bench(args) => bench::execute(args, cli.config).await,
+        Command::Probe(args) => tars_harness::cli::probe::execute(args, cli.config).await,
+        Command::Bench(args) => tars_harness::cli::bench::execute(args, cli.config).await,
         Command::Trajectory(args) => {
             // `--config` is global on the parser for ergonomics, but
             // trajectory operates only on the event-store sqlite file
@@ -204,7 +190,7 @@ async fn main() -> ExitCode {
                      (use --events-path / TARS_EVENTS_PATH instead)"
                 );
             }
-            trajectory::execute(args).await
+            tars_harness::cli::trajectory::execute(args).await
         }
         Command::RunReport(args) => {
             if cli.config.is_some() {
@@ -213,11 +199,13 @@ async fn main() -> ExitCode {
                      (use --events-path / TARS_EVENTS_PATH instead)"
                 );
             }
-            run_report::execute(args).await
+            tars_harness::cli::run_report::execute(args).await
         }
         Command::Harness(args) => run_harness(args, cli.config).await,
-        Command::Models(args) => models::execute(args, cli.config).await,
-        Command::Providers(args) => providers_cmd::execute(args, cli.config).await,
+        Command::Models(args) => tars_harness::cli::models::execute(args, cli.config).await,
+        Command::Providers(args) => {
+            tars_harness::cli::providers_cmd::execute(args, cli.config).await
+        }
         Command::Init(args) => {
             // `--config` is a global flag for ergonomics on other
             // subcommands; `init` writes its own target so it never
@@ -228,7 +216,7 @@ async fn main() -> ExitCode {
                     "--config is ignored by `tars init` (use --path to redirect output)"
                 );
             }
-            init::execute(args).await
+            tars_harness::cli::init::execute(args).await
         }
         Command::Events(args) => {
             // `--config` is unused — `events` operates on the pipeline
@@ -240,7 +228,7 @@ async fn main() -> ExitCode {
                      (use --store-dir / TARS_EVENT_STORE_DIR instead)"
                 );
             }
-            events::execute(args).await
+            tars_harness::cli::events::execute(args).await
         }
     };
 
@@ -257,16 +245,18 @@ async fn main() -> ExitCode {
 /// `tars harness` — the harness owns its flags and its dispatch; this binary
 /// owns the one thing that is a binary's job, which is where `--config` points.
 async fn run_harness(
-    args: tars_harness::cli::HarnessArgs,
+    args: tars_harness::cli::harness::HarnessArgs,
     config: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
-    let cfg = config_loader::load(config)?;
+    let cfg = tars_harness::cli::config_loader::load(config)?;
     let resolve = |requested: Option<&str>| {
-        let registry = dispatch::build_registry_with_breaker(&cfg, /* breaker */ true)?;
-        let pid = dispatch::pick_provider(&cfg, requested)?;
+        let registry = tars_harness::cli::dispatch::build_registry_with_breaker(
+            &cfg, /* breaker */ true,
+        )?;
+        let pid = tars_harness::cli::dispatch::pick_provider(&cfg, requested)?;
         Ok((registry, pid))
     };
-    tars_harness::cli::execute(args, &resolve).await
+    tars_harness::cli::harness::execute(args, &resolve).await
 }
 
 #[cfg(test)]

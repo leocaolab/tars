@@ -24,14 +24,14 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::trajectory_match::{self, MatchMode, ToolStep};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use tars_harness::trajectory_match::{self, MatchMode, ToolStep};
 use tars_melt::agent_event::AgentEvent;
 use tars_storage::AgentEventLog;
 use tars_types::TrajectoryId;
 
-use crate::event_store as event_store_path;
+use crate::cli::event_store as event_store_path;
 
 #[derive(Args, Debug)]
 pub struct TrajectoryArgs {

@@ -11,7 +11,7 @@
 //! things under it — `bless`, `diff` and `migrate-checks` are testing commands
 //! that never run an eval.
 //!
-//! See `docs/eval-and-arc-llm-roadmap.md §1.3` and `tars_harness::eval`
+//! See `docs/eval-and-arc-llm-roadmap.md §1.3` and `crate::eval`
 //! for the design intent + corpus/output layout.
 
 use std::path::PathBuf;

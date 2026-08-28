@@ -26,13 +26,40 @@ tokio-util.workspace = true
 futures.workspace = true
 
 # Serialization
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 # Errors / tracing
 thiserror.workspace = true
 tracing.workspace = true
+tars-config = { path = "../tars-config" }
+tars-cache = { path = "../tars-cache" }
+tars-melt = { path = "../tars-melt" }
+tars-storage = { path = "../tars-storage" }
+# `signal` for ctrl_c on the long-running commands.
+tokio = { workspace = true, features = ["signal"] }
+dirs.workspace = true
+# `tars models` / `tars providers` — live model-list HTTP queries against
+# each provider's REST API. Reuses the workspace reqwest (same TLS stack as
+# tars-provider) rather than adding a second HTTP client.
+reqwest.workspace = true
+# `tars models` reads `$TARS_HOME/.env` so env-var auth resolves for the
+# live queries without the user pre-exporting keys into the shell.
+dotenvy.workspace = true
+# `tars events list` timestamp formatting; `tars models` library `updated_at`.
+chrono.workspace = true
+# Trajectory ids in `tars trajectory` / the events tests.
+uuid.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+
+[[bin]]
+name = "tars"
+path = "src/bin/tars.rs"
+
+[features]
+default = []
+# Build `tars` with OpenTelemetry OTLP trace export. Forwards to tars-melt's
+# `otlp` feature (heavy tonic/grpc stack, hence opt-in).
+otlp = ["tars-melt/otlp"]

@@ -6,8 +6,8 @@
 //!   - `tars models update [PROVIDER]`  — UPDATE: refresh the library from the
 //!     live APIs, report what changed, and flag any stale `default_model`.
 //!
-//! The CLI stays thin: classification + parsing live in [`crate::model_query`],
-//! persistence + diff in [`crate::model_library`]. This module is orchestration
+//! The CLI stays thin: classification + parsing live in [`crate::cli::model_query`],
+//! persistence + diff in [`crate::cli::model_library`]. This module is orchestration
 //! and rendering only.
 
 use std::collections::BTreeMap;
@@ -18,8 +18,10 @@ use anyhow::{Context, Result};
 use tars_config::{Config, ConfigManager, ProviderConfig};
 use tars_types::ProviderId;
 
-use crate::model_library::{EntryStatus, ModelLibrary, ProviderEntry, diff_models, library_path};
-use crate::model_query::{Outcome, plan_for, query};
+use crate::cli::model_library::{
+    EntryStatus, ModelLibrary, ProviderEntry, diff_models, library_path,
+};
+use crate::cli::model_query::{Outcome, plan_for, query};
 
 /// Per-request budget for a live model-list query. Bounds each provider so a
 /// dead local server or a hung TLS handshake can't stall the command.
@@ -202,7 +204,7 @@ async fn run_update(
         .clone()
         .unwrap_or_else(|| ModelLibrary::new(now_rfc3339()));
     lib.updated_at = now_rfc3339();
-    lib.version = crate::model_library::LIBRARY_VERSION;
+    lib.version = crate::cli::model_library::LIBRARY_VERSION;
     for (name, entry) in &fresh {
         lib.providers.insert(name.clone(), entry.clone());
     }

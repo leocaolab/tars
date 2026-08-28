@@ -38,7 +38,7 @@ use futures::StreamExt;
 use tars_provider::registry::ProviderRegistry;
 use tars_types::{ChatEvent, ChatRequest, ProviderId, RequestContext};
 
-use crate::config_loader;
+use crate::cli::config_loader;
 
 /// Default benchmark prompt. Chosen to elicit a coherent response
 /// of ~80-200 output tokens — short enough to keep iterations
