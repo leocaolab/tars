@@ -19,6 +19,14 @@ is authoritative. This file aggregates.
 
 ---
 
+## 1.10.1 — role models resolve `@latest` too — `v1.10.1`
+
+`tars-node`'s role handles (`provider(role)` / `pipeline(role)`) and
+`tars-py`'s `role_model(role)` passed a `[roles]` model through verbatim, so a
+role written `model = "flash@latest"` reached the API as that string. Both now
+resolve it through `ProviderRegistry::resolve_model`, as a provider's
+`default_model` already was.
+
 ## 1.10 — the model catalog: live limits, `@latest`, filled output ceilings — `v1.10.0`
 
 **Why.** A request with no `max_output_tokens` went out without one, so the
