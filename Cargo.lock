@@ -4771,7 +4771,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tars-bedrock"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-stream",
  "aws-config",
@@ -4785,7 +4785,7 @@ dependencies = [
 
 [[package]]
 name = "tars-cache"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-trait",
  "dirs",
@@ -4804,7 +4804,7 @@ dependencies = [
 
 [[package]]
 name = "tars-config"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "dirs",
  "figment",
@@ -4821,7 +4821,7 @@ dependencies = [
 
 [[package]]
 name = "tars-examples"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4839,7 +4839,7 @@ dependencies = [
 
 [[package]]
 name = "tars-harness"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4870,7 +4870,7 @@ dependencies = [
 
 [[package]]
 name = "tars-melt"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4894,7 +4894,7 @@ dependencies = [
 
 [[package]]
 name = "tars-node"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "futures",
  "napi",
@@ -4916,7 +4916,7 @@ dependencies = [
 
 [[package]]
 name = "tars-pipeline"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4941,7 +4941,7 @@ dependencies = [
 
 [[package]]
 name = "tars-provider"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4971,7 +4971,7 @@ dependencies = [
 
 [[package]]
 name = "tars-py"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -4993,11 +4993,11 @@ dependencies = [
 
 [[package]]
 name = "tars-sandbox"
-version = "1.9.0"
+version = "1.10.0"
 
 [[package]]
 name = "tars-storage"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-trait",
  "dirs",
@@ -5014,7 +5014,7 @@ dependencies = [
 
 [[package]]
 name = "tars-tools"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "async-trait",
  "globset",
@@ -5034,7 +5034,7 @@ dependencies = [
 
 [[package]]
 name = "tars-types"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "chrono",
  "reqwest 0.12.28",
@@ -5053,7 +5053,7 @@ dependencies = [
 
 [[package]]
 name = "tars-utils"
-version = "1.9.0"
+version = "1.10.0"
 dependencies = [
  "serde",
  "serde_json",

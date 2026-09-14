@@ -19,7 +19,7 @@ is authoritative. This file aggregates.
 
 ---
 
-## Unreleased — the model catalog: live limits, `@latest`, filled output ceilings
+## 1.10 — the model catalog: live limits, `@latest`, filled output ceilings — `v1.10.0`
 
 **Why.** A request with no `max_output_tokens` went out without one, so the
 provider's own default applied — DeepSeek's is 8K against a 384K ceiling — and
