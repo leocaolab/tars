@@ -1,0 +1,19 @@
+[Unit]
+Description=tars model catalog refresh (live limits; provider.toml drift PR)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# A dedicated clone, reset to origin/main before every run — never the merge
+# server's working copy (it resets that one itself).
+Environment=TARS_REFRESH_REPO=%h/projects/tars-models
+# A user unit's default PATH has no cargo, claude or gh.
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# KEY=VALUE lines, encrypted with `systemd-creds encrypt --user` (README.md).
+LoadCredentialEncrypted=provider-keys:%h/.config/tars-refresh/provider-keys.cred
+StateDirectory=tars-refresh
+ExecStartPre=/usr/bin/git -C ${TARS_REFRESH_REPO} fetch --prune -q origin
+ExecStartPre=/usr/bin/git -C ${TARS_REFRESH_REPO} checkout -q --detach --force origin/main
+ExecStartPre=/usr/bin/git -C ${TARS_REFRESH_REPO} clean -fdq --exclude=target
+ExecStart=/bin/bash ${TARS_REFRESH_REPO}/tools/model-refresh/refresh.sh
+TimeoutStartSec=2h
