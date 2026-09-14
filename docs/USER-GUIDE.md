@@ -71,6 +71,10 @@ cargo run -p tars-cli -- init
 # writes $TARS_HOME/config.toml (default ~/.tars) with starter providers
 ```
 
+A provider's `default_model` can name a concrete model or follow the newest
+one in a series — `default_model = "flash@latest"`; see
+[Model specs and output limits](#model-specs-and-output-limits).
+
 tars reads its global config from **`$TARS_HOME/config.toml`** —
 `$TARS_HOME` resolves as `--tars_home` flag > `$TARS_HOME` env var >
 `~/.tars` (the default). The providers declared there are global: shared by

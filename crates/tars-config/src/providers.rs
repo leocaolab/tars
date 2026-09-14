@@ -40,12 +40,21 @@ where
 
 /// Top-level providers section.
 ///
+/// `default_model` takes a concrete model id, or `<series>@latest` for the
+/// newest model of a series the provider defines in `data/provider.toml`
+/// (Gemini: `flash`, `flash-lite`, `pro`) — see [`crate::model_spec`].
+///
 /// TOML shape:
 /// ```toml
 /// [providers.openai_main]
 /// type = "openai"
 /// auth = { kind = "secret", secret = { source = "env", var = "OPENAI_API_KEY" } }
-/// default_model = "gpt-4o"
+/// default_model = "gpt-5.4"
+///
+/// [providers.gemini_flash]
+/// type = "gemini"
+/// auth = { kind = "secret", secret = { source = "env", var = "GEMINI_API_KEY" } }
+/// default_model = "flash@latest"
 ///
 /// [providers.local_qwen]
 /// type = "openai_compat"

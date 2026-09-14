@@ -52,20 +52,31 @@ const STARTER_TEMPLATE: &str = r#"# tars provider registry — user-level.
 # vLLM cluster — see built-in `vllm` alias.
 
 # ── Cloud (uncomment + ensure env vars are set) ────────────────────
+#
+# default_model is a concrete model id, or `<series>@latest` — the newest
+# model of that series, picked from the list `tars models update` refreshes
+# into models.json next to this file (run it on a schedule). Gemini series:
+# flash, flash-lite, pro. Built-ins `openai`, `anthropic`, `gemini`
+# (flash@latest) and `deepseek` (deepseek-flash) need no block here.
 
 # [providers.anthropic_main]
 # type = "anthropic"
-# default_model = "claude-sonnet-4-7"
+# default_model = "claude-sonnet-5"
 # auth = { kind = "secret", secret = { source = "env", var = "ANTHROPIC_API_KEY" } }
 #
 # [providers.openai_main]
 # type = "openai"
-# default_model = "gpt-4o"
+# default_model = "gpt-5.4"
 # auth = { kind = "secret", secret = { source = "env", var = "OPENAI_API_KEY" } }
 #
 # [providers.gemini_flash]
 # type = "gemini"
-# default_model = "gemini-2.5-flash"
+# default_model = "flash@latest"
+# auth = { kind = "secret", secret = { source = "env", var = "GEMINI_API_KEY" } }
+#
+# [providers.gemini_pro]
+# type = "gemini"
+# default_model = "pro@latest"
 # auth = { kind = "secret", secret = { source = "env", var = "GEMINI_API_KEY" } }
 "#;
 
