@@ -43,8 +43,6 @@ use tars_types::{
 
 use crate::provider::{LlmEventStream, LlmProvider};
 
-///
-///
 /// `request` is what makes a MISS diffable. It is optional because cassettes
 /// recorded before this field exists must keep loading — for those, a MISS can
 /// still only report the fingerprint, and the error says so instead of
@@ -102,7 +100,6 @@ impl<'de> serde::Deserialize<'de> for Recording {
     }
 }
 
-///
 /// Selection only — no diffing and no rendering. Those are the testing layer's
 /// job (`tars_harness::cassette_diff`); this side owns the recordings, so it is
 /// the only place that CAN choose, and it hands the choice out as a fact.
@@ -148,8 +145,6 @@ fn pick_baseline<'a>(
     Some((fp, req, "prefix"))
 }
 
-///
-///
 /// Lives in `attributes` because that map's stated purpose is passing values
 /// through to inner layers — and "which step of the journey is this" is the
 /// consumer's knowledge, not tars's: the orchestration is not in tars, so
@@ -217,7 +212,6 @@ pub fn request_fingerprint(req: &ChatRequest, model: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
-///
 /// Recorded alongside every response so a MISS can be explained rather than
 /// merely announced. A fingerprint alone tells you "the request changed" and
 /// nothing else, which leaves re-recording as the only available move — and
@@ -255,7 +249,6 @@ pub struct CassetteProvider {
     mode: Mode,
 }
 
-///
 /// ProviderProfile matter because arc builds a DIFFERENT request depending on
 /// whether the provider advertises tool support (a fixer's request carries tool
 /// defs); a replay that advertised a bare `text_only_baseline` produced a
@@ -279,7 +272,6 @@ struct CassetteFile {
 }
 
 impl CassetteProvider {
-    ///
     pub fn replay(id: impl Into<ProviderId>, cassette: HashMap<String, Recording>) -> Arc<Self> {
         Self::replay_with_caps(id, cassette, None, BTreeMap::new())
     }
@@ -308,12 +300,10 @@ impl CassetteProvider {
         })
     }
 
-    ///
     pub fn record(id: impl Into<ProviderId>, inner: Arc<dyn LlmProvider>) -> Arc<Self> {
         Self::record_to(id, inner, None)
     }
 
-    ///
     /// `seed` pre-loads already-recorded entries so a recording session split
     /// across multiple registry builds ACCUMULATES into the file instead of
     /// each build overwriting it with only its own captures.
@@ -325,7 +315,6 @@ impl CassetteProvider {
         Self::record_seeded(id, inner, flush_path, HashMap::new())
     }
 
-    ///
     pub fn record_seeded(
         id: impl Into<ProviderId>,
         inner: Arc<dyn LlmProvider>,
@@ -366,7 +355,6 @@ impl CassetteProvider {
         Ok(Self::replay(id, cassette))
     }
 
-    ///
     pub fn take_captured(&self) -> HashMap<String, Recording> {
         match &self.mode {
             Mode::Record { captured, .. } => {

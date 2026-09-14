@@ -54,7 +54,6 @@ impl ToolRegistry {
         Ok(())
     }
 
-
     pub fn register_owned<T: Tool>(&mut self, tool: T) -> Result<(), ToolRegistryError> {
         self.register(Arc::new(tool))
     }
@@ -143,7 +142,6 @@ impl ToolRegistry {
             is_error,
         }
     }
-
 
     async fn execute(
         &self,

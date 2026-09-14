@@ -32,8 +32,6 @@ fn retry_attempt_construction_carries_typed_kind() {
     assert_eq!(back.error_kind, ProviderErrorKind::Network);
 }
 
-
-
 #[test]
 fn try_new_propagates_bad_pricing_from_capabilities() {
     use tars_types::ProviderProfile;
@@ -69,8 +67,6 @@ fn try_new_with_valid_capabilities_round_trips_through_wrap() {
         .build();
 }
 
-
-
 /// `read_policy_raw` is private, but `CachePolicy::default()` going
 /// through serde must round-trip cleanly — that's the contract callers
 /// of `read_policy` depend on (no fallback needed for a valid policy).
@@ -104,8 +100,6 @@ fn malformed_cache_policy_attribute_does_not_panic_attribute_write() {
     assert!(decoded.is_ok(), "default CachePolicy must round-trip");
 }
 
-
-
 #[test]
 fn circuit_breaker_check_under_poisoned_state_fails_safe() {
     use tars_pipeline::CircuitBreaker;
@@ -133,8 +127,6 @@ fn circuit_breaker_check_under_poisoned_state_fails_safe() {
     let _id = breaker.id().clone();
 }
 
-
-
 #[test]
 fn provider_error_kind_set_contains_uses_typed_equality() {
     let mut kinds: HashSet<ProviderErrorKind> = HashSet::new();
@@ -145,8 +137,6 @@ fn provider_error_kind_set_contains_uses_typed_equality() {
     assert!(kinds.contains(&ProviderErrorKind::Network));
     assert!(!kinds.contains(&ProviderErrorKind::Auth));
 }
-
-
 
 #[test]
 fn rwlock_poisoning_canonical_pattern() {

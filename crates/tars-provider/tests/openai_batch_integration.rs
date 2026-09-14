@@ -22,7 +22,6 @@ fn build_provider(server: &MockServer) -> Arc<dyn LlmProvider> {
 async fn submit_uploads_jsonl_file_then_creates_batch() {
     let server = MockServer::start().await;
 
-
     Mock::given(method("POST"))
         .and(path("/files"))
         .and(header("authorization", "Bearer sk-test"))
@@ -34,7 +33,6 @@ async fn submit_uploads_jsonl_file_then_creates_batch() {
         .expect(1)
         .mount(&server)
         .await;
-
 
     Mock::given(method("POST"))
         .and(path("/batches"))
@@ -204,7 +202,6 @@ async fn status_expired_and_cancelled() {
 async fn results_downloads_output_file_and_parses_jsonl() {
     let server = MockServer::start().await;
 
-
     Mock::given(method("GET"))
         .and(path("/batches/batch_done"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -215,7 +212,6 @@ async fn results_downloads_output_file_and_parses_jsonl() {
         })))
         .mount(&server)
         .await;
-
 
     let jsonl = r#"{"custom_id":"draft-1","response":{"status_code":200,"body":{"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hello batch"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}},"error":null}
 {"custom_id":"draft-2","response":null,"error":{"code":"invalid_request","message":"bad input"}}"#;

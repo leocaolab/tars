@@ -271,7 +271,7 @@ mod tests {
         assert!(d.env().contains(&"GEMINI_API_KEY"));
         assert!(d.env().contains(&"ANTIGRAVITY_API_KEY"));
     }
-    
+
     #[test]
     fn parse_text_yields_delta_then_finished() {
         let d = dialect();

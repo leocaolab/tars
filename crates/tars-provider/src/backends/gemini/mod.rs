@@ -4,7 +4,6 @@
 //! <https://ai.google.dev/gemini-api/docs/text-generation>
 //!
 
-
 mod adapter;
 mod mapping;
 mod provider;

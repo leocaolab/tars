@@ -40,9 +40,13 @@ use crate::providers::response::ChatResponse;
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ValidationReason {
-    JsonShape { parse_error: String },
+    JsonShape {
+        parse_error: String,
+    },
 
-    NotEmpty { field: String },
+    NotEmpty {
+        field: String,
+    },
 
     MaxLength {
         field: String,
@@ -123,7 +127,9 @@ pub enum ValidationOutcome {
     /// `reason` is a typed [`ValidationReason`] — callers
     /// match on `reason.kind()` + structured detail rather than parsing
     /// a message string.
-    Reject { reason: ValidationReason },
+    Reject {
+        reason: ValidationReason,
+    },
 
     /// Response unchanged, but the validator wants to record per-call
     /// metrics. Propagates into [`ValidationSummary::outcomes`].

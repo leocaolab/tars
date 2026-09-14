@@ -391,12 +391,10 @@ async fn reasons(store: &dyn PipelineEventLog, args: ReasonsArgs) -> Result<()> 
 async fn print_body(records: &dyn LlmRecordStore, r: &ContentRef, header: &str) -> Result<()> {
     println!("\n=== {header} ===");
     match records.fetch(r).await? {
-        Some(bytes) => {
-            match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
-                Err(_) => println!("{}", String::from_utf8_lossy(&bytes)),
-            }
-        }
+        Some(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+            Err(_) => println!("{}", String::from_utf8_lossy(&bytes)),
+        },
         None => println!("(body not found in store — may have been purged)"),
     }
     Ok(())

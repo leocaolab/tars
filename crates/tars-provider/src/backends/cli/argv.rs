@@ -163,7 +163,6 @@ pub(crate) fn streaming_enabled() -> bool {
 /// + `--verbose`, which produces a real-time NDJSON event stream
 ///   (the runner tees each event to stderr for observability,
 ///   reconstructs the final `result` event as the return Value).
-
 #[allow(dead_code)]
 pub(crate) fn build_argv(inv: &SubprocessInvocation) -> Vec<String> {
     build_argv_with(inv, streaming_enabled())

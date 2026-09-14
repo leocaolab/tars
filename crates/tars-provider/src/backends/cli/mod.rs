@@ -283,8 +283,6 @@ mod tests {
         assert_eq!(resp.stop_reason, Some(StopReason::MaxTokens));
     }
 
-
-
     #[test]
     fn clamp_is_noop_without_budget() {
         let content = vec![

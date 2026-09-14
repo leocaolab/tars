@@ -73,7 +73,6 @@ impl OpenAiProviderBuilder {
     }
 
     builder_setter! {
-        ///
         extras: HttpProviderExtras
     }
 
@@ -489,7 +488,6 @@ impl BatchSubmitter for OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    ///
     async fn fetch_batch_object(
         &self,
         id: &BatchJobId,

@@ -119,7 +119,6 @@ async fn happy_path_pipeline_parses_real_sse_into_usage() {
     assert_eq!(usage.input_tokens, 7);
     assert_eq!(usage.output_tokens, 1);
 
-
     let received = server.received_requests().await.unwrap();
     assert_eq!(received.len(), 1, "expected single upstream POST");
 }
@@ -132,7 +131,6 @@ async fn happy_path_pipeline_parses_real_sse_into_usage() {
 async fn retry_middleware_actually_replays_http_call_on_5xx() {
     let server = MockServer::start().await;
 
-
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(503).set_body_string("model overloaded"))
@@ -140,7 +138,6 @@ async fn retry_middleware_actually_replays_http_call_on_5xx() {
         .with_priority(1)
         .mount(&server)
         .await;
-
 
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -176,7 +173,6 @@ async fn retry_middleware_actually_replays_http_call_on_5xx() {
         .call(ChatRequest::user("x"), RequestContext::test_default())
         .await
         .expect("retry recovers and opens stream");
-
 
     let mut got_finished = false;
     while let Some(ev) = stream.next().await {

@@ -39,7 +39,9 @@ pub enum JudgeVerdict {
     FalsePositive,
     /// Judge can't confidently decide. Caller decides what to do —
     /// retry with different judge, escalate to human, etc.
-    Unsure { reason: String },
+    Unsure {
+        reason: String,
+    },
 }
 
 impl JudgeVerdict {

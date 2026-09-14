@@ -614,7 +614,6 @@ mod tests {
         assert_eq!(stored.len(), 1);
         match &stored[0] {
             PipelineEvent::LlmCallFinished(e) => {
-
                 assert!(matches!(
                     e.result,
                     CallResult::Error {

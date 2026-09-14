@@ -1241,7 +1241,7 @@ pub async fn run_eval(cfg: EvalRunConfig) -> Result<()> {
         ChainOpts::new(provider_id.clone()),
     );
 
-    // trajectory-match:* specs are case-parameterized (need per-case expected_tools), 
+    // trajectory-match:* specs are case-parameterized (need per-case expected_tools),
     // so they're split out from the global invariant CheckRunner and evaluated in the loop.
     let mut invariants: Vec<Arc<dyn Invariant>> = Vec::with_capacity(cfg.checks.len());
     let mut traj_specs: Vec<TrajectorySpec> = Vec::new();
@@ -1320,7 +1320,7 @@ pub async fn run_eval(cfg: EvalRunConfig) -> Result<()> {
     };
     ensure_dir(&output_dir)?;
 
-    // Failures are recorded into the report, not propagated — the value 
+    // Failures are recorded into the report, not propagated — the value
     // of an eval is seeing the distribution.
     let started_at_ms = utc_now_millis();
     let mut reports: Vec<EvalCaseReport> = Vec::with_capacity(cases.len());

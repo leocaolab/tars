@@ -21,7 +21,7 @@ pub struct Config {
     #[serde(default)]
     pub providers: ProvidersConfig,
 
-    /// 
+    ///
     /// Optional — if missing, the CLI falls through to single-provider
     /// dispatch (existing behaviour).
     #[serde(default)]

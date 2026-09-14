@@ -231,10 +231,10 @@ pub struct Pipeline {
 
 #[napi]
 impl Pipeline {
-/// Errors:
-///   - file missing / unreadable / not valid TOML → ConfigError
-///   - provider id absent from the config → ConfigError
-///   - provider construction fails (e.g. bad API key shape) → ProviderError
+    /// Errors:
+    ///   - file missing / unreadable / not valid TOML → ConfigError
+    ///   - provider id absent from the config → ConfigError
+    ///   - provider construction fails (e.g. bad API key shape) → ProviderError
     #[napi(factory)]
     pub fn from_config_path(path: String, provider_id: String) -> Result<Pipeline> {
         let cfg = ConfigManager::load_from_file(&path)
@@ -381,7 +381,6 @@ fn stop_reason_str(r: &tars_types::StopReason) -> &'static str {
         _ => "other",
     }
 }
-
 
 fn build_request(opts: CompleteOptions) -> Result<ChatRequest> {
     if opts.user.is_some() && opts.messages.is_some() {

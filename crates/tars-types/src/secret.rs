@@ -20,11 +20,17 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub enum SecretRef {
     /// Test/dev only — production should
     /// emit a startup warning if any inline secret is observed.
-    Inline { value: SecretString },
-    Env { var: String },
+    Inline {
+        value: SecretString,
+    },
+    Env {
+        var: String,
+    },
     /// Entire contents are the secret (trimmed of trailing
     /// newline). Useful for K8s secret mounts.
-    File { path: PathBuf },
+    File {
+        path: PathBuf,
+    },
 }
 
 impl SecretRef {

@@ -262,7 +262,6 @@ impl Tool for WebSearchTool {
     }
 }
 
-
 fn render_results(query: &str, results: Vec<SearchResult>) -> ToolResult {
     let title = format!("Searched {query:?} ({} results)", results.len());
     let mut body = format!("Results for {query:?}:\n");

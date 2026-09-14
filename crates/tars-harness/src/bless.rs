@@ -1,5 +1,5 @@
 //! The **bless store** — loadable, committed field-level assertions about a
-//! *pinned* response. 
+//! *pinned* response.
 //!
 //! A [`Bless`] is a JSON file of `{selector, expected, match}` assertions. A
 //! test decodes a (cassette-replayed → deterministic) response into a

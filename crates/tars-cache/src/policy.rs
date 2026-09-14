@@ -29,7 +29,9 @@ pub enum CacheLayerPolicy {
     Disabled,
     #[default]
     Default,
-    Override { ttl: Duration },
+    Override {
+        ttl: Duration,
+    },
 }
 
 impl CacheLayerPolicy {

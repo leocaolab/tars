@@ -43,7 +43,6 @@ pub trait OpenAiDialect: Send + Sync {
         false
     }
 
-    ///
     fn build_request(
         &self,
         adapter: &OpenAiAdapter,
@@ -53,7 +52,6 @@ pub trait OpenAiDialect: Send + Sync {
         adapter.build_request_default(req, model)
     }
 
-    ///
     fn parse_event(
         &self,
         adapter: &OpenAiAdapter,
@@ -63,8 +61,6 @@ pub trait OpenAiDialect: Send + Sync {
         adapter.parse_event_default(raw, buf)
     }
 
-    ///
-    ///
     /// Default = [`parse_openai_usage`] (reads `prompt_tokens`,
     /// `completion_tokens`, nested `cached_tokens`, and
     /// `completion_tokens_details.reasoning_tokens`). Used by the streaming
@@ -74,15 +70,12 @@ pub trait OpenAiDialect: Send + Sync {
         parse_openai_usage(usage)
     }
 
-    ///
     fn parse_response(&self, raw: &Value) -> Result<ChatResponse, ProviderError> {
         let mut r = openai_chat_completion_to_chat_response(raw)?;
         self.finalize(&mut r);
         Ok(r)
     }
 
-    ///
-    ///
     /// A dialect's quirks do not all fit in one SSE event. DeepSeek's native tool-call
     /// markup arrives in CHUNKS, so nothing per-event can lift it; it can only be
     /// recognised once the stream has been joined back into text. Overriding
@@ -96,7 +89,6 @@ pub trait OpenAiDialect: Send + Sync {
     fn finalize(&self, _r: &mut ChatResponse) {}
 }
 
-///
 pub struct StandardDialect;
 
 impl OpenAiDialect for StandardDialect {}

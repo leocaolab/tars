@@ -115,7 +115,6 @@ async fn pinned_value() -> serde_json::Value {
 
 #[tokio::test]
 async fn bless_load_and_check_passes_on_pinned_reply() {
-
     let bless = tars_harness::Bless::load(&bless_path()).expect("committed bless loads");
     let outcome = bless.check(&pinned_value().await).expect("check runs");
     assert!(outcome.is_pass(), "unexpected drift: {:?}", outcome.drifts);

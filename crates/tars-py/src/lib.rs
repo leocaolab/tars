@@ -1741,7 +1741,6 @@ fn run_complete_tagged(
     })
 }
 
-
 pub(crate) fn read_telemetry(handle: &tars_types::SharedTelemetry) -> Telemetry {
     let acc = match handle.lock() {
         Ok(g) => g.clone(),

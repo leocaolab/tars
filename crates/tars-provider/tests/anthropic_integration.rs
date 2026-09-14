@@ -14,7 +14,6 @@ use tars_provider::http_base::HttpProviderBase;
 use tars_provider::provider::LlmProvider;
 use tars_types::{ChatEvent, ChatRequest, RequestContext, StopReason};
 
-
 fn sse_named(events: &[(&str, &str)]) -> String {
     let mut s = String::new();
     for (ev, data) in events {

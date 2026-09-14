@@ -451,13 +451,11 @@ pub enum Message {
 }
 
 impl Message {
-
     pub fn user_text(text: impl Into<String>) -> Self {
         Self::User {
             content: vec![ContentBlock::text(text)],
         }
     }
-
 
     pub fn assistant_text(text: impl Into<String>) -> Self {
         Self::Assistant {
@@ -465,7 +463,6 @@ impl Message {
             tool_calls: Vec::new(),
         }
     }
-
 
     pub fn content(&self) -> &[ContentBlock] {
         match self {
@@ -487,11 +484,9 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
-
     pub fn text(s: impl Into<String>) -> Self {
         Self::Text { text: s.into() }
     }
-
 
     pub fn as_text(&self) -> Option<&str> {
         if let Self::Text { text } = self {

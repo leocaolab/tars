@@ -41,7 +41,6 @@ const TEST_NAME: &str = "delegate_cli_escape_blocked_through_real_run_path";
 #[test]
 fn delegate_cli_escape_blocked_through_real_run_path() {
     if std::env::var(CHILD_MARKER).is_ok() {
-
         run_child_body();
         return;
     }

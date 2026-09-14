@@ -3,7 +3,6 @@
 //! Emits structured `tracing` events at call open / call complete /
 //! stream finish / stream error.
 
-
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -209,7 +208,6 @@ mod tests {
     use tracing_subscriber::Registry;
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
-
     type EventFields = BTreeMap<String, String>;
 
     #[derive(Default, Clone)]
@@ -373,7 +371,6 @@ mod tests {
         assert!(finished.contains_key("input_tokens"));
         assert!(finished.contains_key("output_tokens"));
         assert!(finished.contains_key("elapsed_ms"));
-
 
         assert!(captured.find("llm.call.failed").is_none());
         assert!(captured.find("llm.call.stream_error").is_none());

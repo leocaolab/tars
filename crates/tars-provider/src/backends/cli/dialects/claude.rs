@@ -283,5 +283,4 @@ mod tests {
         // nothing rather than a bogus relative path; the jail simply omits it.
         assert!(resolve_claude_state_dirs(None, None).is_empty());
     }
-
 }

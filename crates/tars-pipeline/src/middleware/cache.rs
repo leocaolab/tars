@@ -763,8 +763,6 @@ mod tests {
         );
     }
 
-
-
     #[test]
     fn read_policy_raw_distinguishes_unset_set_malformed() {
         let ctx = RequestContext::test_default();

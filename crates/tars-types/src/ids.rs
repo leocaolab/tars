@@ -99,10 +99,7 @@ macro_rules! string_id {
     };
 }
 
-string_id!(
-    TenantId,
-    "Tenant identifier — the hard isolation boundary."
-);
+string_id!(TenantId, "Tenant identifier — the hard isolation boundary.");
 string_id!(SessionId, "Session identifier.");
 string_id!(
     TraceId,
@@ -114,14 +111,8 @@ string_id!(
     ProviderId,
     "Provider instance identifier (e.g. `openai_main`, `local_qwen`)."
 );
-string_id!(
-    L3HandleId,
-    "Internal handle for an L3 explicit cache."
-);
-string_id!(
-    AgentId,
-    "Agent instance identifier."
-);
+string_id!(L3HandleId, "Internal handle for an L3 explicit cache.");
+string_id!(AgentId, "Agent instance identifier.");
 string_id!(
     BatchJobId,
     "Batch job identifier returned by the provider on submit."

@@ -94,7 +94,10 @@ pub struct RunReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunReportError {
-    FailedExceedsTotal { failed: u32, total: u32 },
+    FailedExceedsTotal {
+        failed: u32,
+        total: u32,
+    },
     AgentFailedExceedsTotal {
         agent: String,
         failed: u32,

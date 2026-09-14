@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use tars_config::{Config, ConfigManager};
 
 pub fn default_config_path() -> Option<PathBuf> {
-
     dirs::config_dir().map(|d| d.join("tars").join("config.toml"))
 }
 

@@ -210,7 +210,6 @@ pub fn default_personal_agent_event_log_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("tars").join("events.sqlite"))
 }
 
-
 pub async fn open_agent_event_log_at_path(
     path: &Path,
 ) -> Result<Arc<SqliteAgentEventLog>, StorageError> {
@@ -221,7 +220,6 @@ pub async fn open_agent_event_log_at_path(
     }
     SqliteAgentEventLog::open(SqliteAgentEventLogConfig::new(path)).await
 }
-
 
 fn row_err(e: sqlx::Error) -> StorageError {
     StorageError::backend_source("decode row", e)

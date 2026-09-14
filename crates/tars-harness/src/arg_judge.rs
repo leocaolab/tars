@@ -1,4 +1,4 @@
-//! LLM-judged tool-argument equivalence 
+//! LLM-judged tool-argument equivalence
 //!
 //! The deterministic `MatchMode::Args` scorer compares arguments byte-for-byte:
 //! `search("ducks")` ≠ `search("duck")`. Sometimes that's too strict — two arg

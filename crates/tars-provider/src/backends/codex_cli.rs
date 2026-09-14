@@ -8,7 +8,6 @@
 //! maps codex's JSONL `ThreadEvent`s onto canonical `ChatEvent`s.
 //!
 
-
 use std::sync::Arc;
 use std::time::Duration;
 
