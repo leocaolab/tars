@@ -314,6 +314,7 @@ mod tests {
             has_structured_output: false,
             temperature: Some(0.0),
             max_output_tokens: None,
+            output_limit: None,
             response_ref: None,
             usage: Usage::default(),
             stop_reason: None,

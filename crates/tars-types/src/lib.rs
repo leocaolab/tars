@@ -36,6 +36,7 @@ pub use providers::error::{ErrorClass, ProviderError, ProviderErrorKind};
 pub use providers::events::{ChatChunk, ChatEvent, PartialUsage, StopReason};
 pub use providers::http_extras::HttpProviderExtras;
 pub use providers::model::{ModelHint, ModelTier, ThinkingMode};
+pub use providers::output_limit::{CatalogSource, OutputLimit};
 pub use providers::provider_profile::{
     InterfaceKind, Modality, PromptCacheKind, ProviderProfile, StructuredOutputMode,
 };

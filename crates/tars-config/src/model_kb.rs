@@ -1,26 +1,28 @@
-//! Model knowledge base — the parsed, typed view of `data/models.toml`.
+//! Model knowledge base — the parsed, typed view of `data/provider.toml`,
+//! the SHIPPED layer of the model catalog.
 //!
 //! Model ids, prices, context windows, and the thinking mode change
 //! faster than tars releases, so they live as **DATA** in
-//! `data/models.toml`, not as string literals in `builtin.rs` or a
+//! `data/provider.toml`, not as string literals in `builtin.rs` or a
 //! substring heuristic in a backend adapter. This module `include_str!`s
-//! that file (so the KB ships in the binary, no runtime file I/O) and
-//! parses it once into [`MODEL_KB`].
+//! that file (so the KB ships in the binary) and parses it once into
+//! [`MODEL_KB`]. The live layer `tars models update` refreshes sits on top of
+//! it in [`crate::model_catalog`].
 //!
-//! Adding/retiring a model or changing a default is a `models.toml`
-//! edit — no code change here.
-//!
-//! Fail-loud: a malformed `models.toml` panics on first access to
+//! Fail-loud: a malformed `provider.toml` panics on first access to
 //! [`MODEL_KB`] rather than silently degrading (see [`MODEL_KB`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
 
 use serde::Deserialize;
 
 use tars_types::{
-    InterfaceKind, Modality, Pricing, PromptCacheKind, ProviderProfile, StructuredOutputMode,
+    CatalogSource, InterfaceKind, Modality, Pricing, PromptCacheKind, ProviderProfile,
+    StructuredOutputMode,
 };
+
+use crate::model_spec::{ModelSpec, ModelSpecError, ResolvedModel, SeriesPattern};
 
 /// Whether a model reasons, and whether "off" is a legal request.
 ///
@@ -54,7 +56,7 @@ pub enum ThinkingParam {
 }
 
 /// Capability tier of a model within its family. A closed set — typed
-/// (not a bare `String`) so a typo in `models.toml` fails to parse loudly.
+/// (not a bare `String`) so a typo in `provider.toml` fails to parse loudly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelTier {
@@ -89,7 +91,7 @@ pub enum KbModality {
     Pdf,
 }
 
-/// One model row from `models.toml`. Price fields are USD per 1M tokens
+/// One model row from `provider.toml`. Price fields are USD per 1M tokens
 /// and are `Option` because deprecated/legacy rows may omit them.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelEntry {
@@ -243,8 +245,9 @@ pub struct ProviderDef {
     pub interface: InterfaceKind,
     /// Billing model — discriminates the price invariant.
     pub billed: BillingModel,
-    /// Default model id for general use. `None` for local providers where the
-    /// user always picks the model (mlx/vllm/llamacpp carry no fixed default).
+    /// Default model for general use — a concrete id or a `<series>@latest`
+    /// spec. `None` for local providers where the user always picks the model
+    /// (mlx/vllm/llamacpp carry no fixed default).
     #[serde(default)]
     pub default: Option<String>,
     /// Optional coding-tuned default (e.g. `gpt-5.6-sol`).
@@ -253,16 +256,98 @@ pub struct ProviderDef {
     /// Provider-level capability facts.
     #[serde(default)]
     pub capabilities: ProviderCapabilities,
+    /// Model series for `<series>@latest` specs: series name → id pattern with
+    /// one `{version}` slot (see [`crate::model_spec`]).
+    #[serde(default)]
+    pub series: BTreeMap<String, String>,
     #[serde(default)]
     pub models: Vec<ModelEntry>,
 }
 
 impl ProviderDef {
     /// Find a model row by exact id or alias.
-    fn find_model(&self, model_id: &str) -> Option<&ModelEntry> {
+    pub fn find_model(&self, model_id: &str) -> Option<&ModelEntry> {
         self.models
             .iter()
             .find(|m| m.id == model_id || m.aliases.iter().any(|a| a == model_id))
+    }
+
+    /// Resolve `spec` for provider `name` against `ids` — the list the caller
+    /// is searching (the live list, or this block's own rows), described by
+    /// `searched`.
+    pub fn resolve_among<'i>(
+        &self,
+        name: &str,
+        spec: &str,
+        ids: impl IntoIterator<Item = &'i str>,
+        searched: CatalogSource,
+    ) -> Result<ResolvedModel, ModelSpecError> {
+        let series = match ModelSpec::parse(spec)? {
+            ModelSpec::Concrete(id) => {
+                return Ok(ResolvedModel {
+                    id: id.to_string(),
+                    picked_from: None,
+                });
+            }
+            ModelSpec::Latest { series } => series,
+        };
+        if self.series.is_empty() {
+            return Err(ModelSpecError::NoSeries {
+                provider: name.to_string(),
+                series: series.to_string(),
+            });
+        }
+        let Some(raw) = self.series.get(series) else {
+            return Err(ModelSpecError::UnknownSeries {
+                provider: name.to_string(),
+                series: series.to_string(),
+                known: self.series.keys().cloned().collect(),
+            });
+        };
+        let pattern = SeriesPattern::parse(raw).ok_or_else(|| ModelSpecError::BadSpec {
+            spec: spec.to_string(),
+            detail: format!(
+                "provider `{name}` series pattern `{raw}` needs exactly one {{version}}"
+            ),
+        })?;
+        let ids: Vec<&str> = ids.into_iter().collect();
+        match pattern.latest(ids.iter().copied()) {
+            Some(id) => Ok(ResolvedModel {
+                id: id.to_string(),
+                picked_from: Some(searched),
+            }),
+            None => Err(ModelSpecError::NoMatch {
+                provider: name.to_string(),
+                series: series.to_string(),
+                pattern: raw.clone(),
+                searched: match searched {
+                    CatalogSource::Live { queried_at } => {
+                        format!("live model list from {queried_at}")
+                    }
+                    CatalogSource::Shipped { verified } => {
+                        format!("shipped provider.toml (verified {verified})")
+                    }
+                },
+                candidates: ids.len(),
+            }),
+        }
+    }
+
+    /// The row the `default` spec names, resolved against this block's own
+    /// rows.
+    fn default_row(&self, name: &str, verified: &str) -> Option<&ModelEntry> {
+        let spec = self.default.as_deref()?;
+        let resolved = self
+            .resolve_among(
+                name,
+                spec,
+                self.models.iter().map(|m| m.id.as_str()),
+                CatalogSource::Shipped {
+                    verified: verified.to_string(),
+                },
+            )
+            .ok()?;
+        self.find_model(&resolved.id)
     }
 
     /// Assemble the runtime [`ProviderProfile`] for `model_id` on this provider:
@@ -271,12 +356,12 @@ impl ProviderDef {
     /// shape when the DB carries no row at all — a local provider with an
     /// empty model list). This generalizes what the gemini backend used to do
     /// by hand.
-    pub fn capabilities_for(&self, model_id: &str) -> ProviderProfile {
+    fn capabilities_for(&self, name: &str, verified: &str, model_id: &str) -> ProviderProfile {
         let cap = &self.capabilities;
         // Resolve the model row: exact/alias match, else the provider default.
         let model = self
             .find_model(model_id)
-            .or_else(|| self.default.as_deref().and_then(|d| self.find_model(d)));
+            .or_else(|| self.default_row(name, verified));
 
         let (
             max_context_tokens,
@@ -369,9 +454,10 @@ pub struct ModelKb {
 }
 
 impl ModelKb {
-    /// Default model id for `provider`, or `None` if the provider isn't
-    /// in the KB, or is a local provider with no fixed default (the user
-    /// picks — mlx/vllm/llamacpp).
+    /// Default model spec for `provider` (a concrete id or
+    /// `<series>@latest`), or `None` if the provider isn't in the KB, or is a
+    /// local provider with no fixed default (the user picks —
+    /// mlx/vllm/llamacpp).
     pub fn default_model(&self, provider: &str) -> Option<&str> {
         self.providers
             .get(provider)
@@ -418,21 +504,14 @@ impl ModelKb {
     /// per-instance `CapabilitiesOverrides` correct it from there.
     pub fn capabilities_for(&self, provider: &str, model_id: &str) -> ProviderProfile {
         match self.providers.get(provider) {
-            Some(def) => def.capabilities_for(model_id),
+            Some(def) => def.capabilities_for(provider, &self.verified, model_id),
             None => ProviderProfile::text_only_baseline(Pricing::default()),
         }
     }
 }
 
-/// Assemble runtime [`ProviderProfile`] for `provider` + `model_id` from the
-/// shipped provider DB. The one assembler that replaces the 15 hand-written
-/// backend constructors (design §5).
-pub fn capabilities_for(provider: &str, model_id: &str) -> ProviderProfile {
-    MODEL_KB.capabilities_for(provider, model_id)
-}
-
 /// Parsed-once knowledge base. **Panics on first access** if
-/// `data/models.toml` is malformed — the KB is compiled-in data, a
+/// `data/provider.toml` is malformed — the KB is compiled-in data, a
 /// parse failure is a build/authoring bug that must fail loud, not a
 /// recoverable runtime condition.
 pub static MODEL_KB: LazyLock<ModelKb> = LazyLock::new(|| {
@@ -455,11 +534,23 @@ mod tests {
         assert!(!kb.providers.is_empty());
         for (name, p) in &kb.providers {
             // A default is optional (local providers carry none); when present
-            // it MUST resolve to a model row.
+            // it MUST resolve (a `@latest` spec included) to a model row.
             if let Some(def) = &p.default {
                 assert!(
-                    p.models.iter().any(|m| &m.id == def),
-                    "provider `{name}` default `{def}` is not present in its models"
+                    p.default_row(name, &kb.verified).is_some(),
+                    "provider `{name}` default `{def}` does not resolve to one of its models"
+                );
+            }
+            // Every series pattern parses and names at least one shipped row.
+            for (series, raw) in &p.series {
+                let pattern = SeriesPattern::parse(raw).unwrap_or_else(|| {
+                    panic!("provider `{name}` series `{series}` pattern `{raw}` is malformed")
+                });
+                assert!(
+                    pattern
+                        .latest(p.models.iter().map(|m| m.id.as_str()))
+                        .is_some(),
+                    "provider `{name}` series `{series}` matches none of its models"
                 );
             }
             if let Some(cd) = &p.coding_default {
@@ -475,11 +566,8 @@ mod tests {
     fn default_model_resolves_for_api_providers() {
         assert_eq!(MODEL_KB.default_model("openai"), Some("gpt-5.4"));
         assert_eq!(MODEL_KB.default_model("anthropic"), Some("claude-opus-4-8"));
-        assert_eq!(MODEL_KB.default_model("gemini"), Some("gemini-3.5-flash"));
-        assert_eq!(
-            MODEL_KB.default_model("deepseek"),
-            Some("deepseek-v4-flash")
-        );
+        assert_eq!(MODEL_KB.default_model("gemini"), Some("flash@latest"));
+        assert_eq!(MODEL_KB.default_model("deepseek"), Some("deepseek-flash"));
         // Local backends aren't in the KB.
         assert_eq!(MODEL_KB.default_model("mlx"), None);
     }
@@ -490,8 +578,8 @@ mod tests {
             MODEL_KB.find("gemini-3.5-flash").unwrap().id,
             "gemini-3.5-flash"
         );
-        let by_alias = MODEL_KB.find("deepseek-reasoner").unwrap();
-        assert_eq!(by_alias.id, "deepseek-v4-flash");
+        let by_alias = MODEL_KB.find("deepseek-v4-flash").unwrap();
+        assert_eq!(by_alias.id, "deepseek-flash");
         assert!(MODEL_KB.find("no-such-model").is_none());
     }
 
@@ -510,12 +598,48 @@ mod tests {
                 .unwrap()
                 .is_thinking_only()
         );
+        // 3.7/3.8 flash reject the `minimal` level (verified live).
+        assert!(
+            MODEL_KB
+                .find("gemini-3.8-flash")
+                .unwrap()
+                .is_thinking_only()
+        );
         assert!(
             !MODEL_KB
                 .find("gemini-2.5-flash")
                 .unwrap()
                 .is_thinking_only()
         );
+    }
+
+    #[test]
+    fn shipped_default_spec_resolves_to_the_newest_row() {
+        let gemini = &MODEL_KB.providers["gemini"];
+        let row = gemini.default_row("gemini", &MODEL_KB.verified).unwrap();
+        assert_eq!(row.id, "gemini-3.8-flash");
+        let pro = gemini
+            .resolve_among(
+                "gemini",
+                "pro@latest",
+                gemini.models.iter().map(|m| m.id.as_str()),
+                CatalogSource::Shipped {
+                    verified: MODEL_KB.verified.clone(),
+                },
+            )
+            .unwrap();
+        assert_eq!(pro.id, "gemini-3.1-pro-preview");
+        let err = MODEL_KB.providers["deepseek"]
+            .resolve_among(
+                "deepseek",
+                "flash@latest",
+                [],
+                CatalogSource::Shipped {
+                    verified: String::new(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, ModelSpecError::NoSeries { .. }), "{err}");
     }
 
     #[test]

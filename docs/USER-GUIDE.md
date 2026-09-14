@@ -112,9 +112,13 @@ local server can't hang the command.
 
 ### The model library — `tars models`
 
-The **model library** is a JSON catalog at **`$TARS_HOME/models.json`**
-recording, per provider, the model ids that provider's API last
-reported. It's tars-owned state alongside `config.toml`.
+The **model library** is a JSON file at **`$TARS_HOME/models.json`**
+recording, per provider, what that provider's list-models API last
+reported: each model id, plus its context and output limits when the API
+states them (Gemini does; OpenAI-shaped lists — OpenAI, DeepSeek,
+Anthropic, local servers — carry ids only). It's tars-owned state alongside
+`config.toml`, and it is the **live layer of the model catalog the runtime
+reads** — see [Model specs and output limits](#model-specs-and-output-limits).
 
 ```bash
 tars models                 # QUERY the library (fast, offline) for every provider
@@ -127,18 +131,88 @@ tars models update openai   # refresh one provider
 ```
 
 - **`tars models`** reads the library — fast and offline. Each provider
-  row marks the configured `default_model` (`← default`), and flags it
-  with `⚠ default not in list (stale config?)` if that default is not in
-  the last-seen live list. If the library is empty/missing it tells you
-  to run `tars models update`. `--live` skips the cache and queries the
-  APIs directly.
+  row shows its default as configured and as resolved
+  (`[default: flash@latest → gemini-3.8-flash]`), marks it (`← default`),
+  lists each model's limits when known, and flags a default missing from
+  the last-seen list (`⚠ default not in list (stale config?)`). A library
+  more than 7 days old gets a "run `tars models update`" note.
 - **`tars models update`** queries every selected provider live,
-  persists the result, and reports what **changed** since last time
-  (`+ added` / `- removed (deprecated/retired)`). If a configured
-  `default_model` is no longer in the provider's live list it prints a
-  **stale-config warning** — it never edits your config, only reports.
-  A single-provider update merges into the existing library without
-  dropping the other providers' rows.
+  persists the result, and reports:
+  - what **changed** since last time — `+ added`, `- removed
+    (deprecated/retired)`, `~ <model> max output: 8192 → 65536`;
+  - where each `@latest` default resolves now, and what it moved from;
+  - a concrete `default_model` that is **no longer listed**, or that a
+    **newer model in its series** has overtaken (with the `@latest` spec
+    that would follow it);
+  - where tars's shipped `provider.toml` is **behind** the API: the newest
+    model of a series has no row there (limits are known from the API, but
+    its price and thinking mode aren't), a row the API no longer lists, or
+    a limit the API contradicts.
+
+  It never edits your config or `provider.toml` — it only reports. A
+  single-provider update merges into the existing library without dropping
+  the other providers' rows.
+
+**Keep it fresh.** A refresh reaches every tars process that starts after
+it — no tars release needed — so run it on a schedule. A daily cron entry:
+
+```cron
+17 6 * * * /path/to/tars models update >> ~/.tars/models-update.log 2>&1
+```
+
+(`tars models update` loads `$TARS_HOME/.env` itself, so the keys don't
+need to be in cron's environment.)
+
+### Model specs and output limits
+
+Wherever a model id goes — a provider's `default_model`, a consumer's
+per-role model — you can write either a **concrete id**
+(`gemini-3.8-flash`) or a **series spec**, `<series>@latest`:
+
+```toml
+[providers.gemini_flash]
+type = "gemini"
+default_model = "flash@latest"     # the newest Gemini flash
+auth = { kind = "secret", secret = { source = "env", var = "GEMINI_API_KEY" } }
+
+[providers.gemini_pro]
+type = "gemini"
+default_model = "pro@latest"       # the newest Gemini pro (preview included)
+auth = { kind = "secret", secret = { source = "env", var = "GEMINI_API_KEY" } }
+```
+
+- Series are defined per provider in `data/provider.toml`
+  (`[providers.gemini.series]`: `flash`, `flash-lite`, `pro`). A series is an
+  id pattern with a version slot (`gemini-{version}-flash`); `latest` is
+  the highest version, a GA model beating a `-preview` of the same version.
+  A provider with no series (DeepSeek, local servers) takes concrete ids
+  only; `flash@latest` there is an error that says so.
+- `@latest` picks from the **live list** in `models.json` when one was
+  refreshed, else from the models `provider.toml` ships. So a new Gemini
+  flash is picked up by the next process after `tars models update`.
+- The spec is resolved **once, when a model is bound to a provider** (the
+  provider registry resolves `default_model` at build; a consumer resolves a
+  role's model with `ProviderRegistry::resolve_model`). Events, cache keys
+  and cassette fingerprints all carry the concrete id that ran.
+
+**Output limit.** A request that sets no `max_output_tokens` does not mean
+"unlimited": the provider's own default applies, and it can be far below the
+model's ceiling (DeepSeek: 8K against 384K). So when an `LlmService` binds a
+provider and model, it asks the provider for that model's **output limit**,
+and a call with no `max_output_tokens` is sent with it. The limit comes from,
+in order:
+
+1. the provider's config — `max_output_tokens` on an `openai_compat` /
+   `vllm` / `mlx` / `llamacpp` provider;
+2. the model's limit in `models.json` (what the API reported);
+3. the model's `max_output` in `provider.toml`;
+4. none known (a local model, a model no table describes) — the request goes
+   out without one and the provider's default applies.
+
+A `max_output_tokens` the caller sets is always sent as set. Each call's event
+records both the value sent (`max_output_tokens`) and the limit with its
+source (`output_limit`: `configured`, `model` with `from: live | shipped`, or
+`unknown`).
 
 ### Which provider types are queryable
 

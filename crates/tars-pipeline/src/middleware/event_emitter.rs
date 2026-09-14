@@ -88,6 +88,7 @@ impl Middleware for EventEmitterMiddleware {
         let has_structured_output = req.structured_output.is_some();
         let temperature = req.temperature;
         let max_output_tokens = req.max_output_tokens;
+        let output_limit = next.output_limit().clone();
 
         // Serialize the request body once — used for both the
         // ContentRef hash and the LlmRecordStore write. If this fails we
@@ -153,6 +154,7 @@ impl Middleware for EventEmitterMiddleware {
                         has_structured_output,
                         temperature,
                         max_output_tokens,
+                        output_limit,
                         telemetry_handle,
                         validation_handle,
                         tags,
@@ -188,6 +190,7 @@ impl Middleware for EventEmitterMiddleware {
                     has_structured_output,
                     temperature,
                     max_output_tokens,
+                    output_limit,
                     telemetry_handle,
                     validation_handle,
                     tags,
@@ -236,6 +239,7 @@ struct StreamCtx {
     has_structured_output: bool,
     temperature: Option<f32>,
     max_output_tokens: Option<u32>,
+    output_limit: tars_types::OutputLimit,
     telemetry_handle: tars_types::SharedTelemetry,
     validation_handle: tars_types::SharedValidationOutcome,
     tags: Vec<String>,
@@ -262,6 +266,7 @@ struct EventInputs {
     has_structured_output: bool,
     temperature: Option<f32>,
     max_output_tokens: Option<u32>,
+    output_limit: tars_types::OutputLimit,
     telemetry_handle: tars_types::SharedTelemetry,
     validation_handle: tars_types::SharedValidationOutcome,
     tags: Vec<String>,
@@ -323,6 +328,7 @@ fn build_event(i: EventInputs) -> LlmCallFinished {
         has_structured_output: i.has_structured_output,
         temperature: i.temperature,
         max_output_tokens: i.max_output_tokens,
+        output_limit: Some(i.output_limit),
         response_ref: i.response_body,
         usage: i.usage,
         stop_reason: i.stop_reason,
@@ -445,6 +451,7 @@ fn wrap_stream_for_emit(
             has_structured_output: sc.has_structured_output,
             temperature: sc.temperature,
             max_output_tokens: sc.max_output_tokens,
+            output_limit: sc.output_limit,
             telemetry_handle: sc.telemetry_handle,
             validation_handle: sc.validation_handle,
             tags: sc.tags,

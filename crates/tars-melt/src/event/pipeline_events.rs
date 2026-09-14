@@ -88,7 +88,16 @@ pub struct LlmCallFinished {
     pub has_thinking: bool,
     pub has_structured_output: bool,
     pub temperature: Option<f32>,
+    /// `max_output_tokens` as sent — the caller's value, or the bound
+    /// model's ceiling when the caller set none (see [`Self::output_limit`]).
+    /// `None` = sent without one; the provider's default applied.
     pub max_output_tokens: Option<u32>,
+    /// The bound model's output ceiling and where it came from (config, the
+    /// provider's API, the shipped model table) — or `Unknown`, which is why
+    /// `max_output_tokens` went out empty. `None` only on an event recorded
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_limit: Option<tars_types::OutputLimit>,
 
     // ── response ────────────────────────────────────────────────
     /// `None` when the call failed before producing a response.
@@ -209,6 +218,7 @@ mod tests {
             has_structured_output: false,
             temperature: Some(0.0),
             max_output_tokens: None,
+            output_limit: None,
             response_ref: None,
             usage: Usage::default(),
             stop_reason: None,

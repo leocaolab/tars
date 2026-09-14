@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, Stream, StreamExt};
 
 use tars_types::{
-    ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, CostUsd, ProviderError, ProviderId,
-    ProviderProfile, RequestContext, Usage,
+    ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder, CostUsd, OutputLimit, ProviderError,
+    ProviderId, ProviderProfile, RequestContext, Usage,
 };
 
 /// Convenience alias for the streaming return type. `'static` because
@@ -28,6 +28,22 @@ pub trait LlmProvider: Send + Sync + 'static {
     fn id(&self) -> &ProviderId;
 
     fn capabilities(&self) -> &ProviderProfile;
+
+    /// The most output tokens this provider produces for `model` (a concrete
+    /// id), and where that number came from. A request with no
+    /// `max_output_tokens` otherwise gets the wire protocol's own default —
+    /// far below the model's ceiling on several providers — so the
+    /// [`LlmService`](../tars_pipeline) binding `provider + model` fills an
+    /// unset request with this.
+    ///
+    /// Default: [`OutputLimit::Unknown`] — a provider built outside config
+    /// knows no model table. Config-built HTTP backends answer from their
+    /// config and the model catalog; a wrapper forwards its inner provider's
+    /// answer.
+    fn output_limit(&self, model: &str) -> OutputLimit {
+        let _ = model;
+        OutputLimit::Unknown
+    }
 
     /// `model` is the concrete provider-side model name (e.g.
     /// `"gpt-4o-2024-08-06"`). It is passed explicitly rather than read

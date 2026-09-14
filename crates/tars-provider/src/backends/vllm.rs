@@ -64,6 +64,8 @@ pub fn vllm(
     let normalized_auth = normalize_auth(auth);
     let mut caps = local_openai_compat_capabilities();
     capability_overrides.apply_to(&mut caps);
+    let output_limits = tars_config::OutputLimitRule::catalog("vllm")
+        .configured(capability_overrides.max_output_tokens);
     OpenAiProviderBuilder::new(id, normalized_auth)
         .base_url(url)
         .extras(extras)
@@ -71,6 +73,7 @@ pub fn vllm(
         // prefix cache; thinking is model-specific (Qwen Thinker has
         // it, but that's per-deployment, not per-vLLM).
         .capabilities(caps)
+        .output_limits(output_limits)
         .build(http, auth_resolver)
 }
 

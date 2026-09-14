@@ -12,7 +12,10 @@
 //!
 //!   CLI / bedrock / mock / cassette have no list API → [`Plan::Skip`].
 //! - [`parse_models`] — pure response parsing per [`ParseStyle`], covered by
-//!   unit tests against captured sample JSON (no network in tests).
+//!   unit tests against captured sample JSON (no network in tests). Keeps the
+//!   context/output limits when the response states them (Gemini's
+//!   `inputTokenLimit` / `outputTokenLimit`); OpenAI-shaped lists carry ids
+//!   only.
 //!
 //! [`query`] glues them: resolve the key from the provider's auth env var,
 //! fire one GET with a timeout, classify the outcome. Never panics, never
@@ -21,6 +24,7 @@
 use std::time::Duration;
 
 use tars_config::ProviderConfig;
+use tars_config::model_library::LiveModel;
 use tars_types::{Auth, SecretRef};
 
 /// Default endpoints, mirrored from the `tars-provider` backends so the
@@ -36,8 +40,9 @@ const LLAMACPP_BASE: &str = "http://localhost:8080/v1";
 /// Shape of the provider's list-models JSON response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseStyle {
-    /// Gemini: `{ "models": [ { "name": "models/gemini-2.5-flash", … } ] }`.
-    /// The `models/` prefix is stripped.
+    /// Gemini: `{ "models": [ { "name": "models/gemini-2.5-flash",
+    /// "inputTokenLimit": …, "outputTokenLimit": … } ] }`. The `models/`
+    /// prefix is stripped.
     Gemini,
     /// OpenAI / OpenAI-compatible / Anthropic: `{ "data": [ { "id": "…" } ] }`.
     OpenAiData,
@@ -170,20 +175,26 @@ fn local_openai_plan(base_url: Option<&str>, default: &str, auth: &Auth) -> Plan
     })
 }
 
-/// Parse a provider's list-models response body into sorted, de-duplicated
-/// model ids. Pure — the unit-tested seam.
-pub fn parse_models(style: ParseStyle, body: &str) -> Result<Vec<String>, String> {
+/// Parse a provider's list-models response body into models sorted and
+/// de-duplicated by id. Pure — the unit-tested seam.
+pub fn parse_models(style: ParseStyle, body: &str) -> Result<Vec<LiveModel>, String> {
     let v: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format!("response was not JSON: {e}"))?;
-    let mut ids: Vec<String> = match style {
+    let mut models: Vec<LiveModel> = match style {
         ParseStyle::Gemini => v
             .get("models")
             .and_then(|m| m.as_array())
             .ok_or_else(|| "missing `models` array".to_string())?
             .iter()
-            .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
-            // `models/gemini-2.5-flash` → `gemini-2.5-flash`.
-            .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
+            .filter_map(|m| {
+                let name = m.get("name").and_then(|n| n.as_str())?;
+                Some(LiveModel {
+                    // `models/gemini-2.5-flash` → `gemini-2.5-flash`.
+                    id: name.strip_prefix("models/").unwrap_or(name).to_string(),
+                    context: m.get("inputTokenLimit").and_then(|n| n.as_u64()),
+                    max_output: m.get("outputTokenLimit").and_then(|n| n.as_u64()),
+                })
+            })
             .collect(),
         ParseStyle::OpenAiData => v
             .get("data")
@@ -191,19 +202,19 @@ pub fn parse_models(style: ParseStyle, body: &str) -> Result<Vec<String>, String
             .ok_or_else(|| "missing `data` array".to_string())?
             .iter()
             .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
-            .map(str::to_string)
+            .map(LiveModel::id_only)
             .collect(),
     };
-    ids.sort();
-    ids.dedup();
-    Ok(ids)
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models.dedup_by(|a, b| a.id == b.id);
+    Ok(models)
 }
 
 /// Outcome of attempting to list one provider's models.
 #[derive(Clone, Debug)]
 pub enum Outcome {
     /// Live list retrieved.
-    Ok { models: Vec<String> },
+    Ok { models: Vec<LiveModel> },
     /// Provider authenticates via an env var that is unset. Carries the var
     /// name so the user knows what to export. The key is never read here.
     NoKey { var: String },
@@ -315,10 +326,11 @@ mod tests {
 
     // ── parse: Gemini (captured shape from generativelanguage v1beta) ──
     #[test]
-    fn parse_gemini_strips_models_prefix_and_sorts() {
+    fn parse_gemini_strips_models_prefix_sorts_and_keeps_limits() {
         let body = r#"{
           "models": [
-            { "name": "models/gemini-2.5-flash", "displayName": "Flash" },
+            { "name": "models/gemini-3.8-flash", "displayName": "Flash",
+              "inputTokenLimit": 1048576, "outputTokenLimit": 65536 },
             { "name": "models/gemini-3.1-flash-lite" },
             { "name": "models/gemini-flash-lite-latest" }
           ]
@@ -327,11 +339,19 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                "gemini-2.5-flash",
-                "gemini-3.1-flash-lite",
-                "gemini-flash-lite-latest",
+                LiveModel::id_only("gemini-3.1-flash-lite"),
+                LiveModel {
+                    id: "gemini-3.8-flash".into(),
+                    context: Some(1_048_576),
+                    max_output: Some(65_536),
+                },
+                LiveModel::id_only("gemini-flash-lite-latest"),
             ]
         );
+    }
+
+    fn ids(models: Vec<LiveModel>) -> Vec<String> {
+        models.into_iter().map(|m| m.id).collect()
     }
 
     // ── parse: OpenAI `{data:[{id}]}` (also DeepSeek / LM Studio) ──
@@ -345,7 +365,7 @@ mod tests {
           ]
         }"#;
         let got = parse_models(ParseStyle::OpenAiData, body).expect("parse");
-        assert_eq!(got, vec!["gpt-4o", "gpt-4o-mini"]);
+        assert_eq!(ids(got), vec!["gpt-4o", "gpt-4o-mini"]);
     }
 
     // ── parse: Anthropic `/v1/models` (same {data:[{id}]} shape) ──
@@ -359,14 +379,14 @@ mod tests {
           "has_more": false
         }"#;
         let got = parse_models(ParseStyle::OpenAiData, body).expect("parse");
-        assert_eq!(got, vec!["claude-opus-4-1", "claude-sonnet-4-5"]);
+        assert_eq!(ids(got), vec!["claude-opus-4-1", "claude-sonnet-4-5"]);
     }
 
     #[test]
     fn parse_dedups_repeated_ids() {
         let body = r#"{"data":[{"id":"m"},{"id":"m"},{"id":"a"}]}"#;
         let got = parse_models(ParseStyle::OpenAiData, body).expect("parse");
-        assert_eq!(got, vec!["a", "m"]);
+        assert_eq!(ids(got), vec!["a", "m"]);
     }
 
     #[test]

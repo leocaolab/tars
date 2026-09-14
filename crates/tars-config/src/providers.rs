@@ -587,6 +587,33 @@ impl AuthDefaults for Auth {
 }
 
 impl ProviderConfig {
+    /// The `data/provider.toml` block that describes the models of the
+    /// provider declared as `id`: the variant's own block for a typed
+    /// provider (`gemini_flash` of type `gemini` → `gemini`), and the
+    /// declared id itself for `openai_compat`, whose block — if the DB names
+    /// one (`deepseek`) — is keyed by the id. A block that doesn't exist is
+    /// fine: lookups against it find no rows and no series.
+    pub fn catalog_name<'a>(&'a self, id: &'a str) -> &'a str {
+        use ProviderConfig::*;
+        match self {
+            Openai { .. } => "openai",
+            OpenaiCompat { .. } => id,
+            Anthropic { .. } => "anthropic",
+            Gemini { .. } => "gemini",
+            Bedrock { .. } => "bedrock",
+            Vllm { .. } => "vllm",
+            Mlx { .. } => "mlx",
+            Llamacpp { .. } => "llamacpp",
+            ClaudeCli { .. } => "claude_cli",
+            ClaudeSdk { .. } => "claude_sdk",
+            CodexCli { .. } => "codex_cli",
+            Opencode { .. } => "opencode",
+            Antigravity { .. } => "antigravity",
+            Mock { .. } => "mock",
+            Cassette { .. } => "cassette",
+        }
+    }
+
     /// How tars reaches and drives this provider — a total function of the
     /// variant, so it can never disagree with the variant. The provider DB
     /// (`data/provider.toml`) also *carries* `interface` for the definition

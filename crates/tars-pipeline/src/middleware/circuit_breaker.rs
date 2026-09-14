@@ -375,6 +375,9 @@ impl LlmProvider for CircuitBreaker {
     fn capabilities(&self) -> &ProviderProfile {
         self.inner.capabilities()
     }
+    fn output_limit(&self, model: &str) -> tars_types::OutputLimit {
+        self.inner.output_limit(model)
+    }
 
     async fn stream(
         self: Arc<Self>,

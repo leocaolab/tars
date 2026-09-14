@@ -68,6 +68,20 @@ pub enum RegistryError {
     /// a registry it did not build.
     #[error("provider registry already initialized — ProviderRegistry::init() may run only once")]
     AlreadyInitialized,
+    /// A provider's `default_model` spec (or a caller's) did not resolve to a
+    /// concrete model — a `<series>@latest` naming an unknown series, or one
+    /// with no matching model. Carries the provider id and the resolver's
+    /// reason.
+    #[error("provider {id}: {source}")]
+    Model {
+        id: ProviderId,
+        #[source]
+        source: Box<tars_config::ModelSpecError>,
+    },
+    /// `resolve_model` was asked about a provider id this registry doesn't
+    /// hold.
+    #[error("provider {0} is not in the registry")]
+    UnknownProvider(ProviderId),
     /// `ProviderRegistry::global` was called before `ProviderRegistry::init`.
     /// `global` is a pure getter and never builds.
     #[error("provider registry not initialized — call ProviderRegistry::init() at startup")]
@@ -85,6 +99,10 @@ pub struct ProviderRegistry {
     /// dispatch. Preserved across [`Self::map_providers`] (e.g. when
     /// wrapping providers in a `CircuitBreaker`).
     default_models: Arc<HashMap<ProviderId, String>>,
+    /// Per-provider `data/provider.toml` block its models belong to
+    /// ([`ProviderConfig::catalog_name`]), for resolving a caller's model
+    /// spec in [`Self::resolve_model`]. Same key set as `default_models`.
+    catalogs: Arc<HashMap<ProviderId, String>>,
 }
 
 impl ProviderRegistry {
@@ -93,6 +111,7 @@ impl ProviderRegistry {
         Self {
             providers: Arc::new(HashMap::new()),
             default_models: Arc::new(HashMap::new()),
+            catalogs: Arc::new(HashMap::new()),
         }
     }
 
@@ -109,6 +128,7 @@ impl ProviderRegistry {
         Self {
             providers: Arc::new(providers),
             default_models: Arc::new(HashMap::new()),
+            catalogs: Arc::new(HashMap::new()),
         }
     }
 
@@ -141,6 +161,7 @@ impl ProviderRegistry {
     ) -> Result<Self, RegistryError> {
         let mut map: HashMap<ProviderId, Arc<dyn LlmProvider>> = HashMap::new();
         let mut default_models: HashMap<ProviderId, String> = HashMap::new();
+        let mut catalogs: HashMap<ProviderId, String> = HashMap::new();
         // Resolve the process-wide force-record override ONCE here, at the
         // config-assembly boundary, and thread it down as a plain value. Read
         // deep inside the `build_cassette` leaf it made that builder read the
@@ -154,11 +175,29 @@ impl ProviderRegistry {
             .iter()
             .partition(|(_, e)| matches!(e, ProviderConfig::Cassette { .. }));
         for (id, entry) in base.into_iter().chain(cassettes) {
+            // The configured default may be a `<series>@latest` spec: resolve
+            // it once, here, so the backend is sized for the model that will
+            // actually run and tier routing hands out a concrete id.
+            let catalog = entry.catalog_name(id.as_str()).to_string();
+            let default_model = tars_config::catalog()
+                .resolve(&catalog, entry.default_model())
+                .map_err(|source| RegistryError::Model {
+                    id: id.clone(),
+                    source: Box::new(source),
+                })?
+                .id;
             let provider = match entry {
                 ProviderConfig::Cassette {
                     path, record_from, ..
                 } => build_cassette(id.clone(), path, record_from.as_deref(), force_record, &map),
-                _ => build_one(id.clone(), entry, http.clone(), auth_resolver.clone())?,
+                _ => build_one(
+                    id.clone(),
+                    entry,
+                    &catalog,
+                    &default_model,
+                    http.clone(),
+                    auth_resolver.clone(),
+                )?,
             };
             // Keep the two maps coupled: only record the default model on
             // the *same* path that successfully inserts the provider, via
@@ -171,13 +210,15 @@ impl ProviderRegistry {
                 }
                 std::collections::hash_map::Entry::Vacant(slot) => {
                     slot.insert(provider);
-                    default_models.insert(id.clone(), entry.default_model().to_string());
+                    default_models.insert(id.clone(), default_model);
+                    catalogs.insert(id.clone(), catalog);
                 }
             }
         }
         Ok(Self {
             providers: Arc::new(map),
             default_models: Arc::new(default_models),
+            catalogs: Arc::new(catalogs),
         })
     }
 
@@ -201,6 +242,7 @@ impl ProviderRegistry {
         Self {
             providers: Arc::new(mapped),
             default_models: self.default_models.clone(),
+            catalogs: self.catalogs.clone(),
         }
     }
 
@@ -208,10 +250,37 @@ impl ProviderRegistry {
         self.providers.get(id).cloned()
     }
 
-    /// The configured default model for `id`, if this registry was
+    /// The configured default model for `id` — resolved to a concrete id
+    /// when the config wrote a `<series>@latest` spec — if this registry was
     /// built from config. Used by routing to resolve tier requests.
     pub fn default_model(&self, id: &ProviderId) -> Option<&str> {
         self.default_models.get(id).map(String::as_str)
+    }
+
+    /// The concrete model a caller should bind to provider `id`: `spec` (a
+    /// concrete id, passed through, or `<series>@latest`, resolved against the
+    /// model catalog) when given, else the provider's resolved default.
+    /// Resolve before binding an `LlmService`, so events, cache keys and
+    /// cassette fingerprints carry the model that actually ran.
+    pub fn resolve_model(
+        &self,
+        id: &ProviderId,
+        spec: Option<&str>,
+    ) -> Result<String, RegistryError> {
+        let catalog = self
+            .catalogs
+            .get(id)
+            .ok_or_else(|| RegistryError::UnknownProvider(id.clone()))?;
+        match spec {
+            Some(spec) => tars_config::catalog()
+                .resolve(catalog, spec)
+                .map(|r| r.id)
+                .map_err(|source| RegistryError::Model {
+                    id: id.clone(),
+                    source: Box::new(source),
+                }),
+            None => Ok(self.default_models[id].clone()),
+        }
     }
 
     pub fn ids(&self) -> impl Iterator<Item = &ProviderId> {
@@ -235,6 +304,10 @@ impl ProviderRegistry {
 fn build_one(
     id: ProviderId,
     cfg: &ProviderConfig,
+    // The block `cfg`'s models belong to, and its default model resolved to
+    // a concrete id.
+    catalog: &str,
+    default_model: &str,
     http: Arc<HttpProviderBase>,
     auth_resolver: Arc<dyn AuthResolver>,
 ) -> Result<Arc<dyn LlmProvider>, RegistryError> {
@@ -245,7 +318,9 @@ fn build_one(
             default_model: _,
             extras,
         } => {
-            let mut builder = OpenAiProviderBuilder::new(id, auth.clone()).extras(extras.clone());
+            let mut builder = OpenAiProviderBuilder::new(id, auth.clone())
+                .extras(extras.clone())
+                .capabilities(tars_config::capabilities_for(catalog, default_model));
             if let Some(url) = base_url {
                 builder = builder.base_url(url.clone());
             }
@@ -255,7 +330,7 @@ fn build_one(
         ProviderConfig::OpenaiCompat {
             base_url,
             auth,
-            default_model,
+            default_model: _,
             extras,
             capabilities,
         } => {
@@ -264,12 +339,16 @@ fn build_one(
             // instance (a local vLLM the DB doesn't name) falls back to
             // `text_only_baseline`. Either way the user's `[capabilities]`
             // overrides win last.
-            let mut caps = tars_config::capabilities_for(id.as_str(), default_model);
+            let mut caps = tars_config::capabilities_for(catalog, default_model);
             capabilities.apply_to(&mut caps);
             let builder = OpenAiProviderBuilder::new(id, auth.clone())
                 .base_url(base_url.clone())
                 .extras(extras.clone())
-                .capabilities(caps);
+                .capabilities(caps)
+                .output_limits(
+                    tars_config::OutputLimitRule::catalog(catalog)
+                        .configured(capabilities.max_output_tokens),
+                );
             builder.build(http, auth_resolver)
         }
 
@@ -280,8 +359,9 @@ fn build_one(
             default_model: _,
             extras,
         } => {
-            let mut builder =
-                AnthropicProviderBuilder::new(id, auth.clone()).extras(extras.clone());
+            let mut builder = AnthropicProviderBuilder::new(id, auth.clone())
+                .extras(extras.clone())
+                .capabilities(tars_config::capabilities_for(catalog, default_model));
             if let Some(url) = base_url {
                 builder = builder.base_url(url.clone());
             }
@@ -297,7 +377,9 @@ fn build_one(
             default_model: _,
             extras,
         } => {
-            let mut builder = GeminiProviderBuilder::new(id, auth.clone()).extras(extras.clone());
+            let mut builder = GeminiProviderBuilder::new(id, auth.clone())
+                .extras(extras.clone())
+                .capabilities(tars_config::capabilities_for(catalog, default_model));
             if let Some(url) = base_url {
                 builder = builder.base_url(url.clone());
             }
@@ -446,9 +528,9 @@ fn build_one(
         ProviderConfig::Opencode {
             executable,
             timeout_secs,
-            default_model,
+            default_model: _,
         } => {
-            let caps = tars_config::capabilities_for("opencode", default_model);
+            let caps = tars_config::capabilities_for(catalog, default_model);
             let dialect = Arc::new(OpenCodeDialect::new(
                 executable.clone(),
                 Duration::from_secs(*timeout_secs),
@@ -460,7 +542,7 @@ fn build_one(
         ProviderConfig::Antigravity {
             executable,
             timeout_secs,
-            default_model,
+            default_model: _,
             effort,
         } => {
             use tars_config::AntigravityEffortConfig;
@@ -468,7 +550,7 @@ fn build_one(
                 AntigravityEffortConfig::Low => AntigravityEffort::Low,
                 AntigravityEffortConfig::High => AntigravityEffort::High,
             };
-            let caps = tars_config::capabilities_for("antigravity", default_model);
+            let caps = tars_config::capabilities_for(catalog, default_model);
             let dialect = Arc::new(AntigravityDialect::new(
                 executable.clone(),
                 Duration::from_secs(*timeout_secs),
@@ -482,11 +564,11 @@ fn build_one(
             executable,
             script_path,
             timeout_secs,
-            default_model,
+            default_model: _,
         } => {
             let mut b = ClaudeSdkProviderBuilder::new(id)
                 .executable(executable.clone())
-                .default_model(default_model.clone())
+                .default_model(default_model.to_string())
                 .timeout(Duration::from_secs(*timeout_secs));
             if let Some(sp) = script_path {
                 b = b.script_path(sp.clone());
@@ -891,6 +973,82 @@ mod tests {
             reg.default_model(&ProviderId::new("agy")),
             Some("gemini-2.5-pro")
         );
+    }
+
+    /// A `<series>@latest` default resolves at build, and a caller's spec
+    /// resolves through `resolve_model`. The catalog is the process-global
+    /// one — it may carry this machine's refreshed model list — so the
+    /// assertions are about the shape of the answer, not a specific id.
+    #[test]
+    fn latest_specs_resolve_to_concrete_ids() {
+        let cfg = ConfigManager::load_from_str(
+            r#"
+            [providers.gemini_flash]
+            type = "gemini"
+            auth = { kind = "secret", secret = { source = "env", var = "GEMINI_API_KEY" } }
+            default_model = "flash@latest"
+
+            [providers.local]
+            type = "openai_compat"
+            base_url = "http://localhost:8000/v1"
+            default_model = "qwen/qwen3-coder-30b"
+            "#,
+        )
+        .unwrap();
+        let reg = ProviderRegistry::from_config(&cfg.providers, http(), basic()).unwrap();
+        let flash = ProviderId::new("gemini_flash");
+        let default = reg.default_model(&flash).unwrap();
+        assert!(
+            default.starts_with("gemini-") && default.ends_with("-flash"),
+            "flash@latest must resolve to a concrete gemini flash id, got {default}"
+        );
+        assert_eq!(reg.resolve_model(&flash, None).unwrap(), default);
+        let pro = reg.resolve_model(&flash, Some("pro@latest")).unwrap();
+        assert!(pro.contains("-pro"), "got {pro}");
+        assert_eq!(
+            reg.resolve_model(&flash, Some("gemini-2.5-flash")).unwrap(),
+            "gemini-2.5-flash"
+        );
+        assert!(matches!(
+            reg.resolve_model(&flash, Some("flsh@latest")),
+            Err(RegistryError::Model { .. })
+        ));
+        // A concrete local model passes through; a series spec there has
+        // nothing to resolve against.
+        let local = ProviderId::new("local");
+        assert_eq!(reg.default_model(&local), Some("qwen/qwen3-coder-30b"));
+        assert!(matches!(
+            reg.resolve_model(&local, Some("flash@latest")),
+            Err(RegistryError::Model { .. })
+        ));
+        assert!(matches!(
+            reg.resolve_model(&ProviderId::new("nope"), None),
+            Err(RegistryError::UnknownProvider(_))
+        ));
+    }
+
+    #[test]
+    fn a_default_spec_that_does_not_resolve_fails_the_build() {
+        let cfg = ConfigManager::load_from_str(
+            r#"
+            [providers.gemini_flash]
+            type = "gemini"
+            auth = { kind = "secret", secret = { source = "env", var = "GEMINI_API_KEY" } }
+            default_model = "flash@3.7"
+            "#,
+        )
+        .unwrap();
+        match ProviderRegistry::from_config(&cfg.providers, http(), basic()) {
+            Err(RegistryError::Model { id, source }) => {
+                assert_eq!(id.as_str(), "gemini_flash");
+                assert!(
+                    source.to_string().contains("only `flash@latest`"),
+                    "{source}"
+                );
+            }
+            Err(other) => panic!("expected RegistryError::Model, got {other:?}"),
+            Ok(_) => panic!("expected the build to fail"),
+        }
     }
 
     #[test]

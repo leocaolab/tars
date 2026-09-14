@@ -26,7 +26,7 @@ const API_VERSION: &str = "v1beta";
 
 /// Whether a Gemini model can accept `thinkingBudget: 0` (turn thinking
 /// off). Reads the `thinking` field of the model row in the model KB
-/// (`data/models.toml`): a model supports thinking-off iff it is NOT
+/// (`data/provider.toml`): a model supports thinking-off iff it is NOT
 /// thinking-only. Unknown models fall to `false` — omitting
 /// `thinkingConfig` is always safe, so we never emit a budget the API
 /// might reject.
@@ -318,13 +318,13 @@ impl HttpAdapter for GeminiAdapter {
         // marks `thinking = "only"` (e.g. gemini-2.5-pro, gemini-3.1-pro)
         // REJECTS it with HTTP 400 "Budget 0 is invalid. This model only
         // works in thinking mode." `model_supports_thinking_off` reads that
-        // flag from `data/models.toml`. So when the requested budget is 0 on
+        // flag from `data/provider.toml`. So when the requested budget is 0 on
         // a model that can't honor it, we omit `thinkingConfig` and let the
         // model apply its mandatory thinking — never sending a value the API
         // rejects. A positive or dynamic (-1) budget is accepted by all
         // models.
         //
-        // Which knob this model's generation uses is DATA (models.toml):
+        // Which knob this model's generation uses is DATA (provider.toml):
         // Gemini 2.5 = numeric `thinkingBudget`, Gemini 3.x = string
         // `thinkingLevel`. Default to Budget for rows that don't declare one.
         let param = tars_config::MODEL_KB
@@ -348,16 +348,19 @@ impl HttpAdapter for GeminiAdapter {
                 // Off → "minimal", Auto → omit (model default level),
                 // Budget(b) → b<=0 "minimal" else "high" (3.x has no numeric
                 // budget, so a positive numeric maps to a high level — lossy).
+                //
+                // A thinking-only model rejects "minimal" (3.7/3.8 flash: HTTP
+                // 400 "Thinking level MINIMAL is not supported"), and omitting
+                // the config leaves its default — `medium` on flash, `high` on
+                // pro. "low" is the least thinking those models accept
+                // (verified live on 3.1-pro-preview, 3.7-flash, 3.8-flash), so
+                // an Off request gets "low".
+                let off_level = if supports_off { "minimal" } else { "low" };
                 let level: Option<&str> = match req.thinking {
-                    tars_types::ThinkingMode::Off => supports_off.then_some("minimal"),
+                    tars_types::ThinkingMode::Off => Some(off_level),
                     tars_types::ThinkingMode::Auto => None,
-                    tars_types::ThinkingMode::Budget(b) => {
-                        if b == 0 {
-                            supports_off.then_some("minimal")
-                        } else {
-                            Some("high")
-                        }
-                    }
+                    tars_types::ThinkingMode::Budget(0) => Some(off_level),
+                    tars_types::ThinkingMode::Budget(_) => Some("high"),
                 };
                 if let Some(level) = level {
                     config["thinkingConfig"] = json!({ "thinkingLevel": level });
@@ -826,6 +829,27 @@ mod tests {
         );
     }
 
+    // A 3.x thinking-only model rejects `minimal`; Off asks for the least it
+    // accepts, `low`, instead of leaving its `medium`/`high` default.
+    #[test]
+    fn thinking_off_asks_low_on_a_level_model_that_rejects_minimal() {
+        let req = ChatRequest::user("hi");
+        for model in ["gemini-3.8-flash", "gemini-3.1-pro-preview"] {
+            let body = adapter().translate_request(&req, model).unwrap();
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingLevel"], "low",
+                "{model}: {body}"
+            );
+        }
+        let body = adapter()
+            .translate_request(&req, "gemini-3.6-flash")
+            .unwrap();
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "minimal"
+        );
+    }
+
     // Flash models can honor Off, so a zero budget is sent to disable thinking.
     #[test]
     fn thinking_off_sets_zero_budget_for_flash() {
@@ -840,7 +864,7 @@ mod tests {
     }
 
     // Thinking-off support is DATA-driven from the model KB
-    // (`data/models.toml`).
+    // (`data/provider.toml`).
     #[test]
     fn model_supports_thinking_off_predicate() {
         // KB `thinking = "optional"` → can turn thinking off.

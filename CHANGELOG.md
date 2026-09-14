@@ -19,6 +19,66 @@ is authoritative. This file aggregates.
 
 ---
 
+## Unreleased — the model catalog: live limits, `@latest`, filled output ceilings
+
+**Why.** A request with no `max_output_tokens` went out without one, so the
+provider's own default applied — DeepSeek's is 8K against a 384K ceiling — and
+consumers papered over it with hard-coded caps (arc's 16384). The model table
+that could have supplied the real ceiling (`data/provider.toml`) was compiled in
+and had not been touched since July; `tars models update` refreshed a separate
+file (`models.json`) the runtime never read, and stored ids only. So Gemini
+3.6/3.7/3.8-flash shipped without tars noticing, and DeepSeek renamed its flash
+model.
+
+**What shipped.**
+
+- **One model catalog, two layers** (`tars_config::model_catalog`). The shipped
+  `provider.toml` plus the live `$TARS_HOME/models.json`. A live limit wins over
+  the shipped number; price, thinking mode and tier stay shipped-only. Installed
+  by `init_tars(home)`; a composition root that uses `Config::set` gets it loaded
+  from the default home on first use. The library moves from `tars-harness` to
+  `tars_config::model_library`, schema v2: each model carries `context` /
+  `max_output` when the API states them (Gemini does), and each provider row
+  names its `catalog` block. A v1 file reads as absent until the next update.
+- **`<series>@latest` model specs** (`tars_config::model_spec`). Series are data:
+  `[providers.gemini.series]` defines `flash`, `flash-lite`, `pro`. `latest` =
+  highest version, GA over a preview of the same version, picked from the live
+  list when refreshed. The registry resolves `default_model` at build (a spec that
+  doesn't resolve fails the build with `RegistryError::Model`), and
+  `ProviderRegistry::resolve_model(id, spec)` resolves a caller's spec — resolve
+  before binding, so events, cache keys and cassette fingerprints carry the
+  concrete id.
+- **Output ceilings filled.** `LlmProvider::output_limit(model) -> OutputLimit`
+  (default `Unknown`); the config-built HTTP backends answer from the provider's
+  configured `max_output_tokens`, else the catalog. `LlmService` asks once at
+  binding and fills an unset `max_output_tokens` before the first layer, so the
+  event, cache key and budget see the value sent. `LlmCallFinished` gains
+  `output_limit` (value + source: `configured`, `model` from `live`/`shipped`, or
+  `unknown`). `CircuitBreaker` forwards it; a cassette records it per model and
+  replays it — a cassette recorded before this has none, so replay fills nothing
+  and its fingerprints are unchanged.
+- **`tars models update` reports what a refresh means**: limit changes, where each
+  `@latest` default moved, a concrete default that is unlisted or behind its
+  series, and shipped-data drift (newest series model with no row, a row the API
+  no longer lists, a limit the API contradicts). `tars models` shows limits, the
+  resolved default, and a note when the library is over 7 days old.
+- **Data refresh (verified 2026-09-14 against the APIs and docs).** Gemini:
+  3.8/3.7/3.6-flash and 3.5-flash-lite rows; default `flash@latest`. 3.7/3.8-flash
+  are `thinking = "only"` — the API rejects `thinkingLevel: minimal` (verified
+  live). DeepSeek: `deepseek-v4-flash` → `deepseek-flash` (old name kept as an
+  alias, still accepted), `max_output` 393216, peak-hour prices; the retired
+  `deepseek-chat` / `deepseek-reasoner` aliases are gone. The dead
+  `data/models.toml` (superseded by `provider.toml` in 1.9, still referenced in
+  comments) is deleted.
+- **Gemini thinking-off on a thinking-only 3.x model** now sends
+  `thinkingLevel: low` — the least those models accept — instead of omitting the
+  config and getting the model's `medium`/`high` default.
+
+**Breaking.** `RegistryError` gains `Model` and `UnknownProvider`;
+`LlmCallFinished` gains `output_limit`; `tars_config::capabilities_for` reads
+the process-global catalog; `ModelKb::default_model` may return a spec;
+`ProviderDef::capabilities_for` is private (use `ModelKb::capabilities_for`).
+
 ## 1.9 — provider definitions are data, and `InterfaceKind` — `v1.9.0`
 
 **Breaking.** `Capabilities` gains `interface: InterfaceKind`, and

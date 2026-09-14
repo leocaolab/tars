@@ -28,7 +28,7 @@
 //! later turn's request (carrying the prior tool results) hashes to its own key
 //! and replays in turn.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -37,7 +37,8 @@ use async_trait::async_trait;
 use futures::{StreamExt, stream};
 
 use tars_types::{
-    ChatEvent, ChatRequest, Pricing, ProviderError, ProviderId, ProviderProfile, RequestContext,
+    ChatEvent, ChatRequest, OutputLimit, Pricing, ProviderError, ProviderId, ProviderProfile,
+    RequestContext,
 };
 
 use crate::provider::{LlmEventStream, LlmProvider};
@@ -236,11 +237,15 @@ enum Mode {
     Record {
         inner: Arc<dyn LlmProvider>,
         captured: Mutex<HashMap<String, Recording>>,
+        /// The inner provider's output limit for each model a service bound —
+        /// written to the file so replay fills requests identically.
+        output_limits: Mutex<BTreeMap<String, OutputLimit>>,
         flush_path: Option<PathBuf>,
     },
     /// A miss is an error (signal).
     Replay {
         cassette: HashMap<String, Recording>,
+        output_limits: BTreeMap<String, OutputLimit>,
     },
 }
 
@@ -261,6 +266,13 @@ pub struct CassetteProvider {
 struct CassetteFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capabilities: Option<ProviderProfile>,
+    /// Per-model output limit of the recorded provider, for the same reason
+    /// as `capabilities`: the service fills an unset `max_output_tokens` from
+    /// it, and that value is part of the fingerprinted request. Absent in a
+    /// cassette recorded before limits were filled — replay then fills
+    /// nothing, exactly as those recordings were made.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    output_limits: BTreeMap<String, OutputLimit>,
     // No `#[serde(default)]` — a legacy bare-map cassette has no `recordings`
     // key, so it fails to parse as `CassetteFile` and falls back below.
     recordings: std::collections::BTreeMap<String, Recording>,
@@ -269,7 +281,7 @@ struct CassetteFile {
 impl CassetteProvider {
     ///
     pub fn replay(id: impl Into<ProviderId>, cassette: HashMap<String, Recording>) -> Arc<Self> {
-        Self::replay_with_caps(id, cassette, None)
+        Self::replay_with_caps(id, cassette, None, BTreeMap::new())
     }
 
     /// Replay advertising the RECORDED provider's capabilities (so arc rebuilds
@@ -278,6 +290,7 @@ impl CassetteProvider {
         id: impl Into<ProviderId>,
         cassette: HashMap<String, Recording>,
         caps: Option<ProviderProfile>,
+        output_limits: BTreeMap<String, OutputLimit>,
     ) -> Arc<Self> {
         Arc::new(Self {
             id: id.into(),
@@ -288,7 +301,10 @@ impl CassetteProvider {
                 c.interface = tars_types::InterfaceKind::Mock;
                 c
             }),
-            mode: Mode::Replay { cassette },
+            mode: Mode::Replay {
+                cassette,
+                output_limits,
+            },
         })
     }
 
@@ -322,6 +338,7 @@ impl CassetteProvider {
             mode: Mode::Record {
                 inner,
                 captured: Mutex::new(seed),
+                output_limits: Mutex::new(BTreeMap::new()),
                 flush_path,
             },
         })
@@ -337,7 +354,12 @@ impl CassetteProvider {
         let raw = std::fs::read_to_string(path)?;
         if let Ok(file) = serde_json::from_str::<CassetteFile>(&raw) {
             let recordings: HashMap<String, Recording> = file.recordings.into_iter().collect();
-            return Ok(Self::replay_with_caps(id, recordings, file.capabilities));
+            return Ok(Self::replay_with_caps(
+                id,
+                recordings,
+                file.capabilities,
+                file.output_limits,
+            ));
         }
         let cassette: HashMap<String, Recording> = serde_json::from_str(&raw)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -360,6 +382,7 @@ impl CassetteProvider {
 fn write_cassette(
     map: &HashMap<String, Recording>,
     caps: &ProviderProfile,
+    output_limits: &Mutex<BTreeMap<String, OutputLimit>>,
     path: &std::path::Path,
 ) {
     if map.is_empty() {
@@ -369,6 +392,10 @@ fn write_cassette(
         map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     let file = CassetteFile {
         capabilities: Some(caps.clone()),
+        output_limits: output_limits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone(),
         recordings,
     };
     match serde_json::to_string_pretty(&file) {
@@ -395,6 +422,27 @@ impl LlmProvider for CassetteProvider {
         &self.capabilities
     }
 
+    fn output_limit(&self, model: &str) -> OutputLimit {
+        match &self.mode {
+            Mode::Record {
+                inner,
+                output_limits,
+                ..
+            } => {
+                let limit = inner.output_limit(model);
+                output_limits
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(model.to_string(), limit.clone());
+                limit
+            }
+            Mode::Replay { output_limits, .. } => output_limits
+                .get(model)
+                .cloned()
+                .unwrap_or(OutputLimit::Unknown),
+        }
+    }
+
     async fn stream(
         self: Arc<Self>,
         req: ChatRequest,
@@ -415,7 +463,7 @@ impl LlmProvider for CassetteProvider {
             "canon and fingerprint must agree"
         );
         match &self.mode {
-            Mode::Replay { cassette } => match cassette.get(&key) {
+            Mode::Replay { cassette, .. } => match cassette.get(&key) {
                 Some(rec) => {
                     let out: Vec<Result<ChatEvent, ProviderError>> =
                         rec.events.iter().cloned().map(Ok).collect();
@@ -441,6 +489,7 @@ impl LlmProvider for CassetteProvider {
             Mode::Record {
                 inner,
                 captured,
+                output_limits,
                 flush_path,
             } => {
                 // collect-then-replay; recording is not
@@ -469,7 +518,7 @@ impl LlmProvider for CassetteProvider {
                     // exits via std::process::exit never runs destructors, so
                     // Drop-only flushing silently loses the whole recording.
                     if let Some(path) = flush_path {
-                        write_cassette(&snapshot, &self.capabilities, path);
+                        write_cassette(&snapshot, &self.capabilities, output_limits, path);
                     }
                 }
                 Ok(Box::pin(stream::iter(events)))
@@ -485,12 +534,13 @@ impl Drop for CassetteProvider {
         // destructors. This catches the graceful-shutdown case.
         if let Mode::Record {
             captured,
+            output_limits,
             flush_path: Some(path),
             ..
         } = &self.mode
         {
             let map = captured.lock().unwrap_or_else(|e| e.into_inner());
-            write_cassette(&map, &self.capabilities, path);
+            write_cassette(&map, &self.capabilities, output_limits, path);
         }
     }
 }
@@ -754,16 +804,28 @@ mod tests {
         // rebuilds the identical, tool-carrying request). Legacy bare maps still load.
         let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
         caps.supports_tool_use = true;
+        let limit = OutputLimit::Configured { tokens: 4242 };
         let file = CassetteFile {
             capabilities: Some(caps.clone()),
+            output_limits: BTreeMap::from([("m".to_string(), limit.clone())]),
             recordings: std::collections::BTreeMap::new(),
         };
         let json = serde_json::to_string(&file).unwrap();
         let back: CassetteFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.output_limits.get("m"), Some(&limit));
         assert!(
             back.capabilities.unwrap().supports_tool_use,
             "caps survive the cassette file"
         );
+        // Replay answers with the recorded limit, and Unknown for a model the
+        // recording never bound — as a pre-limits cassette does for all.
+        let replay =
+            CassetteProvider::replay_with_caps("c", HashMap::new(), None, back.output_limits);
+        assert_eq!(replay.output_limit("m"), limit);
+        assert_eq!(replay.output_limit("other"), OutputLimit::Unknown);
+        let legacy: CassetteFile =
+            serde_json::from_str(r#"{"recordings":{}}"#).expect("pre-limits cassette loads");
+        assert!(legacy.output_limits.is_empty());
         // legacy bare map fails to parse as CassetteFile (no `recordings` key)
         assert!(serde_json::from_str::<CassetteFile>(r#"{"abc":[]}"#).is_err());
     }

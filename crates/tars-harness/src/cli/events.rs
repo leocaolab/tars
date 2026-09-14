@@ -500,6 +500,7 @@ mod tests {
             has_structured_output: false,
             temperature: None,
             max_output_tokens: None,
+            output_limit: None,
             response_ref: None,
             usage: Usage::default(),
             stop_reason: None,

@@ -18,18 +18,19 @@ use tars_types::{Auth, HttpProviderExtras, ProviderId};
 use crate::model_kb::MODEL_KB;
 use crate::providers::ProviderConfig;
 
-/// Resolve the built-in default model for an API provider from the model
-/// KB (`data/models.toml`) — the single source of truth for defaults.
+/// The built-in default model spec for an API provider from the model KB
+/// (`data/provider.toml`) — the single source of truth for defaults. It may be
+/// a `<series>@latest` spec; the provider registry resolves it when it binds.
 ///
 /// Fail-loud: a built-in provider MUST have a KB default. A missing one
-/// is an authoring bug in `models.toml`, caught by the KB unit test and
+/// is an authoring bug in `provider.toml`, caught by the KB unit test and
 /// panicked here rather than shipping a silently-empty default_model.
 fn kb_default(provider: &str) -> String {
     MODEL_KB
         .default_model(provider)
         .unwrap_or_else(|| {
             panic!(
-                "built-in provider `{provider}` has no default in data/models.toml \
+                "built-in provider `{provider}` has no default in data/provider.toml \
                  (defaults are DATA — add a `[providers.{provider}] default = ...`)"
             )
         })
@@ -40,8 +41,8 @@ fn kb_default(provider: &str) -> String {
 /// entry uses an env-var auth reference so users only need to export
 /// the appropriate env var (no inline secrets in defaults).
 ///
-/// `default_model` for each API provider is resolved from the model KB
-/// (`data/models.toml`, via [`kb_default`]) — the single source of truth,
+/// `default_model` for each API provider comes from the model KB
+/// (`data/provider.toml`, via [`kb_default`]) — the single source of truth,
 /// so bumping a default is a data edit, not a code change. Users override
 /// per-provider in their config.
 pub fn built_in_provider_defaults() -> HashMap<ProviderId, ProviderConfig> {
@@ -91,8 +92,8 @@ pub fn default_anthropic() -> ProviderConfig {
     }
 }
 
-/// Default Gemini: `GEMINI_API_KEY`, KB default (`gemini-3.5-flash` —
-/// NOT thinking-only, so a thinking-off default actually works).
+/// Default Gemini: `GEMINI_API_KEY`, KB default (`flash@latest` — the newest
+/// Gemini flash, resolved against the live model list when one was refreshed).
 pub fn default_gemini() -> ProviderConfig {
     ProviderConfig::Gemini {
         base_url: None,
@@ -102,15 +103,15 @@ pub fn default_gemini() -> ProviderConfig {
     }
 }
 
-/// Default DeepSeek: `DEEPSEEK_API_KEY`, `deepseek-v4-flash`.
+/// Default DeepSeek: `DEEPSEEK_API_KEY`, KB default (`deepseek-flash`).
 ///
 /// DeepSeek ships an OpenAI-compatible API, so this is just an
 /// `openai_compat` pointed at `api.deepseek.com` — no dedicated backend.
 /// The OpenAI adapter already surfaces DeepSeek's reasoning channel
 /// (`delta.reasoning_content`) as [`tars_types::ChatEvent::ThinkingDelta`],
-/// so `deepseek-v4-pro` / thinking mode works out of the box. `-flash` is
-/// the cheaper non-reasoning default; request `deepseek-v4-pro` per call
-/// for the reasoning model.
+/// so `deepseek-v4-pro` / thinking mode works out of the box. `deepseek-flash`
+/// is the cheaper default; request `deepseek-v4-pro` per call for the
+/// reasoning model.
 pub fn default_deepseek() -> ProviderConfig {
     ProviderConfig::OpenaiCompat {
         base_url: "https://api.deepseek.com".into(),

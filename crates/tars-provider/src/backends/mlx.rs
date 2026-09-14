@@ -41,10 +41,13 @@ pub fn mlx(
     let url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
     let mut caps = mlx_default_capabilities();
     capability_overrides.apply_to(&mut caps);
+    let output_limits = tars_config::OutputLimitRule::catalog("mlx")
+        .configured(capability_overrides.max_output_tokens);
     OpenAiProviderBuilder::new(id, normalize_auth(auth))
         .base_url(url)
         .extras(extras)
         .capabilities(caps)
+        .output_limits(output_limits)
         .build(http, auth_resolver)
 }
 

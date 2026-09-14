@@ -1,4 +1,4 @@
-# Provider definition DB — DATA, not code. Supersedes data/models.toml.
+# Provider definition DB — DATA, not code.
 #
 # tars-authored (NOT the user's ~/.tars/config.toml). Shipped in the binary
 # via include_str! and parsed once into MODEL_KB (crates/tars-config/src/
@@ -13,6 +13,20 @@
 # that is genuinely absent (subscription/local — no per-token price; no
 # documented ceiling) is left blank, meaning "no limit / no charge".
 #
+# This file is the SHIPPED layer of the model catalog. `tars models update`
+# writes the LIVE layer ($TARS_HOME/models.json: each provider's current model
+# ids + the context/output limits its API reports). At runtime a live limit
+# wins over the number here, and `<series>@latest` picks from the live id list,
+# so a model release is picked up without a tars release. Prices, thinking
+# mode and tier exist only here — the list APIs don't report them; the refresh
+# report names every live model this file doesn't describe yet.
+#
+# `default` may be a concrete id or a `<series>@latest` spec. A provider's
+# `[providers.X.series]` maps a series name to an id pattern with one
+# `{version}` slot (dot-separated numbers); an id may also carry a `-preview`
+# suffix. `latest` = the highest version, a GA id beating a preview of the
+# same version.
+#
 # NOTE on CLI providers: the `capabilities` here are what TARS advertises, not
 # the CLI's native transport. Every CLI runs under the buffered AgentCliBackend
 # (emit-after-turn), so tars advertises `streaming=false` + `cancel=false` even
@@ -21,7 +35,7 @@
 # comments per provider.
 
 schema_version = 2
-verified = "2026-07-10"
+verified = "2026-09-14"
 
 # ═══════════════════════════════ HTTP providers ═══════════════════════════════
 
@@ -261,7 +275,7 @@ status = "ga"
 [providers.gemini]
 interface = "http"
 billed = "per_token"
-default = "gemini-3.5-flash"  # thinking=optional (off verified live) — good default: honors thinking-off
+default = "flash@latest"
 
   [providers.gemini.capabilities]
   structured_output = "strict_schema"    # responseSchema
@@ -274,6 +288,67 @@ default = "gemini-3.5-flash"  # thinking=optional (off verified live) — good d
   # backend (thinking_per_million = that model's output). It is NOT expressible
   # as one provider number, so thinking price is 0 here — a known regression to
   # revisit if per-model thinking pricing is needed.
+
+  [providers.gemini.series]
+  flash = "gemini-{version}-flash"
+  flash-lite = "gemini-{version}-flash-lite"
+  pro = "gemini-{version}-pro"
+
+# 3.6 / 3.7 / 3.8 flash: prices are the intro rate through 2026-12-31; from
+# 2027-01-01 they are 1.50 in / 7.50 out / 0.15 cached.
+[[providers.gemini.models]]
+id = "gemini-3.8-flash"
+tier = "fast"
+input = 0.75
+output = 3.75
+cached_input = 0.075
+context = 1_048_576
+max_output = 65_536
+thinking = "only"            # levels low/medium/high, default medium. `minimal` is
+                             # rejected — verified live 2026-09-14: "Thinking level
+                             # MINIMAL is not supported for this model".
+thinking_param = "level"
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"
+
+[[providers.gemini.models]]
+id = "gemini-3.7-flash"
+tier = "fast"
+input = 0.75
+output = 3.75
+cached_input = 0.075
+context = 1_048_576
+max_output = 65_536
+thinking = "only"            # levels low/medium/high (docs); no `minimal`
+thinking_param = "level"
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"
+
+[[providers.gemini.models]]
+id = "gemini-3.6-flash"
+tier = "fast"
+input = 0.75
+output = 3.75
+cached_input = 0.075
+context = 1_048_576
+max_output = 65_536
+thinking = "optional"        # `minimal` accepted — verified live 2026-09-14
+thinking_param = "level"
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"
+
+[[providers.gemini.models]]
+id = "gemini-3.5-flash-lite"
+tier = "lite"
+input = 0.30
+output = 2.50
+cached_input = 0.03
+context = 1_048_576
+max_output = 65_536
+thinking = "optional"        # default level `minimal` (docs)
+thinking_param = "level"
+modalities = ["text", "vision", "audio", "video", "pdf"]
+status = "ga"
 
 [[providers.gemini.models]]
 id = "gemini-3.5-flash"
@@ -362,7 +437,7 @@ status = "ga"               # audio input 0.30
 [providers.deepseek]
 interface = "http"
 billed = "per_token"
-default = "deepseek-v4-flash"
+default = "deepseek-flash"
 
   [providers.deepseek.capabilities]
   structured_output = "json_object"  # NOT strict (schema enforce only for tool args)
@@ -372,27 +447,31 @@ default = "deepseek-v4-flash"
   streaming = true
   prompt_cache = "implicit_prefix"   # on-disk context cache; no cache-write fee
 
+# Prices are the PEAK rate (01:00-04:00 and 06:00-10:00 UTC, Mon-Fri) — the
+# worst case a budget must assume; off-peak is half, in the comments.
+# max_output: the API accepts max_tokens 1..393216 (384K); an unset max_tokens
+# defaults to 8K (non-thinking) / 64K (thinking).
 [[providers.deepseek.models]]
-id = "deepseek-v4-flash"
+id = "deepseek-flash"
 tier = "fast"
-input = 0.14
-output = 0.28
-cached_input = 0.0028
+input = 0.30                 # off-peak 0.15
+output = 1.20                # off-peak 0.60
+cached_input = 0.006         # off-peak 0.003
 context = 1_000_000
-max_output = 384_000        # documented MAX; default max_tokens UNKNOWN
+max_output = 393_216
 thinking = "optional"
 modalities = ["text"]
 status = "ga"
-aliases = ["deepseek-chat", "deepseek-reasoner"]  # legacy names, retire 2026-07-24
+aliases = ["deepseek-v4-flash"]  # legacy name, still accepted; routes to deepseek-flash
 
 [[providers.deepseek.models]]
 id = "deepseek-v4-pro"
 tier = "flagship"
-input = 0.435
-output = 0.87
-cached_input = 0.003625
+input = 1.32                 # off-peak 0.66
+output = 3.96                # off-peak 1.98
+cached_input = 0.044         # off-peak 0.022
 context = 1_000_000
-max_output = 384_000
+max_output = 393_216
 thinking = "optional"
 modalities = ["text"]
 status = "ga"

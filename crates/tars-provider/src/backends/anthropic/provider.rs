@@ -29,6 +29,7 @@ pub struct AnthropicProviderBuilder {
     auth: Auth,
     capabilities: Option<ProviderProfile>,
     extras: HttpProviderExtras,
+    output_limits: tars_config::OutputLimitRule,
 }
 
 impl AnthropicProviderBuilder {
@@ -40,6 +41,7 @@ impl AnthropicProviderBuilder {
             auth,
             capabilities: None,
             extras: HttpProviderExtras::default(),
+            output_limits: tars_config::OutputLimitRule::catalog("anthropic"),
         }
     }
 
@@ -47,6 +49,7 @@ impl AnthropicProviderBuilder {
     builder_setter!(api_version: into String);
     builder_setter!(capabilities: opt ProviderProfile);
     builder_setter!(extras: HttpProviderExtras);
+    builder_setter!(output_limits: tars_config::OutputLimitRule);
 
     pub fn build(
         self,
@@ -66,6 +69,7 @@ impl AnthropicProviderBuilder {
             auth: self.auth,
             adapter,
             capabilities: caps,
+            output_limits: self.output_limits,
         })
     }
 }
@@ -83,6 +87,7 @@ pub struct AnthropicProvider {
     auth: Auth,
     adapter: Arc<AnthropicAdapter>,
     capabilities: ProviderProfile,
+    output_limits: tars_config::OutputLimitRule,
 }
 
 #[async_trait]
@@ -92,6 +97,9 @@ impl LlmProvider for AnthropicProvider {
     }
     fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
+    }
+    fn output_limit(&self, model: &str) -> tars_types::OutputLimit {
+        self.output_limits.output_limit(model)
     }
     // Boundary log: `err(Display)` auto-emits a tracing event with the
     // error + provider/model span fields on any Err from `stream()`.

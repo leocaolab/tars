@@ -22,10 +22,13 @@ OpenRouter, LM Studio, Ollama, …), local models (vLLM, MLX, llama.cpp),
 Bedrock**. Swapping providers does not touch your call sites.
 
 **Model facts are DATA, not code.** Model ids, prices, context windows and
-thinking-mode live in
-[`crates/tars-config/data/models.toml`](crates/tars-config/data/models.toml).
-Refreshing a price is a data edit, not a recompile, and cost is resolved **per
-model** from the reply's actual model rather than from what you asked for.
+thinking-mode ship in
+[`crates/tars-config/data/provider.toml`](crates/tars-config/data/provider.toml);
+`tars models update` lays each provider's live model list and limits over it,
+so a new model or a changed limit takes effect without a tars release. Write
+`default_model = "flash@latest"` to follow the newest model in a series, and a
+request with no `max_output_tokens` is sent with the model's real ceiling
+instead of the provider's much smaller default.
 
 **A composable middleware pipeline.** Telemetry → budget → cache → validation →
 retry → breaker → rate limit. Each is a layer you add or leave out.

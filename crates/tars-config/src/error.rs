@@ -44,6 +44,11 @@ pub enum ConfigError {
     )]
     AlreadyInitialized,
 
+    /// The live model catalog (`<home>/models.json`) exists but could not be
+    /// read, or was already installed.
+    #[error(transparent)]
+    Catalog(#[from] crate::model_catalog::CatalogError),
+
     #[error("internal: {0}")]
     Internal(String),
 }

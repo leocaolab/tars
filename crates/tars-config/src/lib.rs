@@ -17,7 +17,10 @@ pub mod builtin;
 pub mod error;
 pub mod global;
 pub mod manager;
+pub mod model_catalog;
 pub mod model_kb;
+pub mod model_library;
+pub mod model_spec;
 pub mod paths;
 pub mod providers;
 pub mod roles;
@@ -30,17 +33,21 @@ pub use builtin::{
     default_openai, default_vllm, merge_builtin_with_user,
 };
 pub use error::ConfigError;
-pub use global::resolve_home;
 pub use global::{
     get_boarddb_path, get_bodydb_path, get_cachedb_path, get_durabledb_path, get_eventdb_path,
     get_pipelinedb_path,
 };
+pub use global::{init_tars, resolve_home};
 pub use manager::{Config, ConfigManager};
+pub use model_catalog::{
+    CatalogError, ModelCatalog, OutputLimitRule, capabilities_for, catalog, install_catalog,
+    load_catalog,
+};
 pub use model_kb::{
     BillingModel, KbModality, MODEL_KB, ModelEntry, ModelKb, ModelStatus, ModelTier,
     PromptCacheSpec, ProviderCapabilities, ProviderDef, ProviderModels, Thinking, ThinkingParam,
-    capabilities_for,
 };
+pub use model_spec::{ModelSpec, ModelSpecError, ResolvedModel};
 pub use paths::default_config_path;
 pub use providers::{
     AntigravityEffortConfig, CapabilitiesOverrides, ClaudeCliEffortConfig, ClaudeCliToolsConfig,

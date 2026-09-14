@@ -28,7 +28,8 @@ use crate::manager::{Config, ConfigManager};
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 /// Initialize tars: read `<home>/config.toml` and install it as the
-/// process-global [`Config`].
+/// process-global [`Config`], and install the model catalog with that home's
+/// refreshed `models.json` laid over the shipped provider data.
 ///
 /// `home` is the explicit `--tars_home` override; otherwise `$TARS_HOME`;
 /// otherwise `~/.tars` (see [`resolve_home`]).
@@ -45,6 +46,7 @@ pub fn init_tars(home: Option<PathBuf>) -> Result<(), ConfigError> {
     }
     let dir = resolve_home(home).ok_or(ConfigError::NoHome)?;
     let cfg = ConfigManager::load_from_file(dir.join("config.toml"))?;
+    crate::model_catalog::install_catalog(&dir)?;
     CONFIG.set(cfg).map_err(|_| ConfigError::AlreadyInitialized)
 }
 

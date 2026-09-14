@@ -37,6 +37,7 @@ pub struct OpenAiProviderBuilder {
     /// The behavior seam. `None` = infer from `base_url` at `build()`; set
     /// explicitly via [`OpenAiProviderBuilder::dialect`] to override.
     dialect: Option<Arc<dyn OpenAiDialect>>,
+    output_limits: tars_config::OutputLimitRule,
 }
 
 impl OpenAiProviderBuilder {
@@ -48,6 +49,7 @@ impl OpenAiProviderBuilder {
             capabilities: None,
             extras: HttpProviderExtras::default(),
             dialect: None,
+            output_limits: tars_config::OutputLimitRule::catalog("openai"),
         }
     }
 
@@ -73,6 +75,13 @@ impl OpenAiProviderBuilder {
     builder_setter! {
         ///
         extras: HttpProviderExtras
+    }
+
+    builder_setter! {
+        /// How this instance answers [`LlmProvider::output_limit`]. Default:
+        /// the `openai` catalog block; an OpenAI-compatible server names its
+        /// own block and any configured `max_output_tokens`.
+        output_limits: tars_config::OutputLimitRule
     }
 
     pub fn build(
@@ -104,6 +113,7 @@ impl OpenAiProviderBuilder {
             adapter,
             capabilities: caps,
             dialect,
+            output_limits: self.output_limits,
         })
     }
 }
@@ -127,6 +137,7 @@ pub struct OpenAiProvider {
     /// non-streaming batch results path decodes through the same dialect as
     /// streaming.
     dialect: Arc<dyn OpenAiDialect>,
+    output_limits: tars_config::OutputLimitRule,
 }
 
 /// The stream the agent actually reads, for a dialect whose text means nothing
@@ -200,6 +211,9 @@ impl LlmProvider for OpenAiProvider {
 
     fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
+    }
+    fn output_limit(&self, model: &str) -> tars_types::OutputLimit {
+        self.output_limits.output_limit(model)
     }
 
     // Boundary log — any Err exit auto-emits a tracing event with

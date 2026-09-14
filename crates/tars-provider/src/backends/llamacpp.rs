@@ -53,10 +53,13 @@ pub fn llamacpp(
     };
     let mut caps = llamacpp_default_capabilities();
     capability_overrides.apply_to(&mut caps);
+    let output_limits = tars_config::OutputLimitRule::catalog("llamacpp")
+        .configured(capability_overrides.max_output_tokens);
     OpenAiProviderBuilder::new(id, normalized_auth)
         .base_url(url)
         .extras(extras)
         .capabilities(caps)
+        .output_limits(output_limits)
         .build(http, auth_resolver)
 }
 

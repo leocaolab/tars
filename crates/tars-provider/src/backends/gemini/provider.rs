@@ -28,6 +28,7 @@ pub struct GeminiProviderBuilder {
     auth: Auth,
     capabilities: Option<ProviderProfile>,
     extras: HttpProviderExtras,
+    output_limits: tars_config::OutputLimitRule,
 }
 
 impl GeminiProviderBuilder {
@@ -38,12 +39,14 @@ impl GeminiProviderBuilder {
             auth,
             capabilities: None,
             extras: HttpProviderExtras::default(),
+            output_limits: tars_config::OutputLimitRule::catalog("gemini"),
         }
     }
 
     builder_setter!(base_url: into String);
     builder_setter!(capabilities: opt ProviderProfile);
     builder_setter!(extras: HttpProviderExtras);
+    builder_setter!(output_limits: tars_config::OutputLimitRule);
 
     pub fn build(
         self,
@@ -59,6 +62,7 @@ impl GeminiProviderBuilder {
             auth: self.auth,
             adapter,
             capabilities: caps,
+            output_limits: self.output_limits,
         })
     }
 }
@@ -74,6 +78,7 @@ pub struct GeminiProvider {
     auth: Auth,
     adapter: Arc<GeminiAdapter>,
     capabilities: ProviderProfile,
+    output_limits: tars_config::OutputLimitRule,
 }
 
 #[async_trait]
@@ -83,6 +88,9 @@ impl LlmProvider for GeminiProvider {
     }
     fn capabilities(&self) -> &ProviderProfile {
         &self.capabilities
+    }
+    fn output_limit(&self, model: &str) -> tars_types::OutputLimit {
+        self.output_limits.output_limit(model)
     }
     // Boundary log — any Err exit auto-emits with provider/model
     // context (see anthropic.stream for the rationale).

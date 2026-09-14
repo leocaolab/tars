@@ -6,7 +6,6 @@ pub mod event_store;
 pub mod events;
 pub mod harness;
 pub mod init;
-pub mod model_library;
 pub mod model_query;
 pub mod models;
 pub mod probe;
