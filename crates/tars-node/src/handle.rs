@@ -85,7 +85,8 @@ pub fn pipeline(role: String, ctx: Option<JsContext>) -> napi::Result<Pipeline, 
 }
 
 /// One `[roles]` lookup, no guessing. Two distinct failures, each naming what
-/// actually went wrong.
+/// actually went wrong. The role's model may be a `<series>@latest` spec; it
+/// is resolved here, before binding, so the service carries a concrete id.
 fn resolve_global(
     role: &str,
 ) -> std::result::Result<(String, Arc<dyn LlmProvider>, String), JsError> {
@@ -98,7 +99,10 @@ fn resolve_global(
     let prov = registry
         .get(&entry.provider)
         .ok_or_else(|| provider_not_registered_to_js(role, &entry.provider))?;
-    Ok((entry.provider.to_string(), prov, entry.model.clone()))
+    let model = registry
+        .resolve_model(&entry.provider, Some(&entry.model))
+        .map_err(registry_to_js)?;
+    Ok((entry.provider.to_string(), prov, model))
 }
 
 /// Layer 1 provider handle — a raw backend bound to a role + call context.

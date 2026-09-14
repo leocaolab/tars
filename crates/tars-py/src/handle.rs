@@ -92,7 +92,8 @@ pub(crate) fn role_provider(role: String) -> PyResult<String> {
     Ok(resolve_global_role(&role)?.0)
 }
 
-/// Inspect the `[roles]` mapping: the model `role` binds to.
+/// Inspect the `[roles]` mapping: the model `role` binds to — a
+/// `<series>@latest` spec resolved to the concrete id it names today.
 #[pyfunction]
 pub(crate) fn role_model(role: String) -> PyResult<String> {
     let cfg = Config::get();
@@ -100,7 +101,10 @@ pub(crate) fn role_model(role: String) -> PyResult<String> {
         .roles
         .get(&role)
         .ok_or_else(|| unknown_role_to_py(&role))?;
-    Ok(entry.model.clone())
+    let registry = ProviderRegistry::global().map_err(|e| runtime_to_py("provider registry", e))?;
+    registry
+        .resolve_model(&entry.provider, Some(&entry.model))
+        .map_err(|e| runtime_to_py("role model", e))
 }
 
 /// One lookup, no guessing. Two distinct failures, each carrying what actually
