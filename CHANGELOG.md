@@ -19,6 +19,45 @@ is authoritative. This file aggregates.
 
 ---
 
+## 1.10.2 — the price table knows the models we run, and a cache write costs money — `v1.10.2`
+
+Three fixes to the same organ: `provider.toml` is where prices live, and it was
+wrong in three ways that all pointed the same direction — **too cheap**.
+
+**The two newest Anthropic models were missing.** `claude-opus-5` and
+`claude-fable-5-1` had no row, so `MODEL_KB.pricing()` answered `None` for them.
+Measured on one consumer's week: 53,384 calls, of which only **6.6%** could be
+priced — `claude-opus-5` alone was 49,354 of them. Prices taken from the
+official pricing page (2026-09-18), including the cache-read rule that is *not*
+a flat 0.1× : Fable 5.1 / Mythos 5.1 read at **0.025×**, so `cached_input` is
+0.25, not 1.00.
+
+**A cache WRITE billed at zero.** `ModelEntry::pricing()` hardcoded
+`cache_creation_per_million: 0.0` with a comment saying the backend would
+override it; no backend ever did. Cache writes were 1.5% of that week's tokens
+but ~**15% of the bill**, because the write rate is 12.5× the read rate — so
+every consumer of `Pricing` under-billed by ~15%, including
+`middleware/budget.rs` and `middleware/tenant_budget.rs`, which decide whether
+to let a call through. Now a `cache_write` column carries the 5-minute rate (the
+API's default TTL; a 1-hour write is 2× base input and the caller has to know
+which it used), and `a_cache_write_is_priced_and_costs_more_than_a_read` freezes
+that it is non-zero and dearer than both plain input and a cache read.
+
+**`claude-sonnet-5` carried a price that never happened.** The row said
+`3.00 / 15.00` with a comment "intro 2/10 through 2026-08-31". That date passed;
+the docs now state the $2/$10 pricing "is now the standard price. The previously
+scheduled increase to $3/$15 on September 1, 2026 will not occur." Corrected to
+`2.00 / 10.00 / 0.20` — all three fields, because changing only `input` leaves a
+row that contradicts itself.
+
+**And the refresh that should have caught the missing rows reported green.**
+`tools/model-refresh` diffs `provider.toml` against what each API lists, and
+anthropic came back `no_key` with **0 models** — an empty diff, read as "matches
+the APIs — nothing to propose", every day. A provider that could not be asked is
+not a provider that agrees: any provider whose `entry.status` is neither `ok` nor
+`skipped` (local servers excepted) is now logged as `BLIND …` and makes the run
+exit non-zero.
+
 ## 1.10.1 — role models resolve `@latest` too — `v1.10.1`
 
 `tars-node`'s role handles (`provider(role)` / `pipeline(role)`) and
