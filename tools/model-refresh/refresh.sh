@@ -44,10 +44,44 @@ log "refreshing the model library"
 "$tars" models update --json >"$run/report.json" 2>"$run/update.stderr"
 jq -r '.findings[].message' "$run/report.json" | tee -a "$run/run.log"
 
+# A provider we could not ASK is not a provider that AGREES with us.
+#
+# Drift is computed by diffing provider.toml against the models each API
+# reports. When an API reports nothing, the diff is empty — and the old code
+# read that empty diff as "matches the APIs". Measured 2026-09-18: anthropic
+# came back `no_key`, 0 models, and the run said "nothing to propose" while the
+# file was missing claude-opus-5 (the model 93% of this org's calls run on) and
+# claude-fable-5-1. openai/gemini/deepseek answered that same morning, so the
+# green was for the seven providers it could see and silence for the one it
+# could not.
+#
+# `status` was recorded all along (`entry.status`, with `entry.note` giving the
+# reason) — nothing read it. run.log only prints `findings[].message`, and
+# `no_key` is not a finding, so it never surfaced anywhere either.
+#
+# Local servers (llamacpp / mlx / vllm) being unreachable is the normal resting
+# state of a machine that does not run them, and `skipped` is how a CLI provider
+# declares it has no list API — neither is a failure. Everything else means this
+# run is BLIND for that provider, and the run says so and ends non-zero, so the
+# timer's own status stops reading green.
+blind="$(jq -r '[.providers[]
+  | select((.entry.type | IN("llamacpp", "mlx", "vllm")) | not)
+  | select(.entry.status != "ok" and .entry.status != "skipped")
+  | "\(.name): \(.entry.status) — \(.entry.note // "no reason recorded")"] | .[]' \
+  "$run/report.json")"
+if [[ -n "$blind" ]]; then
+  while IFS= read -r line; do log "BLIND $line"; done <<<"$blind"
+  log "the drift result below covers only the providers that answered"
+fi
+
 jq '[.findings[] | select(.finding.kind | startswith("shipped_"))]' \
   "$run/report.json" >"$run/drift.json"
 drift_count="$(jq length "$run/drift.json")"
 if [[ "$drift_count" == 0 ]]; then
+  if [[ -n "$blind" ]]; then
+    log "no drift among the providers that answered — but some did not, see BLIND above"
+    exit 1
+  fi
   log "provider.toml matches the APIs — nothing to propose"
   exit 0
 fi
@@ -57,7 +91,7 @@ open_pr="$(gh pr list --repo "$gh_repo" --state open --json number,headRefName \
   --jq '[.[] | select(.headRefName | startswith("bot/provider-refresh-"))][0].number // empty')"
 if [[ -n "$open_pr" ]]; then
   log "PR #$open_pr from an earlier refresh is still open — not opening another"
-  exit 0
+  [[ -z "$blind" ]]; exit
 fi
 
 branch="bot/provider-refresh-$stamp"
@@ -83,7 +117,7 @@ claude -p "$(cat "$run/prompt.md")" \
 changed="$(git status --porcelain --untracked-files=all | grep -v '^?? target/' || true)"
 if [[ -z "$changed" ]]; then
   log "Claude changed nothing (see claude.log) — no PR"
-  exit 0
+  [[ -z "$blind" ]]; exit
 fi
 if [[ "$changed" != " M crates/tars-config/data/provider.toml" ]]; then
   log "refusing to push: the edit touched more than provider.toml:"
@@ -104,7 +138,7 @@ cargo test -q -p tars-config >"$run/test.log" 2>&1 || {
 git diff >"$run/provider.toml.diff"
 if [[ "${TARS_REFRESH_DRY_RUN:-}" == 1 ]]; then
   log "dry run: not pushing. diff: $run/provider.toml.diff  body: $body"
-  exit 0
+  [[ -z "$blind" ]]; exit
 fi
 
 git -c user.name="tars model refresh" -c user.email="tars-model-refresh@bluewhale" \
@@ -117,3 +151,8 @@ cp "$body" "$run/pr-body.md"
 url="$(gh pr create --repo "$gh_repo" --head "$branch" --base main \
   --title "data(provider.toml): 按线上 API 刷新（$stamp）" --body-file "$body")"
 log "opened $url"
+
+# A run that could not ask every provider ends non-zero even when it did open a
+# PR: the PR covers what answered, and the timer's status is the only place the
+# silence would otherwise show.
+[[ -z "$blind" ]]

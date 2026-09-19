@@ -30,6 +30,21 @@ retirement dates).
   only refresh the live layer.
 - Each run leaves `report.json`, `drift.json`, the prompt, `claude.log`, the diff
   and the PR body under `~/.local/state/tars-refresh/<timestamp>/`.
+- **A provider that could not be asked is not a provider that agrees.** Drift is
+  a diff against what each API reports, so a provider that returns nothing
+  produces an empty diff — which used to read as "matches the APIs". Any
+  provider whose `entry.status` is neither `ok` nor `skipped` (local servers
+  excepted — a down llamacpp/mlx/vllm is this machine's resting state) is logged
+  as `BLIND <name>: <status> — <reason>` and makes the run **exit non-zero**,
+  even when it opened a PR for the providers that did answer. Without that, the
+  only signal is a green timer.
+
+  Measured 2026-09-18: `anthropic` came back `no_key` with 0 models and the run
+  reported "nothing to propose", while `provider.toml` was missing
+  `claude-opus-5` — the model 93% of this org's calls run on. The status was
+  recorded the whole time; nothing read it. **A blind provider usually means a
+  missing key in the `provider-keys` credential** (see below) — the note says
+  which env var.
 
 ## Install (bluewhale)
 
