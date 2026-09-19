@@ -101,6 +101,19 @@ pub struct ModelEntry {
     pub input: Option<f64>,
     pub output: Option<f64>,
     pub cached_input: Option<f64>,
+    /// Price of WRITING a token into the prompt cache, USD/1M. Anthropic bills
+    /// a 5-minute write at 1.25× base input and a 1-hour write at 2×; this
+    /// column carries the 5-minute rate (the API's default TTL). `None` where
+    /// the provider does not bill cache writes separately.
+    ///
+    /// It is its own column because it is NOT derivable from `input` across
+    /// providers, and because leaving it out bills cache-creation tokens at
+    /// ZERO — measured on one week of a real Anthropic workload, cache writes
+    /// were 1.5% of tokens but ~15% of the bill (the write rate is 12.5× the
+    /// read rate), so a missing column is a silent 15% under-bill, not a
+    /// rounding error.
+    #[serde(default)]
+    pub cache_write: Option<f64>,
     /// Context window (input tokens).
     pub context: Option<u64>,
     pub max_output: Option<u64>,
@@ -143,7 +156,7 @@ impl ModelEntry {
             input_per_million: self.input.unwrap_or(0.0),
             output_per_million: self.output.unwrap_or(0.0),
             cached_input_per_million: self.cached_input.unwrap_or(0.0),
-            cache_creation_per_million: 0.0,
+            cache_creation_per_million: self.cache_write.unwrap_or(0.0),
             thinking_per_million: 0.0,
         }
     }
@@ -640,6 +653,40 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, ModelSpecError::NoSeries { .. }), "{err}");
+    }
+
+    /// Writing into the prompt cache is NOT free, and it is not derivable from
+    /// the input rate across providers — so it is its own column, and this
+    /// proves it reaches `Pricing`. Before `cache_write` existed,
+    /// `cache_creation_per_million` was hardcoded to 0.0 "for the backend to
+    /// override" and no backend ever did: every cache-creation token billed at
+    /// zero, including in the budget middleware that decides whether to let a
+    /// call through.
+    ///
+    /// Measured on one week of a real Anthropic workload: cache writes were
+    /// 1.5% of tokens but ~15% of the bill, because the write rate is 12.5×
+    /// the read rate. A zero here is a silent 15% under-bill.
+    #[test]
+    fn a_cache_write_is_priced_and_costs_more_than_a_read() {
+        for id in ["claude-opus-5", "claude-fable-5-1", "claude-sonnet-5"] {
+            let p = MODEL_KB.pricing(id).unwrap_or_else(|| panic!("{id} has no pricing"));
+            assert!(
+                p.cache_creation_per_million > 0.0,
+                "{id}: a cache write bills at zero — `cache_write` is missing from provider.toml \
+                 or no longer reaches Pricing"
+            );
+            assert!(
+                p.cache_creation_per_million > p.input_per_million,
+                "{id}: a cache write must cost MORE than plain input (Anthropic: 1.25× at 5m)"
+            );
+            assert!(
+                p.cache_creation_per_million > p.cached_input_per_million,
+                "{id}: a cache write must cost more than a cache read"
+            );
+        }
+        // Exact rates, so a typo in the column is caught rather than just "> 0".
+        assert_eq!(MODEL_KB.pricing("claude-opus-5").unwrap().cache_creation_per_million, 6.25);
+        assert_eq!(MODEL_KB.pricing("claude-fable-5-1").unwrap().cache_creation_per_million, 12.50);
     }
 
     #[test]

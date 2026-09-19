@@ -192,6 +192,7 @@ tier = "flagship"
 input = 10.00
 output = 50.00
 cached_input = 0.25          # 2.5% of base input, not the usual 10% — Fable 5.1 / Mythos 5.1 only
+cache_write = 12.50               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "only"            # adaptive always-on; explicit `disabled` or `budget_tokens` → 400
@@ -204,6 +205,7 @@ tier = "flagship"
 input = 5.00
 output = 25.00
 cached_input = 0.50          # 10% of base input
+cache_write = 6.25               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"        # adaptive by DEFAULT (unlike 4.8/4.7); `disabled` only at effort ≤ high
@@ -216,6 +218,7 @@ tier = "flagship"
 input = 10.00
 output = 50.00
 cached_input = 1.00
+cache_write = 12.50               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "only"
@@ -228,6 +231,7 @@ tier = "flagship"
 input = 5.00
 output = 25.00
 cached_input = 0.50
+cache_write = 6.25               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"
@@ -240,6 +244,7 @@ tier = "flagship"
 input = 5.00
 output = 25.00
 cached_input = 0.50
+cache_write = 6.25               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"
@@ -252,6 +257,7 @@ tier = "flagship"
 input = 5.00
 output = 25.00
 cached_input = 0.50
+cache_write = 6.25               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"
@@ -264,6 +270,7 @@ tier = "mid"
 input = 2.00                 # 2026-09-18: docs still say 2/10 — the "intro through 2026-08-31,
 output = 10.00               # then 3/15" note was a prediction that did not come true
 cached_input = 0.20          # 10% of base input
+cache_write = 2.50               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"
@@ -276,6 +283,7 @@ tier = "mid"
 input = 3.00
 output = 15.00
 cached_input = 0.30
+cache_write = 3.75               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"
@@ -288,6 +296,7 @@ tier = "fast"
 input = 1.00
 output = 5.00
 cached_input = 0.10
+cache_write = 1.25               # 5m write = 1.25× base input (1h = 2×)
 context = 200_000
 max_output = 64_000
 thinking = "optional"
