@@ -1,0 +1,48 @@
+name: Merge gate
+
+# THE MERGE SERVER'S GATE. Not CI.
+#
+# `arc-server` reads this file — by convention, from the base tree — and runs
+# every job's steps, in the order written, on the merge host for every change
+# it lands. GitHub never runs this file and is not meant to — `ci.yml` is
+# GitHub's; this one is the merger's. They answer different questions on
+# different machines, so they are different files.
+#
+# EVERY step is a plain `run:`. No `uses:`, no `if:`, no `${{ }}`: arc reports
+# those and does not execute them, and a gate with a step it cannot run judges
+# nothing. So there are no runner chores either — no checkout (the server
+# already has the worktree at the sha under test), no toolchain install, no
+# cache, no bubblewrap install. The merge host already has what these need.
+#
+# Adding a check means adding a `run:` step HERE.
+
+on:
+  # GitHub is told to run this never. The trigger exists because the schema
+  # demands one; the merge server does not read it.
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    runs-on: arc-merge-host
+    steps:
+      # tars-py links libpython at test time; its coverage is the `python` job
+      # in `ci.yml`, not this gate.
+      - name: cargo test (workspace minus tars-py)
+        run: cargo test --workspace --exclude tars-py --no-fail-fast
+
+      - name: cargo clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The `otlp` feature is off by default, so the workspace steps above do
+      # not compile it. Checked here so the OpenTelemetry bridge cannot rot.
+      - name: tars-melt otlp feature (clippy + test)
+        run: |
+          cargo clippy -p tars-melt --features otlp --all-targets -- -D warnings
+          cargo test -p tars-melt --features otlp
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
