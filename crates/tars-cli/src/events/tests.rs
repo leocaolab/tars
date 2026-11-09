@@ -2,8 +2,8 @@ use std::path::Path;
 
 use clap::Parser;
 use tars_melt::event::call_log::{
-    CALL_LOG_SINK, CallDispatch, CallFailure, CallResponse, EvalScoreTable, LlmCallTable,
-    RefusalReasons, SentEnd, StreamEnd,
+    CALL_LOG_SINK, CallDispatch, CallFailure, CallResponse, EvalScoreTable, LlmCallTable, SentEnd,
+    StreamEnd,
 };
 use tars_melt::event::log::{LogSink, ParquetLog};
 use tars_melt::event::wire::SpawnedProcess;
@@ -59,10 +59,10 @@ fn live_row(tenant: &str, at_ms: Millis) -> LlmCallRow {
             degraded: Vec::new(),
             provider_id: None,
             end: SentEnd::Streamed {
-                usage: Usage::default(),
+                usage: Some(Usage::default()),
                 end: StreamEnd::Completed(CallResponse {
                     body: CallBody::Present(LIVE_RESPONSE.into()),
-                    actual_model: "actual-model".into(),
+                    actual_model: Some("actual-model".into()),
                     stop_reason: None,
                 }),
             },
@@ -257,8 +257,10 @@ async fn show_gives_a_refused_call_s_reasons_and_null_on_a_served_call() {
     let now = now_ms();
     let refused = LlmCallRow {
         dispatch: CallDispatch::Refused {
-            reasons: RefusalReasons::new(vec![tars_types::CompatibilityReason::VisionUnsupported])
-                .unwrap(),
+            reasons: tars_types::NonEmpty::from_vec(vec![
+                tars_types::CompatibilityReason::VisionUnsupported,
+            ])
+            .unwrap(),
         },
         ..live_row(TENANT, now - 10_000)
     };
@@ -301,7 +303,7 @@ async fn show_gives_what_the_request_was_sent_without_and_null_on_a_refused_call
                 end: SentEnd::Cancelled,
             },
             None => CallDispatch::Refused {
-                reasons: RefusalReasons::new(vec![
+                reasons: tars_types::NonEmpty::from_vec(vec![
                     tars_types::CompatibilityReason::VisionUnsupported,
                 ])
                 .unwrap(),

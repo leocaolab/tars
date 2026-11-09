@@ -25,16 +25,20 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 
 use crate::{LastFailure, ProviderError};
 use crate::{LlmEventStream, LlmProvider};
 use tars_types::{
     Caller, ChatEvent, ChatRequest, ChatResponse, CostUsd, LlmErrorKind, ProviderId,
-    ProviderProfile, StopReason, Usage,
+    ProviderProfile, Usage,
 };
 
 /// Configures a [`CircuitBreaker`]. The default opens after 5 failures and cools down for 30 s.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// It reads from the `[llm.circuit_breaker]` config section (`failure_threshold`,
+/// `cooldown_secs`) through [`CircuitBreakerConfig::new`]; a key left out keeps its default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "BreakerKeys", into = "BreakerKeys")]
 pub struct CircuitBreakerConfig {
     failure_threshold: NonZeroU32,
     cooldown: Duration,
@@ -74,6 +78,38 @@ impl Default for CircuitBreakerConfig {
             failure_threshold: DEFAULT_FAILURE_THRESHOLD,
             cooldown: Duration::from_secs(30),
         }
+    }
+}
+
+/// The `[llm.circuit_breaker]` keys as written, before [`CircuitBreakerConfig::new`] checks them.
+#[derive(Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct BreakerKeys {
+    failure_threshold: NonZeroU32,
+    #[serde(rename = "cooldown_secs", with = "crate::duration_serde::secs")]
+    cooldown: Duration,
+}
+
+impl Default for BreakerKeys {
+    fn default() -> Self {
+        CircuitBreakerConfig::default().into()
+    }
+}
+
+impl From<CircuitBreakerConfig> for BreakerKeys {
+    fn from(c: CircuitBreakerConfig) -> Self {
+        Self {
+            failure_threshold: c.failure_threshold,
+            cooldown: c.cooldown,
+        }
+    }
+}
+
+impl TryFrom<BreakerKeys> for CircuitBreakerConfig {
+    type Error = CooldownTooLongError;
+
+    fn try_from(k: BreakerKeys) -> Result<Self, Self::Error> {
+        Self::new(k.failure_threshold, k.cooldown)
     }
 }
 
@@ -202,6 +238,7 @@ fn says_provider_is_down(kind: LlmErrorKind) -> bool {
         | K::ProviderTimedOut
         | K::StreamCut
         | K::Unfinished
+        | K::StreamViolation
         | K::RateLimited
         | K::BudgetExceeded
         | K::InvalidRequest
@@ -239,15 +276,6 @@ fn terminal_outcome(item: &Result<ChatEvent, ProviderError>) -> Option<HealthVer
         Ok(ChatEvent::Finished { .. }) => Some(HealthVerdict::Success),
         Ok(_) => None,
         Err(e) => Some(outcome_of(e)),
-    }
-}
-
-/// Returns the outcome of a `complete` that returned a response: only one with a stop reason
-/// came from a `Finished`, and one without is a stream that ended early.
-fn response_outcome(stop_reason: Option<StopReason>) -> HealthVerdict {
-    match stop_reason {
-        Some(_) => HealthVerdict::Success,
-        None => HealthVerdict::Ignored,
     }
 }
 
@@ -528,7 +556,7 @@ impl LlmProvider for CircuitBreaker {
         let settlement = self.enter()?;
         let result = self.inner.clone().complete(req, model, ctx).await;
         settlement.settle(match &result {
-            Ok(response) => response_outcome(response.stop_reason),
+            Ok(_) => HealthVerdict::Success,
             Err(e) => outcome_of(e),
         });
         result
@@ -556,6 +584,7 @@ mod tests {
     use super::*;
     use crate::provider::error::{ParseProblem, RequestRefusal};
     use std::sync::atomic::{AtomicU32, Ordering};
+    use tars_types::StopReason;
 
     use tokio::sync::mpsc;
 
@@ -590,7 +619,7 @@ mod tests {
         );
     }
 
-    // ── outcome_of / terminal_outcome / response_outcome ─────────────
+    // ── outcome_of / terminal_outcome ────────────────────────────────
 
     #[test]
     fn provider_health_errors_are_failures() {
@@ -618,6 +647,7 @@ mod tests {
             LlmErrorKind::MalformedToolCall,
             LlmErrorKind::TruncatedToolCall,
             LlmErrorKind::IncompleteToolCall,
+            LlmErrorKind::StreamViolation,
             LlmErrorKind::Incompatible,
             LlmErrorKind::ValidationFailed,
             LlmErrorKind::Unavailable,
@@ -631,7 +661,7 @@ mod tests {
     fn a_stream_settles_on_finished_or_on_an_error_and_not_before() {
         let finished = Ok(ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
+            usage: Some(Usage::default()),
         });
         assert_eq!(terminal_outcome(&finished), Some(HealthVerdict::Success));
         assert_eq!(
@@ -651,12 +681,13 @@ mod tests {
     }
 
     #[test]
-    fn a_response_succeeds_with_a_stop_reason_and_has_no_verdict_without_one() {
+    fn a_stream_that_ended_without_saying_why_has_no_verdict() {
         assert_eq!(
-            response_outcome(Some(StopReason::EndTurn)),
-            HealthVerdict::Success
+            outcome_of(&ProviderError::Unfinished(
+                tars_types::Unfinished::NoStopReason
+            )),
+            HealthVerdict::Ignored
         );
-        assert_eq!(response_outcome(None), HealthVerdict::Ignored);
     }
 
     // ── admit ────────────────────────────────────────────────────────
@@ -954,7 +985,7 @@ mod tests {
             Ok(ChatEvent::Delta { text: "x".into() }),
             Ok(ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
+                usage: Some(Usage::default()),
             }),
         ]
     }
@@ -1118,7 +1149,7 @@ mod tests {
             .clone()
             .complete(ChatRequest::user("x"), "m", ctx())
             .await;
-        assert_eq!(r.unwrap().stop_reason, None);
+        assert!(matches!(r, Err(ProviderError::Unfinished(_))), "{r:?}");
         assert_eq!(
             cb.current().phase,
             Phase::HalfOpen {
@@ -1292,5 +1323,39 @@ mod tests {
         let cb = CircuitBreaker::wrap(inner, CircuitBreakerConfig::default());
         assert_eq!(cb.id().as_ref(), "p");
         assert_eq!(cb.capabilities().max_context_tokens, marker);
+    }
+
+    #[test]
+    fn a_breaker_section_sets_only_the_keys_it_names() {
+        let cfg: CircuitBreakerConfig =
+            toml::from_str("cooldown_secs = 60\n").expect("a partial [llm.circuit_breaker] reads");
+        assert_eq!(
+            cfg,
+            CircuitBreakerConfig::new(DEFAULT_FAILURE_THRESHOLD, Duration::from_secs(60))
+                .expect("a minute is a cooldown")
+        );
+    }
+
+    #[test]
+    fn a_breaker_section_is_checked_as_new_checks_it() {
+        let day = MAX_COOLDOWN.as_secs();
+        assert!(
+            toml::from_str::<CircuitBreakerConfig>(&format!("cooldown_secs = {day}\n")).is_ok()
+        );
+        let err = toml::from_str::<CircuitBreakerConfig>(&format!("cooldown_secs = {}\n", day + 1))
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds the maximum"), "{err}");
+        assert!(toml::from_str::<CircuitBreakerConfig>("failure_threshold = 0\n").is_err());
+        assert!(toml::from_str::<CircuitBreakerConfig>("cooldown = 5\n").is_err());
+    }
+
+    #[test]
+    fn the_default_breaker_writes_and_reads_back_unchanged() {
+        let written =
+            toml::to_string(&CircuitBreakerConfig::default()).expect("the default writes");
+        assert_eq!(
+            toml::from_str::<CircuitBreakerConfig>(&written).expect("and reads back"),
+            CircuitBreakerConfig::default()
+        );
     }
 }

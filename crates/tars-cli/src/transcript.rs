@@ -15,7 +15,7 @@ pub(crate) struct Transcript {
     /// When the first generated token, visible or reasoning, arrived after the request.
     pub(crate) first_token: Option<Duration>,
     /// The `Finished` event's stop reason and usage; `None` while the stream has not finished.
-    pub(crate) finished: Option<(StopReason, Usage)>,
+    pub(crate) finished: Option<(StopReason, Option<Usage>)>,
 }
 
 impl Transcript {
@@ -72,7 +72,12 @@ pub(crate) fn stream_end(finished: bool, has_text: bool, has_tool_call: bool) ->
 pub(crate) fn event_line(n: usize, event: &ChatEvent) -> String {
     let body = match event {
         ChatEvent::Degraded { unsent } => format!("Degraded    unsent={unsent:?}"),
-        ChatEvent::Started { actual_model, .. } => format!("Started     model={actual_model}"),
+        ChatEvent::Started { actual_model, .. } => {
+            format!(
+                "Started     model={}",
+                actual_model.as_deref().unwrap_or("?")
+            )
+        }
         ChatEvent::Delta { text } => format!("Delta       text={text:?}"),
         ChatEvent::ThinkingDelta { text } => format!("Thinking    text={text:?}"),
         ChatEvent::ToolCallStart { id, name, .. } => format!("ToolStart   id={id} name={name}"),
@@ -83,13 +88,20 @@ pub(crate) fn event_line(n: usize, event: &ChatEvent) -> String {
         ChatEvent::Measured { telemetry } => format!("Measured    {telemetry:?}"),
         ChatEvent::Validated { summary } => format!("Validated   {summary:?}"),
         ChatEvent::UsageProgress { usage } => format!("UsageProg   {usage:?}"),
-        ChatEvent::Finished { stop_reason, usage } => format!(
+        ChatEvent::Finished {
+            stop_reason,
+            usage: Some(usage),
+        } => format!(
             "Finished    stop={stop_reason:?} in={} out={} cached={} thinking={}",
             usage.input_tokens,
             usage.output_tokens,
             usage.cached_input_tokens,
             usage.thinking_tokens,
         ),
+        ChatEvent::Finished {
+            stop_reason,
+            usage: None,
+        } => format!("Finished    stop={stop_reason:?} usage=unreported"),
     };
     format!("[evt {n:>2}] {body}")
 }
@@ -115,7 +127,7 @@ mod tests {
             .step(
                 ChatEvent::Finished {
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
+                    usage: Some(Usage::default()),
                 },
                 ms(120),
             );

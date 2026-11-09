@@ -28,6 +28,7 @@ use tars_types::{Caller, ChatEvent, ChatRequest, ProviderId, ProviderProfile, St
 use crate::provider::wire::{SpawnedProcess, Transport, WireOutcome, WireRecorder, failed};
 use crate::provider::{LlmEventStream, LlmProvider};
 
+pub(crate) use claude_argv::is_stripped_env;
 pub use claude_argv::{ClaudeCliEffort, ClaudeToolAccess};
 pub use dialect::{CliDialect, OutputFraming, OutputMode, PromptChannel};
 pub use dialects::antigravity::{AntigravityDialect, AntigravityEffort};
@@ -168,14 +169,16 @@ impl AgentCliBackend {
     }
 }
 
-/// Cuts the reply's text to 4 bytes per token of `max_output_tokens` in all, at a char
-/// boundary, dropping the deltas past the budget; when it cut anything, `Finished` says
-/// `MaxTokens`, so a cut reply does not look like a natural end.
+/// Cuts the reply's text to [`tars_types::BYTES_PER_TOKEN`] bytes per token of
+/// `max_output_tokens`, at a char boundary, dropping the deltas past the budget; when it cut
+/// anything, `Finished` says `MaxTokens`, so a cut reply does not look like a natural end.
 fn clamp_to_output_budget(
     content: Vec<ChatEvent>,
     max_output_tokens: Option<u32>,
 ) -> Vec<ChatEvent> {
-    let Some(cap) = max_output_tokens.map(|t| (t as usize).saturating_mul(4)) else {
+    let Some(cap) =
+        max_output_tokens.map(|t| (t as usize).saturating_mul(tars_types::BYTES_PER_TOKEN))
+    else {
         return content;
     };
 
@@ -276,16 +279,16 @@ mod tests {
             .await;
 
         assert!(
-            matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == "opus")
+            matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model.as_deref() == Some("opus"))
         );
         assert!(matches!(&events[1], ChatEvent::Delta { text } if text == "hello from claude"));
         match &events[2] {
             ChatEvent::Finished { stop_reason, usage } => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
                 // Anthropic's 12 excludes the 3 cache reads; tars counts 15.
-                assert_eq!(usage.input_tokens, 15);
-                assert_eq!(usage.output_tokens, 5);
-                assert_eq!(usage.cached_input_tokens, 3);
+                assert_eq!(usage.unwrap().input_tokens, 15);
+                assert_eq!(usage.unwrap().output_tokens, 5);
+                assert_eq!(usage.unwrap().cached_input_tokens, 3);
             }
             other => panic!("expected Finished, got {other:?}"),
         }
@@ -310,7 +313,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.text.len(), 40);
-        assert_eq!(resp.stop_reason, Some(StopReason::MaxTokens));
+        assert_eq!(resp.stop_reason, StopReason::MaxTokens);
     }
 
     #[test]
@@ -322,7 +325,7 @@ mod tests {
             delta("ghi"),
             ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
+                usage: Some(Usage::default()),
             },
         ];
         let out = clamp_to_output_budget(content, Some(1));
@@ -347,7 +350,7 @@ mod tests {
             },
             ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
+                usage: Some(Usage::default()),
             },
         ];
         let out = clamp_to_output_budget(content, None);

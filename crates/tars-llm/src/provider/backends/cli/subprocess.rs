@@ -78,8 +78,51 @@ fn resolve_effective_policy(
     Ok((effective, jail_root))
 }
 
-/// Returns the jailed [`Command`] for a CLI, with `stripped_env` removed from its environment
-/// whatever their case and everything else, the real `$TMPDIR` included, passed on. A
+/// Names the variables every CLI is given whatever its dialect, upper-cased: where programs are,
+/// who and where the user is, the temp directories, the terminal, the time zone, proxies and CA
+/// bundles. Locale variables (`LANG`, `LANGUAGE`, `LC_*`) pass too.
+const SYSTEM_ENV_KEYS_UPPER: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "TERM",
+    "TZ",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "__CF_USER_TEXT_ENCODING",
+];
+
+/// Returns whether the tars process's variable `name` reaches a CLI that `needs` the listed
+/// variables beyond the system ones and is never given `stripped` (upper-cased). Names are
+/// compared whatever their case, since Windows keeps a variable's case.
+fn passes_env(name: &str, needs: &[&str], stripped: &HashSet<String>) -> bool {
+    let upper = name.to_uppercase();
+    let system = SYSTEM_ENV_KEYS_UPPER.contains(&upper.as_str())
+        || upper == "LANG"
+        || upper == "LANGUAGE"
+        || upper.starts_with("LC_");
+    let needed = needs.iter().any(|n| n.eq_ignore_ascii_case(name));
+    (system || needed) && !stripped.contains(&upper)
+}
+
+/// Returns the jailed [`Command`] for a CLI, whose environment holds only the system variables
+/// and those the CLI `needs`, never `stripped_env` (matched whatever their case); a provider key
+/// or other credential of the tars process is not passed on. A
 /// workspace-write jail can also write `$TMPDIR`, `/tmp` and those `state_dirs` that exist (the
 /// wrap canonicalizes each root); the git directories of the worktree's repository stay
 /// read-only, denied by [`tars_sandbox::SandboxPolicy::wrap`]. The caller sets stdio and spawns.
@@ -91,6 +134,7 @@ fn resolve_effective_policy(
 pub(crate) fn build_sandboxed_command(
     executable: &str,
     argv: &[String],
+    needs_env: &[&str],
     stripped_env: &HashSet<String>,
     cwd: Option<&Path>,
     policy: &tars_sandbox::SandboxPolicy,
@@ -125,11 +169,7 @@ pub(crate) fn build_sandboxed_command(
     cmd.current_dir(&jail_root);
 
     cmd.env_clear();
-    for (k, v) in std::env::vars() {
-        if !stripped_env.contains(&k.to_uppercase()) {
-            cmd.env(k, v);
-        }
-    }
+    cmd.envs(std::env::vars().filter(|(name, _)| passes_env(name, needs_env, stripped_env)));
 
     Ok(cmd)
 }
@@ -164,6 +204,7 @@ impl RealSubprocessRunner {
         let mut cmd = build_sandboxed_command(
             &inv.executable,
             &argv,
+            super::claude_argv::NEEDED_ENV_KEYS,
             &inv.stripped_env,
             inv.cwd.as_deref(),
             &inv.sandbox,
@@ -358,10 +399,8 @@ pub(super) async fn end_child(
     if let Some(pid) = group {
         crate::provider::child_reaper::kill_group(pid);
     }
-    if timed_out {
-        if let Err(e) = child.start_kill() {
-            tracing::debug!(error = %e, "CLI child: kill after the timeout failed");
-        }
+    if timed_out && let Err(e) = child.start_kill() {
+        tracing::debug!(error = %e, "CLI child: kill after the timeout failed");
     }
     if let Err(e) = child.wait().await {
         tracing::debug!(error = %e, "CLI child: reaping after the run failed");
@@ -466,6 +505,7 @@ impl SharedCliRunner {
         let mut cmd = build_sandboxed_command(
             &inv.executable,
             &argv,
+            self.dialect.env(),
             &inv.stripped_env,
             inv.cwd.as_deref(),
             &inv.sandbox,
@@ -719,6 +759,26 @@ mod tests {
             "cost {} != {expected}",
             cost.0
         );
+    }
+
+    #[test]
+    fn a_variable_reaches_a_cli_only_when_it_is_a_system_one_or_needed() {
+        let none = HashSet::new();
+        assert!(passes_env("PATH", &[], &none));
+        assert!(passes_env("lc_all", &[], &none));
+        assert!(passes_env("https_proxy", &[], &none));
+        assert!(!passes_env("GEMINI_API_KEY", &[], &none));
+        assert!(passes_env("Gemini_Api_Key", &["GEMINI_API_KEY"], &none));
+    }
+
+    #[test]
+    fn a_stripped_variable_never_reaches_a_cli_even_when_needed() {
+        let stripped = HashSet::from(["ANTHROPIC_API_KEY".to_string()]);
+        assert!(!passes_env(
+            "anthropic_api_key",
+            &["ANTHROPIC_API_KEY"],
+            &stripped
+        ));
     }
 
     #[test]

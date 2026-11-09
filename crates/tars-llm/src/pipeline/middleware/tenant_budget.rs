@@ -36,7 +36,7 @@ use tars_types::{Caller, ChatRequest, Pricing, ProviderProfile, TenantId};
 use tars_utils::display_chain;
 
 use crate::pipeline::middleware::Middleware;
-use crate::pipeline::middleware::budget::default_max_output_tokens;
+use crate::pipeline::middleware::OutputReserve;
 use crate::pipeline::service::{Next, OpenFailure};
 
 // ─── BudgetStore trait + reference impl ────────────────────────────────
@@ -173,12 +173,13 @@ pub struct TenantBudgetMiddleware {
 }
 
 impl TenantBudgetMiddleware {
-    /// Builds the middleware from a provider's capabilities.
+    /// Builds the middleware from a provider's pricing, assuming the default [`OutputReserve`] for a
+    /// request that reaches it with no `max_output_tokens`.
     pub fn new(store: Arc<dyn BudgetStore>, capabilities: &ProviderProfile) -> Self {
         Self::from_parts(
             store,
             capabilities.pricing,
-            default_max_output_tokens(capabilities),
+            OutputReserve::default().output_tokens.get(),
         )
     }
 
@@ -397,7 +398,7 @@ mod tests {
             ChatEvent::Delta { text: "ok".into() },
             ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage,
+                usage: Some(usage),
             },
         ]);
         let mock = MockProvider::new(ProviderId::new("p"), canned);
@@ -408,7 +409,6 @@ mod tests {
                 // the budget, and the pipeline would refuse them before it.
                 caps: ProviderProfile {
                     max_context_tokens: None,
-                    max_output_tokens: None,
                     ..ProviderProfile::text_only_baseline(Pricing::default())
                 },
                 inner: mock,
@@ -483,7 +483,12 @@ mod tests {
         }
 
         assert!(
-            matches!(ended_in, Some(ProviderError::Unfinished)),
+            matches!(
+                ended_in,
+                Some(ProviderError::Unfinished(
+                    tars_types::Unfinished::NoStopReason
+                ))
+            ),
             "{ended_in:?}"
         );
         // 100 × $3/M + 200 × $15/M = $0.0033.

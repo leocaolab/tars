@@ -274,13 +274,14 @@ mod tests {
 
     fn resp(text: &str) -> ChatResponse {
         let mut b = ChatResponseBuilder::new();
-        b.apply(ChatEvent::started("m"));
-        b.apply(ChatEvent::Delta { text: text.into() });
+        b.apply(ChatEvent::started("m")).unwrap();
+        b.apply(ChatEvent::Delta { text: text.into() }).unwrap();
         b.apply(ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-        });
-        b.finish()
+            usage: Some(Usage::default()),
+        })
+        .unwrap();
+        b.finish().unwrap()
     }
 
     #[test]

@@ -76,9 +76,10 @@ use tars_config::{MODEL_KB, Vendor};
 use tars_llm::provider::registry::{ProviderRegistry, RegistryError};
 use tars_llm::{
     ChainOptions, JsonShapeValidator, LlmService, MaxLengthValidator, NotEmptyValidator,
+    ProviderError, RetryConfig,
 };
 use tars_sandbox::SandboxPolicy;
-use tars_types::{Caller, ChatRequest, ChatResponse, ChatResponseBuilder, ProviderId};
+use tars_types::{Caller, ChatRequest, ChatResponse, ChatResponseBuilder, ProviderId, Usage};
 use tars_utils::display_chain;
 
 // ─── errors ───────────────────────────────────────────────────────────
@@ -128,6 +129,10 @@ pub enum FileError {
 pub enum LoadCorpusError {
     #[error("corpus path is not a directory: {}", path.display())]
     NotADirectory { path: PathBuf },
+    /// A case directory's name is not UTF-8, so it cannot be a case id; skipping it would leave
+    /// the run a case short with nothing to say so.
+    #[error("case directory name is not UTF-8: {}", path.display())]
+    NonUtf8Name { path: PathBuf },
     #[error(
         "parsing {} (expect a JSON array of tool names or {{name,args}})",
         path.display()
@@ -301,6 +306,8 @@ pub struct RunRequest {
     /// How long one case may take, its model call and any arg-judge calls together; a case past
     /// it is recorded as failed there and the run goes on. `None` waits as long as a call takes.
     pub case_deadline: Option<Duration>,
+    /// The retry policy of the run's chain and of any arg judge's.
+    pub retry: RetryConfig,
 }
 
 /// Says which run [`run_judge`] grades and with which provider.
@@ -316,6 +323,8 @@ pub struct JudgeRequest {
     /// The judge's model spec, resolved against its catalog. `None` → the provider's default
     /// model.
     pub judge_model: Option<String>,
+    /// The retry policy of the judge's chain.
+    pub retry: RetryConfig,
 }
 
 /// Says which two runs [`run_diff`] compares.
@@ -597,6 +606,7 @@ pub async fn run_judge(
     let manifest = run_dir.read_manifest()?;
     let judging = set_up_judge(
         &cfg.registry,
+        &cfg.retry,
         &cfg.judge,
         cfg.judge_model.as_deref(),
         &RunModel {
@@ -635,6 +645,13 @@ pub async fn run_judge(
     })
 }
 
+/// Returns the default chain's options with `retry` as its policy.
+fn retrying(retry: &RetryConfig) -> ChainOptions {
+    let mut opts = ChainOptions::default();
+    opts.retry = Some(retry.clone());
+    opts
+}
+
 /// The model a run's calls were bound to, which a judge of the run must not share a provider or
 /// vendor with.
 struct RunModel<'a> {
@@ -660,6 +677,7 @@ struct Judging {
 /// does not resolve, or its model is known to be the run's vendor's.
 fn set_up_judge(
     registry: &ProviderRegistry,
+    retry: &RetryConfig,
     judge: &ProviderId,
     model: Option<&str>,
     run: &RunModel<'_>,
@@ -690,7 +708,7 @@ fn set_up_judge(
     })?;
     Ok(Judging {
         id: format!("{judge}:{judge_model}"),
-        service: LlmService::default_chain(provider, judge_model, ChainOptions::default()),
+        service: LlmService::default_chain(provider, judge_model, retrying(retry)),
         vendors,
     })
 }
@@ -920,12 +938,13 @@ pub async fn run_eval(
             source,
         })?;
     let vendor = MODEL_KB.vendor_of(&model).cloned();
-    let pipeline = LlmService::default_chain(provider, model.clone(), ChainOptions::default());
+    let pipeline = LlmService::default_chain(provider, model.clone(), retrying(&cfg.retry));
 
     let (arg_judge, args_judge_vendors) = match cfg.checks.args_judge() {
         Some(choice) => {
             let judging = set_up_judge(
                 &cfg.registry,
+                &cfg.retry,
                 &choice.provider,
                 choice.model.as_deref(),
                 &RunModel {
@@ -1093,13 +1112,15 @@ fn build_case_request(case: &Case, max_output_tokens: Option<u32>) -> ChatReques
     req
 }
 
-/// What one case's model call received.
+/// What one case's model call received: all of it, or what came before the failure.
 struct CaseCall {
-    response: ChatResponse,
+    text: String,
+    /// `None` when the provider reported none.
+    usage: Option<Usage>,
     /// The tool calls the model asked for.
     tool_steps: Vec<ToolStep>,
-    /// Why the call did not complete, if it did not.
-    failure: Option<CaseFailure>,
+    /// The finished response, or why the call did not finish.
+    response: Result<ChatResponse, CaseFailure>,
 }
 
 /// Makes one completion and returns what it received.
@@ -1120,17 +1141,31 @@ async fn run_completion_case(
             match within(deadline, stream.next()).await {
                 Err(passed) => break Some(passed.case_failure()),
                 Ok(None) => break None,
-                Ok(Some(Ok(ev))) => acc.apply(ev),
+                Ok(Some(Ok(ev))) => {
+                    if let Err(violation) = acc.apply(ev) {
+                        let e = ProviderError::from(violation);
+                        break Some(CaseFailure::call(e.kind(), &display_chain(&e)));
+                    }
+                }
                 Ok(Some(Err(e))) => break Some(CaseFailure::call(e.kind(), &display_chain(&e))),
             }
         },
     };
-    let response = acc.finish();
-    let tool_steps = trajectory_match::from_tool_calls(&response.tool_calls);
+    let text = acc.text().to_owned();
+    let usage = acc.usage();
+    let tool_steps = trajectory_match::from_tool_calls(acc.tool_calls());
+    let response = match failure {
+        Some(failure) => Err(failure),
+        None => acc.finish().map_err(|unfinished| {
+            let e = ProviderError::from(unfinished);
+            CaseFailure::call(e.kind(), &display_chain(&e))
+        }),
+    };
     CaseCall {
-        response,
+        text,
+        usage,
         tool_steps,
-        failure,
+        response,
     }
 }
 
@@ -1236,10 +1271,12 @@ async fn run_one_case(
 
     let call = run_completion_case(pipeline, req.clone(), caller.for_call(), deadline).await;
     // A call that did not complete has no output to check.
-    let outcome = match call.failure {
-        Some(failure) => CaseOutcome::Error { failure },
-        None => {
-            let mut results = response_checks(&checks.invariants, &req, &call.response);
+    let outcome = match &call.response {
+        Err(failure) => CaseOutcome::Error {
+            failure: failure.clone(),
+        },
+        Ok(response) => {
+            let mut results = response_checks(&checks.invariants, &req, response);
             let expected = case.expected_tools.as_deref();
             for ts in &checks.trajectory {
                 let scored = match within(deadline, ts.eval(&call.tool_steps, expected)).await {
@@ -1255,7 +1292,8 @@ async fn run_one_case(
     case_run(
         case.id.clone(),
         started.elapsed(),
-        call.response,
+        call.text,
+        call.usage,
         call.tool_steps,
         outcome,
     )
@@ -1277,16 +1315,16 @@ fn response_checks(
 fn case_run(
     case_id: CaseId,
     wall_clock: Duration,
-    response: ChatResponse,
+    output_text: String,
+    usage: Option<Usage>,
     tool_steps: Vec<ToolStep>,
     outcome: CaseOutcome,
 ) -> CaseRun {
-    let output_text = response.text;
     CaseRun {
         summary: CaseReport {
             case_id,
             wall_clock_ms: wall_clock.as_millis() as u64,
-            usage: response.usage,
+            usage,
             output_chars: output_text.chars().count() as u64,
             tool_trajectory: tool_steps.into_iter().map(|s| s.name).collect(),
             outcome,
@@ -1319,12 +1357,11 @@ fn load_corpus(root: &Path) -> Result<Vec<Case>, LoadCorpusError> {
         if !path.is_dir() {
             continue;
         }
-        let name = path
+        let name = entry
             .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        if name.is_empty() || name.starts_with('.') {
+            .into_string()
+            .map_err(|_| LoadCorpusError::NonUtf8Name { path: path.clone() })?;
+        if name.starts_with('.') {
             continue;
         }
         let id = CaseId::try_from(name).expect(
@@ -1598,7 +1635,7 @@ mod tests {
         CaseReport {
             case_id: id.parse().unwrap(),
             wall_clock_ms: 0,
-            usage: Usage::default(),
+            usage: Some(Usage::default()),
             output_chars: 0,
             tool_trajectory: traj.iter().map(|s| s.to_string()).collect(),
             outcome: CaseOutcome::Ok { checks },
@@ -1716,6 +1753,26 @@ mod tests {
         assert_eq!(cases[0].id.as_str(), "good");
     }
 
+    // Linux file names are bytes; APFS refuses a non-UTF-8 name, so there is nothing to test.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_case_directory_whose_name_is_not_utf8_is_an_error_not_a_skipped_case() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = TempDir::new().unwrap();
+        write(&dir.path().join("good").join("input.txt"), "ok");
+        let bad = dir.path().join(std::ffi::OsStr::from_bytes(b"case_\xff"));
+        write(&bad.join("input.txt"), "unreachable by id");
+
+        let err = load_corpus(dir.path())
+            .err()
+            .expect("a case must not vanish");
+        assert!(
+            matches!(&err, LoadCorpusError::NonUtf8Name { path } if *path == bad),
+            "{err:?}"
+        );
+    }
+
     #[test]
     fn load_corpus_errors_on_non_dir_path() {
         let dir = TempDir::new().unwrap();
@@ -1752,7 +1809,7 @@ mod tests {
                 .map(|id| CaseReport {
                     case_id: id.parse().unwrap(),
                     wall_clock_ms: 2500,
-                    usage: Usage::default(),
+                    usage: Some(Usage::default()),
                     output_chars: 80,
                     tool_trajectory: Vec::new(),
                     outcome: CaseOutcome::Ok {
@@ -1865,6 +1922,7 @@ mod tests {
                 max_output_tokens: None,
                 checks: CheckSet::default(),
                 case_deadline: None,
+                retry: RetryConfig::default(),
             },
             |_| {},
         )
@@ -1900,6 +1958,7 @@ mod tests {
                 max_output_tokens: None,
                 checks: CheckSet::default(),
                 case_deadline: None,
+                retry: RetryConfig::default(),
             },
             |_| {},
         )
@@ -1964,6 +2023,7 @@ mod tests {
             max_output_tokens: None,
             checks: CheckSet::default(),
             case_deadline: None,
+            retry: RetryConfig::default(),
         }
     }
 
@@ -2362,6 +2422,7 @@ mod tests {
                 run: out.path().to_path_buf(),
                 judge: ProviderId::new("judge_rec"),
                 judge_model: Some("m".into()),
+                retry: RetryConfig::default(),
             },
             |_| {},
         )
@@ -2414,6 +2475,7 @@ mod tests {
                 run: out.path().to_path_buf(),
                 judge: ProviderId::new("judge_rec"),
                 judge_model: Some(judge_model.into()),
+                retry: RetryConfig::default(),
             },
             |_| {},
         )
@@ -2493,11 +2555,17 @@ mod tests {
     fn a_max_length_violation_says_how_long_the_output_was() {
         let check = invariant_of(&"max-length:3".parse().unwrap()).unwrap();
         let mut b = tars_types::ChatResponseBuilder::new();
-        b.apply(tars_types::ChatEvent::started("m"));
+        b.apply(tars_types::ChatEvent::started("m")).unwrap();
         b.apply(tars_types::ChatEvent::Delta {
             text: "hello".into(),
-        });
-        let result = check.check(&ChatRequest::user("q"), &b.finish());
+        })
+        .unwrap();
+        b.apply(tars_types::ChatEvent::Finished {
+            stop_reason: tars_types::StopReason::EndTurn,
+            usage: None,
+        })
+        .unwrap();
+        let result = check.check(&ChatRequest::user("q"), &b.finish().unwrap());
         assert!(!result.passed());
         let detail = result.detail().unwrap();
         assert!(
@@ -2530,6 +2598,7 @@ mod tests {
                 run: out.path().to_path_buf(),
                 judge: ProviderId::new("judge_rec"),
                 judge_model: Some("m".into()),
+                retry: RetryConfig::default(),
             },
             |_| {},
         )

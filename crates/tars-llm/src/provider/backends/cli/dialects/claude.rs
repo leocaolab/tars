@@ -8,11 +8,13 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::ProviderError;
+use crate::provider::backends::anthropic::map_stop_reason;
 use crate::provider::error::IoOp;
 use tars_types::{Caller, ChatEvent, ChatRequest, StopReason};
 
 use super::super::claude_argv::{
-    ClaudeCliEffort, ClaudeToolAccess, STRIPPED_ENV_KEYS_UPPER, build_argv_with, streaming_enabled,
+    ClaudeCliEffort, ClaudeToolAccess, NEEDED_ENV_KEYS, STRIPPED_ENV_KEYS_UPPER, build_argv_with,
+    streaming_enabled,
 };
 use super::super::dialect::{CliDialect, OutputMode, PromptChannel};
 use super::super::invocation::SubprocessInvocation;
@@ -111,6 +113,10 @@ impl CliDialect for ClaudeCliDialect {
         OutputMode::JsonEvents
     }
 
+    fn env(&self) -> &[&str] {
+        NEEDED_ENV_KEYS
+    }
+
     fn state_dirs(&self) -> Vec<std::path::PathBuf> {
         // claude's home holds its config, its sessions and the directory its Bash tool creates
         // on first use.
@@ -120,11 +126,17 @@ impl CliDialect for ClaudeCliDialect {
     fn parse_line(&self, raw: &Value) -> Result<Vec<ChatEvent>, ProviderError> {
         let text = extract_result_text(raw);
         let usage = extract_usage(raw);
+        // claude passes on the API's `stop_reason`. A release that leaves it out reports a run
+        // that completed, which ended its turn.
+        let stop_reason = raw
+            .get("stop_reason")
+            .and_then(Value::as_str)
+            .map_or(StopReason::EndTurn, map_stop_reason);
         Ok(vec![
             ChatEvent::Delta { text },
             ChatEvent::Finished {
-                stop_reason: StopReason::EndTurn,
-                usage,
+                stop_reason,
+                usage: Some(usage),
             },
         ])
     }
@@ -235,14 +247,28 @@ mod tests {
             ChatEvent::Finished { stop_reason, usage } => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
                 // Anthropic's 12 excludes the 3 cache reads; tars counts 15.
-                assert_eq!(usage.input_tokens, 15);
-                assert_eq!(usage.output_tokens, 5);
-                assert_eq!(usage.cached_input_tokens, 3);
-                assert_eq!(usage.cache_creation_tokens, 0);
-                assert_eq!(usage.thinking_tokens, 0);
+                assert_eq!(usage.unwrap().input_tokens, 15);
+                assert_eq!(usage.unwrap().output_tokens, 5);
+                assert_eq!(usage.unwrap().cached_input_tokens, 3);
+                assert_eq!(usage.unwrap().cache_creation_tokens, 0);
+                assert_eq!(usage.unwrap().thinking_tokens, 0);
             }
             other => panic!("expected Finished, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_line_reads_the_stop_reason_claude_reports() {
+        let events = dialect()
+            .parse_line(&json!({"result": "cut", "is_error": false, "stop_reason": "max_tokens"}))
+            .unwrap();
+        assert!(matches!(
+            &events[1],
+            ChatEvent::Finished {
+                stop_reason: StopReason::MaxTokens,
+                ..
+            }
+        ));
     }
 
     #[test]

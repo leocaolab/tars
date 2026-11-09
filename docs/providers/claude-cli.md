@@ -276,6 +276,13 @@ toggle can't divert the call off your subscription onto API billing
 - `CLAUDE_CODE_USE_VERTEX`
 - `CLAUDE_CODE_USE_FOUNDRY`
 
+**Passed env** — claude gets only the system variables (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, the temp directories, `TERM`, `TZ`, the locale (`LANG`, `LANGUAGE`, `LC_*`), the `XDG_*` directories, proxies (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) and CA bundles (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`)),
+`CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN`; no other variable of the
+tars process reaches it (`passes_env` in
+`crates/tars-llm/src/provider/backends/cli/subprocess.rs`). The
+`claude_sdk` daemon is not jailed and inherits the environment, but loses
+the four stripped keys above.
+
 So exporting `ANTHROPIC_API_KEY` does **not** feed the default (non-`bare`)
 call a key — the subscription path is what runs. The one exception is
 `bare = true`: `claude --help` documents that `--bare` forces auth strictly

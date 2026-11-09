@@ -79,6 +79,8 @@ enum CommandError {
     Init(#[from] init::InitError),
     #[error(transparent)]
     Events(#[from] events::EventsError),
+    #[error(transparent)]
+    Config(#[from] config::ConfigCommandError),
 }
 
 impl CommandError {
@@ -90,6 +92,7 @@ impl CommandError {
             Self::Eval(e) => e.ending(),
             Self::Models(e) => e.ending(),
             Self::Providers(e) => e.ending(),
+            Self::Config(e) => e.ending(),
             Self::Init(_) | Self::Events(_) => Ending::NotRun,
         }
     }
@@ -121,6 +124,11 @@ pub struct Cli {
     #[arg(short, long, global = true, env = "TARS_CONFIG")]
     config: Option<std::path::PathBuf>,
 
+    /// Path to the system config file, laid under the user's: a value the user file also sets
+    /// is the user's. Read only when given; with it, the user file may be missing.
+    #[arg(long, global = true, env = "TARS_SYSTEM_CONFIG")]
+    system_config: Option<std::path::PathBuf>,
+
     /// Verbosity. `-v` → info, `-vv` → debug, `-vvv` → trace.
     /// A valid, non-blank `RUST_LOG` overrides it.
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
@@ -129,7 +137,7 @@ pub struct Cli {
     /// Stderr log format. `pretty` is human-readable (default); `json`
     /// emits one JSON record per event. Overrides `TARS_LOG_FORMAT`
     /// if both are set.
-    #[arg(long, global = true, value_enum, env = "TARS_LOG_FORMAT_FLAG")]
+    #[arg(long, global = true, value_enum)]
     log_format: Option<LogFormatArg>,
 
     /// Sandbox mode for the model calls of `probe`, `bench` and `eval run` / `judge`, which
@@ -207,6 +215,9 @@ enum Command {
     /// Inspect the call log the pipeline writes: list calls, show one.
     #[command(subcommand_value_name = "COMMAND")]
     Events(events::EventsArgs),
+    /// Explain where each operator setting comes from, or check a set of config files.
+    #[command(subcommand_value_name = "COMMAND")]
+    Config(config::ConfigArgs),
 }
 
 /// Runs the command `cli` names and returns the exit code that reports how it ended.
@@ -248,6 +259,7 @@ pub async fn run(cli: Cli) -> ExitCode {
         Command::Providers(_) => "providers".to_string(),
         Command::Init(_) => "init".to_string(),
         Command::Events(_) => "events".to_string(),
+        Command::Config(_) => "config".to_string(),
     };
 
     // Declared after the guard, the root span closes before the guard flushes the exporters.
@@ -264,7 +276,11 @@ pub async fn run(cli: Cli) -> ExitCode {
             return ExitCode::from(exit_code(Ending::NotRun));
         }
     };
-    let command = execute(cli.command, cli.config, cli.sandbox, &cmd_name).instrument(root.clone());
+    let paths = config::ConfigPaths {
+        user: cli.config,
+        system: cli.system_config,
+    };
+    let command = execute(cli.command, &paths, cli.sandbox, &cmd_name).instrument(root.clone());
     let ending = tokio::select! {
         ending = command => ending,
         signal = signals.recv() => {
@@ -294,7 +310,7 @@ fn command_span(command: &str) -> tracing::Span {
 /// Runs `command` and returns how it ended.
 async fn execute(
     command: Command,
-    config: Option<std::path::PathBuf>,
+    config: &config::ConfigPaths,
     sandbox: Option<SandboxModeArg>,
     cmd_name: &str,
 ) -> Ending {
@@ -325,7 +341,7 @@ async fn execute(
         },
         Command::Providers(args) => providers::execute(args, config).await.map_err(Into::into),
         Command::Init(args) => {
-            if config.is_some() {
+            if config.user.is_some() {
                 tracing::warn!(
                     "--config is ignored by `tars init` (use --path to redirect output)"
                 );
@@ -333,7 +349,7 @@ async fn execute(
             init::execute(args).await.map_err(Into::into)
         }
         Command::Events(args) => {
-            if config.is_some() {
+            if config.user.is_some() {
                 tracing::warn!(
                     "--config is ignored by `tars events` \
                      (use --store-dir / TARS_EVENT_STORE_DIR instead)"
@@ -341,6 +357,7 @@ async fn execute(
             }
             events::execute(args).await.map_err(Into::into)
         }
+        Command::Config(args) => config::execute(args, config).map_err(Into::into),
     };
 
     match &result {
@@ -357,7 +374,11 @@ fn calls_models(command: &Command) -> bool {
     match command {
         Command::Probe(_) | Command::Bench(_) => true,
         Command::Eval(e) => e.command.calls_models(),
-        Command::Models(_) | Command::Providers(_) | Command::Init(_) | Command::Events(_) => false,
+        Command::Models(_)
+        | Command::Providers(_)
+        | Command::Init(_)
+        | Command::Events(_)
+        | Command::Config(_) => false,
     }
 }
 

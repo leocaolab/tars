@@ -18,9 +18,10 @@ pub enum ChatEvent {
         unsent: Vec<crate::providers::chat::Degradation>,
     },
 
-    /// The provider's first event: the model the adapter called, and what it found in the cache.
+    /// The provider's first event: the model that answered, `None` when the provider did not
+    /// say, and what it found in the cache.
     Started {
-        actual_model: String,
+        actual_model: Option<String>,
         cache_hit: CacheHitInfo,
     },
 
@@ -81,10 +82,11 @@ pub enum ChatEvent {
         summary: ValidationSummary,
     },
 
-    /// The terminal event, emitted exactly once by a successful stream.
+    /// The terminal event, emitted exactly once by a successful stream. `usage` is `None` when
+    /// the provider reported none, which is not zero.
     Finished {
         stop_reason: StopReason,
-        usage: Usage,
+        usage: Option<Usage>,
     },
 }
 
@@ -121,24 +123,20 @@ impl StopReason {
 }
 
 impl ChatEvent {
-    /// Returns a `Started` event with no cache hit.
+    /// Returns a `Started` event naming the model the provider reported, with no cache hit.
     pub fn started(actual_model: impl Into<String>) -> Self {
         Self::Started {
-            actual_model: actual_model.into(),
+            actual_model: Some(actual_model.into()),
             cache_hit: CacheHitInfo::default(),
         }
     }
 
     /// Returns the last event of a stream that said `stop_reason` and reported `usage`:
-    /// `Finished` when it said why the turn stopped (with zero usage when it reported none),
-    /// `UsageProgress` when it only reported usage, so the tokens spent are not lost, and none
-    /// when it said neither.
+    /// `Finished` when it said why the turn stopped, `UsageProgress` when it only reported usage,
+    /// so the tokens spent are not lost, and none when it said neither.
     pub fn stream_end(stop_reason: Option<StopReason>, usage: Option<Usage>) -> Option<Self> {
         match (stop_reason, usage) {
-            (Some(stop_reason), usage) => Some(Self::Finished {
-                stop_reason,
-                usage: usage.unwrap_or_default(),
-            }),
+            (Some(stop_reason), usage) => Some(Self::Finished { stop_reason, usage }),
             (None, Some(usage)) => Some(Self::UsageProgress { usage }),
             (None, None) => None,
         }
@@ -150,13 +148,16 @@ impl ChatEvent {
     }
 
     /// Returns what the stream has spent once this event has passed, given `spent` before it,
-    /// `None` meaning no usage reported yet. `Finished` states the call's usage and replaces every
-    /// earlier report; `UsageProgress` raises each figure to the highest reported, since reports
-    /// are snapshots of one response, not increments. A stream that ends in an error has spent
-    /// what its reports reached by then.
+    /// `None` meaning no usage reported yet. A `Finished` that reports usage states the call's and
+    /// replaces every earlier report; one that reports none leaves the reports as they are.
+    /// `UsageProgress` raises each figure to the highest reported, since reports are snapshots of
+    /// one response, not increments. A stream that ends in an error has spent what its reports
+    /// reached by then.
     pub fn spent_after(&self, spent: Option<Usage>) -> Option<Usage> {
         match self {
-            Self::Finished { usage, .. } => Some(*usage),
+            Self::Finished {
+                usage: Some(usage), ..
+            } => Some(*usage),
             Self::UsageProgress { usage } => Some(spent.map_or(*usage, |s| s.max_each(*usage))),
             _ => spent,
         }
@@ -215,7 +216,7 @@ mod tests {
     fn finished(input_tokens: u64, output_tokens: u64) -> ChatEvent {
         ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
-            usage: usage(input_tokens, output_tokens),
+            usage: Some(usage(input_tokens, output_tokens)),
         }
     }
 
@@ -264,7 +265,7 @@ mod tests {
     fn finished_is_terminal() {
         let e = ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
+            usage: Some(Usage::default()),
         };
         assert!(e.is_terminal());
     }
@@ -310,7 +311,7 @@ mod tests {
             },
             ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
+                usage: Some(Usage::default()),
             },
         ];
         for original in cases {
@@ -346,12 +347,12 @@ mod tests {
         };
         assert!(matches!(
             ChatEvent::stream_end(Some(StopReason::ToolUse), Some(spent)),
-            Some(ChatEvent::Finished { stop_reason: StopReason::ToolUse, usage })
+            Some(ChatEvent::Finished { stop_reason: StopReason::ToolUse, usage: Some(usage) })
                 if usage.output_tokens == 500
         ));
         assert!(matches!(
             ChatEvent::stream_end(Some(StopReason::EndTurn), None),
-            Some(ChatEvent::Finished { usage, .. }) if usage.total_tokens() == 0
+            Some(ChatEvent::Finished { usage: None, .. })
         ));
         assert!(matches!(
             ChatEvent::stream_end(None, Some(spent)),

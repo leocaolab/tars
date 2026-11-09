@@ -1500,6 +1500,25 @@ fn the_next_midnight_is_the_start_of_the_following_utc_day() {
 }
 
 #[test]
+fn a_clock_with_no_utc_day_is_reported_by_the_round_not_dropped() {
+    let before = UNIX_EPOCH - Duration::from_secs(1);
+    let report = midnight(before);
+    assert!(report.deferred.is_none());
+    assert!(
+        matches!(
+            report.failures.as_slice(),
+            [LogError::ClockOutOfRange { reading }] if *reading == before
+        ),
+        "{:?}",
+        report.failures
+    );
+
+    let report = midnight(UNIX_EPOCH);
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert!(report.deferred.is_some());
+}
+
+#[test]
 fn tenants_differing_only_in_case_get_directories_that_differ_ignoring_case() {
     let folded = |tenant: &str| {
         let tenant = tenant.parse::<TenantId>().unwrap();

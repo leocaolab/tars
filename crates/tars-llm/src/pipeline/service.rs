@@ -73,11 +73,12 @@ impl LlmService {
         mut req: ChatRequest,
         ctx: Caller,
     ) -> Result<LlmEventStream, OpenFailure> {
-        // The caller's own `max_output_tokens` is checked, not the bound model's limit filled in
-        // below: a provider-wide profile ceiling can sit below one model's own.
-        let unsent = match req.compatibility_check(self.provider.capabilities()) {
+        // The caller's own `max_output_tokens` is checked against the bound model's limit before
+        // the limit is filled in below.
+        let unsent = match req.compatibility_check(self.provider.capabilities(), &self.output_limit)
+        {
             CompatibilityCheck::Compatible => Vec::new(),
-            CompatibilityCheck::Degraded { unsent } => unsent,
+            CompatibilityCheck::Degraded { unsent } => unsent.into_vec(),
             CompatibilityCheck::Incompatible { reasons } => {
                 let error = LlmError::Incompatible { reasons };
                 self.tell_refused(ledger, &req, &ctx, &error);
@@ -403,7 +404,9 @@ fn provider_time(started: std::time::Instant) -> CallTelemetry {
 /// error: every backend's stream passes here, so a reply that never said why the turn stopped
 /// reaches no caller as a success. A stream that failed keeps its own error.
 fn unfinished(finished: bool, failed: bool) -> Option<ProviderError> {
-    (!finished && !failed).then_some(ProviderError::Unfinished)
+    (!finished && !failed).then_some(ProviderError::Unfinished(
+        tars_types::Unfinished::NoStopReason,
+    ))
 }
 
 #[cfg(test)]
@@ -514,9 +517,9 @@ mod tests {
         let mut events = svc.call(req, Caller::test_default()).await.result.unwrap();
         let mut b = tars_types::ChatResponseBuilder::new();
         while let Some(ev) = events.next().await {
-            b.apply(ev.unwrap());
+            b.apply(ev.unwrap()).unwrap();
         }
-        b.finish()
+        b.finish().unwrap()
     }
 
     #[tokio::test]
@@ -531,7 +534,6 @@ mod tests {
             degraded.degraded,
             [Degradation::ChatTemplateThinkingNotSent]
         );
-        assert!(degraded.is_finished());
 
         let whole = response_of(&svc, ChatRequest::user("ping")).await;
         assert!(whole.degraded.is_empty());
@@ -541,9 +543,8 @@ mod tests {
     async fn a_request_for_what_the_provider_has_no_data_on_is_sent() {
         let svc = profiled(tars_types::ProviderProfile::undescribed_http());
         let mut req = ChatRequest::user("ping");
-        req.thinking = tars_types::ThinkingMode::Auto;
+        req.thinking = Some(tars_types::ThinkingMode::Auto);
         let resp = response_of(&svc, req).await;
-        assert!(resp.is_finished());
         assert!(resp.degraded.is_empty());
     }
 
@@ -553,7 +554,7 @@ mod tests {
             tars_types::InterfaceKind::Http,
         ));
         let mut req = ChatRequest::user("ping");
-        req.thinking = tars_types::ThinkingMode::Auto;
+        req.thinking = Some(tars_types::ThinkingMode::Auto);
         let refused = svc
             .run(&CallLedger::default(), req, Caller::test_default())
             .await;
@@ -593,7 +594,10 @@ mod tests {
                     refusal.error()
                 );
             };
-            self.refused.lock().unwrap().push(reasons.clone());
+            self.refused
+                .lock()
+                .unwrap()
+                .push(reasons.clone().into_vec());
         }
     }
 
@@ -607,7 +611,7 @@ mod tests {
             .build();
 
         let mut thinking = ChatRequest::user("ping");
-        thinking.thinking = tars_types::ThinkingMode::Auto;
+        thinking.thinking = Some(tars_types::ThinkingMode::Auto);
         let refused = svc.call(thinking, Caller::test_default()).await.result;
         assert!(matches!(refused, Err(LlmError::Incompatible { .. })));
         drop(
@@ -667,7 +671,9 @@ mod tests {
     fn a_stream_that_ended_before_finished_ends_unfinished() {
         assert!(matches!(
             unfinished(false, false),
-            Some(ProviderError::Unfinished)
+            Some(ProviderError::Unfinished(
+                tars_types::Unfinished::NoStopReason
+            ))
         ));
     }
 
@@ -706,7 +712,7 @@ mod tests {
                     Ok(ChatEvent::Started { .. }),
                     Ok(ChatEvent::Delta { .. }),
                     Ok(ChatEvent::Measured { telemetry }),
-                    Err(ProviderError::Unfinished),
+                    Err(ProviderError::Unfinished(tars_types::Unfinished::NoStopReason)),
                 ] if telemetry.provider_latency_ms.is_some()
             ),
             "{items:?}"
@@ -719,7 +725,7 @@ mod tests {
             ChatEvent::started("m"),
             ChatEvent::Finished {
                 stop_reason: tars_types::StopReason::EndTurn,
-                usage: tars_types::Usage::default(),
+                usage: Some(tars_types::Usage::default()),
             },
         ])
         .await;

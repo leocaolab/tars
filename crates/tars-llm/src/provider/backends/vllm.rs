@@ -148,7 +148,7 @@ mod tests {
             tars_types::PromptCacheKind::None
         ));
         assert_eq!(caps.supports_thinking, tars_types::Support::Unknown);
-        assert_eq!(caps.supports_tool_use, tars_types::Support::Supported);
+        assert_eq!(caps.tool_use.support(), tars_types::Support::Supported);
     }
 
     #[tokio::test]

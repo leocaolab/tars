@@ -4,22 +4,18 @@ use serde::{Deserialize, Serialize};
 
 /// The serde form is a storage format, since the call log stores requests and refusal reasons:
 /// `{"mode":"off"}`, `{"mode":"auto"}`, `{"mode":"budget","tokens":N}`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Default, Serialize, Deserialize)]
+///
+/// A request that says nothing about thinking holds no `ThinkingMode` at all (`None` on
+/// `ChatRequest::thinking`), and the provider's default applies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", content = "tokens", rename_all = "snake_case")]
 pub enum ThinkingMode {
-    /// Disable any provider "thinking" feature.
-    #[default]
+    /// Turns thinking off, explicitly on every provider that has a switch for it.
     Off,
     /// Let the provider auto-decide thinking depth.
     Auto,
     /// Hard cap on thinking tokens (Anthropic-style).
     Budget(u32),
-}
-
-impl ThinkingMode {
-    pub fn is_off(&self) -> bool {
-        matches!(self, Self::Off)
-    }
 }
 
 #[cfg(test)]

@@ -24,6 +24,9 @@ use super::super::subprocess::truncate;
 pub(crate) const STRIPPED_ENV_KEYS_UPPER: &[&str] =
     &["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_AGENT_IDENTITY"];
 
+/// Names the variables `codex` needs beyond the system ones: its home, where its login is.
+const NEEDED_ENV_KEYS: &[&str] = &["CODEX_HOME"];
+
 /// The value of `codex exec --sandbox`. The default is read-only, so codex edits no file unless
 /// asked to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -135,6 +138,10 @@ impl CliDialect for CodexCliDialect {
         OutputFraming::JsonLinesArray
     }
 
+    fn env(&self) -> &[&str] {
+        NEEDED_ENV_KEYS
+    }
+
     fn state_dirs(&self) -> Vec<std::path::PathBuf> {
         // `$CODEX_HOME`, else `~/.codex`, holds codex's config, sessions and logs; its socket is
         // under `$TMPDIR`, which every jail can write.
@@ -159,7 +166,15 @@ impl CliDialect for CodexCliDialect {
 
         let mut out: Vec<ChatEvent> = Vec::new();
         for line_val in lines {
-            let line = line_val.as_str().unwrap_or_default();
+            let line = line_val.as_str().ok_or_else(|| ProviderError::Parse {
+                at: "codex runner payload",
+                line: None,
+                problem: Box::new(ParseProblem::WrongType {
+                    expected: JsonKind::String,
+                    got: JsonKind::of(line_val),
+                }),
+                raw: Some(truncate(&line_val.to_string(), 200)),
+            })?;
             if line.trim().is_empty() {
                 continue;
             }
@@ -172,13 +187,10 @@ impl CliDialect for CodexCliDialect {
                         .ok()
                         .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string));
                     match kind.as_deref() {
-                        Some("turn.completed") | Some("turn.failed") | Some("error") => {
+                        Some(critical @ ("turn.completed" | "turn.failed" | "error")) => {
                             return Err(cli_subprocess_died(
                                 None,
-                                format!(
-                                    "codex: failed to parse critical `{}` event: {e}",
-                                    kind.as_deref().unwrap_or("?"),
-                                ),
+                                format!("codex: failed to parse critical `{critical}` event: {e}"),
                             ));
                         }
                         _ => {
@@ -279,7 +291,7 @@ fn map_thread_event(event: ThreadEvent) -> Vec<Result<ChatEvent, ProviderError>>
         ThreadEvent::TurnCompleted { usage } => {
             vec![Ok(ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage: convert_usage(&usage),
+                usage: Some(convert_usage(&usage)),
             })]
         }
         ThreadEvent::TurnFailed { error } => {
@@ -421,7 +433,7 @@ mod tests {
                     stop_sequences: vec![],
                     seed: None,
                     cache_directives: vec![],
-                    thinking: Default::default(),
+                    thinking: None,
                     enable_chat_template_thinking: None,
                 },
                 "gpt-5-codex",
@@ -434,6 +446,20 @@ mod tests {
         );
         assert!(inv.prompt.contains("[assistant]\nfirst assistant"));
         assert!(inv.prompt.ends_with("[user]\nsecond user"));
+    }
+
+    #[test]
+    fn a_payload_line_that_is_not_a_string_is_a_typed_error_not_a_blank_line() {
+        let payload = Value::Array(vec![Value::String(String::new()), Value::from(7)]);
+        let err = dialect().parse_line(&payload).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ProviderError::Parse { problem, .. }
+                    if matches!(**problem, ParseProblem::WrongType { expected: JsonKind::String, got: JsonKind::Number })
+            ),
+            "{err:?}"
+        );
     }
 
     fn parse_line(lines: &[&str]) -> Result<Vec<ChatEvent>, ProviderError> {
@@ -454,8 +480,8 @@ mod tests {
         match &events[1] {
             ChatEvent::Finished { stop_reason, usage } => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
-                assert_eq!(usage.input_tokens, 10);
-                assert_eq!(usage.output_tokens, 2);
+                assert_eq!(usage.unwrap().input_tokens, 10);
+                assert_eq!(usage.unwrap().output_tokens, 2);
             }
             other => panic!("expected Finished, got {other:?}"),
         }
@@ -472,7 +498,7 @@ mod tests {
         assert!(matches!(&events[0], ChatEvent::ThinkingDelta { text } if text == "thinking…"));
         assert!(matches!(&events[1], ChatEvent::Delta { text } if text == "answer"));
         match &events[2] {
-            ChatEvent::Finished { usage, .. } => assert_eq!(usage.thinking_tokens, 5),
+            ChatEvent::Finished { usage, .. } => assert_eq!(usage.unwrap().thinking_tokens, 5),
             other => panic!("expected Finished, got {other:?}"),
         }
     }
@@ -548,11 +574,11 @@ mod tests {
         match out.into_iter().next().unwrap().unwrap() {
             ChatEvent::Finished { stop_reason, usage } => {
                 assert_eq!(stop_reason, StopReason::EndTurn);
-                assert_eq!(usage.input_tokens, 100);
-                assert_eq!(usage.cached_input_tokens, 30);
-                assert_eq!(usage.output_tokens, 50);
-                assert_eq!(usage.thinking_tokens, 20);
-                assert_eq!(usage.cache_creation_tokens, 0);
+                assert_eq!(usage.unwrap().input_tokens, 100);
+                assert_eq!(usage.unwrap().cached_input_tokens, 30);
+                assert_eq!(usage.unwrap().output_tokens, 50);
+                assert_eq!(usage.unwrap().thinking_tokens, 20);
+                assert_eq!(usage.unwrap().cache_creation_tokens, 0);
             }
             other => panic!("expected Finished, got {other:?}"),
         }

@@ -6,15 +6,11 @@
 //! and is broad on purpose.
 //!
 //! Each accessor reads the environment when called and keeps no snapshot, so flipping
-//! `TARS_CLAUDE_CLI_STREAM` between two runs takes effect on the next call.
+//! `TARS_CLAUDE_CLI_STREAM` between two runs takes effect on the next call. One accessor,
+//! [`cassette_force_record`], is handed the lookup instead of reading the process: its reader
+//! builds over an environment of its own (`$TARS_HOME/.env` laid over the process, or a test's).
 
 use std::path::PathBuf;
-
-/// Returns `TARS_CLAUDE_SDK_SCRIPT`, the path that overrides the `claude_sdk` backend's Node
-/// daemon script; `None` when unset. A non-UTF-8 value is returned as is.
-pub fn claude_sdk_script_override() -> Option<PathBuf> {
-    std::env::var_os("TARS_CLAUDE_SDK_SCRIPT").map(PathBuf::from)
-}
 
 /// Returns `$HOME`; `None` when it is unset, as in some containers. A non-UTF-8 value is
 /// returned as is.
@@ -44,6 +40,23 @@ pub fn claude_cli_streaming() -> Result<Option<bool>, std::env::VarError> {
     }
 }
 
+/// Returns whether `TARS_CASSETTE_RECORD`, as `var` reads it, makes every cassette record instead
+/// of replaying: `1` or `true` (any case) does; any other value, or none, does not.
+///
+/// # Errors
+///
+/// Returns the `VarError` when the variable is set but not UTF-8, so a misconfiguration is not
+/// read as unset.
+pub fn cassette_force_record(
+    var: impl FnOnce(&str) -> Result<String, std::env::VarError>,
+) -> Result<bool, std::env::VarError> {
+    match var("TARS_CASSETTE_RECORD") {
+        Ok(v) => Ok(v == "1" || v.eq_ignore_ascii_case("true")),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Returns the raw `TARS_LOG_FORMAT` for tars-melt to parse, in `std::env::var`'s shape, as
 /// tars-melt reads its other variables.
 ///
@@ -59,6 +72,46 @@ pub fn log_format_raw() -> Result<String, std::env::VarError> {
 mod tests {
     // Setting process-wide env would race the tests running in parallel, so these test a copy
     // of the accessor's match, not the accessor.
+
+    #[test]
+    fn cassette_recording_is_forced_by_tars_cassette_record_alone() {
+        let only = |name: &'static str, value: &'static str| {
+            move |asked: &str| {
+                if asked == name {
+                    Ok(value.to_string())
+                } else {
+                    Err(std::env::VarError::NotPresent)
+                }
+            }
+        };
+
+        assert_eq!(
+            super::cassette_force_record(only("TARS_CASSETTE_RECORD", "1")),
+            Ok(true)
+        );
+        assert_eq!(
+            super::cassette_force_record(only("TARS_CASSETTE_RECORD", "True")),
+            Ok(true)
+        );
+        assert_eq!(
+            super::cassette_force_record(only("TARS_CASSETTE_RECORD", "0")),
+            Ok(false)
+        );
+        assert_eq!(
+            super::cassette_force_record(only("TARS_RECORD", "1")),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_cassette_switch_that_is_not_utf8_is_unreadable_not_unset() {
+        let not_utf8 = |_: &str| {
+            Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                "x",
+            )))
+        };
+        assert!(super::cassette_force_record(not_utf8).is_err());
+    }
 
     #[test]
     fn claude_cli_streaming_falsy_set_matches_documented_strings() {

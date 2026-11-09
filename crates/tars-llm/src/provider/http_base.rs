@@ -12,6 +12,7 @@ use reqwest::header::{
     CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, InvalidHeaderName, InvalidHeaderValue,
 };
 use reqwest::{Method, StatusCode};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
@@ -28,19 +29,29 @@ use crate::provider::wire::{Attempt, Transport, WireOutcome, WireRecorder, faile
 
 const DEFAULT_STREAM_IDLE_MS: u64 = 300_000;
 
-/// The HTTP client's settings.
-#[derive(Clone, Debug)]
+/// The HTTP client's settings. The two timeouts read from the `[llm.http]` config section in
+/// milliseconds (`connect_timeout_ms`, `stream_idle_timeout_ms`); the user agent and the trace
+/// headers are the binary's, not an operator's, and no file sets them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct HttpClientConfig {
     /// Bounds the TCP and TLS handshake.
+    #[serde(rename = "connect_timeout_ms", with = "crate::duration_serde::millis")]
     pub connect_timeout: Duration,
     /// Bounds the wait between two SSE chunks once the stream is open (default 5 minutes); a
     /// long generation may take far longer as a whole. It is a timer around each read, not
     /// reqwest's `read_timeout`, so a stall ends as `Network(Idle)` whether or not the
     /// request has a deadline, which reqwest would report as the deadline's `TimedOut`.
+    #[serde(
+        rename = "stream_idle_timeout_ms",
+        with = "crate::duration_serde::millis"
+    )]
     pub stream_idle_timeout: Duration,
+    #[serde(skip)]
     pub user_agent: String,
     /// Writes the trace-context headers every request carries, read at send time inside the
     /// call's span; `None` adds none.
+    #[serde(skip)]
     pub trace_headers: Option<TraceHeaderWriter>,
 }
 
@@ -169,7 +180,8 @@ where
     adapter.extras().apply_query_params(&mut url);
 
     let mut headers = adapter.build_headers(&auth)?;
-    apply_extra_headers(adapter.extras(), base.env.as_ref(), &mut headers);
+    insert_extra_headers(adapter.extras(), base.env.as_ref(), &mut headers)
+        .map_err(ProviderError::ExtraHeader)?;
     if let Some(write) = base.config.trace_headers {
         add_trace_headers(write, &mut headers);
     }
@@ -504,32 +516,57 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duratio
 /// Inserts the headers a provider's config adds to each of its requests into `target`, replacing
 /// headers of the same name: the static `http_headers`, then each `env_http_headers` header whose
 /// var `env` holds. `env` must be the environment the provider's credential is read from, so a
-/// `.env` file feeds both. A header that does not make a valid one is skipped with a
-/// `tracing::warn!` rather than failing, since failing here would fail every call of the provider.
-pub fn apply_extra_headers(extras: &HttpOverrides, env: &dyn EnvSource, target: &mut HeaderMap) {
-    for (k, v) in &extras.http_headers {
-        match (HeaderName::try_from(k), HeaderValue::try_from(v)) {
-            (Ok(name), Ok(value)) => {
-                target.insert(name, value);
-            }
-            (Err(e), _) => {
-                tracing::warn!(
-                    header_name = %k,
-                    error = %e,
-                    "http_extras: skipping header — invalid name",
-                );
-            }
-            (_, Err(e)) => {
-                tracing::warn!(
-                    header_name = %k,
-                    error = %e,
-                    "http_extras: skipping header — invalid value",
-                );
-            }
-        }
+/// `.env` file feeds both.
+///
+/// # Errors
+///
+/// Fails on the first configured header that does not make a valid one: a static one only when
+/// the provider was not built by the registry, which refuses those, and an env one when its var
+/// is set to something that is not a header value.
+pub(crate) fn insert_extra_headers(
+    extras: &HttpOverrides,
+    env: &dyn EnvSource,
+    target: &mut HeaderMap,
+) -> Result<(), ExtraHeaderError> {
+    for (name, value) in &extras.http_headers {
+        let (name, value) = static_header(name, value)?;
+        target.insert(name, value);
     }
     for (header, var) in &extras.env_http_headers {
-        match env_header(header, var, env.var(var)) {
+        if let Some((name, value)) = env_header(header, var, env.var(var))? {
+            target.insert(name, value);
+        }
+    }
+    Ok(())
+}
+
+/// Returns the static `http_headers` of a provider's config as a header map.
+///
+/// # Errors
+///
+/// Fails on the first one that does not make a valid header.
+pub(crate) fn static_headers(extras: &HttpOverrides) -> Result<HeaderMap, ExtraHeaderError> {
+    extras
+        .http_headers
+        .iter()
+        .map(|(name, value)| static_header(name, value))
+        .collect()
+}
+
+/// Inserts the extra headers as [`insert_extra_headers`] does, skipping each one that does not
+/// make a valid header with a `tracing::warn!`. Only the `tars models` listing uses it; a provider
+/// call fails instead.
+pub fn apply_extra_headers(extras: &HttpOverrides, env: &dyn EnvSource, target: &mut HeaderMap) {
+    let statics = extras
+        .http_headers
+        .iter()
+        .map(|(name, value)| static_header(name, value).map(Some));
+    let from_env = extras
+        .env_http_headers
+        .iter()
+        .map(|(header, var)| env_header(header, var, env.var(var)).map_err(ExtraHeaderError::from));
+    for header in statics.chain(from_env) {
+        match header {
             Ok(Some((name, value))) => {
                 target.insert(name, value);
             }
@@ -537,17 +574,37 @@ pub fn apply_extra_headers(extras: &HttpOverrides, env: &dyn EnvSource, target: 
             Err(e) => {
                 tracing::warn!(
                     error = %tars_utils::display_chain(&e),
-                    "http_extras: skipping env header",
+                    "http_extras: skipping header",
                 );
             }
         }
     }
 }
 
+/// A header a provider's config adds that does not make a valid one. It never holds the value,
+/// which may be a credential.
+#[derive(Debug, thiserror::Error)]
+pub enum ExtraHeaderError {
+    #[error("configured header `{header}` is not a valid header name")]
+    Name {
+        header: String,
+        #[source]
+        source: InvalidHeaderName,
+    },
+    #[error("the configured value of header `{header}` is not a valid header value")]
+    Value {
+        header: String,
+        #[source]
+        source: InvalidHeaderValue,
+    },
+    #[error(transparent)]
+    Env(#[from] EnvHeaderError),
+}
+
 /// Why an `env_http_headers` entry whose var is set does not make a header. It never holds the
 /// var's value, which may be a credential.
 #[derive(Debug, thiserror::Error)]
-enum EnvHeaderError {
+pub enum EnvHeaderError {
     #[error("`{header}` is not a valid header name")]
     Name {
         header: String,
@@ -563,6 +620,18 @@ enum EnvHeaderError {
         #[source]
         source: InvalidHeaderValue,
     },
+}
+
+fn static_header(header: &str, value: &str) -> Result<(HeaderName, HeaderValue), ExtraHeaderError> {
+    let name = HeaderName::try_from(header).map_err(|source| ExtraHeaderError::Name {
+        header: header.to_owned(),
+        source,
+    })?;
+    let value = HeaderValue::try_from(value).map_err(|source| ExtraHeaderError::Value {
+        header: header.to_owned(),
+        source,
+    })?;
+    Ok((name, value))
 }
 
 /// Returns the header `header` gets from env var `var`, whose lookup gave `lookup`: none when the
@@ -839,5 +908,24 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert("retry-after-ms", HeaderValue::from_static("not-a-number"));
         assert_eq!(parse_retry_after(&h), None);
+    }
+
+    #[test]
+    fn an_http_section_sets_the_timeouts_and_leaves_the_agent_and_headers_alone() {
+        let cfg: HttpClientConfig =
+            toml::from_str("connect_timeout_ms = 2000\n").expect("a partial [llm.http] reads");
+        let default = HttpClientConfig::default();
+        assert_eq!(cfg.connect_timeout, Duration::from_secs(2));
+        assert_eq!(cfg.stream_idle_timeout, default.stream_idle_timeout);
+        assert_eq!(cfg.user_agent, default.user_agent);
+        assert!(toml::from_str::<HttpClientConfig>("user_agent = \"x\"\n").is_err());
+    }
+
+    #[test]
+    fn the_default_http_config_writes_only_the_timeouts() {
+        let written: toml::Table =
+            toml::Table::try_from(HttpClientConfig::default()).expect("the default writes");
+        let keys: Vec<&str> = written.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["connect_timeout_ms", "stream_idle_timeout_ms"]);
     }
 }

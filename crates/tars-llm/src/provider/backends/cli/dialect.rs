@@ -95,13 +95,14 @@ pub trait CliDialect: Send + Sync {
             },
             ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
+                usage: Some(Usage::default()),
             },
         ])
     }
 
-    /// Returns the variables the CLI needs from the environment. Only a test reads it; the
-    /// runner passes on every variable not stripped anyway.
+    /// Returns the variables the CLI needs from the environment beyond the system ones the runner
+    /// always passes (`PATH`, `HOME`, locale, temp directories, proxies); no other variable of the
+    /// tars process reaches it. By default none.
     fn env(&self) -> &[&str] {
         &[]
     }

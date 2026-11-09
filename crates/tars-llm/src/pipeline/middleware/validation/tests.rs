@@ -19,8 +19,16 @@ fn fake_req() -> ChatRequest {
 }
 fn resp_with_text(t: &str) -> ChatResponse {
     ChatResponse {
+        actual_model: None,
         text: t.into(),
-        ..Default::default()
+        thinking: String::new(),
+        tool_calls: Vec::new(),
+        stop_reason: tars_types::StopReason::EndTurn,
+        usage: None,
+        cache_hit: Default::default(),
+        degraded: Vec::new(),
+        validation_summary: Default::default(),
+        created: 0,
     }
 }
 
@@ -166,8 +174,8 @@ async fn drain(s: crate::LlmEventStream) -> Vec<tars_types::ChatEvent> {
 /// Returns the response a caller builds from `events`, the validation summary included.
 fn built(events: Vec<tars_types::ChatEvent>) -> ChatResponse {
     let mut b = tars_types::ChatResponseBuilder::new();
-    events.into_iter().for_each(|ev| b.apply(ev));
-    b.finish()
+    events.into_iter().for_each(|ev| b.apply(ev).unwrap());
+    b.finish().unwrap()
 }
 
 #[tokio::test]

@@ -194,15 +194,18 @@ impl BatchSubmitter for MockBatchSubmitter {
 }
 
 fn echo_response(model: &str) -> ChatResponse {
-    use tars_types::{ChatEvent, ChatResponseBuilder, StopReason, Usage};
-    let mut acc = ChatResponseBuilder::new();
-    acc.apply(ChatEvent::started(model));
-    acc.apply(ChatEvent::Delta { text: "ok".into() });
-    acc.apply(ChatEvent::Finished {
-        stop_reason: StopReason::EndTurn,
-        usage: Usage::default(),
-    });
-    acc.finish()
+    ChatResponse {
+        actual_model: Some(model.to_string()),
+        text: "ok".into(),
+        thinking: String::new(),
+        tool_calls: Vec::new(),
+        stop_reason: tars_types::StopReason::EndTurn,
+        usage: Some(tars_types::Usage::default()),
+        cache_hit: Default::default(),
+        degraded: Vec::new(),
+        validation_summary: Default::default(),
+        created: 0,
+    }
 }
 
 fn clone_provider_error(e: &ProviderError) -> ProviderError {
@@ -301,7 +304,7 @@ mod tests {
         m.set_status(
             &id,
             BatchStatus::InProgress {
-                processed: 0,
+                processed: Some(0),
                 total: Some(1),
                 eta: None,
             },
@@ -330,7 +333,7 @@ mod tests {
         m.set_status(
             &id,
             BatchStatus::InProgress {
-                processed: 5,
+                processed: Some(5),
                 total: Some(10),
                 eta: None,
             },

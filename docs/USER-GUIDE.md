@@ -98,7 +98,7 @@ tars-types  = { git = "https://github.com/leocaolab/tars.git", tag = "v2.0.0" }
 tars-config = { git = "https://github.com/leocaolab/tars.git", tag = "v2.0.0" }
 ```
 
-Requires the Rust toolchain in `rust-toolchain.toml` (1.85+).
+Requires the Rust toolchain in `rust-toolchain.toml` (1.99+).
 
 ### Node
 
@@ -260,7 +260,8 @@ regression (more failed cases, a check's violation rate up, judge
 precision down), `tars models update` with a provider that answered with
 no list, `tars providers --check` with a provider that is unreachable,
 refused, or answered a list that does not parse, `tars bench` whose every
-iteration generated nothing, and `tars probe` whose provider failed the probe.
+iteration generated nothing, `tars probe` whose provider failed the probe, and
+`tars config check` that found a problem in the files it was given.
 A key the config names that does not resolve (a key file that cannot be read)
 or cannot be sent (a newline in it) is a failure too. A provider whose key
 variable is not set, with no list API, or whose local server (vllm, mlx,
@@ -270,6 +271,35 @@ A `bench` iteration whose stream ends without `Finished` stops the bench
 servers (`mlx`, `llamacpp`, `vllm`) are in every config, so a refresh or a
 check of every provider exits 3 while one of them is not running; name the
 provider (`tars models update openai`) to refresh just that one.
+
+### Operator settings — `tars config explain` / `tars config check`
+
+Retry, circuit breaker, HTTP timeouts and the output-token reserve are set in
+`[llm.retry]`, `[llm.circuit_breaker]`, `[llm.http]` and `[llm.reserve]`. A key
+left out keeps its default, which lives with the code that uses it. They can
+be written in the user file and in a system file the platform names with
+`--system-config` or `$TARS_SYSTEM_CONFIG`; the user file wins key by key.
+
+```toml
+[llm.retry]
+max_attempts = 5          # also initial_backoff_ms, max_backoff_ms, multiplier,
+                          # respect_retry_after, max_wait_ms, jitter_ms
+[llm.circuit_breaker]
+cooldown_secs = 60        # also failure_threshold
+[llm.http]
+connect_timeout_ms = 5000 # also stream_idle_timeout_ms
+[llm.reserve]
+output_tokens = 4096      # assumed for a request that states no output limit
+```
+
+```sh
+tars config explain                 # every setting, its value and where it came from
+tars config explain llm.retry       # one section, or one key
+tars config check --system system.toml [--user config.toml]   # exit 3 on any problem
+```
+
+A misspelt section or key is an error, not a silent default; so is a
+section that the process reading the file does not use.
 
 ### Model specs and output limits
 
@@ -352,21 +382,38 @@ takes the layers you name, and `LlmService::default_chain` assembles the
 standard ones.
 
 ```rust
-use tars_llm::{LlmService, ProviderRegistry, RetryMiddleware, TelemetryMiddleware, complete_async};
+use std::sync::Arc;
+use tars_config::{LoadedHome, Section};
+use tars_llm::{
+    HttpClientConfig, LlmService, OutputReserve, ProcessEnv, ProviderRegistry, RetryConfig,
+    RetryMiddleware, TelemetryMiddleware, complete_async,
+};
 use tars_types::{Caller, ChatRequest, ProviderId, TenantId, TraceId};
 
-// Read $TARS_HOME/config.toml (default ~/.tars), build the provider registry from it,
-// and install the config only once both succeeded, so a failed start can be retried.
-let loaded = tars_config::load_tars(None)?;
-let registry =
-    ProviderRegistry::from_config_default(loaded.config.providers(), &loaded.catalog, None)?;
-tars_config::install(loaded)?;
+// Read $TARS_HOME/config.toml (default ~/.tars), under the file $TARS_SYSTEM_CONFIG names if
+// any. Take the [llm.*] sections this program uses: `finish` fails when a file sets one it did
+// not take. Build the provider registry, and install the config only once all of that
+// succeeded, so a failed start can be retried.
+let LoadedHome { config, mut operator, catalog } = tars_config::load_tars(None)?;
+let retry = operator.take::<RetryConfig>(Section::LlmRetry)?.into_value();
+let http = operator.take::<HttpClientConfig>(Section::LlmHttp)?.into_value();
+let reserve = operator.take::<OutputReserve>(Section::LlmReserve)?.into_value();
+operator.finish()?;
+let registry = ProviderRegistry::from_config_with_env(
+    config.providers(),
+    &catalog,
+    http,
+    reserve,
+    Arc::new(ProcessEnv),
+    None,
+)?;
+tars_config::install(config, catalog)?;
 let provider = registry.get(&ProviderId::new("anthropic"))?;
 
 // An LlmService is one provider, one model and a middleware chain; the first layer is outermost.
 let svc = LlmService::builder(provider, "claude-sonnet-5")
     .layer(TelemetryMiddleware::new())
-    .layer(RetryMiddleware::default())
+    .layer(RetryMiddleware::new(retry))
     .build();
 
 let mut req = ChatRequest::user("Find race conditions in this Rust function: ...")
@@ -419,7 +466,7 @@ const resp = await pipeline.complete({
 });
 
 console.log(resp.text);
-console.log(resp.usage.inputTokens, resp.usage.outputTokens);
+console.log(resp.usage?.inputTokens, resp.usage?.outputTokens); // absent when the provider reported none
 console.log(resp.stopReason);
 ```
 
@@ -624,7 +671,7 @@ let needs = ProviderNeeds {
     estimated_max_output_tokens: 8000,
     ..ProviderNeeds::default()
 };
-match svc.provider().capabilities().check_requirements(&needs) {
+match svc.provider().capabilities().check_requirements(&needs, svc.output_limit()) {
     CompatibilityCheck::Compatible => {}
     CompatibilityCheck::Degraded { unsent } => eprintln!("served without {unsent:?}"),
     CompatibilityCheck::Incompatible { reasons } => {
@@ -668,7 +715,8 @@ The kinds (`LlmErrorKind` in `tars-types` lists them all):
 | `truncated_tool_call` | Output hit `max_output_tokens` inside a tool call (Permanent; raise the limit); the tool name and the raw arguments holds the part received |
 | `incomplete_tool_call` | The stream's terminator came without a stop reason while a tool call's arguments were unparsed (Permanent); the tool name and the raw arguments holds the part received |
 | `stream_cut`          | The response body ended before the end of the stream: the connection was closed under it (Transient); when it was inside a tool call, the tool name and the raw arguments holds the part received |
-| `unfinished`          | The stream ended, without an error, before saying why the turn stopped; the reply may be cut short (Permanent) |
+| `unfinished`          | The stream ended, without an error, before saying why the turn stopped, or with a tool call started and never ended; the reply may be cut short (Permanent) |
+| `stream_violation`    | The stream broke the tool-call order: a second start for an open call, arguments or an end for a call that never started, an end whose id is not its start's (Permanent) |
 | `server_error`        | The provider failed on its side: a 5xx other than 503 (504 included), or a server error inside an open stream (Transient) |
 | `model_overloaded`    | The provider said it is overloaded: 503, Anthropic 529 (Transient) |
 | `request_timeout`     | Provider 408: it waited too long for the request (Transient) |
@@ -754,7 +802,7 @@ Here the code is fixed and you compare two configs over a fixed corpus.
 Because outcomes are **paired** (same corpus through both), the correct
 test is **McNemar** on the discordant cells — *not* two overlapping
 confidence intervals. Tag each cohort so the event store can split them
-(`Caller::tags` in Rust; `tags` in the Node call options), then compare with
+(`Caller::tags` in Rust; the Node binding writes no call log), then compare with
 `tars eval diff`. The full methodology (McNemar, paired bootstrap,
 precision/recall) lives in [eval-methodology.md](eval-methodology.md).
 

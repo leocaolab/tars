@@ -1090,15 +1090,6 @@ impl DurableStore for SqliteDurableStore {
         self.enqueue_all(std::slice::from_ref(spec), now).await
     }
 
-    async fn claim_ready(
-        &self,
-        owner: &str,
-        now: Millis,
-        ttl: Millis,
-    ) -> Result<Option<ClaimedTask>, DurableStoreError> {
-        self.claim_ready_excluding(owner, now, ttl, &[]).await
-    }
-
     async fn claim_ready_excluding(
         &self,
         owner: &str,

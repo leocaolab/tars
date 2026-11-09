@@ -29,6 +29,24 @@ use super::super::invocation::SubprocessInvocation;
 use super::super::prompt::check_prompt_arg;
 use super::super::subprocess::truncate;
 
+/// Names the variables `opencode` needs beyond the system ones: its own config overrides, and the
+/// API keys of the providers it fronts, since a user may log a provider in by exporting its key
+/// instead of `opencode auth login`.
+const NEEDED_ENV_KEYS: &[&str] = &[
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_CONFIG_CONTENT",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GROQ_API_KEY",
+    "XAI_API_KEY",
+    "MISTRAL_API_KEY",
+];
+
 /// The `opencode` settings every run uses.
 #[derive(Clone, Debug)]
 pub struct OpenCodeDialect {
@@ -100,6 +118,10 @@ impl CliDialect for OpenCodeDialect {
         OutputFraming::JsonLinesArray
     }
 
+    fn env(&self) -> &[&str] {
+        NEEDED_ENV_KEYS
+    }
+
     fn state_dirs(&self) -> Vec<std::path::PathBuf> {
         // opencode fails when it cannot open its log under `~/.local/share/opencode`; it also
         // writes config and cache under `~/.config` and `~/.cache`.
@@ -128,9 +150,18 @@ impl CliDialect for OpenCodeDialect {
         // Each `step_finish` counts its own step only (`processor.ts` sets it from that step's
         // usage), so the sum is the turn's.
         let mut usage = Usage::default();
+        let mut steps_finished = 0usize;
 
         for line_val in lines {
-            let line = line_val.as_str().unwrap_or_default();
+            let line = line_val.as_str().ok_or_else(|| ProviderError::Parse {
+                at: "opencode runner payload",
+                line: None,
+                problem: Box::new(ParseProblem::WrongType {
+                    expected: JsonKind::String,
+                    got: JsonKind::of(line_val),
+                }),
+                raw: Some(truncate(&line_val.to_string(), 200)),
+            })?;
             if line.trim().is_empty() {
                 continue;
             }
@@ -149,24 +180,25 @@ impl CliDialect for OpenCodeDialect {
             let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or_default();
             match ty {
                 "text" => {
-                    if let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str()) {
-                        if !text.is_empty() {
-                            out.push(ChatEvent::Delta {
-                                text: text.to_string(),
-                            });
-                        }
+                    if let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str())
+                        && !text.is_empty()
+                    {
+                        out.push(ChatEvent::Delta {
+                            text: text.to_string(),
+                        });
                     }
                 }
                 "reasoning" => {
-                    if let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str()) {
-                        if !text.is_empty() {
-                            out.push(ChatEvent::ThinkingDelta {
-                                text: text.to_string(),
-                            });
-                        }
+                    if let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str())
+                        && !text.is_empty()
+                    {
+                        out.push(ChatEvent::ThinkingDelta {
+                            text: text.to_string(),
+                        });
                     }
                 }
                 "step_finish" => {
+                    steps_finished += 1;
                     if let Some(tokens) = v.pointer("/part/tokens") {
                         usage = usage.merge(step_usage(tokens));
                     }
@@ -185,9 +217,17 @@ impl CliDialect for OpenCodeDialect {
             }
         }
 
+        if out.is_empty() && steps_finished == 0 {
+            return Err(ProviderError::Parse {
+                at: "opencode runner payload",
+                line: None,
+                problem: Box::new(ParseProblem::Missing("text")),
+                raw: Some(truncate(&raw.to_string(), 200)),
+            });
+        }
         out.push(ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
-            usage,
+            usage: Some(usage),
         });
         Ok(out)
     }
@@ -272,6 +312,20 @@ mod tests {
         assert!(argv[5].contains("say hi"));
     }
 
+    #[test]
+    fn a_payload_line_that_is_not_a_string_is_a_typed_error_not_a_blank_line() {
+        let payload = Value::Array(vec![Value::String(String::new()), Value::from(7)]);
+        let err = dialect().parse_line(&payload).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ProviderError::Parse { problem, .. }
+                    if matches!(**problem, ParseProblem::WrongType { expected: JsonKind::String, got: JsonKind::Number })
+            ),
+            "{err:?}"
+        );
+    }
+
     fn parse_line(lines: &[&str]) -> Result<Vec<ChatEvent>, ProviderError> {
         let arr = Value::Array(lines.iter().map(|l| Value::String(l.to_string())).collect());
         dialect().parse_line(&arr)
@@ -290,11 +344,11 @@ mod tests {
             ChatEvent::Finished { stop_reason, usage } => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
                 // 50 uncached plus the 10 read and 2 written that opencode took out.
-                assert_eq!(usage.input_tokens, 62);
-                assert_eq!(usage.output_tokens, 4);
-                assert_eq!(usage.thinking_tokens, 7);
-                assert_eq!(usage.cached_input_tokens, 10);
-                assert_eq!(usage.cache_creation_tokens, 2);
+                assert_eq!(usage.unwrap().input_tokens, 62);
+                assert_eq!(usage.unwrap().output_tokens, 4);
+                assert_eq!(usage.unwrap().thinking_tokens, 7);
+                assert_eq!(usage.unwrap().cached_input_tokens, 10);
+                assert_eq!(usage.unwrap().cache_creation_tokens, 2);
             }
             other => panic!("expected Finished, got {other:?}"),
         }
@@ -321,8 +375,8 @@ mod tests {
         assert!(matches!(&events[1], ChatEvent::Delta { text } if text == "answer"));
         match &events[2] {
             ChatEvent::Finished { usage, .. } => {
-                assert_eq!(usage.input_tokens, 0);
-                assert_eq!(usage.output_tokens, 0);
+                assert_eq!(usage.unwrap().input_tokens, 0);
+                assert_eq!(usage.unwrap().output_tokens, 0);
             }
             other => panic!("expected Finished, got {other:?}"),
         }
@@ -338,10 +392,10 @@ mod tests {
         .unwrap();
         match events.last().unwrap() {
             ChatEvent::Finished { usage, .. } => {
-                assert_eq!(usage.input_tokens, 33);
-                assert_eq!(usage.output_tokens, 7);
-                assert_eq!(usage.thinking_tokens, 1);
-                assert_eq!(usage.cached_input_tokens, 3);
+                assert_eq!(usage.unwrap().input_tokens, 33);
+                assert_eq!(usage.unwrap().output_tokens, 7);
+                assert_eq!(usage.unwrap().thinking_tokens, 1);
+                assert_eq!(usage.unwrap().cached_input_tokens, 3);
             }
             other => panic!("expected Finished, got {other:?}"),
         }
@@ -373,6 +427,17 @@ mod tests {
                 assert!(stderr.contains("missing api key"));
             }
             other => panic!("expected CliSubprocessDied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_run_that_printed_no_text_and_finished_no_step_is_a_parse_error() {
+        let err = parse_line(&["", "not json"]).unwrap_err();
+        match err {
+            ProviderError::Parse { raw, .. } => {
+                assert!(raw.is_some_and(|r| r.contains("not json")));
+            }
+            other => panic!("expected Parse, got {other:?}"),
         }
     }
 

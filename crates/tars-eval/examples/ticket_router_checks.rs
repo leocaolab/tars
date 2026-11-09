@@ -112,15 +112,19 @@ fn first_turn_router(req: &ChatRequest) -> ChatResponse {
 
 fn reply(queue: &str) -> ChatResponse {
     let mut builder = ChatResponseBuilder::new();
-    builder.apply(ChatEvent::started("example-router"));
-    builder.apply(ChatEvent::Delta {
-        text: format!("{ROUTE_PREFIX}{queue}"),
-    });
-    builder.apply(ChatEvent::Finished {
-        stop_reason: StopReason::EndTurn,
-        usage: Usage::default(),
-    });
-    builder.finish()
+    builder.apply(ChatEvent::started("example-router")).unwrap();
+    builder
+        .apply(ChatEvent::Delta {
+            text: format!("{ROUTE_PREFIX}{queue}"),
+        })
+        .unwrap();
+    builder
+        .apply(ChatEvent::Finished {
+            stop_reason: StopReason::EndTurn,
+            usage: Some(Usage::default()),
+        })
+        .unwrap();
+    builder.finish().unwrap()
 }
 
 fn report(check: &str, result: &CheckOutcome) {

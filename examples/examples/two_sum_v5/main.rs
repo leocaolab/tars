@@ -325,8 +325,9 @@ struct TurnReply {
     text: String,
     tool_calls: Vec<ToolCall>,
     stop_reason: Option<StopReason>,
-    usage: Usage,
-    actual_model: String,
+    /// `None` when the provider reported no usage; the totals then count it as zero.
+    usage: Option<Usage>,
+    actual_model: Option<String>,
 }
 
 async fn drain(mut stream: tars_llm::LlmEventStream) -> Result<TurnReply, tars_llm::ProviderError> {
@@ -573,17 +574,21 @@ async fn run() -> Result<(), DemoError> {
             .await
             .map_err(|source| DemoError::Drain { turn, source })?;
 
-        total_in += reply.usage.input_tokens;
-        total_out += reply.usage.output_tokens;
+        total_in += reply.usage.map_or(0, |u| u.input_tokens);
+        total_out += reply.usage.map_or(0, |u| u.output_tokens);
         max_parallel = max_parallel.max(reply.tool_calls.len());
-        growth.push((turn, user_msg.chars().count(), reply.usage.input_tokens));
+        growth.push((
+            turn,
+            user_msg.chars().count(),
+            reply.usage.map_or(0, |u| u.input_tokens),
+        ));
 
         println!("── Turn {turn} ───────────────────────────────────────────");
         println!(
             "  LLM: stop={:?}  tokens in/out={}/{}  tool_calls={}  (MEMORY: {} obs, {} chars)",
             reply.stop_reason.unwrap_or(StopReason::Other),
-            reply.usage.input_tokens,
-            reply.usage.output_tokens,
+            reply.usage.map_or(0, |u| u.input_tokens),
+            reply.usage.map_or(0, |u| u.output_tokens),
             reply.tool_calls.len(),
             memory.len(),
             user_msg.chars().count(),

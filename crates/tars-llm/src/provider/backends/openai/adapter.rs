@@ -117,13 +117,11 @@ impl OpenAiAdapter {
                 // OpenAI's tool message has no error flag; without the marker a failed tool reads
                 // as a success.
                 let mut content_blocks = Self::translate_content(content);
-                if *is_error {
-                    if let Value::Array(arr) = &mut content_blocks {
-                        arr.insert(
-                            0,
-                            json!({"type": "text", "text": "[tool execution failed]\n"}),
-                        );
-                    }
+                if *is_error && let Value::Array(arr) = &mut content_blocks {
+                    arr.insert(
+                        0,
+                        json!({"type": "text", "text": "[tool execution failed]\n"}),
+                    );
                 }
                 json!({
                     "role": "tool",
@@ -205,12 +203,12 @@ impl OpenAiAdapter {
     ) -> Result<Value, ProviderError> {
         // OpenAI rejects an empty user message with a 400.
         for m in &req.messages {
-            if let Message::User { content } = m {
-                if content.is_empty() {
-                    return Err(ProviderError::InvalidRequest(
-                        RequestRefusal::EmptyUserMessage,
-                    ));
-                }
+            if let Message::User { content } = m
+                && content.is_empty()
+            {
+                return Err(ProviderError::InvalidRequest(
+                    RequestRefusal::EmptyUserMessage,
+                ));
             }
         }
 
@@ -360,19 +358,19 @@ impl OpenAiAdapter {
             }
         }
 
-        let model = v
-            .get("model")
-            .and_then(|m| m.as_str())
-            .unwrap_or("")
-            .to_string();
-
         let choices = match v.get("choices").and_then(|c| c.as_array()) {
             Some(arr) => arr,
             None => return Ok(out),
         };
 
-        if !model.is_empty() && buf.take_started() {
-            out.push(ChatEvent::started(model.clone()));
+        let model = v
+            .get("model")
+            .and_then(|m| m.as_str())
+            .filter(|m| !m.is_empty());
+        if let Some(model) = model
+            && buf.take_started()
+        {
+            out.push(ChatEvent::started(model));
         }
 
         for choice in choices {
@@ -394,7 +392,7 @@ impl OpenAiAdapter {
                 if let Some(usage_obj) = v.get("usage").and_then(|u| u.as_object()) {
                     out.push(ChatEvent::Finished {
                         stop_reason: stop,
-                        usage: self.dialect.parse_usage(usage_obj),
+                        usage: Some(self.dialect.parse_usage(usage_obj)),
                     });
                     buf.mark_finished();
                 } else {
@@ -514,16 +512,16 @@ pub(super) fn tool_name_from_wire(wire: &str, tools: &[tars_types::ToolSpec]) ->
 fn check_wire_names_distinct(tools: &[tars_types::ToolSpec]) -> Result<(), ProviderError> {
     let mut seen = std::collections::HashMap::new();
     for t in tools {
-        if let Some(other) = seen.insert(wire_tool_name(&t.name), &t.name) {
-            if *other != t.name {
-                return Err(ProviderError::InvalidRequest(
-                    RequestRefusal::WireNameCollision {
-                        first: other.clone(),
-                        second: t.name.clone(),
-                        wire: wire_tool_name(&t.name),
-                    },
-                ));
-            }
+        if let Some(other) = seen.insert(wire_tool_name(&t.name), &t.name)
+            && *other != t.name
+        {
+            return Err(ProviderError::InvalidRequest(
+                RequestRefusal::WireNameCollision {
+                    first: other.clone(),
+                    second: t.name.clone(),
+                    wire: wire_tool_name(&t.name),
+                },
+            ));
         }
     }
     Ok(())
@@ -619,7 +617,7 @@ mod tests {
             stop_sequences: vec![],
             seed: None,
             cache_directives: vec![],
-            thinking: Default::default(),
+            thinking: None,
             enable_chat_template_thinking: None,
         };
         let mk = |mode| {
@@ -704,7 +702,7 @@ mod tests {
             stop_sequences: vec![],
             seed: None,
             cache_directives: vec![],
-            thinking: t,
+            thinking: Some(t),
             enable_chat_template_thinking: None,
         };
         for (base, mode) in [
@@ -751,7 +749,7 @@ mod tests {
             stop_sequences: vec![],
             seed: None,
             cache_directives: vec![],
-            thinking: Default::default(),
+            thinking: None,
             enable_chat_template_thinking: None,
         };
         let body = a.translate_request(&req, "gpt-4o").unwrap();

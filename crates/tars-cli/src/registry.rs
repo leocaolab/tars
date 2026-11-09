@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use tars_config::Config;
 use tars_llm::provider::registry::{ProviderRegistry, RegistryError};
-use tars_llm::{CircuitBreaker, CircuitBreakerConfig, HttpClientConfig};
+use tars_llm::{CircuitBreaker, HttpClientConfig};
 use tars_types::ProviderId;
 
+use crate::config::LlmSettings;
 use crate::home_env::HomeEnv;
 
 /// Says a provider a command named is not in the config, with the ids that are.
@@ -47,45 +48,49 @@ fn join(ids: &[ProviderId]) -> String {
         .join(", ")
 }
 
-/// Builds the registry from `cfg`, its env-var keys and env headers read from `env`.
+/// Builds the registry from `cfg` with the operator's HTTP settings and output reserve, its
+/// env-var keys and env headers read from `env`.
 pub(crate) fn build_registry(
     cfg: &Config,
+    llm: &LlmSettings,
     env: Arc<HomeEnv>,
 ) -> Result<ProviderRegistry, RegistryError> {
     ProviderRegistry::from_config_with_env(
         cfg.providers(),
         tars_config::catalog(),
-        http_config(),
+        http_config(llm.http.clone()),
+        llm.reserve,
         env,
         None,
     )
 }
 
-/// Returns the HTTP settings whose requests carry the call span's `traceparent`, so a gateway
-/// that traces joins tars's trace.
+/// Returns `http` with requests that carry the call span's `traceparent`, so a gateway that
+/// traces joins tars's trace.
 #[cfg(feature = "otlp")]
-fn http_config() -> HttpClientConfig {
+fn http_config(http: HttpClientConfig) -> HttpClientConfig {
     HttpClientConfig {
         trace_headers: Some(tars_telemetry::trace_headers),
-        ..HttpClientConfig::default()
+        ..http
     }
 }
 
-/// Returns the default HTTP settings: without the `otlp` feature there is no trace to carry.
+/// Returns `http` as it is: without the `otlp` feature there is no trace to carry.
 #[cfg(not(feature = "otlp"))]
-fn http_config() -> HttpClientConfig {
-    HttpClientConfig::default()
+fn http_config(http: HttpClientConfig) -> HttpClientConfig {
+    http
 }
 
-/// Builds the registry as [`build_registry`] does, every provider wrapped in a default
-/// [`CircuitBreaker`].
+/// Builds the registry as [`build_registry`] does, every provider wrapped in a
+/// [`CircuitBreaker`] with the operator's breaker settings.
 pub(crate) fn build_registry_with_breakers(
     cfg: &Config,
+    llm: &LlmSettings,
     env: Arc<HomeEnv>,
 ) -> Result<Arc<ProviderRegistry>, RegistryError> {
-    let breaker = CircuitBreakerConfig::default();
+    let breaker = llm.breaker;
     let registry =
-        build_registry(cfg, env)?.map_providers(|_id, p| CircuitBreaker::wrap(p, breaker));
+        build_registry(cfg, llm, env)?.map_providers(|_id, p| CircuitBreaker::wrap(p, breaker));
     Ok(Arc::new(registry))
 }
 

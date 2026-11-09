@@ -204,6 +204,7 @@ fn cap_err_to_outcome(err: CapError) -> Outcome {
         }
         CapError::ExecuteTransient(msg) => Outcome::failure(Reason::Transient(msg)),
         CapError::ExecuteFatal(msg) => Outcome::failure(Reason::CallFailed(msg)),
+        CapError::Defect(msg) => Outcome::failure(Reason::defect(msg)),
     }
 }
 

@@ -421,12 +421,16 @@ impl TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        // A failed shutdown only loses the trailing spans and metrics, and there is no one left
-        // to tell at process exit.
+        // A failed shutdown loses the trailing spans and metrics. The global subscriber outlives
+        // this guard and still writes to stderr, so the warning reaches whoever reads the logs.
         #[cfg(feature = "otlp")]
         if let Some(OtlpProviders { tracer, meter }) = self.providers.take() {
-            let _ = tracer.shutdown();
-            let _ = meter.shutdown();
+            if let Err(error) = tracer.shutdown() {
+                tracing::warn!(%error, "the OTLP tracer did not shut down cleanly; trailing spans may be lost");
+            }
+            if let Err(error) = meter.shutdown() {
+                tracing::warn!(%error, "the OTLP meter did not shut down cleanly; trailing metrics may be lost");
+            }
         }
     }
 }

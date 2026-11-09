@@ -22,10 +22,13 @@ pub(super) fn progress(event: RunProgress<'_>) -> String {
         } => format!("── eval: {case_count} cases, provider={provider}, model={model}\n"),
         RunProgress::CaseStarted { case_id } => format!("── {case_id} ... "),
         RunProgress::CaseFinished { report } => match &report.outcome {
-            CaseOutcome::Ok { .. } => format!(
-                "ok ({} tokens in / {} out, {} ms)\n",
-                report.usage.input_tokens, report.usage.output_tokens, report.wall_clock_ms,
-            ),
+            CaseOutcome::Ok { .. } => match report.usage {
+                Some(usage) => format!(
+                    "ok ({} tokens in / {} out, {} ms)\n",
+                    usage.input_tokens, usage.output_tokens, report.wall_clock_ms,
+                ),
+                None => format!("ok (usage not reported, {} ms)\n", report.wall_clock_ms),
+            },
             CaseOutcome::Error { failure } => {
                 format!("ERR ({} ms): {failure}\n", report.wall_clock_ms)
             }

@@ -6,6 +6,8 @@
 //!   `model` field is counted without the `model` attribute;
 //! - `tars.llm.latency_ms`, a histogram of the event's `elapsed_ms`, by the same attributes;
 //! - `tars.llm.tokens`, a counter of input plus output tokens of finished calls, by `model`;
+//! - `tars.llm.tokens_unreported`, a counter of finished calls that reported no token counts, by
+//!   `model`, whose tokens are missing from `tars.llm.tokens`;
 //! - `tars.metrics.cardinality_overflow`, a counter by `key` of the events whose value for that
 //!   attribute was collapsed into the overflow bucket, which is the alert that a label is
 //!   running away.
@@ -50,6 +52,7 @@ pub(crate) struct MetricsBridge {
     calls: Counter<u64>,
     latency_ms: Histogram<u64>,
     tokens: Counter<u64>,
+    tokens_unreported: Counter<u64>,
     cardinality_overflow: Counter<u64>,
     cardinality: CardinalityLimit,
 }
@@ -61,6 +64,7 @@ impl MetricsBridge {
             calls: meter.u64_counter("tars.llm.calls").build(),
             latency_ms: meter.u64_histogram("tars.llm.latency_ms").build(),
             tokens: meter.u64_counter("tars.llm.tokens").build(),
+            tokens_unreported: meter.u64_counter("tars.llm.tokens_unreported").build(),
             cardinality_overflow: meter
                 .u64_counter("tars.metrics.cardinality_overflow")
                 .build(),
@@ -102,12 +106,19 @@ impl<S: tracing::Subscriber> Layer<S> for MetricsBridge {
             self.latency_ms.record(ms, &attrs);
         }
         if call == CallEvent::Finished {
-            let tokens = v.input_tokens.unwrap_or(0) + v.output_tokens.unwrap_or(0);
-            if tokens > 0 {
-                self.tokens.add(tokens, &Vec::from_iter(model));
+            let model = Vec::from_iter(model);
+            match reported_tokens(v.input_tokens, v.output_tokens) {
+                Some(tokens) => self.tokens.add(tokens, &model),
+                None => self.tokens_unreported.add(1, &model),
             }
         }
     }
+}
+
+/// Returns a finished call's input plus output tokens, or `None` unless both were reported: half
+/// a count added to the total would read as a cheap call.
+fn reported_tokens(input: Option<u64>, output: Option<u64>) -> Option<u64> {
+    Some(input?.saturating_add(output?))
 }
 
 /// The two `llm.call.*` events tars-llm's telemetry middleware emits that end a call; the
@@ -279,6 +290,53 @@ mod tests {
             names.iter().any(|n| n == "tars.llm.tokens"),
             "got: {names:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_call_without_usage_is_counted_as_unreported() {
+        let exporter = InMemoryMetricExporter::default();
+        let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(
+            exporter.clone(),
+            opentelemetry_sdk::runtime::Tokio,
+        )
+        .build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let subscriber = tracing_subscriber::registry().with(MetricsBridge::new(&provider));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                event = "llm.call.finished",
+                model = "qwen",
+                elapsed_ms = 9u64
+            );
+        });
+
+        provider.force_flush().unwrap();
+        let names: Vec<String> = exporter
+            .get_finished_metrics()
+            .unwrap()
+            .iter()
+            .flat_map(|rm| &rm.scope_metrics)
+            .flat_map(|sm| &sm.metrics)
+            .map(|m| m.name.to_string())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "tars.llm.tokens_unreported"),
+            "got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "tars.llm.tokens"),
+            "no tokens were reported, so none are counted: {names:?}"
+        );
+    }
+
+    #[test]
+    fn tokens_count_only_when_both_halves_are_reported() {
+        assert_eq!(reported_tokens(Some(11), Some(4)), Some(15));
+        assert_eq!(reported_tokens(Some(0), Some(0)), Some(0));
+        assert_eq!(reported_tokens(Some(11), None), None);
+        assert_eq!(reported_tokens(None, Some(4)), None);
+        assert_eq!(reported_tokens(None, None), None);
     }
 
     #[test]

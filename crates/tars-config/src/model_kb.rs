@@ -7,14 +7,14 @@
 //! `builtin.rs` is each local server's placeholder, which the user replaces. The live layer that
 //! `tars models update` refreshes sits on top of it in [`crate::model_catalog`].
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
 use tars_types::{
-    CatalogSource, InterfaceKind, Modality, Pricing, PromptCacheKind, ProviderProfile, Rate,
-    StructuredOutputMode, Support,
+    CatalogSource, InterfaceKind, Modalities, Modality, Pricing, PromptCacheKind, ProviderProfile,
+    Rate, StructuredOutputMode, Support, ToolUse,
 };
 
 use crate::model_spec::{ModelSpec, ResolveModelSpecError, ResolvedModel, SeriesPattern};
@@ -65,18 +65,6 @@ pub enum ModelStatus {
     },
 }
 
-/// An input the model's API accepts. It has `Pdf`, which `tars_types::Modality` lacks, and
-/// spells `Image` as `Vision`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum KbModality {
-    Text,
-    Vision,
-    Audio,
-    Video,
-    Pdf,
-}
-
 /// One model row of `provider.toml`. Prices are USD per million tokens, and a deprecated or
 /// legacy row may omit them.
 #[derive(Debug, Clone, Deserialize)]
@@ -99,7 +87,7 @@ pub struct ModelEntry {
     pub context: Option<u64>,
     pub max_output: Option<u64>,
     pub thinking: Thinking,
-    pub modalities: Vec<KbModality>,
+    pub modalities: Vec<Modality>,
     pub status: ModelStatus,
     /// Lists other ids that find this row (legacy names, dated snapshots).
     pub aliases: Vec<String>,
@@ -122,7 +110,7 @@ struct ModelRow {
     #[serde(default)]
     thinking_param: Option<ThinkingParam>,
     #[serde(default)]
-    modalities: Vec<KbModality>,
+    modalities: Vec<Modality>,
     status: StatusWord,
     #[serde(default)]
     retire: Option<String>,
@@ -237,13 +225,28 @@ pub enum BillingModel {
 
 /// The capabilities a provider has for every model it serves; an absent key takes its default.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(try_from = "CapabilitiesRow")]
 pub struct ProviderCapabilities {
     pub structured_output: StructuredOutputMode,
-    pub tool_use: bool,
-    pub parallel_tool_calls: bool,
+    pub tool_use: ToolUse,
     pub cancel: bool,
     pub streaming: bool,
+    pub prompt_cache: PromptCacheKind,
+    pub chat_template_thinking: bool,
+    pub cache_creation_per_million: Option<Rate>,
+    pub thinking_per_million: Option<Rate>,
+}
+
+/// A provider's capabilities as the data file spells them: tool use and parallel calls as two
+/// flags.
+#[derive(Deserialize)]
+#[serde(default)]
+struct CapabilitiesRow {
+    structured_output: StructuredOutputMode,
+    tool_use: bool,
+    parallel_tool_calls: bool,
+    cancel: bool,
+    streaming: bool,
     /// Is written as `"explicit_marker"` or, with the provider's threshold,
     /// `{ implicit_prefix = { min_tokens = 1024 } }`.
     pub prompt_cache: PromptCacheKind,
@@ -258,18 +261,62 @@ pub struct ProviderCapabilities {
     pub thinking_per_million: Option<Rate>,
 }
 
+/// A data file that declares parallel tool calls for a provider without tool use.
+#[derive(Debug, thiserror::Error)]
+#[error("`parallel_tool_calls = true` needs `tool_use = true`")]
+pub struct ParallelWithoutToolUseError;
+
+impl TryFrom<CapabilitiesRow> for ProviderCapabilities {
+    type Error = ParallelWithoutToolUseError;
+
+    fn try_from(row: CapabilitiesRow) -> Result<Self, Self::Error> {
+        let tool_use = match (row.tool_use, row.parallel_tool_calls) {
+            (true, parallel) => ToolUse::Supported { parallel },
+            (false, false) => ToolUse::Unsupported,
+            (false, true) => return Err(ParallelWithoutToolUseError),
+        };
+        Ok(Self {
+            structured_output: row.structured_output,
+            tool_use,
+            cancel: row.cancel,
+            streaming: row.streaming,
+            prompt_cache: row.prompt_cache,
+            chat_template_thinking: row.chat_template_thinking,
+            cache_creation_per_million: row.cache_creation_per_million,
+            thinking_per_million: row.thinking_per_million,
+        })
+    }
+}
+
 impl Default for ProviderCapabilities {
     fn default() -> Self {
         Self {
             structured_output: StructuredOutputMode::None,
-            tool_use: false,
-            parallel_tool_calls: false,
+            tool_use: ToolUse::Unsupported,
             cancel: false,
             streaming: false,
             prompt_cache: PromptCacheKind::None,
             chat_template_thinking: false,
             cache_creation_per_million: None,
             thinking_per_million: None,
+        }
+    }
+}
+
+/// An absent key reads as [`ProviderCapabilities::default`] has it.
+impl Default for CapabilitiesRow {
+    fn default() -> Self {
+        let d = ProviderCapabilities::default();
+        Self {
+            structured_output: d.structured_output,
+            tool_use: d.tool_use.support() == Support::Supported,
+            parallel_tool_calls: d.tool_use.parallel(),
+            cancel: d.cancel,
+            streaming: d.streaming,
+            prompt_cache: d.prompt_cache,
+            chat_template_thinking: d.chat_template_thinking,
+            cache_creation_per_million: d.cache_creation_per_million,
+            thinking_per_million: d.thinking_per_million,
         }
     }
 }
@@ -382,21 +429,14 @@ impl ProviderDef {
             .find_model(model_id)
             .or_else(|| self.default_row(name, verified));
 
-        let (
-            max_context_tokens,
-            max_output_tokens,
-            supports_vision,
-            supports_thinking,
-            mods_in,
-            pricing,
-        ) = match model {
+        let (max_context_tokens, supports_thinking, mods_in, pricing) = match model {
             Some(m) => {
-                let mut mods_in: HashSet<Modality> =
-                    m.modalities.iter().filter_map(kb_to_modality).collect();
-                // `ProviderProfile::validate` refuses an empty `modalities_in`.
-                if mods_in.is_empty() {
-                    mods_in.insert(Modality::Text);
-                }
+                // A row that names no modality takes text alone.
+                let mods_in = if m.modalities.is_empty() {
+                    Modalities::text_only()
+                } else {
+                    Modalities::listed(m.modalities.iter().copied())
+                };
                 let mut pricing = m.pricing();
                 if let Some(rate) = cap.cache_creation_per_million {
                     pricing.cache_creation_per_million = rate;
@@ -406,8 +446,6 @@ impl ProviderDef {
                 }
                 (
                     m.context.map(|c| c as u32),
-                    m.max_output.map(|o| o as u32),
-                    Support::from(mods_in.contains(&Modality::Image)),
                     Support::from(!matches!(m.thinking, Thinking::None)),
                     mods_in,
                     pricing,
@@ -423,10 +461,8 @@ impl ProviderDef {
                 };
                 (
                     None,
-                    None,
                     Support::Unknown,
-                    Support::Unknown,
-                    HashSet::from([Modality::Text]),
+                    Modalities::text_and_unknown(),
                     pricing,
                 )
             }
@@ -436,18 +472,15 @@ impl ProviderDef {
             interface: self.interface,
             gen_ai_provider_name: self.gen_ai_provider_name.clone(),
             max_context_tokens,
-            max_output_tokens,
-            supports_tool_use: Support::from(cap.tool_use),
-            supports_parallel_tool_calls: cap.parallel_tool_calls,
+            tool_use: cap.tool_use,
             supports_structured_output: Some(cap.structured_output),
-            supports_vision,
             supports_thinking,
             supports_chat_template_thinking: cap.chat_template_thinking,
             supports_cancel: cap.cancel,
             prompt_cache: cap.prompt_cache,
             streaming: cap.streaming,
             modalities_in: mods_in,
-            modalities_out: HashSet::from([Modality::Text]),
+            modalities_out: Modalities::text_only(),
             pricing,
         }
     }
@@ -455,17 +488,6 @@ impl ProviderDef {
 
 /// Is another name for [`ProviderDef`]; nothing in the workspace uses it.
 pub type ProviderModels = ProviderDef;
-
-/// Returns the [`Modality`] of a data-file modality; `Pdf` has none.
-fn kb_to_modality(m: &KbModality) -> Option<Modality> {
-    match m {
-        KbModality::Text => Some(Modality::Text),
-        KbModality::Vision => Some(Modality::Image),
-        KbModality::Audio => Some(Modality::Audio),
-        KbModality::Video => Some(Modality::Video),
-        KbModality::Pdf => None,
-    }
-}
 
 /// The lab that made a model, as the data file's `[vendors.<name>]` names it (`anthropic`,
 /// `google`).
@@ -787,6 +809,28 @@ mod tests {
     }
 
     #[test]
+    fn parallel_tool_calls_without_tool_use_do_not_read() {
+        let got = toml::from_str::<ModelKb>(
+            r#"
+            schema_version = 1
+            verified = "2026-11-04"
+            [providers.p]
+            interface = "http"
+            billed = "per_token"
+            [providers.p.capabilities]
+            tool_use = false
+            parallel_tool_calls = true
+            "#,
+        );
+        let err = got.expect_err("parallel calls without tool use must not read");
+        assert!(
+            err.to_string()
+                .contains(&ParallelWithoutToolUseError.to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn a_rate_the_block_sets_replaces_the_rows_rate_in_the_provider_profile() {
         let kb: ModelKb = toml::from_str(
             r#"
@@ -812,24 +856,6 @@ mod tests {
         let pricing = kb.capabilities_for("p", "m").pricing;
         assert_eq!(pricing.cache_creation_per_million.usd_per_million(), 9.0);
         assert_eq!(pricing.thinking_per_million.usd_per_million(), 4.0);
-    }
-
-    #[test]
-    fn every_shipped_provider_profile_is_consistent() {
-        for (provider, def) in &MODEL_KB.providers {
-            for m in &def.models {
-                let profile = MODEL_KB.capabilities_for(provider, &m.id);
-                if let Err(e) = profile.validate() {
-                    panic!("{provider}/{}: {e}", m.id);
-                }
-            }
-            if let Err(e) = MODEL_KB
-                .capabilities_for(provider, "no-such-model")
-                .validate()
-            {
-                panic!("{provider}/<unknown model>: {e}");
-            }
-        }
     }
 
     #[test]
@@ -866,9 +892,9 @@ mod tests {
     fn a_local_block_with_no_model_row_knows_tool_use_but_not_thinking_vision_or_window() {
         for provider in ["vllm", "mlx", "llamacpp"] {
             let p = MODEL_KB.capabilities_for(provider, "qwen3");
-            assert_eq!(p.supports_tool_use, Support::Supported, "{provider}");
+            assert_eq!(p.tool_use.support(), Support::Supported, "{provider}");
             assert_eq!(p.supports_thinking, Support::Unknown, "{provider}");
-            assert_eq!(p.supports_vision, Support::Unknown, "{provider}");
+            assert_eq!(p.modalities_in.image, Support::Unknown, "{provider}");
             assert_eq!(p.max_context_tokens, None, "{provider}");
         }
     }
@@ -877,13 +903,13 @@ mod tests {
     fn a_row_states_thinking_and_vision_as_known() {
         let p = MODEL_KB.capabilities_for("anthropic", "claude-opus-5");
         assert_eq!(p.supports_thinking, Support::Supported);
-        assert_eq!(p.supports_vision, Support::Supported);
+        assert_eq!(p.modalities_in.image, Support::Supported);
     }
 
     #[test]
     fn a_provider_the_data_file_does_not_name_is_undescribed() {
         let p = MODEL_KB.capabilities_for("my_local_server", "whatever");
-        assert_eq!(p.supports_tool_use, Support::Unknown);
+        assert_eq!(p.tool_use.support(), Support::Unknown);
         assert_eq!(p.max_context_tokens, None);
     }
 

@@ -4,7 +4,7 @@
 use reqwest::header::AUTHORIZATION;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::provider::error::{
     CredentialError, ParseProblem, ProviderRefusal, RequestRefusal, status_error,
@@ -62,21 +62,18 @@ pub(super) fn translate_openai_batch_status(v: &Value) -> Result<BatchStatus, Pr
             raw: Some(truncate(&v.to_string(), RAW_ERR_CAP)),
         })?;
 
-    let counts = v
-        .get("request_counts")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    // OpenAI reports `request_counts` only in some states; a count it does not report is `None`.
     // `BatchStatus` counts in u32; a larger count is clamped, not wrapped.
-    let clamp_u32 = |n: u64| n.min(u32::MAX as u64) as u32;
-    let total = counts.get("total").and_then(|n| n.as_u64()).map(clamp_u32);
-    let completed = clamp_u32(
-        counts
-            .get("completed")
-            .and_then(|n| n.as_u64())
-            .unwrap_or(0),
-    );
-    let failed = clamp_u32(counts.get("failed").and_then(|n| n.as_u64()).unwrap_or(0));
-    let processed = completed.saturating_add(failed);
+    let count = |k: &str| {
+        v.get("request_counts")
+            .and_then(|c| c.get(k))
+            .and_then(Value::as_u64)
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+    };
+    let total = count("total");
+    let processed = count("completed")
+        .zip(count("failed"))
+        .map(|(completed, failed)| completed.saturating_add(failed));
 
     match status {
         "validating" | "in_progress" | "finalizing" | "cancelling" => Ok(BatchStatus::InProgress {
@@ -163,10 +160,17 @@ pub(super) fn parse_openai_batch_results(
             .ok_or_else(|| unparsed(ParseProblem::Missing("response.body")))?;
         let status = response.get("status_code").and_then(Value::as_u64);
         let result = match status {
-            Some(code) if !(200..300).contains(&code) => Err(batch_item_error(
-                body.get("error").unwrap_or(&Value::Null),
-                u16::try_from(code).ok(),
-            )),
+            Some(code) if !(200..300).contains(&code) => match u16::try_from(code) {
+                // A gateway's error body may have no `error` object; then the body is the error.
+                Ok(code) => Err(batch_item_error(
+                    body.get("error").unwrap_or(body),
+                    Some(code),
+                )),
+                Err(_) => Err(unparsed(ParseProblem::UnexpectedValue {
+                    field: "response.status_code",
+                    value: code.to_string(),
+                })),
+            },
             _ => dialect.parse_response(body),
         };
         items.push(BatchResultItem { item_id, result });
@@ -176,31 +180,31 @@ pub(super) fn parse_openai_batch_results(
 
 /// Returns the error of one batch item from OpenAI's `{code, type, message}` error object and,
 /// for an item the API answered, its response's HTTP status: a code this build knows decides,
-/// then the status; with neither the item fails in OpenAI's words.
+/// then the status; with neither the item fails in OpenAI's words, with no code when the object
+/// names none.
 fn batch_item_error(err: &Value, status: Option<u16>) -> ProviderError {
     let code = err
         .get("code")
         .and_then(Value::as_str)
-        .or_else(|| err.get("type").and_then(Value::as_str))
-        .unwrap_or("error");
+        .or_else(|| err.get("type").and_then(Value::as_str));
     let msg = err
         .get("message")
         .and_then(Value::as_str)
         .map_or_else(|| err.to_string(), str::to_string);
     match code {
-        "invalid_request" | "invalid_request_error" => {
+        Some("invalid_request" | "invalid_request_error") => {
             ProviderError::InvalidRequest(RequestRefusal::Provider(ProviderRefusal {
                 status: None,
                 message: msg,
             }))
         }
-        "rate_limit_exceeded" => ProviderError::RateLimited { retry_after: None },
-        "batch_expired" => ProviderError::BatchItemExpired,
-        "batch_cancelled" => ProviderError::BatchItemCanceled,
+        Some("rate_limit_exceeded") => ProviderError::RateLimited { retry_after: None },
+        Some("batch_expired") => ProviderError::BatchItemExpired,
+        Some("batch_cancelled") => ProviderError::BatchItemCanceled,
         _ => match status {
             Some(status) => status_error(status, msg, None),
             None => ProviderError::BatchItemFailed {
-                code: code.to_string(),
+                code: code.map(str::to_string),
                 message: msg,
             },
         },
@@ -262,31 +266,27 @@ pub(super) fn message_events(part: &Value) -> Result<Vec<ChatEvent>, ParseProble
 
     let calls = part.get("tool_calls").and_then(Value::as_array);
     for (position, tc) in calls.into_iter().flatten().enumerate() {
-        // A missing `index`, or one too big for `usize`, falls back to the position in this
-        // part; 0 would merge parallel calls into one. A whole message carries no `index`.
-        let index = tc
-            .get("index")
-            .and_then(Value::as_u64)
-            .and_then(|i| usize::try_from(i).ok())
-            .unwrap_or(position);
+        // A missing `index` falls back to the position in this part; 0 would merge parallel calls
+        // into one. A whole message carries no `index`.
+        let index = match tc.get("index").and_then(Value::as_u64) {
+            Some(i) => usize::try_from(i).map_err(|_| ParseProblem::IndexOverflow(i))?,
+            None => position,
+        };
         let function = tc.get("function");
-        let id = tc.get("id").and_then(Value::as_str).unwrap_or("");
-        let name = function
-            .and_then(|f| f.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let id = non_empty_str(tc.get("id"));
+        let name = non_empty_str(function.and_then(|f| f.get("name")));
 
         // OpenAI sends a call's id and name once, in its first chunk; later chunks for the same
         // `index` carry only arguments. An invented id would hide the server's error.
-        match (id.is_empty(), name.is_empty()) {
-            (false, false) => out.push(ChatEvent::ToolCallStart {
+        match (id, name) {
+            (Some(id), Some(name)) => out.push(ChatEvent::ToolCallStart {
                 index,
                 id: id.to_string(),
                 name: name.to_string(),
             }),
-            (false, true) => return Err(ParseProblem::Missing("function.name")),
-            (true, false) => return Err(ParseProblem::Missing("id")),
-            (true, true) => {}
+            (Some(_), None) => return Err(ParseProblem::Missing("function.name")),
+            (None, Some(_)) => return Err(ParseProblem::Missing("id")),
+            (None, None) => {}
         }
         if let Some(args) = function
             .and_then(|f| f.get("arguments"))
@@ -300,6 +300,10 @@ pub(super) fn message_events(part: &Value) -> Result<Vec<ChatEvent>, ParseProble
         }
     }
     Ok(out)
+}
+
+fn non_empty_str(v: Option<&Value>) -> Option<&str> {
+    v.and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
 /// Opens in `buf` each tool call `events` start and adds the arguments they carry, so the calls
@@ -330,10 +334,6 @@ pub(super) fn openai_chat_completion_to_chat_response(
     body: &Value,
     parse_usage: impl Fn(&serde_json::Map<String, Value>) -> Usage,
 ) -> Result<ChatResponse, ProviderError> {
-    let model = body
-        .get("model")
-        .and_then(|m| m.as_str())
-        .unwrap_or("openai");
     let choice = body
         .get("choices")
         .and_then(|c| c.as_array())
@@ -360,14 +360,16 @@ pub(super) fn openai_chat_completion_to_chat_response(
         .map(parse_usage);
 
     let mut acc = ChatResponseBuilder::new();
-    acc.apply(ChatEvent::started(model));
+    if let Some(model) = body.get("model").and_then(|m| m.as_str()) {
+        acc.apply(ChatEvent::started(model))?;
+    }
     for ev in events.into_iter().chain(ends) {
-        acc.apply(ev);
+        acc.apply(ev)?;
     }
     if let Some(end) = ChatEvent::stream_end(stop_reason, usage) {
-        acc.apply(end);
+        acc.apply(end)?;
     }
-    Ok(acc.finish())
+    Ok(acc.finish()?)
 }
 
 pub(super) fn parse_openai_usage(usage: &serde_json::Map<String, Value>) -> Usage {
@@ -402,6 +404,7 @@ pub(super) fn parse_openai_usage(usage: &serde_json::Map<String, Value>) -> Usag
 #[cfg(test)]
 mod usage_tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parse_openai_usage_surfaces_reasoning_tokens() {
@@ -434,6 +437,7 @@ mod usage_tests {
 mod raw_carry_tests {
     use super::super::dialect::StandardDialect;
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn malformed_batch_line_error_carries_raw() {
@@ -508,6 +512,7 @@ mod raw_carry_tests {
 mod batch_error_file_tests {
     use super::*;
     use crate::provider::backends::openai::StandardDialect;
+    use serde_json::json;
 
     #[test]
     fn a_line_of_the_error_file_becomes_that_items_error() {
@@ -533,15 +538,22 @@ mod batch_error_file_tests {
     }
 
     #[test]
-    fn a_completion_with_no_finish_reason_has_no_stop_reason_and_keeps_its_usage() {
+    fn a_completion_with_no_finish_reason_is_unfinished() {
         let body = json!({
             "model": "m",
             "choices": [{ "message": { "content": "hi" } }],
             "usage": { "prompt_tokens": 1000, "completion_tokens": 500 }
         });
-        let r = openai_chat_completion_to_chat_response(&body, parse_openai_usage).unwrap();
-        assert_eq!(r.stop_reason, None);
-        assert_eq!((r.usage.input_tokens, r.usage.output_tokens), (1000, 500));
+        let r = openai_chat_completion_to_chat_response(&body, parse_openai_usage);
+        assert!(
+            matches!(
+                r,
+                Err(ProviderError::Unfinished(
+                    tars_types::Unfinished::NoStopReason
+                ))
+            ),
+            "{r:?}"
+        );
     }
 
     #[test]
@@ -555,6 +567,67 @@ mod batch_error_file_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::backends::openai::StandardDialect;
+
+    fn only_item(line: &str) -> Result<ChatResponse, ProviderError> {
+        let mut items = parse_openai_batch_results(&StandardDialect, line).unwrap();
+        assert_eq!(items.len(), 1);
+        items.remove(0).result
+    }
+
+    #[test]
+    fn a_batch_that_reports_no_counts_has_no_progress_rather_than_zero() {
+        let v = serde_json::json!({"status": "in_progress"});
+        assert_eq!(
+            translate_openai_batch_status(&v).unwrap(),
+            BatchStatus::InProgress {
+                processed: None,
+                total: None,
+                eta: None
+            }
+        );
+    }
+
+    #[test]
+    fn a_failed_item_whose_body_has_no_error_object_carries_the_body() {
+        let line =
+            r#"{"custom_id":"a","response":{"status_code":502,"body":{"detail":"upstream gone"}}}"#;
+        let err = only_item(line).unwrap_err();
+        assert!(err.to_string().contains("upstream gone"), "{err}");
+    }
+
+    #[test]
+    fn a_status_code_past_u16_is_a_parse_error_of_that_item() {
+        let line = r#"{"custom_id":"a","response":{"status_code":70000,"body":{}}}"#;
+        let err = only_item(line).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ProviderError::Parse { problem, .. }
+                    if matches!(**problem, ParseProblem::UnexpectedValue { field: "response.status_code", .. })
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_item_error_naming_no_code_or_type_has_no_code() {
+        let line = r#"{"custom_id":"a","error":{"message":"boom"}}"#;
+        let err = only_item(line).unwrap_err();
+        assert!(
+            matches!(&err, ProviderError::BatchItemFailed { code: None, message } if message == "boom"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_completion_without_a_model_reports_no_model() {
+        let body = serde_json::json!({
+            "choices": [{ "message": { "content": "hi" }, "finish_reason": "stop" }]
+        });
+        let r = openai_chat_completion_to_chat_response(&body, parse_openai_usage).unwrap();
+        assert_eq!(r.actual_model, None);
+    }
 
     #[test]
     fn a_failed_batch_without_a_message_carries_the_batch_object() {

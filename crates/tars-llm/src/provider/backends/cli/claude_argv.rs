@@ -12,6 +12,17 @@ pub(crate) const STRIPPED_ENV_KEYS_UPPER: &[&str] = &[
     "CLAUDE_CODE_USE_FOUNDRY",
 ];
 
+/// Names the variables `claude` needs beyond the system ones: its home override and the
+/// long-lived subscription token `claude setup-token` makes for machines without a keychain.
+pub(crate) const NEEDED_ENV_KEYS: &[&str] = &["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"];
+
+/// Returns whether `name` is one of [`STRIPPED_ENV_KEYS_UPPER`], whatever its case.
+pub(crate) fn is_stripped_env(name: &str) -> bool {
+    STRIPPED_ENV_KEYS_UPPER
+        .iter()
+        .any(|key| key.eq_ignore_ascii_case(name))
+}
+
 /// The tools `claude` may use. The default is none: without tools it cannot start its own agent
 /// loop, so a call is plain inference; the token cost of that loop is measured in
 /// `docs/architecture/01-llm-provider.md`, "CLI Subprocess Tuning".
@@ -22,8 +33,58 @@ pub enum ClaudeToolAccess {
     Disabled,
     /// Omits `--tools`, so the CLI has all of its tools.
     Default,
-    /// Passes the names joined by commas; a name containing a comma is dropped.
+    /// Passes the names joined by commas; a name containing a comma is dropped. A list left
+    /// empty passes `--tools ""`, as `Disabled` does.
     Allow(Vec<String>),
+}
+
+/// The tools a run of `claude` is given, after the names `--tools` cannot carry are dropped.
+#[derive(Debug, PartialEq, Eq)]
+enum ToolGrant {
+    None,
+    All,
+    /// The comma-joined names; never empty.
+    Named(String),
+}
+
+impl ToolGrant {
+    /// Returns whether claude can run a tool, and so needs the permission bypass. A run with
+    /// none gets no bypass: claude may still load MCP servers from the user's config, and those
+    /// must not run unprompted.
+    fn runs_tools(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// Returns the tools `access` gives a run. An allow-list left with no name, because it was empty
+/// or every name held a comma, gives none, the same as `Disabled`.
+fn tool_grant(access: &ClaudeToolAccess) -> ToolGrant {
+    match access {
+        ClaudeToolAccess::Disabled => ToolGrant::None,
+        ClaudeToolAccess::Default => ToolGrant::All,
+        ClaudeToolAccess::Allow(names) => {
+            // A comma in a name would split it into two tools; no real tool name has one.
+            let kept: Vec<&str> = names
+                .iter()
+                .filter(|name| {
+                    let carried = !name.contains(',');
+                    if !carried {
+                        tracing::warn!(
+                            tool = %name,
+                            "claude_cli: dropping tool name containing ',' — it would corrupt the --tools CSV",
+                        );
+                    }
+                    carried
+                })
+                .map(String::as_str)
+                .collect();
+            if kept.is_empty() {
+                ToolGrant::None
+            } else {
+                ToolGrant::Named(kept.join(","))
+            }
+        }
+    }
 }
 
 /// The value of claude's `--effort`.
@@ -97,43 +158,23 @@ pub(crate) fn build_argv_with(inv: &SubprocessInvocation, streaming: bool) -> Ve
         argv.push("--verbose".into());
     }
 
-    match &inv.tools {
-        ClaudeToolAccess::Disabled => {
+    let grant = tool_grant(&inv.tools);
+    match &grant {
+        ToolGrant::None => {
             argv.push("--tools".into());
             argv.push(String::new());
         }
-        ClaudeToolAccess::Default => {}
-        ClaudeToolAccess::Allow(list) => {
+        ToolGrant::All => {}
+        ToolGrant::Named(csv) => {
             argv.push("--tools".into());
-            // A comma in a name would split it into two tools; no real tool name has one.
-            let cleaned: Vec<&String> = list
-                .iter()
-                .filter(|name| {
-                    if name.contains(',') {
-                        tracing::warn!(
-                            tool = %name,
-                            "claude_cli: dropping tool name containing ',' — it would corrupt the --tools CSV",
-                        );
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .collect();
-            argv.push(
-                cleaned
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            );
+            argv.push(csv.clone());
         }
     }
 
     // In `-p` mode nobody answers the permission prompt, so without the bypass every edit and
     // bash call is refused and the agent reports no changes. `extra_args` can set a stricter
     // mode.
-    if !matches!(inv.tools, ClaudeToolAccess::Disabled) {
+    if grant.runs_tools() {
         argv.push("--permission-mode".into());
         argv.push("bypassPermissions".into());
     }
@@ -159,4 +200,36 @@ pub(crate) fn build_argv_with(inv: &SubprocessInvocation, streaming: bool) -> Ve
     argv.extend(inv.extra_args.iter().cloned());
 
     argv
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_allow_list_with_no_usable_name_grants_no_tools() {
+        assert_eq!(
+            tool_grant(&ClaudeToolAccess::Allow(vec![])),
+            ToolGrant::None
+        );
+        assert_eq!(
+            tool_grant(&ClaudeToolAccess::Allow(vec!["Read,Bash".into()])),
+            ToolGrant::None
+        );
+    }
+
+    #[test]
+    fn an_allow_list_keeps_the_names_without_a_comma() {
+        assert_eq!(
+            tool_grant(&ClaudeToolAccess::Allow(vec!["Read".into(), "a,b".into()])),
+            ToolGrant::Named("Read".into())
+        );
+    }
+
+    #[test]
+    fn only_a_grant_with_tools_asks_for_the_permission_bypass() {
+        assert!(!ToolGrant::None.runs_tools());
+        assert!(ToolGrant::All.runs_tools());
+        assert!(ToolGrant::Named("Read".into()).runs_tools());
+    }
 }

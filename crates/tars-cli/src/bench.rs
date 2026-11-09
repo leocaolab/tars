@@ -5,7 +5,6 @@
 //! The summary goes to stdout, so it can be piped or diffed between runs; each iteration's line
 //! goes to stderr.
 
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -119,6 +118,8 @@ pub enum IterationError {
     TimedOut(#[source] tokio::time::error::Elapsed),
     #[error("stream ended without a Finished event ({events} events received)")]
     Unfinished { events: usize },
+    #[error("the provider reported no usage, so there are no token counts to time")]
+    UsageNotReported,
 }
 
 /// Why `tars bench` measured nothing it can report.
@@ -181,15 +182,15 @@ impl BenchError {
 
 pub async fn execute(
     args: BenchArgs,
-    config_path: Option<PathBuf>,
+    config_paths: &config::ConfigPaths,
     sandbox: Option<SandboxMode>,
 ) -> Result<(), BenchError> {
-    let cfg = config::load(config_path)?;
+    let config::LoadedConfig { config: cfg, llm } = config::load(config_paths)?;
     let prompt = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
 
     let id = configured(&cfg, args.provider)?;
-    let registry =
-        build_registry(&cfg, Arc::new(crate::home_env::load()?)).map_err(BenchError::Registry)?;
+    let registry = build_registry(&cfg, &llm, Arc::new(crate::home_env::load()?))
+        .map_err(BenchError::Registry)?;
     let provider = registry
         .get(&id)
         .map_err(|source| BenchError::Unavailable {
@@ -285,6 +286,7 @@ async fn run_one(
             events: transcript.events,
         });
     };
+    let usage = usage.ok_or(IterationError::UsageNotReported)?;
     Ok(Sample {
         first_token: transcript.first_token,
         total,

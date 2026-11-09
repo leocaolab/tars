@@ -74,8 +74,8 @@ async fn streaming_text_response_decodes_to_events() {
     assert_eq!(text, "Hello, world!");
     assert_eq!(saw_finish, Some(StopReason::EndTurn));
     let u = usage.expect("usage seen");
-    assert_eq!(u.input_tokens, 4);
-    assert_eq!(u.output_tokens, 3);
+    assert_eq!(u.unwrap().input_tokens, 4);
+    assert_eq!(u.unwrap().output_tokens, 3);
 }
 
 #[tokio::test]

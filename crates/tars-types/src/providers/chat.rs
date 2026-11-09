@@ -3,9 +3,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::non_empty::NonEmpty;
 use crate::providers::cache::CacheDirective;
 use crate::providers::model::ThinkingMode;
-use crate::providers::provider_profile::{ProviderProfile, Support};
+use crate::providers::output_limit::OutputLimit;
+use crate::providers::provider_profile::{ProviderProfile, Support, ToolUse};
 use crate::providers::schema::JsonSchema;
 use crate::providers::tools::{ToolChoice, ToolSpec};
 
@@ -44,13 +46,13 @@ pub struct ChatRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_directives: Vec<CacheDirective>,
 
-    #[serde(default, skip_serializing_if = "ThinkingMode::is_off")]
-    pub thinking: ThinkingMode,
+    /// How much the provider may think; `None` says nothing and leaves the provider's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingMode>,
 
     /// The OpenAI-compat `chat_template_kwargs.enable_thinking` flag (Qwen3, mlx_lm.server, vLLM
     /// with a Qwen-family template); `None` leaves the server's default. It is apart from
-    /// [`ThinkingMode`] because `ThinkingMode::Off` also means "not specified", and sending
-    /// `enable_thinking=false` on every call would override the server. A provider whose profile
+    /// [`ThinkingMode`] because only a server with a chat template reads it. A provider whose profile
     /// has no `supports_chat_template_thinking` is not sent it, and
     /// [`ChatRequest::compatibility_check`] answers [`Degradation::ChatTemplateThinkingNotSent`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,7 +75,7 @@ impl ChatRequest {
             stop_sequences: Vec::new(),
             seed: None,
             cache_directives: Vec::new(),
-            thinking: ThinkingMode::default(),
+            thinking: None,
             enable_chat_template_thinking: None,
         }
     }
@@ -83,18 +85,36 @@ impl ChatRequest {
         self
     }
 
-    /// Checks the request against a provider's profile before it is sent: whether the provider
-    /// cannot serve it, or serves it without some fields.
+    /// Returns the UTF-8 bytes of the system prompt and every text block; images and tool calls
+    /// are not counted.
+    pub fn text_bytes(&self) -> usize {
+        self.messages
+            .iter()
+            .flat_map(|m| m.content())
+            .filter_map(ContentBlock::as_text)
+            .map(str::len)
+            .fold(
+                self.system.as_deref().map_or(0, str::len),
+                usize::saturating_add,
+            )
+    }
+
+    /// Checks the request against a provider's profile and the bound model's output ceiling
+    /// before it is sent: whether the provider cannot serve it, or serves it without some fields.
     ///
     /// Only what the profile knows the provider lacks makes it unservable: a capability it has no
-    /// data on ([`Support::Unknown`]) and a ceiling it does not state are not findings, and the
+    /// data on ([`Support::Unknown`]) and a ceiling nobody states are not findings, and the
     /// provider answers for itself.
-    pub fn compatibility_check(&self, caps: &ProviderProfile) -> CompatibilityCheck {
+    pub fn compatibility_check(
+        &self,
+        caps: &ProviderProfile,
+        output_limit: &OutputLimit,
+    ) -> CompatibilityCheck {
         let mut reasons = Vec::new();
         let mut unsent = Vec::new();
 
         // `tool_choice` without tools is left for the provider to refuse.
-        if !self.tools.is_empty() && caps.supports_tool_use == Support::Unsupported {
+        if !self.tools.is_empty() && caps.tool_use == ToolUse::Unsupported {
             reasons.push(CompatibilityReason::ToolUseUnsupported {
                 tool_count: self.tools.len(),
             });
@@ -107,12 +127,10 @@ impl ChatRequest {
         if self.enable_chat_template_thinking.is_some() && !caps.supports_chat_template_thinking {
             unsent.push(Degradation::ChatTemplateThinkingNotSent);
         }
-        if !matches!(self.thinking, ThinkingMode::Off)
+        if let Some(mode @ (ThinkingMode::Auto | ThinkingMode::Budget(_))) = self.thinking
             && caps.supports_thinking == Support::Unsupported
         {
-            reasons.push(CompatibilityReason::ThinkingUnsupported {
-                mode: self.thinking,
-            });
+            reasons.push(CompatibilityReason::ThinkingUnsupported { mode });
         }
 
         let has_image = self.messages.iter().any(|m| {
@@ -120,31 +138,31 @@ impl ChatRequest {
                 .iter()
                 .any(|c| matches!(c, ContentBlock::Image { .. }))
         });
-        if has_image && caps.supports_vision == Support::Unsupported {
+        if has_image && caps.modalities_in.image == Support::Unsupported {
             reasons.push(CompatibilityReason::VisionUnsupported);
         }
 
-        // Bytes / 4 (the English BPE ratio) mostly underestimates the token count, so only an
-        // obvious overflow is flagged; a borderline request goes through and the provider refuses
-        // it with ContextTooLong.
-        let prompt_bytes = prompt_bytes(self);
-        let estimated_tokens = u32::try_from(prompt_bytes / 4).unwrap_or(u32::MAX);
-        if let Some(max_ctx) = caps.max_context_tokens {
-            if estimated_tokens > max_ctx {
-                reasons.push(CompatibilityReason::ContextWindowExceeded {
-                    estimated_prompt_tokens: estimated_tokens,
-                    max_context_tokens: max_ctx,
-                });
-            }
+        // The byte estimate mostly underestimates the token count, so only an obvious overflow is
+        // flagged; a borderline request goes through and the provider refuses it with
+        // ContextTooLong.
+        let estimated_tokens =
+            u32::try_from(crate::estimate_tokens(self.text_bytes())).unwrap_or(u32::MAX);
+        if let Some(max_ctx) = caps.max_context_tokens
+            && estimated_tokens > max_ctx
+        {
+            reasons.push(CompatibilityReason::ContextWindowExceeded {
+                estimated_prompt_tokens: estimated_tokens,
+                max_context_tokens: max_ctx,
+            });
         }
 
-        if let (Some(req_max), Some(max_out)) = (self.max_output_tokens, caps.max_output_tokens) {
-            if req_max > max_out {
-                reasons.push(CompatibilityReason::MaxOutputTokensExceeded {
-                    requested: req_max,
-                    max: max_out,
-                });
-            }
+        if let (Some(req_max), Some(max_out)) = (self.max_output_tokens, output_limit.tokens())
+            && req_max > max_out
+        {
+            reasons.push(CompatibilityReason::MaxOutputTokensExceeded {
+                requested: req_max,
+                max: max_out,
+            });
         }
 
         CompatibilityCheck::from_findings(reasons, unsent)
@@ -152,18 +170,6 @@ impl ChatRequest {
 }
 
 /// Returns the byte length of the request's text, the system prompt included.
-fn prompt_bytes(req: &ChatRequest) -> usize {
-    let mut total = req.system.as_ref().map(|s| s.len()).unwrap_or(0);
-    for m in &req.messages {
-        for c in m.content() {
-            if let Some(t) = c.as_text() {
-                total += t.len();
-            }
-        }
-    }
-    total
-}
-
 /// Whether one provider can serve a request, and what it leaves out. It says nothing of other
 /// providers: a caller bound to this one provider refuses on `Incompatible`, a router tries the
 /// next candidate.
@@ -172,20 +178,20 @@ pub enum CompatibilityCheck {
     /// This provider can serve the request as it is.
     Compatible,
     /// This provider serves the request without what `unsent` names; never empty.
-    Degraded { unsent: Vec<Degradation> },
+    Degraded { unsent: NonEmpty<Degradation> },
     /// This provider cannot serve the request, for every one of `reasons`; never empty. What it
     /// would also have left out is not listed, since the request is not sent.
-    Incompatible { reasons: Vec<CompatibilityReason> },
+    Incompatible {
+        reasons: NonEmpty<CompatibilityReason>,
+    },
 }
 
 impl CompatibilityCheck {
     fn from_findings(reasons: Vec<CompatibilityReason>, unsent: Vec<Degradation>) -> Self {
-        if !reasons.is_empty() {
-            Self::Incompatible { reasons }
-        } else if !unsent.is_empty() {
-            Self::Degraded { unsent }
-        } else {
-            Self::Compatible
+        match (NonEmpty::from_vec(reasons), NonEmpty::from_vec(unsent)) {
+            (Some(reasons), _) => Self::Incompatible { reasons },
+            (None, Some(unsent)) => Self::Degraded { unsent },
+            (None, None) => Self::Compatible,
         }
     }
 }
@@ -322,16 +328,21 @@ pub struct ProviderNeeds {
 }
 
 impl ProviderProfile {
-    /// Checks the profile against a caller's declared needs at startup, returning every unmet
-    /// one in the same verdict [`ChatRequest::compatibility_check`] gives.
-    pub fn check_requirements(&self, req: &ProviderNeeds) -> CompatibilityCheck {
+    /// Checks the profile and the bound model's output ceiling against a caller's declared needs
+    /// at startup, returning every unmet one in the same verdict
+    /// [`ChatRequest::compatibility_check`] gives.
+    pub fn check_requirements(
+        &self,
+        req: &ProviderNeeds,
+        output_limit: &OutputLimit,
+    ) -> CompatibilityCheck {
         let mut reasons = Vec::new();
         let mut unsent = Vec::new();
 
-        if req.requires_tools && self.supports_tool_use == Support::Unsupported {
+        if req.requires_tools && self.tool_use == ToolUse::Unsupported {
             reasons.push(CompatibilityReason::ToolUseUnsupported { tool_count: 0 });
         }
-        if req.requires_vision && self.supports_vision == Support::Unsupported {
+        if req.requires_vision && self.modalities_in.image == Support::Unsupported {
             reasons.push(CompatibilityReason::VisionUnsupported);
         }
         if req.requires_thinking && self.supports_thinking == Support::Unsupported {
@@ -343,21 +354,23 @@ impl ProviderProfile {
         if req.requires_structured_output && self.schema_enforcement() == Support::Unsupported {
             unsent.push(Degradation::StructuredOutputNotEnforced);
         }
-        if let Some(max_ctx) = self.max_context_tokens {
-            if req.estimated_max_prompt_tokens > 0 && req.estimated_max_prompt_tokens > max_ctx {
-                reasons.push(CompatibilityReason::ContextWindowExceeded {
-                    estimated_prompt_tokens: req.estimated_max_prompt_tokens,
-                    max_context_tokens: max_ctx,
-                });
-            }
+        if let Some(max_ctx) = self.max_context_tokens
+            && req.estimated_max_prompt_tokens > 0
+            && req.estimated_max_prompt_tokens > max_ctx
+        {
+            reasons.push(CompatibilityReason::ContextWindowExceeded {
+                estimated_prompt_tokens: req.estimated_max_prompt_tokens,
+                max_context_tokens: max_ctx,
+            });
         }
-        if let Some(max_out) = self.max_output_tokens {
-            if req.estimated_max_output_tokens > 0 && req.estimated_max_output_tokens > max_out {
-                reasons.push(CompatibilityReason::MaxOutputTokensExceeded {
-                    requested: req.estimated_max_output_tokens,
-                    max: max_out,
-                });
-            }
+        if let Some(max_out) = output_limit.tokens()
+            && req.estimated_max_output_tokens > 0
+            && req.estimated_max_output_tokens > max_out
+        {
+            reasons.push(CompatibilityReason::MaxOutputTokensExceeded {
+                requested: req.estimated_max_output_tokens,
+                max: max_out,
+            });
         }
 
         CompatibilityCheck::from_findings(reasons, unsent)
@@ -485,15 +498,19 @@ mod tests {
 
     // ── compatibility_check tests ───────────────────────────────────────────
 
-    use crate::providers::provider_profile::{Modality, PromptCacheKind, ProviderProfile};
+    use crate::providers::provider_profile::{
+        Modalities, Modality, PromptCacheKind, ProviderProfile,
+    };
     use crate::providers::schema::JsonSchema;
     use crate::providers::usage::Pricing;
-    use std::collections::HashSet;
+
+    const MINIMAL_LIMIT: OutputLimit = OutputLimit::Configured { tokens: 4096 };
+    const FULL_LIMIT: OutputLimit = OutputLimit::Configured { tokens: 8192 };
+    const ZERO_LIMIT: OutputLimit = OutputLimit::Configured { tokens: 0 };
 
     fn caps_minimal() -> ProviderProfile {
         ProviderProfile {
             max_context_tokens: Some(32_768),
-            max_output_tokens: Some(4096),
             supports_cancel: true,
             streaming: true,
             ..ProviderProfile::nothing_claimed(crate::InterfaceKind::Http)
@@ -501,20 +518,17 @@ mod tests {
     }
 
     fn caps_full() -> ProviderProfile {
-        let both = HashSet::from([Modality::Text, Modality::Image]);
+        let both = Modalities::listed([Modality::Text, Modality::Image]);
         ProviderProfile {
             max_context_tokens: Some(200_000),
-            max_output_tokens: Some(8192),
-            supports_tool_use: Support::Supported,
-            supports_parallel_tool_calls: true,
+            tool_use: ToolUse::Supported { parallel: true },
             supports_structured_output: Some(StructuredOutputMode::StrictSchema),
-            supports_vision: Support::Supported,
             supports_thinking: Support::Supported,
             supports_chat_template_thinking: true,
             supports_cancel: true,
             prompt_cache: PromptCacheKind::ImplicitPrefix { min_tokens: 1024 },
             streaming: true,
-            modalities_in: both.clone(),
+            modalities_in: both,
             modalities_out: both,
             ..ProviderProfile::nothing_claimed(crate::InterfaceKind::Http)
         }
@@ -525,18 +539,18 @@ mod tests {
         let mut req = ChatRequest::user("hi");
         req.enable_chat_template_thinking = Some(false);
         assert_eq!(
-            req.compatibility_check(&caps_minimal()),
+            req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT),
             CompatibilityCheck::Degraded {
-                unsent: vec![Degradation::ChatTemplateThinkingNotSent]
+                unsent: NonEmpty::new(Degradation::ChatTemplateThinkingNotSent, [])
             }
         );
         assert_eq!(
-            req.compatibility_check(&caps_full()),
+            req.compatibility_check(&caps_full(), &FULL_LIMIT),
             CompatibilityCheck::Compatible
         );
         req.enable_chat_template_thinking = None;
         assert_eq!(
-            req.compatibility_check(&caps_minimal()),
+            req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT),
             CompatibilityCheck::Compatible
         );
     }
@@ -551,13 +565,13 @@ mod tests {
         let mut json_mode = caps_full();
         json_mode.supports_structured_output = Some(StructuredOutputMode::JsonObjectMode);
         assert_eq!(
-            req.compatibility_check(&json_mode),
+            req.compatibility_check(&json_mode, &FULL_LIMIT),
             CompatibilityCheck::Degraded {
-                unsent: vec![Degradation::StructuredOutputNotEnforced]
+                unsent: NonEmpty::new(Degradation::StructuredOutputNotEnforced, [])
             }
         );
         assert_eq!(
-            req.compatibility_check(&caps_full()),
+            req.compatibility_check(&caps_full(), &FULL_LIMIT),
             CompatibilityCheck::Compatible
         );
     }
@@ -566,13 +580,16 @@ mod tests {
     fn a_request_that_is_both_degraded_and_unservable_is_incompatible() {
         let mut req = ChatRequest::user("hi");
         req.enable_chat_template_thinking = Some(true);
-        req.thinking = ThinkingMode::Auto;
+        req.thinking = Some(ThinkingMode::Auto);
         assert_eq!(
-            req.compatibility_check(&caps_minimal()),
+            req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT),
             CompatibilityCheck::Incompatible {
-                reasons: vec![CompatibilityReason::ThinkingUnsupported {
-                    mode: ThinkingMode::Auto
-                }]
+                reasons: NonEmpty::new(
+                    CompatibilityReason::ThinkingUnsupported {
+                        mode: ThinkingMode::Auto
+                    },
+                    []
+                )
             }
         );
     }
@@ -581,7 +598,7 @@ mod tests {
     fn compat_text_only_request_passes_minimal_provider() {
         let req = ChatRequest::user("hi");
         assert!(matches!(
-            req.compatibility_check(&caps_minimal()),
+            req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT),
             CompatibilityCheck::Compatible
         ));
     }
@@ -595,7 +612,7 @@ mod tests {
             description: "x".into(),
             input_schema: JsonSchema::loose(crate::json_object! {"type":"object"}),
         });
-        match req.compatibility_check(&caps_minimal()) {
+        match req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT) {
             CompatibilityCheck::Incompatible { reasons } => {
                 assert_eq!(reasons.len(), 1);
                 assert!(matches!(
@@ -616,7 +633,7 @@ mod tests {
             description: "x".into(),
             input_schema: JsonSchema::loose(crate::json_object! {"type": "object"}),
         });
-        req.thinking = ThinkingMode::Auto;
+        req.thinking = Some(ThinkingMode::Auto);
         req.structured_output = Some(JsonSchema::strict(
             "R",
             crate::json_object! {"type": "object"},
@@ -634,7 +651,7 @@ mod tests {
     fn a_provider_with_no_data_on_a_capability_is_sent_the_request() {
         assert_eq!(
             every_capability_and_a_long_prompt()
-                .compatibility_check(&ProviderProfile::undescribed_http()),
+                .compatibility_check(&ProviderProfile::undescribed_http(), &OutputLimit::Unknown),
             CompatibilityCheck::Compatible
         );
     }
@@ -642,12 +659,12 @@ mod tests {
     #[test]
     fn a_provider_known_to_lack_each_capability_is_refused_for_each() {
         let mut caps = ProviderProfile::undescribed_http();
-        caps.supports_tool_use = Support::Unsupported;
+        caps.tool_use = ToolUse::Unsupported;
         caps.supports_thinking = Support::Unsupported;
-        caps.supports_vision = Support::Unsupported;
+        caps.modalities_in.image = Support::Unsupported;
         caps.max_context_tokens = Some(32_000);
         let CompatibilityCheck::Incompatible { reasons } =
-            every_capability_and_a_long_prompt().compatibility_check(&caps)
+            every_capability_and_a_long_prompt().compatibility_check(&caps, &OutputLimit::Unknown)
         else {
             panic!("expected Incompatible");
         };
@@ -666,7 +683,7 @@ mod tests {
             estimated_max_output_tokens: 1_000_000,
         };
         assert_eq!(
-            ProviderProfile::undescribed_http().check_requirements(&needs),
+            ProviderProfile::undescribed_http().check_requirements(&needs, &OutputLimit::Unknown),
             CompatibilityCheck::Compatible
         );
     }
@@ -681,7 +698,7 @@ mod tests {
             input_schema: JsonSchema::loose(crate::json_object! {"type":"object"}),
         });
         assert!(matches!(
-            req.compatibility_check(&caps_full()),
+            req.compatibility_check(&caps_full(), &FULL_LIMIT),
             CompatibilityCheck::Compatible
         ));
     }
@@ -689,8 +706,8 @@ mod tests {
     #[test]
     fn compat_thinking_auto_blocked_when_not_supported() {
         let mut req = ChatRequest::user("hi");
-        req.thinking = ThinkingMode::Auto;
-        match req.compatibility_check(&caps_minimal()) {
+        req.thinking = Some(ThinkingMode::Auto);
+        match req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT) {
             CompatibilityCheck::Incompatible { reasons } => {
                 assert!(reasons.iter().any(|r| matches!(
                     r,
@@ -705,10 +722,11 @@ mod tests {
 
     #[test]
     fn compat_thinking_off_passes_anywhere() {
-        let req = ChatRequest::user("hi");
-        assert!(matches!(req.thinking, ThinkingMode::Off));
+        let mut req = ChatRequest::user("hi");
+        req.thinking = Some(ThinkingMode::Off);
+        assert!(matches!(req.thinking, Some(ThinkingMode::Off)));
         assert!(matches!(
-            req.compatibility_check(&caps_minimal()),
+            req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT),
             CompatibilityCheck::Compatible
         ));
     }
@@ -718,9 +736,9 @@ mod tests {
         let mut req = ChatRequest::user("hi");
         req.structured_output = Some(JsonSchema::loose(crate::json_object! {"type":"object"}));
         assert_eq!(
-            req.compatibility_check(&caps_minimal()),
+            req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT),
             CompatibilityCheck::Degraded {
-                unsent: vec![Degradation::StructuredOutputNotEnforced]
+                unsent: NonEmpty::new(Degradation::StructuredOutputNotEnforced, [])
             }
         );
     }
@@ -743,10 +761,10 @@ mod tests {
             stop_sequences: Vec::new(),
             seed: None,
             cache_directives: Vec::new(),
-            thinking: ThinkingMode::default(),
+            thinking: None,
             enable_chat_template_thinking: None,
         };
-        match req.compatibility_check(&caps_minimal()) {
+        match req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT) {
             CompatibilityCheck::Incompatible { reasons } => {
                 assert!(
                     reasons
@@ -778,7 +796,7 @@ mod tests {
             stop_sequences: Vec::new(),
             seed: None,
             cache_directives: Vec::new(),
-            thinking: ThinkingMode::Auto,
+            thinking: Some(ThinkingMode::Auto),
             enable_chat_template_thinking: None,
         };
         req.tools.push(ToolSpec {
@@ -786,7 +804,7 @@ mod tests {
             description: "x".into(),
             input_schema: JsonSchema::loose(crate::json_object! {}),
         });
-        match req.compatibility_check(&caps_minimal()) {
+        match req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT) {
             CompatibilityCheck::Incompatible { reasons } => {
                 assert_eq!(
                     reasons.len(),
@@ -814,7 +832,7 @@ mod tests {
         // pad to 200k chars to be obviously over.
         let mut req = ChatRequest::user("x".repeat(200_000));
         req.system = None;
-        match req.compatibility_check(&caps_minimal()) {
+        match req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT) {
             CompatibilityCheck::Incompatible { reasons } => {
                 let r = reasons
                     .iter()
@@ -836,8 +854,8 @@ mod tests {
     #[test]
     fn compat_max_output_tokens_exceeded_flagged() {
         let mut req = ChatRequest::user("hi");
-        req.max_output_tokens = Some(8192); // caps_minimal has max=4096
-        match req.compatibility_check(&caps_minimal()) {
+        req.max_output_tokens = Some(8192); // MINIMAL_LIMIT is 4096
+        match req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT) {
             CompatibilityCheck::Incompatible { reasons } => {
                 assert!(reasons.iter().any(|r| matches!(
                     r,
@@ -856,9 +874,23 @@ mod tests {
         let mut req = ChatRequest::user("hi");
         req.max_output_tokens = Some(4096); // exactly at the cap
         assert!(matches!(
-            req.compatibility_check(&caps_minimal()),
+            req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT),
             CompatibilityCheck::Compatible
         ));
+    }
+
+    #[test]
+    fn the_output_ceiling_checked_is_the_bound_models_limit() {
+        let mut req = ChatRequest::user("hi");
+        req.max_output_tokens = Some(4097);
+        assert!(matches!(
+            req.compatibility_check(&caps_minimal(), &MINIMAL_LIMIT),
+            CompatibilityCheck::Incompatible { .. }
+        ));
+        assert_eq!(
+            req.compatibility_check(&caps_minimal(), &OutputLimit::Unknown),
+            CompatibilityCheck::Compatible
+        );
     }
 
     // ── Boundary cases ─────────────────────────────────────────────
@@ -867,11 +899,9 @@ mod tests {
     fn caps_zero() -> ProviderProfile {
         let mut c = ProviderProfile::text_only_baseline(Pricing::default());
         c.max_context_tokens = Some(0);
-        c.max_output_tokens = Some(0);
-        c.supports_tool_use = Support::Unsupported;
-        c.supports_parallel_tool_calls = false;
+        c.tool_use = ToolUse::Unsupported;
         c.supports_structured_output = Some(StructuredOutputMode::None);
-        c.supports_vision = Support::Unsupported;
+        c.modalities_in.image = Support::Unsupported;
         c.supports_thinking = Support::Unsupported;
         c.streaming = false;
         c
@@ -881,7 +911,7 @@ mod tests {
     fn compat_baseline_capabilities_text_only_request_passes() {
         let caps = ProviderProfile::text_only_baseline(Pricing::default());
         let req = ChatRequest::user("hi");
-        match req.compatibility_check(&caps) {
+        match req.compatibility_check(&caps, &MINIMAL_LIMIT) {
             CompatibilityCheck::Compatible => {}
             other => panic!("expected Compatible, got: {other:?}"),
         }
@@ -906,15 +936,15 @@ mod tests {
             }],
             tool_choice: ToolChoice::default(),
             structured_output: Some(JsonSchema::loose(crate::json_object! {})),
-            max_output_tokens: Some(99_999), // exceeds default max=0
+            max_output_tokens: Some(99_999), // exceeds ZERO_LIMIT
             temperature: None,
             stop_sequences: Vec::new(),
             seed: None,
             cache_directives: Vec::new(),
-            thinking: ThinkingMode::Auto,
+            thinking: Some(ThinkingMode::Auto),
             enable_chat_template_thinking: None,
         };
-        match req.compatibility_check(&zero_caps) {
+        match req.compatibility_check(&zero_caps, &ZERO_LIMIT) {
             CompatibilityCheck::Incompatible { reasons } => {
                 let kinds: std::collections::HashSet<_> =
                     reasons.iter().map(|r| r.kind()).collect();
@@ -935,7 +965,7 @@ mod tests {
     fn requirements_default_is_empty_and_passes_minimal_caps() {
         let reqs = ProviderNeeds::default();
         assert!(matches!(
-            caps_minimal().check_requirements(&reqs),
+            caps_minimal().check_requirements(&reqs, &MINIMAL_LIMIT),
             CompatibilityCheck::Compatible
         ));
     }
@@ -946,7 +976,7 @@ mod tests {
             requires_tools: true,
             ..Default::default()
         };
-        match caps_minimal().check_requirements(&reqs) {
+        match caps_minimal().check_requirements(&reqs, &MINIMAL_LIMIT) {
             CompatibilityCheck::Incompatible { reasons } => {
                 assert!(
                     reasons
@@ -968,7 +998,7 @@ mod tests {
             estimated_max_prompt_tokens: 100_000, // > caps_minimal's 32k
             estimated_max_output_tokens: 8_000,   // > caps_minimal's 4096
         };
-        match caps_minimal().check_requirements(&reqs) {
+        match caps_minimal().check_requirements(&reqs, &MINIMAL_LIMIT) {
             CompatibilityCheck::Incompatible { reasons } => {
                 let kinds: std::collections::HashSet<_> =
                     reasons.iter().map(|r| r.kind()).collect();
@@ -987,9 +1017,8 @@ mod tests {
         };
         let mut caps = caps_minimal();
         caps.max_context_tokens = Some(0);
-        caps.max_output_tokens = Some(0);
         assert!(matches!(
-            caps.check_requirements(&reqs),
+            caps.check_requirements(&reqs, &ZERO_LIMIT),
             CompatibilityCheck::Compatible
         ));
     }
@@ -1005,7 +1034,7 @@ mod tests {
             estimated_max_output_tokens: 4_000,   // < caps_full's 8k
         };
         assert!(matches!(
-            caps_full().check_requirements(&reqs),
+            caps_full().check_requirements(&reqs, &FULL_LIMIT),
             CompatibilityCheck::Compatible
         ));
     }

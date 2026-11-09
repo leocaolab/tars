@@ -17,6 +17,7 @@ use tars_config::{
 };
 use tars_types::ProviderId;
 
+use crate::pipeline::middleware::OutputReserve;
 use crate::provider::LlmProvider;
 use crate::provider::auth::{AuthResolver, EnvFileAuthResolver, EnvSource, ProcessEnv};
 use crate::provider::backends::anthropic::AnthropicProviderBuilder;
@@ -37,7 +38,9 @@ use crate::provider::backends::mlx::mlx_builder;
 use crate::provider::backends::mock::{CannedResponse, MockProvider};
 use crate::provider::backends::openai::{CompatServer, OpenAiProviderBuilder};
 use crate::provider::backends::vllm::vllm_builder;
-use crate::provider::http_base::{HttpClient, HttpClientConfig};
+use crate::provider::http_base::{
+    ExtraHeaderError, HttpClient, HttpClientConfig, HttpOverrides, static_headers,
+};
 use crate::provider::wire::WireRecorder;
 
 #[derive(Debug, Error)]
@@ -85,6 +88,14 @@ pub enum RegistryError {
     /// has no default.
     #[error("provider {0} has no default model (it was not built from config); name a model")]
     NoDefaultModel(ProviderId),
+    /// A static header in the provider's `http_headers` does not make a valid one; sending
+    /// without it would drop it from every call.
+    #[error("provider {id}")]
+    InvalidHeader {
+        id: ProviderId,
+        #[source]
+        source: Box<ExtraHeaderError>,
+    },
 }
 
 /// The built providers by id; cloning shares them.
@@ -167,6 +178,7 @@ impl ProviderRegistry {
             cfg,
             model_catalog,
             HttpClientConfig::default(),
+            OutputReserve::default(),
             Arc::new(ProcessEnv),
             wire,
         )
@@ -179,12 +191,20 @@ impl ProviderRegistry {
         cfg: &ProvidersConfig,
         model_catalog: &ModelCatalog<'_>,
         http: HttpClientConfig,
+        output_reserve: OutputReserve,
         env: Arc<dyn EnvSource>,
         wire: Option<WireRecorder>,
     ) -> Result<Self, RegistryError> {
         let auth_resolver = Arc::new(EnvFileAuthResolver::new(env.clone()));
         let http = HttpClient::new(http, env).map_err(RegistryError::HttpBaseInit)?;
-        Self::from_config(cfg, model_catalog, http, auth_resolver, wire)
+        Self::from_config(
+            cfg,
+            model_catalog,
+            http,
+            output_reserve,
+            auth_resolver,
+            wire,
+        )
     }
 
     /// Builds every provider declared in `cfg`, the HTTP ones sharing `http` and `auth_resolver`.
@@ -203,6 +223,7 @@ impl ProviderRegistry {
         cfg: &ProvidersConfig,
         model_catalog: &ModelCatalog<'_>,
         http: Arc<HttpClient>,
+        output_reserve: OutputReserve,
         auth_resolver: Arc<dyn AuthResolver>,
         wire: Option<WireRecorder>,
     ) -> Result<Self, RegistryError> {
@@ -245,9 +266,12 @@ impl ProviderRegistry {
                     entry,
                     model_catalog,
                     &models,
-                    http.clone(),
-                    auth_resolver.clone(),
-                    wire.clone(),
+                    RegistryInputs {
+                        http: http.clone(),
+                        auth_resolver: auth_resolver.clone(),
+                        output_reserve,
+                        wire: wire.clone(),
+                    },
                 )?,
             };
             entries.insert(
@@ -381,20 +405,58 @@ impl ProviderRegistry {
     }
 }
 
+/// Returns the extra headers and query parameters of a provider that speaks HTTP.
+fn http_extras(cfg: &ProviderConfig) -> Option<&HttpOverrides> {
+    match cfg {
+        ProviderConfig::Openai { extras, .. }
+        | ProviderConfig::OpenaiCompat { extras, .. }
+        | ProviderConfig::Anthropic { extras, .. }
+        | ProviderConfig::Gemini { extras, .. }
+        | ProviderConfig::Vllm { extras, .. }
+        | ProviderConfig::Mlx { extras, .. }
+        | ProviderConfig::Llamacpp { extras, .. } => Some(extras),
+        ProviderConfig::ClaudeCli { .. }
+        | ProviderConfig::ClaudeSdk { .. }
+        | ProviderConfig::CodexCli { .. }
+        | ProviderConfig::Opencode { .. }
+        | ProviderConfig::Antigravity { .. }
+        | ProviderConfig::Mock { .. }
+        | ProviderConfig::Cassette { .. } => None,
+    }
+}
+
+/// What a registry gives every backend it builds alike.
+struct RegistryInputs {
+    http: Arc<HttpClient>,
+    auth_resolver: Arc<dyn AuthResolver>,
+    output_reserve: OutputReserve,
+    wire: Option<WireRecorder>,
+}
+
 /// Builds the provider of one non-cassette [`ProviderConfig`].
 fn build_one(
     id: ProviderId,
     cfg: &ProviderConfig,
     model_catalog: &ModelCatalog<'_>,
     models: &ConfiguredModels,
-    http: Arc<HttpClient>,
-    auth_resolver: Arc<dyn AuthResolver>,
-    wire: Option<WireRecorder>,
+    inputs: RegistryInputs,
 ) -> Result<Backend, RegistryError> {
     let ConfiguredModels {
         catalog,
         default_model,
     } = models;
+    let RegistryInputs {
+        http,
+        auth_resolver,
+        output_reserve,
+        wire,
+    } = inputs;
+    if let Some(extras) = http_extras(cfg) {
+        static_headers(extras).map_err(|source| RegistryError::InvalidHeader {
+            id: id.clone(),
+            source: Box::new(source),
+        })?;
+    }
     let provider: Arc<dyn LlmProvider> = match cfg {
         ProviderConfig::Openai {
             base_url,
@@ -450,6 +512,7 @@ fn build_one(
         } => {
             let mut builder = AnthropicProviderBuilder::new(id, auth.clone())
                 .extras(extras.clone())
+                .output_reserve(output_reserve)
                 .capabilities(model_catalog.capabilities_for(catalog, default_model));
             if let Some(url) = base_url {
                 builder = builder.base_url(url.clone());
@@ -641,7 +704,6 @@ fn build_one(
         } => {
             let mut b = ClaudeSdkProviderBuilder::new(id)
                 .executable(executable.clone())
-                .default_model(default_model.to_string())
                 .timeout(Duration::from_secs(*timeout_secs))
                 .capabilities(model_catalog.capabilities_for("claude_sdk", ""));
             if let Some(sp) = script_path {
@@ -672,12 +734,13 @@ fn build_one(
     Ok(Backend::Built(provider))
 }
 
-/// Returns whether `env`'s `TARS_CASSETTE_RECORD` is `1` or `true`, forcing every cassette to
-/// record.
+/// Reads [`tars_types::env::cassette_force_record`] from `env`. Set but not UTF-8 is logged and
+/// read as off, as `TARS_CLAUDE_CLI_STREAM` is.
 fn cassette_force_record(env: &dyn EnvSource) -> bool {
-    env.var("TARS_CASSETTE_RECORD")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    tars_types::env::cassette_force_record(|name| env.var(name)).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "TARS_CASSETTE_RECORD set but unreadable (non-UTF-8); not recording");
+        false
+    })
 }
 
 /// Builds a cassette provider, which replays recorded answers for tests.
@@ -784,6 +847,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -822,6 +886,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -892,6 +957,7 @@ mod tests {
                 cfg.providers(),
                 tars_config::catalog(),
                 http(),
+                OutputReserve::default(),
                 basic(),
                 None,
             )
@@ -910,6 +976,7 @@ mod tests {
                 cfg.providers(),
                 tars_config::catalog(),
                 http(),
+                OutputReserve::default(),
                 basic(),
                 None,
             )
@@ -962,6 +1029,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             HttpClientConfig::default(),
+            OutputReserve::default(),
             Arc::new(OneVar("TARS_CASSETTE_RECORD", "1")),
             None,
         )
@@ -1030,6 +1098,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -1080,6 +1149,72 @@ mod tests {
             "left as it was"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_static_header_that_makes_no_header_is_refused_at_build() {
+        let cfg = Config::from_toml(
+            r#"
+            [providers.local]
+            type = "vllm"
+            default_model = "m"
+            http_headers = { "bad name" = "v" }
+            "#,
+        )
+        .unwrap();
+        let built = ProviderRegistry::from_config_with_env(
+            cfg.providers(),
+            tars_config::catalog(),
+            HttpClientConfig::default(),
+            OutputReserve::default(),
+            Arc::new(OneVar("", "")),
+            None,
+        );
+        assert!(
+            matches!(built, Err(RegistryError::InvalidHeader { ref id, .. }) if id.as_str() == "local"),
+            "{:?}",
+            built.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_env_header_that_makes_no_header_fails_the_call() {
+        let cfg = Config::from_toml(
+            r#"
+            [providers.local]
+            type = "openai_compat"
+            gen_ai_provider_name = "local"
+            base_url = "http://127.0.0.1:9/v1"
+            default_model = "m"
+            env_http_headers = { "X-Org" = "ORG" }
+            "#,
+        )
+        .unwrap();
+        let reg = ProviderRegistry::from_config_with_env(
+            cfg.providers(),
+            tars_config::catalog(),
+            HttpClientConfig::default(),
+            OutputReserve::default(),
+            Arc::new(OneVar("ORG", "org\nsecret")),
+            None,
+        )
+        .unwrap();
+        let sent = reg
+            .get(&ProviderId::new("local"))
+            .unwrap()
+            .stream(
+                tars_types::ChatRequest::user("q"),
+                "m",
+                tars_types::Caller::test_default(),
+            )
+            .await;
+        match sent {
+            Err(e @ crate::ProviderError::ExtraHeader(_)) => {
+                assert!(!tars_utils::display_chain(&e).contains("secret"));
+            }
+            Err(other) => panic!("expected ExtraHeader, got {other:?}"),
+            Ok(_) => panic!("expected ExtraHeader, the call was sent"),
+        }
     }
 
     #[test]
@@ -1135,6 +1270,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -1173,6 +1309,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -1208,6 +1345,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -1249,6 +1387,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -1322,6 +1461,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -1381,6 +1521,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -1390,9 +1531,8 @@ mod tests {
             .unwrap()
             .capabilities()
             .clone();
-        assert_eq!(caps.supports_tool_use, tars_types::Support::Unsupported);
-        assert!(!caps.supports_parallel_tool_calls);
-        assert!(caps.validate().is_ok());
+        assert_eq!(caps.tool_use.support(), tars_types::Support::Unsupported);
+        assert!(!caps.tool_use.parallel());
     }
 
     #[test]
@@ -1427,6 +1567,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -1459,6 +1600,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         ) {
@@ -1485,6 +1627,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )
@@ -1512,6 +1655,7 @@ mod tests {
             cfg.providers(),
             tars_config::catalog(),
             http(),
+            OutputReserve::default(),
             basic(),
             None,
         )

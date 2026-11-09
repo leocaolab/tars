@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use crate::LlmError;
 use crate::LlmEventStream;
+use crate::ProviderError;
 use async_trait::async_trait;
 use futures::StreamExt;
 use tars_types::{
@@ -80,14 +81,27 @@ impl Middleware for ValidationMiddleware {
                 Ok(ChatEvent::Measured { telemetry }) => measured = measured.merge(telemetry),
                 Ok(ev) => {
                     events_held.push(ev.clone());
-                    builder.apply(ev);
+                    if let Err(violation) = builder.apply(ev) {
+                        return Err(OpenFailure::new(
+                            ProviderError::from(violation).into(),
+                            measured,
+                        ));
+                    }
                 }
                 Err(e) => {
                     return Err(OpenFailure::new(e.into(), measured));
                 }
             }
         }
-        let response = builder.finish();
+        let response = match builder.finish() {
+            Ok(response) => response,
+            Err(unfinished) => {
+                return Err(OpenFailure::new(
+                    ProviderError::from(unfinished).into(),
+                    measured,
+                ));
+            }
+        };
 
         // A blocking validator on an async worker would stall every task that worker polls,
         // budget timers included.

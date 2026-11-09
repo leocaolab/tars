@@ -12,7 +12,6 @@
 //! events   = 3
 //! ```
 
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -138,16 +137,16 @@ impl ProbeError {
 
 pub async fn execute(
     args: ProbeArgs,
-    config_path: Option<PathBuf>,
+    config_paths: &config::ConfigPaths,
     sandbox: Option<SandboxMode>,
 ) -> Result<(), ProbeError> {
-    let cfg = config::load(config_path)?;
+    let config::LoadedConfig { config: cfg, llm } = config::load(config_paths)?;
 
     let prompt = args.prompt.as_deref().unwrap_or(DEFAULT_PROMPT);
 
     let id = configured(&cfg, args.provider)?;
-    let registry =
-        build_registry(&cfg, Arc::new(crate::home_env::load()?)).map_err(ProbeError::Registry)?;
+    let registry = build_registry(&cfg, &llm, Arc::new(crate::home_env::load()?))
+        .map_err(ProbeError::Registry)?;
     let provider = registry
         .get(&id)
         .map_err(|source| ProbeError::Unavailable {

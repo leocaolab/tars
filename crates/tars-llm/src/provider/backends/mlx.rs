@@ -75,8 +75,8 @@ mod tests {
             caps.prompt_cache,
             tars_types::PromptCacheKind::None
         ));
-        assert_eq!(caps.supports_vision, tars_types::Support::Unknown);
-        assert_eq!(caps.supports_tool_use, tars_types::Support::Supported);
+        assert_eq!(caps.modalities_in.image, tars_types::Support::Unknown);
+        assert_eq!(caps.tool_use.support(), tars_types::Support::Supported);
     }
 
     #[test]

@@ -10,5 +10,7 @@ mod mapping;
 mod provider;
 
 pub use adapter::AnthropicAdapter;
+#[cfg(feature = "cli")]
+pub(crate) use mapping::map_stop_reason;
 pub use provider::{AnthropicProvider, AnthropicProviderBuilder};
 pub(crate) use provider::{DEFAULT_API_VERSION, DEFAULT_BASE_URL};

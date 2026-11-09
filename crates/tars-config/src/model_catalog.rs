@@ -158,13 +158,10 @@ impl<'kb> ModelCatalog<'kb> {
             model.to_string()
         };
         let mut caps = self.kb.capabilities_for(provider, &model);
-        if self.live_list(provider).is_some() {
-            if let OutputLimit::Model { tokens, .. } = self.output_limit(provider, &model) {
-                caps.max_output_tokens = Some(tokens);
-            }
-            if let Some((tokens, _)) = self.context_limit(provider, &model) {
-                caps.max_context_tokens = Some(tokens);
-            }
+        if self.live_list(provider).is_some()
+            && let Some((tokens, _)) = self.context_limit(provider, &model)
+        {
+            caps.max_context_tokens = Some(tokens);
         }
         caps
     }
@@ -406,13 +403,7 @@ mod tests {
         ));
 
         let caps = cat.capabilities_for("gemini", "gemini-3.8-flash");
-        assert_eq!(caps.max_output_tokens, Some(100_000));
         assert_eq!(caps.max_context_tokens, Some(2_000_000));
-        // An empty model is the default `flash@latest`, which the live list resolves to 3.9.
-        assert_eq!(
-            cat.capabilities_for("gemini", "").max_output_tokens,
-            Some(131_072)
-        );
     }
 
     #[test]

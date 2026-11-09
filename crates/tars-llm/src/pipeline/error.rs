@@ -22,7 +22,9 @@ pub enum LlmError {
     /// The provider's profile says it cannot serve the request, so it was not sent. It is
     /// permanent for this provider; another provider may serve it.
     #[error("provider cannot serve the request: {}", join_reasons(reasons))]
-    Incompatible { reasons: Vec<CompatibilityReason> },
+    Incompatible {
+        reasons: tars_types::NonEmpty<CompatibilityReason>,
+    },
 
     /// A budget layer refused the call before it was sent.
     #[error("budget exceeded")]
@@ -134,7 +136,9 @@ mod tests {
     fn each_chain_failure_keeps_its_kind_and_class() {
         let cases = [
             (
-                LlmError::Incompatible { reasons: vec![] },
+                LlmError::Incompatible {
+                    reasons: tars_types::NonEmpty::new(CompatibilityReason::VisionUnsupported, []),
+                },
                 LlmErrorKind::Incompatible,
                 ErrorClass::Permanent,
             ),
@@ -229,7 +233,9 @@ mod tests {
     fn a_refusal_of_the_chain_is_a_failed_call_the_model_reads() {
         for e in [
             LlmError::BudgetExceeded,
-            LlmError::Incompatible { reasons: vec![] },
+            LlmError::Incompatible {
+                reasons: tars_types::NonEmpty::new(CompatibilityReason::VisionUnsupported, []),
+            },
         ] {
             let reason = Reason::from(e);
             assert!(matches!(reason, Reason::CallFailed(_)), "{reason:?}");

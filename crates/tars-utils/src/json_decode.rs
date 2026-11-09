@@ -300,10 +300,10 @@ fn extract_tag_block<'a>(text: &'a str, tags: &[&str]) -> Option<&'a str> {
 fn clamp_ints_in_place(v: &mut Value) {
     match v {
         Value::Number(n) => {
-            if let Some(u) = n.as_u64() {
-                if u > i64::MAX as u64 {
-                    *n = serde_json::Number::from(i64::MAX);
-                }
+            if let Some(u) = n.as_u64()
+                && u > i64::MAX as u64
+            {
+                *n = serde_json::Number::from(i64::MAX);
             }
         }
         Value::Array(arr) => arr.iter_mut().for_each(clamp_ints_in_place),
@@ -415,12 +415,12 @@ pub fn salvage_json_array(raw: &str, array_key: Option<&str>) -> Vec<Value> {
                     break;
                 }
                 depth -= 1;
-                if depth == 0 {
-                    if let Some(s) = elem_start.take() {
-                        // Braces are ASCII, so `s..=i` is a valid char boundary.
-                        if let Ok(v) = serde_json::from_str::<Value>(&raw[s..=i]) {
-                            out.push(v);
-                        }
+                if depth == 0
+                    && let Some(s) = elem_start.take()
+                {
+                    // Braces are ASCII, so `s..=i` is a valid char boundary.
+                    if let Ok(v) = serde_json::from_str::<Value>(&raw[s..=i]) {
+                        out.push(v);
                     }
                 }
             }
@@ -437,10 +437,10 @@ pub fn salvage_json_array(raw: &str, array_key: Option<&str>) -> Vec<Value> {
 pub fn find_json_array_start(raw: &str, array_key: Option<&str>) -> Option<usize> {
     if let Some(key) = array_key {
         let search = format!("\"{}\"", key);
-        if let Some(fpos) = raw.find(&search) {
-            if let Some(rel) = raw[fpos..].find('[') {
-                return Some(fpos + rel + 1);
-            }
+        if let Some(fpos) = raw.find(&search)
+            && let Some(rel) = raw[fpos..].find('[')
+        {
+            return Some(fpos + rel + 1);
         }
     }
     let trimmed = raw.trim_start();
@@ -672,8 +672,16 @@ mod tests {
     #[test]
     fn chat_response_json_method_decodes_text() {
         let resp = ChatResponse {
+            actual_model: Some("m".into()),
             text: "here: {\"x\":1,\"y\":2}".into(),
-            ..Default::default()
+            thinking: String::new(),
+            tool_calls: Vec::new(),
+            stop_reason: tars_types::StopReason::EndTurn,
+            usage: None,
+            cache_hit: Default::default(),
+            degraded: Vec::new(),
+            validation_summary: Default::default(),
+            created: 0,
         };
         let p: Point = resp.json(StructuredOutputMode::None).unwrap();
         assert_eq!(p, Point { x: 1, y: 2 });

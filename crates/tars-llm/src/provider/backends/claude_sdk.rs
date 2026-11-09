@@ -6,9 +6,10 @@
 //! Concurrent requests share the child's stdin and stdout, one JSON object per line; each carries
 //! an `id`, and a reader task hands each reply to the call waiting on that id. The child is
 //! spawned on the first call and killed when the provider is dropped. A call that loses the child
-//! (its stdin write fails, or the child exits before replying) or times out drops the session, and
-//! the next call spawns a new child; a reply that carries the daemon's `error` keeps it, since the
-//! child is still there to answer the next call.
+//! (its stdin write fails, or the child exits before replying) or times out before its request is
+//! written drops the session, and the next call spawns a new child. A call that times out waiting
+//! for its reply, or gets a reply carrying the daemon's `error`, keeps it, since the child is still
+//! there to answer the next call.
 //!
 //! ```json
 //! stdin:  { "id": u64, "prompt": str, "system"?: str, "model"?: str, "max_turns": int,
@@ -31,6 +32,7 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
 
 use crate::ProviderError;
+use crate::provider::backends::cli::is_stripped_env;
 use crate::provider::error::{DaemonScriptError, IoOp, ParseProblem, RequestRefusal};
 use crate::provider::http_base::truncate;
 use tars_types::{
@@ -40,10 +42,6 @@ use tars_types::{
 
 use crate::provider::{LlmEventStream, LlmProvider};
 
-/// Bounds one call when the caller sets no deadline. It is a ceiling: one batched review of 264
-/// fixes across 154 files took over 300 s, while single-file calls finish well under that.
-const DEFAULT_TIMEOUT_SECS: u64 = 900;
-
 /// The calls waiting for a reply, by wire `id`. The reader removes an entry when its reply
 /// arrives; a call that fails or times out removes its own.
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<DaemonChatReply, ProviderError>>>>>;
@@ -52,7 +50,6 @@ pub struct ClaudeSdkProviderBuilder {
     id: ProviderId,
     executable: String,
     script_path: Option<String>,
-    default_model: Option<String>,
     timeout: Duration,
     capabilities: Option<ProviderProfile>,
 }
@@ -61,17 +58,15 @@ impl ClaudeSdkProviderBuilder {
     pub fn new(id: ProviderId) -> Self {
         Self {
             id,
-            executable: "node".into(),
+            executable: tars_config::providers::CLAUDE_SDK_EXECUTABLE.into(),
             script_path: None,
-            default_model: None,
-            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            timeout: Duration::from_secs(tars_config::providers::CLAUDE_SDK_TIMEOUT_SECS),
             capabilities: None,
         }
     }
 
     builder_setter!(executable: into String);
     builder_setter!(script_path: into_opt String);
-    builder_setter!(default_model: into_opt String);
     builder_setter!(timeout: Duration);
     builder_setter!(capabilities: opt ProviderProfile);
 
@@ -82,7 +77,6 @@ impl ClaudeSdkProviderBuilder {
             id: self.id,
             executable: self.executable,
             script_path: self.script_path,
-            default_model: self.default_model,
             timeout: self.timeout,
             capabilities: caps,
             session: Mutex::new(None),
@@ -99,7 +93,6 @@ pub struct ClaudeSdkProvider {
     id: ProviderId,
     executable: String,
     script_path: Option<String>,
-    default_model: Option<String>,
     timeout: Duration,
     capabilities: ProviderProfile,
     /// The running child; `None` until the first call, and again after a call lost it.
@@ -140,11 +133,10 @@ impl LlmProvider for ClaudeSdkProvider {
             resp.result_subtype.as_deref().map(map_stop_reason),
             resp.usage.as_ref().map(normalize_usage),
         );
-        let actual_model = resp
-            .model
-            .unwrap_or_else(|| self.default_model.clone().unwrap_or_default());
-        let mut events: Vec<Result<ChatEvent, ProviderError>> =
-            vec![Ok(ChatEvent::started(actual_model))];
+        let mut events: Vec<Result<ChatEvent, ProviderError>> = vec![Ok(ChatEvent::Started {
+            actual_model: resp.model,
+            cache_hit: tars_types::CacheHitInfo::default(),
+        })];
         if !resp.thinking.is_empty() {
             events.push(Ok(ChatEvent::ThinkingDelta {
                 text: resp.thinking,
@@ -186,7 +178,7 @@ impl ClaudeSdkProvider {
             max_turns: 7,
             schema: req.structured_output.as_ref().map(|s| s.schema()),
             // Only `Off` turns thinking off; a budget is not passed on.
-            thinking: req.thinking.is_off().then_some("off"),
+            thinking: (req.thinking == Some(tars_types::ThinkingMode::Off)).then_some("off"),
         };
         let mut line = serde_json::to_string(&body).map_err(ProviderError::Encode)?;
         line.push('\n');
@@ -195,24 +187,26 @@ impl ClaudeSdkProvider {
         // draining stdin, the pipe fills, and `write_all` blocks (a call once hung 40 minutes
         // there). The caller's deadline wins over the configured timeout.
         let budget = ctx.call_budget(self.timeout);
-        let exchange = match tokio::time::timeout(budget, exchange(&session, &line, rx)).await {
-            Ok(exchange) => exchange,
-            Err(_) => Exchange::TimedOut,
-        };
-        if !keeps_session(&exchange) {
+        let deadline = tokio::time::Instant::now() + budget;
+        let exchange = exchange(&session, &line, rx, deadline).await;
+        if !matches!(exchange, Exchange::Replied(_)) {
             session.pending.lock().await.remove(&id);
+        }
+        if !keeps_session(&exchange) {
             self.clear_session(&session).await;
         }
+        let timed_out = |phase: &str| ProviderError::TimedOut {
+            budget,
+            detail: format!(
+                "claude_sdk: timed out {phase} (model={model}, prompt_chars={})",
+                prompt.len()
+            ),
+        };
         match exchange {
             Exchange::Replied(reply) => reply,
             Exchange::Lost(e) => Err(e),
-            Exchange::TimedOut => Err(ProviderError::TimedOut {
-                budget,
-                detail: format!(
-                    "claude_sdk: timed out in request/reply round-trip (model={model}, prompt_chars={})",
-                    prompt.len()
-                ),
-            }),
+            Exchange::TimedOutWriting => Err(timed_out("writing the request")),
+            Exchange::TimedOutWaiting => Err(timed_out("waiting for the reply")),
         }
     }
 
@@ -249,17 +243,11 @@ impl ClaudeSdkProvider {
             })
         })?;
 
-        let mut cmd = Command::new(&self.executable);
-        cmd.args([script, "--stdio"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            // The daemon's ready line and SDK warnings reach the operator's terminal.
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        // Its own process group, so the signal-time reaper kills the daemon and the claude
-        // children it spawns together; a SIGINT or SIGTERM to tars runs no `kill_on_drop`.
-        #[cfg(unix)]
-        cmd.process_group(0);
+        let mut cmd = daemon_command(
+            &self.executable,
+            script,
+            std::env::vars_os().map(|(name, _)| name),
+        );
         let mut child = cmd.spawn().map_err(|source| ProviderError::Spawn {
             program: self.executable.clone().into(),
             source,
@@ -317,50 +305,86 @@ impl ClaudeSdkProvider {
     }
 }
 
+/// Returns the daemon's command: `script --stdio` under `executable`, piped, in its own process
+/// group, with every variable of `inherited` that would make the SDK bill an API account instead
+/// of the subscription removed, the same ones the claude CLI is never given.
+fn daemon_command(
+    executable: &str,
+    script: &str,
+    inherited: impl Iterator<Item = std::ffi::OsString>,
+) -> Command {
+    let mut cmd = Command::new(executable);
+    cmd.args([script, "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        // The daemon's ready line and SDK warnings reach the operator's terminal.
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    for name in inherited.filter(|name| name.to_str().is_some_and(is_stripped_env)) {
+        cmd.env_remove(name);
+    }
+    // Its own process group, so the signal-time reaper kills the daemon and the claude
+    // children it spawns together; a SIGINT or SIGTERM to tars runs no `kill_on_drop`.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd
+}
+
 /// How one call's exchange with the child ended.
+#[derive(Debug)]
 enum Exchange {
     /// The daemon answered, with its answer or its own error.
     Replied(Result<DaemonChatReply, ProviderError>),
     /// The child is gone: the stdin write failed, or it exited before replying.
     Lost(ProviderError),
-    /// The call's budget ran out, possibly mid-write.
-    TimedOut,
+    /// The call's budget ran out before its request line was written whole.
+    TimedOutWriting,
+    /// The call's budget ran out after its request line was written, while the daemon worked.
+    TimedOutWaiting,
 }
 
-/// Returns whether the session survives an exchange: only a reply shows the child still answers.
-/// A daemon that stopped draining stdin would hang every later call too, so a timeout drops it.
+/// Returns whether the session survives an exchange. A daemon that stopped draining stdin would
+/// hang every later call too, and a half-written line corrupts the next one, so a timeout while
+/// writing drops it. A timeout while waiting is this call's deadline only: the daemon answers
+/// requests concurrently and drops a reply whose caller left.
 fn keeps_session(exchange: &Exchange) -> bool {
     match exchange {
-        Exchange::Replied(_) => true,
-        Exchange::Lost(_) | Exchange::TimedOut => false,
+        Exchange::Replied(_) | Exchange::TimedOutWaiting => true,
+        Exchange::Lost(_) | Exchange::TimedOutWriting => false,
     }
 }
 
-/// Writes one request line and waits for its reply.
+/// Writes one request line and waits for its reply, both before `deadline`.
 async fn exchange(
     session: &Session,
     line: &str,
     rx: oneshot::Receiver<Result<DaemonChatReply, ProviderError>>,
+    deadline: tokio::time::Instant,
 ) -> Exchange {
-    {
+    let write = async {
         let mut stdin = session.stdin.lock().await;
-        if let Err(source) = stdin.write_all(line.as_bytes()).await {
-            return Exchange::Lost(ProviderError::Io {
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|source| ProviderError::Io {
                 op: IoOp::WriteChildStdin,
                 source,
-            });
-        }
-        if let Err(source) = stdin.flush().await {
-            return Exchange::Lost(ProviderError::Io {
-                op: IoOp::FlushChildStdin,
-                source,
-            });
-        }
+            })?;
+        stdin.flush().await.map_err(|source| ProviderError::Io {
+            op: IoOp::FlushChildStdin,
+            source,
+        })
+    };
+    match tokio::time::timeout_at(deadline, write).await {
+        Err(_) => return Exchange::TimedOutWriting,
+        Ok(Err(e)) => return Exchange::Lost(e),
+        Ok(Ok(())) => {}
     }
-    match rx.await {
-        Ok(reply) => Exchange::Replied(reply),
+    match tokio::time::timeout_at(deadline, rx).await {
+        Err(_) => Exchange::TimedOutWaiting,
+        Ok(Ok(reply)) => Exchange::Replied(reply),
         // The reader drops every waiting sender when the child's stdout ends.
-        Err(_) => Exchange::Lost(ProviderError::DaemonExited),
+        Ok(Err(_)) => Exchange::Lost(ProviderError::DaemonExited),
     }
 }
 
@@ -407,30 +431,29 @@ struct Session {
     _reaper_guard: Option<crate::provider::child_reaper::ReaperGuard>,
 }
 
-/// Returns the first daemon script that exists: `$TARS_CLAUDE_SDK_SCRIPT`, then
-/// `tools/claude-daemon/server.mjs` in the working directory or any parent, then
-/// `~/.tars/claude-daemon/server.mjs` (where `tars install-claude-daemon` puts it).
+/// Returns the first daemon script that exists among [`default_script_paths`] of the working
+/// directory and `$HOME`.
 fn find_default_script_path() -> Option<std::path::PathBuf> {
-    if let Some(pb) = tars_types::env::claude_sdk_script_override()
-        && pb.exists()
-    {
-        return Some(pb);
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        for ancestor in cwd.ancestors() {
-            let candidate = ancestor.join("tools/claude-daemon/server.mjs");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    if let Some(home) = tars_types::env::home_dir() {
-        let candidate = home.join(".tars/claude-daemon/server.mjs");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    let cwd = std::env::current_dir().ok();
+    let home = tars_types::env::home_dir();
+    default_script_paths(cwd.as_deref(), home.as_deref())
+        .into_iter()
+        .find(|candidate| candidate.exists())
+}
+
+/// Returns where an unconfigured daemon script is looked for, in order:
+/// `tools/claude-daemon/server.mjs` in `cwd` and each of its ancestors, then
+/// `<home>/.tars/claude-daemon/server.mjs`, where `tars install-claude-daemon` puts it.
+fn default_script_paths(
+    cwd: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let in_checkout = cwd
+        .into_iter()
+        .flat_map(std::path::Path::ancestors)
+        .map(|dir| dir.join("tools/claude-daemon/server.mjs"));
+    let installed = home.map(|home| home.join(".tars/claude-daemon/server.mjs"));
+    in_checkout.chain(installed).collect()
 }
 
 /// Returns the messages as one prompt, each under a `[role]` header; a message with no content
@@ -551,13 +574,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_unconfigured_daemon_script_is_looked_for_only_in_the_checkout_and_home() {
+        let found = default_script_paths(
+            Some(std::path::Path::new("/w/repo")),
+            Some(std::path::Path::new("/h")),
+        );
+
+        assert_eq!(
+            found,
+            [
+                "/w/repo/tools/claude-daemon/server.mjs",
+                "/w/tools/claude-daemon/server.mjs",
+                "/tools/claude-daemon/server.mjs",
+                "/h/.tars/claude-daemon/server.mjs",
+            ]
+            .map(std::path::PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn a_builder_and_a_block_that_set_nothing_run_the_same_daemon_with_the_same_timeout() {
+        let cfg = tars_config::Config::from_toml(
+            "[providers.sdk]\ntype = \"claude_sdk\"\ndefault_model = \"claude-sonnet-4-5\"\n",
+        )
+        .unwrap();
+        let Some(tars_config::ProviderConfig::ClaudeSdk {
+            executable,
+            timeout_secs,
+            ..
+        }) = cfg.providers().get(&ProviderId::new("sdk"))
+        else {
+            panic!("the block is a claude_sdk block");
+        };
+
+        let built = ClaudeSdkProviderBuilder::new(ProviderId::new("sdk"));
+
+        assert_eq!(built.timeout, Duration::from_secs(*timeout_secs));
+        assert_eq!(&built.executable, executable);
+    }
+
+    #[test]
     fn a_daemon_error_reply_keeps_the_session_and_a_lost_child_drops_it() {
         let daemon_error = Exchange::Replied(Err(ProviderError::DaemonFailed {
             message: "rate limited".into(),
         }));
         assert!(keeps_session(&daemon_error));
         assert!(!keeps_session(&Exchange::Lost(ProviderError::DaemonExited)));
-        assert!(!keeps_session(&Exchange::TimedOut));
+        assert!(!keeps_session(&Exchange::TimedOutWriting));
     }
 
     #[test]
@@ -628,11 +691,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "spawns node + uses live Anthropic OAuth"]
     async fn smoke_stdio_roundtrip() {
-        // Finds the script by the default search; outside the checkout, set
-        // `TARS_CLAUDE_SDK_SCRIPT`.
-        let p = ClaudeSdkProviderBuilder::new(ProviderId::new("claude_sdk_smoke"))
-            .default_model("claude-sonnet-4-5")
-            .build();
+        // Finds the script by the default search, so it runs inside the checkout.
+        let p = ClaudeSdkProviderBuilder::new(ProviderId::new("claude_sdk_smoke")).build();
         let req = ChatRequest::user("Reply with only the literal word: pong");
         let resp = p
             .clone()
@@ -645,15 +705,14 @@ mod tests {
             "expected reply to contain 'pong', got: {:?}",
             resp.text
         );
-        assert!(resp.usage.output_tokens >= 1);
+        assert!(resp.usage.unwrap().output_tokens >= 1);
     }
 
     #[tokio::test]
     #[ignore = "spawns node + uses live Anthropic OAuth"]
     async fn smoke_stdio_concurrent_requests() {
-        let p = ClaudeSdkProviderBuilder::new(ProviderId::new("claude_sdk_smoke_concurrent"))
-            .default_model("claude-sonnet-4-5")
-            .build();
+        let p =
+            ClaudeSdkProviderBuilder::new(ProviderId::new("claude_sdk_smoke_concurrent")).build();
         let req_a = ChatRequest::user("Reply with only: alpha");
         let req_b = ChatRequest::user("Reply with only: beta");
         let p2 = p.clone();
@@ -686,7 +745,6 @@ mod tests {
             .unwrap();
         }
         let p = ClaudeSdkProviderBuilder::new(ProviderId::new("stuck_daemon_test"))
-            .default_model("m")
             .script_path(script.to_str().unwrap().to_string())
             .timeout(Duration::from_millis(800))
             .build();
@@ -703,5 +761,29 @@ mod tests {
             elapsed < Duration::from_secs(8),
             "must time out near the 800ms budget, not hang; took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn only_a_timeout_before_the_request_is_written_drops_the_session() {
+        assert!(keeps_session(&Exchange::TimedOutWaiting));
+        assert!(!keeps_session(&Exchange::TimedOutWriting));
+    }
+
+    #[test]
+    fn the_daemon_is_not_given_the_variables_that_switch_claude_to_api_billing() {
+        let cmd = daemon_command(
+            "node",
+            "server.mjs",
+            ["Anthropic_Api_Key", "CLAUDE_CODE_USE_BEDROCK", "PATH"]
+                .into_iter()
+                .map(std::ffi::OsString::from),
+        );
+        let removed: Vec<_> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_os_string())
+            .collect();
+        assert_eq!(removed, ["Anthropic_Api_Key", "CLAUDE_CODE_USE_BEDROCK"]);
     }
 }

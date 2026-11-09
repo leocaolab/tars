@@ -5,7 +5,7 @@ use std::path::Path;
 
 use tars_config::model_library::{Failure, LastQuery, Listing, ProviderEntry};
 
-use super::{Finding, ListingRow, ProviderRefresh, STALE_AFTER_DAYS};
+use super::{Finding, ListingRow, Previous, ProviderRefresh, STALE_AFTER_DAYS};
 
 pub(super) fn print_update_human(path: &Path, changes: &[ProviderRefresh], findings: &[Finding]) {
     println!("Updated model library: {}\n", path.display());
@@ -63,9 +63,15 @@ pub(super) fn print_update_human(path: &Path, changes: &[ProviderRefresh], findi
         }
     }
 
-    let (resolved, notes): (Vec<&Finding>, Vec<&Finding>) = findings
-        .iter()
-        .partition(|f| matches!(f, Finding::DefaultResolved { previous: None, .. }));
+    let (resolved, notes): (Vec<&Finding>, Vec<&Finding>) = findings.iter().partition(|f| {
+        matches!(
+            f,
+            Finding::DefaultResolved {
+                previous: Previous::Unchanged,
+                ..
+            }
+        )
+    });
     if !resolved.is_empty() {
         println!("\nDefaults:");
         for f in resolved {

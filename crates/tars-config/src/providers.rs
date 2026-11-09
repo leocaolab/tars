@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use tars_types::{Auth, HttpOverrides, ProviderId};
+use tars_types::{Auth, HttpOverrides, ProviderId, ToolUse};
 
 use crate::error::{ValidationError, ValidationProblem};
 
@@ -237,7 +237,7 @@ pub enum ProviderConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<ClaudeCliEffortConfig>,
         /// Sets `--exclude-dynamic-system-prompt-sections`, on by default for prompt-cache reuse.
-        #[serde(default = "default_true")]
+        #[serde(default = "default_exclude_dynamic_sections")]
         exclude_dynamic_sections: bool,
         /// Lists raw argv tokens appended to every call.
         #[serde(default)]
@@ -255,9 +255,8 @@ pub enum ProviderConfig {
             deserialize_with = "de_trimmed_string"
         )]
         executable: String,
-        /// Points at `server.mjs`. When unset the backend tries `$TARS_CLAUDE_SDK_SCRIPT`, then
-        /// `tools/claude-daemon/server.mjs` in the working directory or an ancestor, then
-        /// `~/.tars/claude-daemon/server.mjs`.
+        /// Points at `server.mjs`. When unset the backend tries `tools/claude-daemon/server.mjs` in
+        /// the working directory or an ancestor, then `~/.tars/claude-daemon/server.mjs`.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -265,7 +264,7 @@ pub enum ProviderConfig {
         )]
         script_path: Option<String>,
         /// Bounds the wait for one reply, in seconds; the child itself stays up across calls.
-        #[serde(default = "default_cli_timeout_secs")]
+        #[serde(default = "default_claude_sdk_timeout_secs")]
         timeout_secs: u64,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
@@ -288,7 +287,7 @@ pub enum ProviderConfig {
         sandbox: CodexSandboxConfig,
         /// Passes `--skip-git-repo-check`, on by default because tars often runs codex outside a
         /// git repository, which codex otherwise refuses.
-        #[serde(default = "default_true")]
+        #[serde(default = "default_skip_git_repo_check")]
         skip_git_repo_check: bool,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
@@ -352,12 +351,44 @@ fn default_cassette_model() -> String {
     "cassette".into()
 }
 
+/// The program the `claude_cli` backend runs when its block names none, looked up in `PATH`.
+pub const CLAUDE_CLI_EXECUTABLE: &str = "claude";
+
+/// The Node-compatible runtime the `claude_sdk` backend hosts its daemon script in when its block
+/// names none, looked up in `PATH`.
+pub const CLAUDE_SDK_EXECUTABLE: &str = "node";
+
+/// The program the `codex_cli` backend runs when its block names none, looked up in `PATH`.
+pub const CODEX_CLI_EXECUTABLE: &str = "codex";
+
+/// Bounds one call of the `claude_cli`, `opencode` and `antigravity` backends when their block
+/// sets no `timeout_secs`, in seconds.
+pub const CLI_TIMEOUT_SECS: u64 = 300;
+
+/// Bounds the wait for one `claude_sdk` reply when its block sets no `timeout_secs`, in seconds.
+/// It is longer than [`CLI_TIMEOUT_SECS`] because one batched review of 264 fixes across 154 files
+/// took over 300 s; single-file calls finish well under that.
+pub const CLAUDE_SDK_TIMEOUT_SECS: u64 = 900;
+
+/// Bounds one `codex_cli` call when its block sets no `timeout_secs`, in seconds. It is longer
+/// than [`CLI_TIMEOUT_SECS`] because `codex exec` runs a whole agent loop.
+pub const CODEX_CLI_TIMEOUT_SECS: u64 = 600;
+
+/// Whether `claude_cli` passes `--exclude-dynamic-system-prompt-sections` when its block does not
+/// say: without the per-machine cwd, environment and git status, the system prompt caches across
+/// machines.
+pub const CLAUDE_CLI_EXCLUDE_DYNAMIC_SECTIONS: bool = true;
+
+/// Whether `codex_cli` passes `--skip-git-repo-check` when its block does not say: tars often runs
+/// codex outside a git repository, which codex otherwise refuses with an unclear error.
+pub const CODEX_CLI_SKIP_GIT_REPO_CHECK: bool = true;
+
 fn default_claude_executable() -> String {
-    "claude".into()
+    CLAUDE_CLI_EXECUTABLE.into()
 }
 
 fn default_codex_executable() -> String {
-    "codex".into()
+    CODEX_CLI_EXECUTABLE.into()
 }
 
 fn default_opencode_executable() -> String {
@@ -369,19 +400,27 @@ fn default_antigravity_executable() -> String {
 }
 
 fn default_cli_timeout_secs() -> u64 {
-    300
+    CLI_TIMEOUT_SECS
+}
+
+fn default_claude_sdk_timeout_secs() -> u64 {
+    CLAUDE_SDK_TIMEOUT_SECS
 }
 
 fn default_codex_timeout_secs() -> u64 {
-    600
+    CODEX_CLI_TIMEOUT_SECS
 }
 
 fn default_node_executable() -> String {
-    "node".into()
+    CLAUDE_SDK_EXECUTABLE.into()
 }
 
-fn default_true() -> bool {
-    true
+fn default_exclude_dynamic_sections() -> bool {
+    CLAUDE_CLI_EXCLUDE_DYNAMIC_SECTIONS
+}
+
+fn default_skip_git_repo_check() -> bool {
+    CODEX_CLI_SKIP_GIT_REPO_CHECK
 }
 
 /// The TOML spelling of `tars_llm`'s codex `SandboxMode`; the registry converts it.
@@ -522,25 +561,26 @@ impl CapabilitiesOverrides {
         if let Some(n) = self.max_context_tokens {
             base.max_context_tokens = Some(n);
         }
-        if let Some(n) = self.max_output_tokens {
-            base.max_output_tokens = Some(n);
-        }
         if let Some(b) = self.supports_tool_use {
-            base.supports_tool_use = b.into();
-            if !b {
-                base.supports_parallel_tool_calls = false;
-                if base.supports_structured_output
-                    == Some(tars_types::StructuredOutputMode::ToolUseEmulation)
-                {
-                    base.supports_structured_output = Some(tars_types::StructuredOutputMode::None);
+            base.tool_use = match (b, base.tool_use) {
+                (true, ToolUse::Supported { parallel }) => ToolUse::Supported { parallel },
+                (true, ToolUse::Unsupported | ToolUse::Unknown) => {
+                    ToolUse::Supported { parallel: false }
                 }
+                (false, _) => ToolUse::Unsupported,
+            };
+            if !b
+                && base.supports_structured_output
+                    == Some(tars_types::StructuredOutputMode::ToolUseEmulation)
+            {
+                base.supports_structured_output = Some(tars_types::StructuredOutputMode::None);
             }
         }
         if let Some(b) = self.supports_thinking {
             base.supports_thinking = b.into();
         }
         if let Some(b) = self.supports_vision {
-            base.supports_vision = b.into();
+            base.modalities_in.image = b.into();
         }
         if let Some(mode) = self.supports_structured_output {
             base.supports_structured_output = Some(mode.into());
@@ -978,13 +1018,13 @@ impl ProviderConfig {
                     ));
                 }
                 // An empty path would stop the backend's search for the script.
-                if let Some(sp) = script_path {
-                    if sp.trim().is_empty() {
-                        sink.push(ValidationError::new(
-                            key("script_path"),
-                            ValidationProblem::EmptyScriptPath,
-                        ));
-                    }
+                if let Some(sp) = script_path
+                    && sp.trim().is_empty()
+                {
+                    sink.push(ValidationError::new(
+                        key("script_path"),
+                        ValidationProblem::EmptyScriptPath,
+                    ));
                 }
                 check_timeout(*timeout_secs, sink);
                 check_default_model(default_model, sink);
@@ -1040,13 +1080,12 @@ impl ProvidersConfig {
                 record_from: Some(source),
                 ..
             } = cfg
+                && let Some(problem) = record_source_problem(source, self.providers.get(source))
             {
-                if let Some(problem) = record_source_problem(source, self.providers.get(source)) {
-                    sink.push(ValidationError::new(
-                        format!("providers.{id}.record_from"),
-                        problem,
-                    ));
-                }
+                sink.push(ValidationError::new(
+                    format!("providers.{id}.record_from"),
+                    problem,
+                ));
             }
         }
     }
@@ -1247,7 +1286,6 @@ mod tests {
         let mut base =
             tars_types::ProviderProfile::text_only_baseline(tars_types::Pricing::default());
         base.max_context_tokens = Some(4096);
-        base.max_output_tokens = Some(1024);
 
         let overrides = CapabilitiesOverrides {
             max_context_tokens: Some(262144),
@@ -1255,7 +1293,6 @@ mod tests {
         };
         let p = overrides.apply_to(base);
         assert_eq!(p.max_context_tokens, Some(262144));
-        assert_eq!(p.max_output_tokens, Some(1024));
     }
 
     #[test]
@@ -1275,16 +1312,15 @@ mod tests {
             panic!("wrong variant");
         };
         let p = capabilities.apply_to(tars_types::ProviderProfile::undescribed_http());
-        assert_eq!(p.supports_tool_use, tars_types::Support::Supported);
-        assert_eq!(p.supports_vision, tars_types::Support::Unsupported);
+        assert_eq!(p.tool_use.support(), tars_types::Support::Supported);
+        assert_eq!(p.modalities_in.image, tars_types::Support::Unsupported);
         assert_eq!(p.supports_thinking, tars_types::Support::Unknown);
     }
 
     #[test]
     fn tool_use_declared_off_turns_off_parallel_calls_and_tool_use_emulation() {
         let mut parallel = tars_types::ProviderProfile::undescribed_http();
-        parallel.supports_tool_use = tars_types::Support::Supported;
-        parallel.supports_parallel_tool_calls = true;
+        parallel.tool_use = ToolUse::Supported { parallel: true };
         parallel.supports_structured_output =
             Some(tars_types::StructuredOutputMode::ToolUseEmulation);
         let no_tools = CapabilitiesOverrides {
@@ -1292,19 +1328,18 @@ mod tests {
             ..CapabilitiesOverrides::default()
         };
         let off = no_tools.apply_to(parallel.clone());
-        assert!(!off.supports_parallel_tool_calls);
+        assert!(!off.tool_use.parallel());
         assert_eq!(
             off.supports_structured_output,
             Some(tars_types::StructuredOutputMode::None)
         );
-        assert!(off.validate().is_ok());
 
         let with_tools = CapabilitiesOverrides {
             supports_tool_use: Some(true),
             ..CapabilitiesOverrides::default()
         };
         let on = with_tools.apply_to(parallel);
-        assert!(on.supports_parallel_tool_calls);
+        assert!(on.tool_use.parallel());
         assert_eq!(
             on.supports_structured_output,
             Some(tars_types::StructuredOutputMode::ToolUseEmulation)

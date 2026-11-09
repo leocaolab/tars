@@ -1,7 +1,7 @@
 # tars — one way to call a language model
 
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
-[![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](./rust-toolchain.toml)
+[![rust](https://img.shields.io/badge/rust-1.99%2B-orange.svg)](./rust-toolchain.toml)
 
 A Rust library for making LLM calls, with the parts you end up writing yourself
 either way: a dozen providers behind one trait, a middleware pipeline, typed
@@ -60,7 +60,7 @@ for "did this change actually help", metamorphic relations for domains with no
 ground truth, and tool-trajectory scoring.
 
 **Node bindings** (napi-rs), and a CLI whose subcommands all *inspect*:
-`probe`, `bench`, `eval`, `models`, `providers`, `init`, `events`.
+`probe`, `bench`, `eval`, `models`, `providers`, `init`, `events`, `config`.
 
 ## Quick start
 

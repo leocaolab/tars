@@ -111,7 +111,7 @@ async fn status_translates_in_progress_with_counts() {
             total,
             eta: _,
         } => {
-            assert_eq!(processed, 32);
+            assert_eq!(processed, Some(32));
             assert_eq!(total, Some(100));
         }
         other => panic!("expected InProgress, got {other:?}"),
@@ -233,8 +233,8 @@ async fn results_downloads_output_file_and_parses_jsonl() {
     assert_eq!(results[0].item_id.as_str(), "draft-1");
     let succ = results[0].result.as_ref().expect("draft-1 should succeed");
     assert!(succ.text.contains("hello batch"));
-    assert_eq!(succ.usage.input_tokens, 10);
-    assert_eq!(succ.usage.output_tokens, 2);
+    assert_eq!(succ.usage.unwrap().input_tokens, 10);
+    assert_eq!(succ.usage.unwrap().output_tokens, 2);
 
     assert_eq!(results[1].item_id.as_str(), "draft-2");
     let err = results[1].result.as_ref().expect_err("draft-2 should fail");

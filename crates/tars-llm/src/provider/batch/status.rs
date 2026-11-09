@@ -16,11 +16,11 @@ use crate::ProviderError;
 pub enum BatchStatus {
     /// Submitted and accepted; not yet started processing.
     Submitted,
-    /// The vendor is processing. `processed` is 0 and `total` is `None` when the vendor does not
+    /// The vendor is processing. `processed` and `total` are `None` when the vendor does not
     /// report them; OpenAI reports them only in some states.
     InProgress {
         #[serde(default)]
-        processed: u32,
+        processed: Option<u32>,
         #[serde(default)]
         total: Option<u32>,
         /// When the vendor estimates the job will finish; `None` when it does not say.
@@ -78,7 +78,7 @@ mod tests {
         assert!(!BatchStatus::Submitted.is_terminal());
         assert!(
             !BatchStatus::InProgress {
-                processed: 1,
+                processed: Some(1),
                 total: Some(10),
                 eta: None
             }
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn serde_roundtrip_in_progress() {
         let s = BatchStatus::InProgress {
-            processed: 42,
+            processed: Some(42),
             total: Some(100),
             eta: None,
         };

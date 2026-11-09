@@ -1,5 +1,10 @@
-//! Loads one TOML file into a [`Config`], merges the built-in providers under it and validates
-//! the result. There is no reload: a loaded config does not change.
+//! Loads the config files into a [`Config`], merges the built-in providers under them and
+//! validates the result. There is no reload: a loaded config does not change.
+//!
+//! The files are layers: an optional system file the platform names, then the user's
+//! `<home>/config.toml`. A provider, a role or the `[sandbox]` table in a later layer replaces the
+//! earlier one whole. The `[llm]` operator sections are not read here: they go to
+//! [`OperatorLayers`] for a composition root to take.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -9,6 +14,7 @@ use tars_types::ProviderId;
 
 use crate::builtin::merge_builtin_with_user;
 use crate::error::{ConfigError, ValidationError, ValidationErrors, ValidationProblem};
+use crate::operator::{FileLayer, OperatorLayers};
 use crate::providers::ProvidersConfig;
 use crate::roles::RoleConfig;
 use crate::sandbox::SandboxConfig;
@@ -21,9 +27,9 @@ pub struct Config {
     providers: ProvidersConfig,
     roles: HashMap<String, RoleConfig>,
     sandbox: Option<SandboxConfig>,
-    /// Holds the provider ids the user's TOML declared, before the built-ins were merged in. With
-    /// the built-ins always present, `tars run` without `--provider` picks from this set; counting
-    /// the built-ins would make every config ambiguous.
+    /// Holds the provider ids the files declared, before the built-ins were merged in. With the
+    /// built-ins always present, `tars run` without `--provider` picks from this set; counting the
+    /// built-ins would make every config ambiguous.
     user_provider_ids: HashSet<ProviderId>,
     store_dir: Option<PathBuf>,
 }
@@ -45,6 +51,33 @@ struct ConfigFile {
     roles: HashMap<String, RoleConfig>,
     #[serde(default)]
     sandbox: Option<SandboxConfig>,
+    /// Holds the `[llm.<section>]` operator sections, whose fields only their owner knows.
+    #[serde(default)]
+    llm: Option<toml::Table>,
+}
+
+/// The files one config is read from.
+#[derive(Clone, Debug)]
+pub struct LayerPaths {
+    /// The system layer, read only when a path is given; tars does not look for one.
+    pub system: Option<PathBuf>,
+    /// The user layer, normally `<home>/config.toml`; `None` reads no user layer. A named file may
+    /// be missing only when `system` is given.
+    pub user: Option<PathBuf>,
+}
+
+/// A config read from its layers, with the operator sections not yet taken.
+#[derive(Debug)]
+pub struct LayeredConfig {
+    pub config: Config,
+    pub operator: OperatorLayers,
+}
+
+/// One file as written, with the layer it was read as.
+struct LayerFile {
+    layer: FileLayer,
+    path: PathBuf,
+    file: ConfigFile,
 }
 
 impl Config {
@@ -107,7 +140,7 @@ impl Config {
         }
     }
 
-    /// Returns the providers the user's TOML declared, without the merged-in built-ins.
+    /// Returns the providers the files declared, without the merged-in built-ins.
     pub fn user_declared(&self) -> impl Iterator<Item = (&ProviderId, &crate::ProviderConfig)> {
         self.providers
             .iter()
@@ -116,7 +149,37 @@ impl Config {
 }
 
 impl Config {
-    /// Reads, merges and validates the TOML file at `path`.
+    /// Reads, merges and validates the layers `paths` names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Io`] when a file cannot be read (the user file may be missing only
+    /// when a system file is given), [`ConfigError::Parse`] for the first file that is not a
+    /// config, and [`ConfigError::ValidationFailed`] with every broken rule of the merged config.
+    pub fn load_layers(paths: &LayerPaths) -> Result<LayeredConfig, ConfigError> {
+        let system = paths
+            .system
+            .as_ref()
+            .map(|path| read_layer(FileLayer::System, path))
+            .transpose()?;
+        let user = match &paths.user {
+            None => None,
+            Some(path) => match std::fs::read_to_string(path) {
+                Ok(text) => Some(parse_layer(FileLayer::User, &text, path.clone())?),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && system.is_some() => None,
+                Err(source) => {
+                    return Err(ConfigError::Io {
+                        path: path.clone(),
+                        source,
+                    });
+                }
+            },
+        };
+        assemble(system.into_iter().chain(user).collect())
+    }
+
+    /// Reads, merges and validates the one TOML file at `path`, for a caller that takes no
+    /// operator section.
     ///
     /// # Errors
     ///
@@ -124,44 +187,83 @@ impl Config {
     /// returns otherwise, with `path` in a parse error.
     pub fn load_file(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
         let path = path.as_ref().to_path_buf();
-        let raw = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        Self::parse(&raw, path)
+        let layer = read_layer(FileLayer::User, &path)?;
+        without_operator(assemble(vec![layer])?)
     }
 
-    /// Parses TOML text, lays the built-in providers under it and validates the result.
+    /// Parses TOML text, lays the built-in providers under it and validates the result, for a
+    /// caller that takes no operator section.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Parse`] for text that is not a config, and
-    /// [`ConfigError::ValidationFailed`] with every broken rule otherwise.
+    /// Returns [`ConfigError::Parse`] for text that is not a config,
+    /// [`ConfigError::ValidationFailed`] with every broken rule, and [`ConfigError::Operator`]
+    /// when the text sets an operator section, which nobody would read.
     pub fn from_toml(text: &str) -> Result<Config, ConfigError> {
-        Self::parse(text, PathBuf::from("<inline>"))
-    }
-
-    fn parse(text: &str, path: PathBuf) -> Result<Config, ConfigError> {
-        let file: ConfigFile = toml::from_str(text).map_err(|source| ConfigError::Parse {
-            path,
-            source: Box::new(source),
-        })?;
-        let cfg = with_builtins(file);
-        cfg.validate()
-            .map_err(|errors| ConfigError::ValidationFailed { errors })?;
-        Ok(cfg)
+        let layer = parse_layer(FileLayer::User, text, PathBuf::from("<inline>"))?;
+        without_operator(assemble(vec![layer])?)
     }
 }
 
-/// Lays the built-in providers under the user's, the user's entry winning on the same id, and
-/// records which ids the user declared.
-fn with_builtins(file: ConfigFile) -> Config {
-    let user = file.providers.providers;
-    let user_provider_ids = user.keys().cloned().collect();
+fn read_layer(layer: FileLayer, path: &Path) -> Result<LayerFile, ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    parse_layer(layer, &text, path.to_path_buf())
+}
+
+fn parse_layer(layer: FileLayer, text: &str, path: PathBuf) -> Result<LayerFile, ConfigError> {
+    match toml::from_str(text) {
+        Ok(file) => Ok(LayerFile { layer, path, file }),
+        Err(source) => Err(ConfigError::Parse {
+            path,
+            source: Box::new(source),
+        }),
+    }
+}
+
+/// Returns the config of a single-file load, which has no root to take operator sections: a
+/// section the file sets is refused, not ignored.
+fn without_operator(layered: LayeredConfig) -> Result<Config, ConfigError> {
+    layered.operator.finish().map_err(ConfigError::Operator)?;
+    Ok(layered.config)
+}
+
+/// Merges `files`, given in override order, over the built-in providers and validates the result.
+fn assemble(files: Vec<LayerFile>) -> Result<LayeredConfig, ConfigError> {
+    let mut declared = HashMap::new();
+    let mut roles = HashMap::new();
+    let mut sandbox = None;
+    let mut operator = Vec::with_capacity(files.len());
+    for LayerFile { layer, path, file } in files {
+        declared.extend(file.providers.providers);
+        roles.extend(file.roles);
+        sandbox = file.sandbox.or(sandbox);
+        operator.push((layer, path, file.llm));
+    }
+    let config = with_builtins(declared, roles, sandbox);
+    config
+        .validate()
+        .map_err(|errors| ConfigError::ValidationFailed { errors })?;
+    Ok(LayeredConfig {
+        config,
+        operator: OperatorLayers::new(operator),
+    })
+}
+
+/// Lays the built-in providers under the declared ones, a declared entry winning on the same id,
+/// and records which ids were declared.
+fn with_builtins(
+    declared: HashMap<ProviderId, crate::ProviderConfig>,
+    roles: HashMap<String, RoleConfig>,
+    sandbox: Option<SandboxConfig>,
+) -> Config {
+    let user_provider_ids = declared.keys().cloned().collect();
     Config {
-        providers: ProvidersConfig::from_map(merge_builtin_with_user(user)),
-        roles: file.roles,
-        sandbox: file.sandbox,
+        providers: ProvidersConfig::from_map(merge_builtin_with_user(declared)),
+        roles,
+        sandbox,
         user_provider_ids,
         store_dir: None,
     }
@@ -506,5 +608,76 @@ mod tests {
             }
             _ => panic!("wrong error variant"),
         }
+    }
+
+    const MOCK_A: &str = "[providers.a]\ntype = \"mock\"\ncanned_response = \"from-system\"\n";
+
+    fn layered(system: Option<&str>, user: Option<&str>) -> Result<LayeredConfig, ConfigError> {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        let system = system.map(|text| write("system.toml", text));
+        let user_path = dir.path().join("config.toml");
+        if let Some(text) = user {
+            write("config.toml", text);
+        }
+        Config::load_layers(&LayerPaths {
+            system,
+            user: Some(user_path),
+        })
+    }
+
+    #[test]
+    fn a_user_provider_replaces_the_system_one_of_the_same_id_whole() {
+        let user = "[providers.a]\ntype = \"mock\"\ncanned_response = \"from-user\"\n\
+                    [providers.b]\ntype = \"mock\"\ncanned_response = \"b\"\n";
+        let cfg = layered(Some(MOCK_A), Some(user)).unwrap().config;
+        assert!(matches!(
+            cfg.providers().get(&ProviderId::new("a")),
+            Some(crate::ProviderConfig::Mock { canned_response, .. }) if canned_response == "from-user"
+        ));
+        let mut declared: Vec<&str> = cfg.user_declared().map(|(id, _)| id.as_str()).collect();
+        declared.sort_unstable();
+        assert_eq!(declared, ["a", "b"]);
+    }
+
+    #[test]
+    fn with_a_system_file_the_user_file_may_be_missing_and_without_one_it_may_not() {
+        let cfg = layered(Some(MOCK_A), None)
+            .expect("a system layer alone loads")
+            .config;
+        assert!(cfg.user_declared().any(|(id, _)| id.as_str() == "a"));
+        assert!(matches!(layered(None, None), Err(ConfigError::Io { .. })));
+    }
+
+    #[test]
+    fn a_system_file_that_is_named_must_exist() {
+        let err = Config::load_layers(&LayerPaths {
+            system: Some(PathBuf::from("/definitely/not/system.toml")),
+            user: Some(PathBuf::from("/definitely/not/config.toml")),
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Io { path, .. } if path.ends_with("system.toml")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn an_operator_section_in_a_single_file_load_is_refused_not_ignored() {
+        let err = Config::from_toml("[llm.retry]\nmax_attempts = 5\n").unwrap_err();
+        let message = tars_utils::display_chain(&err);
+        assert!(matches!(err, ConfigError::Operator(_)), "{message}");
+        assert!(message.contains("llm.retry"), "{message}");
+        assert!(Config::from_toml("[llm]\n").is_ok());
+    }
+
+    #[test]
+    fn a_misspelt_owner_table_is_an_unknown_field_at_parse() {
+        let err = Config::from_toml("[lmm.retry]\n").unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }), "{err}");
     }
 }

@@ -6,6 +6,7 @@
 
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod duration_serde;
 pub mod pipeline;
 pub mod provider;
 
@@ -59,7 +60,7 @@ pub use pipeline::middleware::validation::{
     OutputValidator, ValidationMiddleware,
     builtin::{JsonShapeValidator, MaxLengthValidator, NotEmptyValidator, OnExceed, ResponseField},
 };
-pub use pipeline::middleware::{ChainOptions, LlmServiceBuilder, Middleware};
+pub use pipeline::middleware::{ChainOptions, LlmServiceBuilder, Middleware, OutputReserve};
 pub use pipeline::service::{
     LlmService, Next, OpenFailure, RefusedCall, ServiceCall, max_output_tokens_sent,
 };

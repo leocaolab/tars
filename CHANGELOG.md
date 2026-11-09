@@ -46,6 +46,86 @@ the current one until a later release brings it back.
   `tars eval run` / `diff` / `judge`.
 - **`tars eval run` refuses an output directory that is not empty** (exit 2), so a
   reused `-o` no longer pairs one run's judge report with another run.
+- **Rust 1.99 or newer.** The workspace's `rust-version` is 1.99 (it was 1.85), and
+  `rust-toolchain.toml` pins 1.99.1 instead of following `stable`.
+- **A request that says nothing about thinking sends nothing about it.**
+  `ChatRequest::thinking` is `Option<ThinkingMode>`, `None` by default, and `None`
+  leaves the provider's default. `ThinkingMode` has no `Default` and no `is_off()`.
+  `Some(ThinkingMode::Off)` turns thinking off wherever the vendor has a switch:
+  Anthropic is now sent `thinking: {"type": "disabled"}`, DeepSeek the same, Gemini
+  a zero budget or the lowest thinking level the model accepts, `claude_sdk` its
+  `off`. Before, an unset field
+  meant `Off`, so a Gemini, DeepSeek or `claude_sdk` request that set nothing had
+  thinking turned off; it now thinks as much as the provider does by default, and
+  is billed for it. Set `Some(ThinkingMode::Off)` where you relied on the old
+  behaviour. In the Node binding an absent `thinking` leaves the provider's
+  default, and `thinking: false` turns it off.
+  **Why:** "not specified" and "off" were one value, so tars could neither leave a
+  provider's default alone nor turn thinking off on a provider that thinks unless
+  told not to.
+- **A response is a finished stream.** `ChatResponse.stop_reason` is a `StopReason`
+  (it was an `Option`), `ChatResponse` has no `Default` and no `is_finished()`.
+  `ChatResponseBuilder::apply` returns `Result<(), StreamViolation>` and `finish`
+  returns `Result<ChatResponse, Unfinished>`. A stream that ends without saying why
+  the turn stopped, or with a tool call started and never ended, fails the call
+  with `ProviderError::Unfinished` (kind `unfinished`); a stream that breaks the
+  tool-call order (a second start for an open call, arguments or an end for a call
+  that never started, an end whose id is not its start's) fails with
+  `ProviderError::StreamViolation` (kind `stream_violation`). Before, both were
+  logged and the response came back as if whole.
+- **Usage the provider did not report is `None`, not zero.** `ChatEvent::Finished`,
+  `ChatResponse` and the eval report's per-case `usage` are `Option<Usage>`. The
+  Node binding's `CompleteResult.usage` is optional (`resp.usage?.inputTokens`),
+  and `stopReason` is always present.
+- **A model the provider did not name is `None`.** `actual_model` is an
+  `Option<String>` on `ChatEvent::Started`, `ChatResponse` and the call log's
+  response; it used to be `""` or a stand-in (`"anthropic"`, the `claude_sdk`
+  builder's `default_model`). `ClaudeSdkProviderBuilder::default_model` is gone: it
+  was never sent to the daemon. The Node binding's `CompleteResult.model` is absent
+  when the provider did not say.
+- **The Node binding has no `tags`**, neither on the context (`pipeline(role,
+  { tenant, session, trace })`) nor in `complete()`'s options. The binding writes no
+  call log, so the tags reached nothing.
+- **A provider profile states each capability once.**
+  - `ProviderProfile.tool_use` is a `ToolUse` (`Unsupported`, `Unknown`, or
+    `Supported { parallel }`); it replaces `supports_tool_use` and
+    `supports_parallel_tool_calls`, so parallel calls without tool use cannot be
+    written.
+  - `modalities_in` and `modalities_out` are `Modalities`, one `Support` per
+    modality (`text`, `image`, `audio`, `video`, `pdf`); `supports_vision` is gone,
+    and "can it see images" is `modalities_in.image`. `Modality` has `Pdf`.
+    `tars_config::KbModality` is gone: `ModelEntry.modalities` is a
+    `Vec<Modality>`.
+  - `ProviderProfile.max_output_tokens` is gone: the output ceiling is the bound
+    model's `OutputLimit` (`LlmService::output_limit()`), and
+    `ChatRequest::compatibility_check` and `ProviderProfile::check_requirements`
+    take it as a second argument.
+  - `ProviderProfile::validate` and `ProviderProfileError` are gone; what they
+    checked can no longer be written.
+  - The config keys under `capabilities` are unchanged; `supports_vision` sets
+    `modalities_in.image`.
+  - A cassette file stores the profile in this shape. A cassette recorded before
+    2.0 with a `capabilities` block does not read; record it again.
+- **The lists in a compatibility verdict are never empty.**
+  `CompatibilityCheck::Degraded { unsent }`, `CompatibilityCheck::Incompatible
+  { reasons }` and `LlmError::Incompatible { reasons }` hold a
+  `tars_types::NonEmpty` (`iter()`, `as_slice()`, `into_vec()`). tars-melt's
+  `RefusalReasons` is gone; the call log keeps the same `NonEmpty`.
+- **Other Rust API changes:**
+  - `ProviderError` has `ExtraHeader`, `CassetteNotWritten` and `StreamViolation`,
+    and `Unfinished` carries why; `RegistryError` has `InvalidHeader` (all below).
+    `LlmErrorKind` has `StreamViolation`.
+  - `ProviderError::BatchItemFailed.code` and `BatchStatus::InProgress.processed`
+    are `Option`: an error with no type, or progress the provider did not report, is
+    no longer `"error"` or `0`.
+  - `DurableStore` implementors implement `claim_ready_excluding`; `claim_ready` is
+    provided and calls it with nothing excluded.
+  - `StepContext::with_task_id` and `with_job_scope` are one
+    `with_durable_run(task_id, job_id)`; `durable_run()` returns both.
+  - `CapError::Defect` is a failure of the cap's own code (a reply that does not
+    encode as JSON); `TypedCap` returns it where it returned `ExecuteFatal`.
+  - `MockProvider::with_responses(vec![])` fails each call instead of answering
+    empty text.
 
 ### Config
 
@@ -66,6 +146,105 @@ the current one until a later release brings it back.
   back to the shipped `provider.toml` without a word. The failure is recorded and
   the list kept until a query succeeds again; `tars models` prints the failure above
   the kept list.
+- **Retry, the circuit breaker, HTTP timeouts and the output reserve are set in the
+  config.**
+
+  ```toml
+  [llm.retry]
+  max_attempts = 5          # also initial_backoff_ms, max_backoff_ms, multiplier,
+                            # respect_retry_after, max_wait_ms, jitter_ms
+  [llm.circuit_breaker]
+  cooldown_secs = 60        # also failure_threshold
+  [llm.http]
+  connect_timeout_ms = 5000 # also stream_idle_timeout_ms
+  [llm.reserve]
+  output_tokens = 4096      # assumed for a request that states no output limit
+  ```
+
+  A key left out keeps its default. A misspelt section or key is an error, and so
+  is a section the process reading the file does not use (the Node binding builds
+  no circuit breaker, so `[llm.circuit_breaker]` fails its `init()`).
+  `RetryConfig`, `CircuitBreakerConfig`, `HttpClientConfig` and the new
+  `OutputReserve` read from these sections.
+- **A system config file under the user's.** `--system-config <path>` or
+  `$TARS_SYSTEM_CONFIG` names a file read before `$TARS_HOME/config.toml`. In
+  `[llm.*]` the user file wins key by key; a provider, a role or `[sandbox]` in the
+  user file replaces the system file's of the same name whole. With a system file
+  the user file may be missing. Without the flag or the variable no system file is
+  read.
+- **`tars config explain [key]`** prints each operator setting, its value and where
+  it came from (the default, the system file or the user file); `key` is a section
+  (`llm.retry`) or one key (`llm.retry.max_attempts`). **`tars config check
+  --system <path> [--user <path>]`** loads the files as a process would, builds no
+  provider, and exits 3 on any problem.
+- **A Rust program that loads the config takes the operator sections it uses.**
+  `load_tars` returns `LoadedHome { config, operator, catalog }`. Take each section
+  with `operator.take::<T>(Section::…)`, then call `operator.finish()`, which fails
+  when a file set a section nobody took. `install(config, catalog)` takes the two
+  parts (it took the whole `LoadedHome`). `ProviderRegistry::from_config_with_env`
+  and `from_config` take an `OutputReserve` after the HTTP config. `RunRequest` and
+  `JudgeRequest` in tars-eval have a `retry` field. `Config::load_file`,
+  `Config::from_toml` and `init_tars` read one file and refuse `[llm.*]` sections,
+  and so do the Node binding's `Pipeline.fromConfigPath` and `fromStr`.
+- **A `claude_sdk` provider without `timeout_secs` waits 900 seconds** for a reply,
+  as the builder always did; from a config block it waited 300. `claude_cli`,
+  `opencode` and `antigravity` keep 300, `codex_cli` 600.
+- **`TARS_CLAUDE_SDK_SCRIPT` is gone.** Set `script_path` on the `claude_sdk`
+  provider instead. **Why:** set to a missing file, it fell through to the default
+  search without a word.
+- **`TARS_LOG_FORMAT_FLAG` is gone.** `--log-format` and `TARS_LOG_FORMAT` are the
+  two ways to choose the log format; the flag wins. **Why:** `TARS_LOG_FORMAT_FLAG`
+  silently beat the documented `TARS_LOG_FORMAT`.
+- **A header the config adds that is not a valid header is an error.** A bad
+  `http_headers` entry refuses the provider when the registry builds it
+  (`RegistryError::InvalidHeader`); an `env_http_headers` variable whose value is not
+  a valid header value fails the call before it is sent (`ProviderError::ExtraHeader`,
+  kind `invalid_header`). Neither error holds the value. Before, the header was
+  dropped with a warning and the call went out without it.
+
+### CLI delegates
+
+- **A delegate CLI gets only the system variables and the ones it needs.** claude,
+  codex, opencode and antigravity are given `PATH`, `HOME`, `USER`, `LOGNAME`,
+  `SHELL`, the temp directories, `TERM`, `TZ`, the locale, the `XDG_*` directories,
+  proxies and CA bundles, plus their own list: claude `CLAUDE_CONFIG_DIR` and
+  `CLAUDE_CODE_OAUTH_TOKEN`; codex `CODEX_HOME`; opencode its config overrides and
+  the API keys of the providers it fronts; antigravity `GEMINI_API_KEY` and
+  `ANTIGRAVITY_API_KEY`. Each provider guide in [`docs/providers/`](docs/providers/)
+  lists them. **Why:** every delegate got the whole environment of the tars process
+  (every provider key in it included), and they run with permission bypasses.
+- **The `claude_sdk` daemon no longer inherits `ANTHROPIC_API_KEY`** or
+  `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY`, the variables the claude CLI is
+  never given, so it bills the subscription and not an API account.
+- **An empty claude allow-list grants no tools and no permission bypass.**
+  `ClaudeToolAccess::Allow` with no usable name (an empty list, or every name
+  holding a comma) passed `--tools ""` but still `--permission-mode
+  bypassPermissions`, so MCP tools from the user's claude config could run
+  unprompted.
+- **claude's stop reason is read.** A `claude_cli` run cut off at its output limit
+  ends `MaxTokens`, not `EndTurn`.
+- **An opencode run that printed no text and finished no step is a parse error**
+  carrying what it printed, not an empty reply.
+- **A `claude_sdk` call that times out waiting for its reply keeps the daemon.**
+  Any timeout used to restart it, so one caller's short deadline cold-started the
+  next call.
+
+### Call log and telemetry
+
+- **The `llm_call` table has a `stream_opened` column**, since a call's usage can no
+  longer say whether its stream opened. Call-log files written before 2.0 do not
+  read; start a new store directory. `actual_model` may be null.
+- **`tars.llm.tokens` counts a call only when the provider reported both input and
+  output tokens;** a call that did not adds 1 to the new `tars.llm.tokens_unreported`
+  counter. Before, a missing half counted as zero.
+- **`tars models update --json`:** a `default_resolved` finding's `previous` is an
+  object, `{"state": "unchanged"}`, `{"state": "was", "model": …}` or
+  `{"state": "unresolvable", "error": …}`, instead of a model id or null. The text
+  output says when a default did not resolve before the refresh.
+- **`tars eval run`** prints `usage not reported` for a case whose provider reported
+  none, and refuses a corpus with a case directory whose name is not UTF-8 instead
+  of skipping it. **`tars bench`** stops (exit 1) at an iteration whose provider
+  reported no usage, since it has no token counts to time.
 
 ### Circuit breaker
 
@@ -81,6 +260,17 @@ the current one until a later release brings it back.
 - **Stopping `tars` stops the CLI delegates it started.** On SIGINT or SIGTERM it
   kills their process groups and exits 130 or 143; before, the children ran on.
   tars-node adds `killSpawnedChildren()` for a host that wants the same.
+- **A recording cassette that cannot write its file fails the call**
+  (`ProviderError::CassetteNotWritten`, kind `io`), naming whether the directory or
+  the file could not be made; before, it logged a warning and the recording was
+  lost. The recording stays in memory and is written again when the cassette is
+  dropped.
+- **A protocol field that carries meaning and is missing is a parse error** with the
+  raw event, not a zero or an empty value: Anthropic's content-block `index`,
+  `content_block` and `delta`, Anthropic batch counts, an errored batch item's error
+  object, Gemini's `functionCall.name`.
+- **A Gemini reply whose `promptFeedback` has no `blockReason` is not a block.** It
+  was reported as content-filtered (`safety`) though the prompt went through.
 - New provider guide: [`docs/providers/codex-cli.md`](docs/providers/codex-cli.md).
 
 ## 1.10.2 — the price table knows the models we run, and a cache write costs money — `v1.10.2`

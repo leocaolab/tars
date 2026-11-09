@@ -242,23 +242,23 @@ impl HttpAdapter for GeminiAdapter {
             "contents": contents,
         });
 
-        let mut config = json!({});
+        let mut config = serde_json::Map::new();
         if let Some(max) = req.max_output_tokens {
-            config["maxOutputTokens"] = json!(max);
+            config.insert("maxOutputTokens".into(), json!(max));
         }
         if let Some(t) = req.temperature {
-            config["temperature"] = json!(t);
+            config.insert("temperature".into(), json!(t));
         }
         if !req.stop_sequences.is_empty() {
-            config["stopSequences"] = json!(req.stop_sequences);
+            config.insert("stopSequences".into(), json!(req.stop_sequences));
         }
         if let Some(seed) = req.seed {
-            config["seed"] = json!(seed);
+            config.insert("seed".into(), json!(seed));
         }
 
         if let Some(schema) = response_schema(req)? {
-            config["responseMimeType"] = json!("application/json");
-            config["responseSchema"] = schema.schema;
+            config.insert("responseMimeType".into(), json!("application/json"));
+            config.insert("responseSchema".into(), schema.schema);
         }
 
         // Gemini 2.5 takes a numeric `thinkingBudget`, 3.x a `thinkingLevel`; the model's row in
@@ -272,13 +272,13 @@ impl HttpAdapter for GeminiAdapter {
         let supports_off = model_supports_thinking_off(model);
         match param {
             tars_config::ThinkingParam::Budget => {
-                let budget: i64 = match req.thinking {
+                let budget: Option<i64> = req.thinking.map(|mode| match mode {
                     tars_types::ThinkingMode::Off => 0,
                     tars_types::ThinkingMode::Auto => -1,
                     tars_types::ThinkingMode::Budget(b) => i64::from(b),
-                };
-                if budget != 0 || supports_off {
-                    config["thinkingConfig"] = json!({ "thinkingBudget": budget });
+                });
+                if let Some(budget) = budget.filter(|b| *b != 0 || supports_off) {
+                    config.insert("thinkingConfig".into(), json!({ "thinkingBudget": budget }));
                 }
             }
             tars_config::ThinkingParam::Level => {
@@ -288,19 +288,20 @@ impl HttpAdapter for GeminiAdapter {
                 // it accepts (tried on 3.1-pro-preview, 3.7-flash and 3.8-flash).
                 let off_level = if supports_off { "minimal" } else { "low" };
                 let level: Option<&str> = match req.thinking {
-                    tars_types::ThinkingMode::Off => Some(off_level),
-                    tars_types::ThinkingMode::Auto => None,
-                    tars_types::ThinkingMode::Budget(0) => Some(off_level),
-                    tars_types::ThinkingMode::Budget(_) => Some("high"),
+                    None | Some(tars_types::ThinkingMode::Auto) => None,
+                    Some(tars_types::ThinkingMode::Off | tars_types::ThinkingMode::Budget(0)) => {
+                        Some(off_level)
+                    }
+                    Some(tars_types::ThinkingMode::Budget(_)) => Some("high"),
                 };
                 if let Some(level) = level {
-                    config["thinkingConfig"] = json!({ "thinkingLevel": level });
+                    config.insert("thinkingConfig".into(), json!({ "thinkingLevel": level }));
                 }
             }
         }
 
-        if config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
-            body["generationConfig"] = config;
+        if !config.is_empty() {
+            body["generationConfig"] = Value::Object(config);
         }
 
         if let Some(sys) = &req.system {
@@ -362,29 +363,30 @@ impl HttpAdapter for GeminiAdapter {
         })?;
 
         let mut out = Vec::new();
-        let model_version = v
-            .get("modelVersion")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_string();
-
         let candidates = match v.get("candidates").and_then(|c| c.as_array()) {
             Some(arr) => arr,
             None => {
-                // `promptFeedback` means the prompt itself was blocked.
-                if let Some(fb) = v.get("promptFeedback") {
-                    let category = fb
-                        .get("blockReason")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("safety")
-                        .to_string();
-                    return Err(ProviderError::ContentFiltered { category });
+                // Only a `blockReason` says the prompt was blocked; `promptFeedback` can come with
+                // nothing but safety ratings on a prompt that went through.
+                if let Some(reason) = v
+                    .pointer("/promptFeedback/blockReason")
+                    .and_then(|s| s.as_str())
+                {
+                    return Err(ProviderError::ContentFiltered {
+                        category: reason.to_string(),
+                    });
                 }
                 return Ok(out);
             }
         };
 
-        if !model_version.is_empty() && buf.take_started() {
+        let model_version = v
+            .get("modelVersion")
+            .and_then(|s| s.as_str())
+            .filter(|m| !m.is_empty());
+        if let Some(model_version) = model_version
+            && buf.take_started()
+        {
             out.push(ChatEvent::started(model_version));
         }
 
@@ -401,17 +403,17 @@ impl HttpAdapter for GeminiAdapter {
                     .get("thought")
                     .and_then(|t| t.as_bool())
                     .unwrap_or(false);
-                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                    if !text.is_empty() {
-                        if is_thought {
-                            out.push(ChatEvent::ThinkingDelta {
-                                text: text.to_string(),
-                            });
-                        } else {
-                            out.push(ChatEvent::Delta {
-                                text: text.to_string(),
-                            });
-                        }
+                if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                    && !text.is_empty()
+                {
+                    if is_thought {
+                        out.push(ChatEvent::ThinkingDelta {
+                            text: text.to_string(),
+                        });
+                    } else {
+                        out.push(ChatEvent::Delta {
+                            text: text.to_string(),
+                        });
                     }
                 }
                 if let Some(fc) = part.get("functionCall") {
@@ -424,7 +426,13 @@ impl HttpAdapter for GeminiAdapter {
                     let name = fc
                         .get("name")
                         .and_then(|s| s.as_str())
-                        .unwrap_or("")
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| ProviderError::Parse {
+                            at: "gemini functionCall",
+                            line: None,
+                            problem: Box::new(ParseProblem::Missing("functionCall.name")),
+                            raw: Some(truncate(&raw.data, 200)),
+                        })?
                         .to_string();
                     let args = fc
                         .get("args")
@@ -462,8 +470,7 @@ impl HttpAdapter for GeminiAdapter {
                 let usage = v
                     .get("usageMetadata")
                     .and_then(|u| u.as_object())
-                    .map(parse_usage)
-                    .unwrap_or_default();
+                    .map(parse_usage);
                 // Gemini stops with `STOP` after a tool call too; a call anywhere in the stream
                 // turns it into `ToolUse`, as other providers report.
                 let stop = match map_stop_reason(reason_str) {
@@ -869,8 +876,21 @@ mod tests {
     }
 
     #[test]
-    fn thinking_off_omits_config_for_thinking_only_model() {
+    fn a_request_that_says_nothing_about_thinking_sends_no_thinking_config() {
         let req = ChatRequest::user("hi");
+        for model in ["gemini-2.5-flash", "gemini-3.6-flash", "gemini-3.8-flash"] {
+            let body = adapter().translate_request(&req, model).unwrap();
+            assert!(
+                body["generationConfig"]["thinkingConfig"].is_null(),
+                "{model}: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn thinking_off_omits_config_for_thinking_only_model() {
+        let mut req = ChatRequest::user("hi");
+        req.thinking = Some(tars_types::ThinkingMode::Off);
         let body = adapter().translate_request(&req, "gemini-2.5-pro").unwrap();
         assert!(
             body["generationConfig"]["thinkingConfig"].is_null(),
@@ -880,7 +900,8 @@ mod tests {
 
     #[test]
     fn thinking_off_asks_low_on_a_level_model_that_rejects_minimal() {
-        let req = ChatRequest::user("hi");
+        let mut req = ChatRequest::user("hi");
+        req.thinking = Some(tars_types::ThinkingMode::Off);
         for model in ["gemini-3.8-flash", "gemini-3.1-pro-preview"] {
             let body = adapter().translate_request(&req, model).unwrap();
             assert_eq!(
@@ -899,7 +920,8 @@ mod tests {
 
     #[test]
     fn thinking_off_sets_zero_budget_for_flash() {
-        let req = ChatRequest::user("hi");
+        let mut req = ChatRequest::user("hi");
+        req.thinking = Some(tars_types::ThinkingMode::Off);
         let body = adapter()
             .translate_request(&req, "gemini-2.5-flash")
             .unwrap();
@@ -932,6 +954,36 @@ mod tests {
             err,
             ProviderError::ContentFiltered { ref category } if category == "SAFETY"
         ));
+    }
+
+    #[test]
+    fn prompt_feedback_without_a_block_reason_is_not_a_block() {
+        let mut buf = StreamDecodeState::new();
+        let raw = SseEvent {
+            event: "message".into(),
+            data:
+                r#"{"promptFeedback":{"safetyRatings":[]},"usageMetadata":{"promptTokenCount":4}}"#
+                    .into(),
+        };
+        assert!(adapter().parse_event(&raw, &mut buf).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_function_call_without_a_name_is_a_parse_error_carrying_the_event() {
+        let mut buf = StreamDecodeState::new();
+        let raw = SseEvent {
+            event: "message".into(),
+            data: r#"{"candidates":[{"content":{"parts":[{"functionCall":{"args":{}}}]}}]}"#.into(),
+        };
+        let err = adapter().parse_event(&raw, &mut buf).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ProviderError::Parse { problem, raw: Some(_), .. }
+                    if matches!(**problem, ParseProblem::Missing("functionCall.name"))
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

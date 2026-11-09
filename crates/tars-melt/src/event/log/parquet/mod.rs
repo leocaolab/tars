@@ -54,7 +54,7 @@ use super::seal::{RowGroup, row_groups};
 use super::sink::{BufferedSink, Coalesce, SealWriter, SinkConfig, UpkeepReport, lock};
 use super::{
     LogError, LogSource, LogTable, PartialSource, Partition, Partitioned, Projected, SinkHealth,
-    TableName, TenantScope,
+    TENANT_PREFIX, TableName, TenantScope, tenant_dir,
 };
 use compact::DataFile;
 use file::Scan;
@@ -64,24 +64,7 @@ use partition::{DayAge, InFlight, PartitionDir, TmpFile, io_at};
 use sweep::{past_partitions, sweep_day};
 use upload::Uploader;
 
-const TENANT_PREFIX: &str = "tenant=";
 const DATE_PREFIX: &str = "date=";
-/// Everything but `[a-z0-9_-]` is escaped, so `.` / `..` / `/` never survive, and two tenants
-/// that differ only in case get two directories on a file system that ignores case.
-const TENANT_ESCAPE: &percent_encoding::AsciiSet =
-    &with_uppercase(percent_encoding::NON_ALPHANUMERIC.remove(b'_').remove(b'-'));
-
-/// Returns `set` with `A`-`Z` added. The escape writes its hex digits in upper case, so the
-/// escaped text holds no lower-case letter that a letter's escape could fold into.
-const fn with_uppercase(set: percent_encoding::AsciiSet) -> percent_encoding::AsciiSet {
-    let mut set = set;
-    let mut letter = b'A';
-    while letter <= b'Z' {
-        set = set.add(letter);
-        letter += 1;
-    }
-    set
-}
 
 pub use compact::CompactRule;
 pub use encode::OffsetLimit;
@@ -710,15 +693,22 @@ fn expiring(dir: PartitionDir, at: SystemTime, now: SystemTime) -> Option<Expiri
 }
 
 /// Returns the sweep due when `now`'s UTC day ends, so a day is swept, frozen and uploaded although
-/// nothing is sealed after it; nothing for a clock with no day.
+/// nothing is sealed after it.
+///
+/// A reading with no UTC day (before the epoch, or past what a day can be named for) is reported
+/// here, once per round, as a failure carrying the reading; the sweep and the day ages pass over
+/// it, so only the tiered merge runs until the clock is set.
 fn midnight(now: SystemTime) -> UpkeepReport<ExpiringDirs> {
-    UpkeepReport {
-        failures: Vec::new(),
-        deferred: next_midnight(now).map(|at| ExpiringDirs {
-            dirs: BTreeSet::new(),
-            at,
-            as_of: now,
-        }),
+    match day_of(now).and(next_midnight(now)) {
+        Some(at) => UpkeepReport {
+            failures: Vec::new(),
+            deferred: Some(ExpiringDirs {
+                dirs: BTreeSet::new(),
+                at,
+                as_of: now,
+            }),
+        },
+        None => UpkeepReport::from_iter([LogError::ClockOutOfRange { reading: now }]),
     }
 }
 
@@ -736,8 +726,8 @@ fn day_of(now: SystemTime) -> Option<UtcDay> {
     epoch_millis(now).and_then(UtcDay::of)
 }
 
-/// Returns `at` in epoch ms; `None` for a clock before the epoch or past `Millis`, when no day can
-/// be called past and so only the tiered merge runs.
+/// Returns `at` in epoch ms; `None` for a clock before the epoch or past `Millis`, which
+/// [`midnight`] reports.
 fn epoch_millis(at: SystemTime) -> Option<Millis> {
     let since = at.duration_since(UNIX_EPOCH).ok()?;
     Millis::try_from(since.as_millis()).ok()
@@ -766,8 +756,7 @@ fn partition_dir(root: &Path, table: &str, p: &Partition) -> PartitionDir {
 /// Returns `<root>/tenant=<t>/<table>`, the one directory holding a tenant's partitions of
 /// `table`.
 fn table_dir(root: &Path, table: &str, tenant: &TenantId) -> PathBuf {
-    let tenant = percent_encoding::utf8_percent_encode(tenant.as_str(), TENANT_ESCAPE);
-    root.join(format!("{TENANT_PREFIX}{tenant}")).join(table)
+    tenant_dir(root, tenant).join(table)
 }
 
 /// Lists every partition directory of `table` across all tenants, each with the day its name

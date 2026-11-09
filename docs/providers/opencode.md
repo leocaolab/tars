@@ -89,11 +89,17 @@ however you configured it on its own side:
 - `opencode auth login` (its subscription / OAuth flow), or
 - provider API keys in opencode's own environment/config.
 
-The dialect's env-strip table is **empty** — tars neither injects nor
-strips auth env for opencode, it just spawns the binary and lets
-opencode resolve its own credentials
-(`crates/tars-llm/src/provider/backends/cli/dialects/opencode.rs:115-127`,
-empty strip set). There is no `auth` field on the `opencode` config
+**Passed env** — a delegate CLI gets only the system variables
+(`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, the temp directories, `TERM`, `TZ`, the locale (`LANG`, `LANGUAGE`, `LC_*`), the `XDG_*` directories, proxies (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) and CA bundles (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`)) and the ones its dialect names; no other variable of the tars
+process reaches it. opencode's list (`NEEDED_ENV_KEYS` in
+`crates/tars-llm/src/provider/backends/cli/dialects/opencode.rs`) is its
+config overrides (`OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`,
+`OPENCODE_CONFIG_CONTENT`) and the API keys of the providers it fronts:
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+`GOOGLE_GENERATIVE_AI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`,
+`GROQ_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`. A key for another
+provider must go through `opencode auth login` or opencode's own config.
+Nothing is stripped. There is no `auth` field on the `opencode` config
 block — the provider is wired with `Auth::Delegate`, which resolves to
 `ResolvedAuth::None` ("the spawned tool/CLI carries its own credential;
 tars injects nothing", `crates/tars-llm/src/provider/auth.rs:137-139`;

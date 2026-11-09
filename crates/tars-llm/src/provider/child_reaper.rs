@@ -33,7 +33,8 @@ pub fn deregister(pid: u32) {
 }
 
 /// SIGKILLs, on unix, the process group of every registered child, so their descendants die too,
-/// and empties the registry; a failed kill is ignored, and elsewhere nothing is killed. The host
+/// and empties the registry; a failed kill is handled as [`kill_group`] does, and elsewhere
+/// nothing is killed. The host
 /// calls it on SIGINT or SIGTERM before exiting. It takes a mutex and allocates, so it belongs in a
 /// signal-handling task, not in a raw signal handler.
 pub fn kill_all_spawned() {
@@ -43,14 +44,9 @@ pub fn kill_all_spawned() {
         Err(poisoned) => poisoned.into_inner().drain().collect(),
     };
 
-    #[cfg(unix)]
     for pid in pids {
-        let pgid = nix::unistd::Pid::from_raw(pid as i32);
-        let _ = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL);
+        kill_group(pid);
     }
-
-    #[cfg(not(unix))]
-    let _ = pids;
 }
 
 /// SIGKILLs, on unix, the process group led by `pid`, so a child's descendants die with it; a

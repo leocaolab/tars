@@ -21,12 +21,13 @@ use uuid::Uuid;
 
 use super::{
     CallBody, CallDispatch, CallFailure, CallOutcome, CallResponse, EvalScoreRow, EvalScoreTable,
-    LlmCallRow, LlmCallSummary, LlmCallTable, RefusalReasons, SentEnd, StreamEnd,
+    LlmCallRow, LlmCallSummary, LlmCallTable, SentEnd, StreamEnd,
 };
 use crate::event::log::{
     ColumnError, DecodeError, EncodeError, OffsetLimit, ParquetProjected, ParquetTable,
     decode_rows, string_lists, strs,
 };
+use tars_types::NonEmpty;
 
 pub(crate) const UUID_BYTES: i32 = 16;
 const SHA256_BYTES: i32 = 32;
@@ -41,6 +42,7 @@ const BODY_WITHHELD: &str = "withheld";
 const BODY_UNSERIALIZABLE: &str = "unserializable";
 
 const DEGRADED: &str = "degraded";
+const STREAM_OPENED: &str = "stream_opened";
 /// A JSON array of [`CompatibilityReason`](tars_types::CompatibilityReason)s, whose serde form that type keeps stable as a storage
 /// format.
 const REFUSAL_REASONS: &str = "refusal_reasons";
@@ -85,6 +87,7 @@ impl ParquetTable for LlmCallTable {
             ),
             Field::new(DEGRADED, DataType::List(list_item()), true),
             Field::new("result", Utf8, false),
+            Field::new(STREAM_OPENED, Boolean, false),
             Field::new("error_kind", Utf8, true),
             Field::new("response_body", Utf8, true),
             Field::new("response_body_state", Utf8, true),
@@ -175,6 +178,7 @@ impl ParquetTable for LlmCallTable {
                 "result",
                 outcomes.iter().map(|o| Some(result_word(o))),
             )?,
+            bools(rows.iter().map(stream_opened)),
             strs(
                 limit,
                 "error_kind",
@@ -188,7 +192,7 @@ impl ParquetTable for LlmCallTable {
                 limit,
                 "actual_model",
                 rows.iter()
-                    .map(|r| r.response().map(|x| x.actual_model.as_str())),
+                    .map(|r| r.response().and_then(|x| x.actual_model.as_deref())),
             )?,
             strs(
                 limit,
@@ -254,6 +258,7 @@ impl ParquetTable for LlmCallTable {
         let output_limit = c.output_limit()?;
         let degraded = c.list(DEGRADED)?;
         let result = c.utf8("result")?;
+        let stream_opened = c.bool(STREAM_OPENED)?;
         let error_kind = c.utf8("error_kind")?;
         let response_body = c.body("response_body")?;
         let actual_model = c.utf8("actual_model")?;
@@ -274,9 +279,7 @@ impl ParquetTable for LlmCallTable {
                 .map(|body| -> Result<CallResponse, ColumnError> {
                     Ok(CallResponse {
                         body,
-                        actual_model: opt_str(actual_model, i)
-                            .ok_or_else(|| missing("actual_model"))?
-                            .to_owned(),
+                        actual_model: opt_str(actual_model, i).map(str::to_owned),
                         stop_reason: opt_str(stop_reason, i).map(from_name).transpose()?,
                     })
                 })
@@ -289,6 +292,7 @@ impl ParquetTable for LlmCallTable {
             )?;
             let dispatch = dispatch_at(Ended {
                 outcome,
+                stream_opened: stream_opened.value(i),
                 degraded: degraded_at(degraded, i)?,
                 provider_id: opt_str(provider_id, i).map(from_name).transpose()?,
                 usage: usage.at(i)?,
@@ -538,6 +542,18 @@ fn output_limit_from(
 
 // ── outcome ─────────────────────────────────────────────────────────
 
+/// Returns whether the call's stream opened, which a failed call's usage cannot say: a stream
+/// may end without its provider reporting any.
+fn stream_opened(row: &LlmCallRow) -> bool {
+    matches!(
+        row.dispatch,
+        CallDispatch::Sent {
+            end: SentEnd::Streamed { .. },
+            ..
+        }
+    )
+}
+
 /// Returns the `result` word of an outcome; a refused call is an error, its kind `incompatible`.
 fn result_word(o: &CallOutcome) -> &'static str {
     match o {
@@ -569,7 +585,7 @@ fn outcome_at(
         (CANCELLED, None, None, None) => Ok(CallOutcome::Cancelled),
         (ERROR, Some(kind), refusal, validation) => match (from_name(kind)?, refusal, validation) {
             (LlmErrorKind::Incompatible, Some(reasons), None) => {
-                RefusalReasons::new(from_json(reasons)?)
+                NonEmpty::from_vec(from_json(reasons)?)
                     .map(CallOutcome::Refused)
                     .ok_or_else(inconsistent)
             }
@@ -589,6 +605,7 @@ fn outcome_at(
 #[derive(Debug)]
 struct Ended {
     outcome: CallOutcome,
+    stream_opened: bool,
     degraded: Option<Vec<Degradation>>,
     provider_id: Option<ProviderId>,
     usage: Option<Usage>,
@@ -598,10 +615,11 @@ struct Ended {
 /// Returns the dispatch the columns describe, or why they do not describe one.
 fn dispatch_at(ended: Ended) -> Result<CallDispatch, ColumnError> {
     dispatch_of(ended).map_err(|ended| ColumnError::Inconsistent {
-        columns: "result, degraded, provider_id, usage and response",
+        columns: "result, stream_opened, degraded, provider_id, usage and response",
         found: format!(
-            "outcome={:?} degraded={:?} provider_id={:?} usage={} response={}",
+            "outcome={:?} stream_opened={} degraded={:?} provider_id={:?} usage={} response={}",
             ended.outcome,
+            ended.stream_opened,
             ended.degraded,
             ended.provider_id,
             if ended.usage.is_some() { "set" } else { "null" },
@@ -615,12 +633,13 @@ fn dispatch_at(ended: Ended) -> Result<CallDispatch, ColumnError> {
 }
 
 /// Returns the dispatch `ended` describes, or `ended` back when its parts do not fit: a refused
-/// call has no degradations, provider, usage or response; a sent call has degradations (maybe
-/// none), usage exactly when a stream was drained, and a response only from a drained stream.
+/// call opened no stream and has no degradations, provider, usage or response; a sent call has
+/// degradations (maybe none), and usage and a response only from a stream it opened.
 fn dispatch_of(ended: Ended) -> Result<CallDispatch, Box<Ended>> {
     match ended {
         Ended {
             outcome: CallOutcome::Refused(reasons),
+            stream_opened: false,
             degraded: None,
             provider_id: None,
             usage: None,
@@ -628,29 +647,33 @@ fn dispatch_of(ended: Ended) -> Result<CallDispatch, Box<Ended>> {
         } => Ok(CallDispatch::Refused { reasons }),
         Ended {
             outcome,
+            stream_opened,
             degraded: Some(degraded),
             provider_id,
             usage,
             response,
         } => {
-            let end = match (outcome, usage, response) {
-                (CallOutcome::Completed, Some(usage), Some(response)) => SentEnd::Streamed {
+            let end = match (outcome, stream_opened, usage, response) {
+                (CallOutcome::Completed, true, usage, Some(response)) => SentEnd::Streamed {
                     usage,
                     end: StreamEnd::Completed(response),
                 },
-                (CallOutcome::Failed(failure), None, None) => SentEnd::FailedBeforeStream(failure),
-                (CallOutcome::Failed(failure), Some(usage), response) => SentEnd::Streamed {
+                (CallOutcome::Failed(failure), false, None, None) => {
+                    SentEnd::FailedBeforeStream(failure)
+                }
+                (CallOutcome::Failed(failure), true, usage, response) => SentEnd::Streamed {
                     usage,
                     end: StreamEnd::Failed { failure, response },
                 },
-                (CallOutcome::Unterminated, Some(usage), None) => SentEnd::Streamed {
+                (CallOutcome::Unterminated, true, usage, None) => SentEnd::Streamed {
                     usage,
                     end: StreamEnd::Unterminated,
                 },
-                (CallOutcome::Cancelled, None, None) => SentEnd::Cancelled,
-                (outcome, usage, response) => {
+                (CallOutcome::Cancelled, false, None, None) => SentEnd::Cancelled,
+                (outcome, stream_opened, usage, response) => {
                     return Err(Box::new(Ended {
                         outcome,
+                        stream_opened,
                         degraded: Some(degraded),
                         provider_id,
                         usage,
@@ -1075,7 +1098,8 @@ pub(crate) fn missing(column: &str) -> ColumnError {
 #[cfg(test)]
 pub(super) mod writers {
     use super::{
-        DEGRADED, OUTPUT_LIMIT_SOURCE, OUTPUT_LIMIT_TOKENS, REFUSAL_REASONS, VALIDATION_REASON,
+        DEGRADED, OUTPUT_LIMIT_SOURCE, OUTPUT_LIMIT_TOKENS, REFUSAL_REASONS, STREAM_OPENED,
+        VALIDATION_REASON,
     };
 
     /// Who writes an `llm_call` column.
@@ -1111,6 +1135,7 @@ pub(super) mod writers {
             (OUTPUT_LIMIT_SOURCE, AtStart),
             (DEGRADED, AtStart),
             ("result", AtEnd),
+            (STREAM_OPENED, AtEnd),
             ("error_kind", AtEnd),
             ("response_body", AtEnd),
             ("response_body_state", AtEnd),
@@ -1169,7 +1194,7 @@ mod tests {
         assert_eq!(
             got,
             CallOutcome::Refused(
-                RefusalReasons::new(vec![CompatibilityReason::VisionUnsupported]).unwrap()
+                NonEmpty::from_vec(vec![CompatibilityReason::VisionUnsupported]).unwrap()
             )
         );
     }
@@ -1195,6 +1220,7 @@ mod tests {
     fn ended(outcome: CallOutcome, degraded: Option<Vec<Degradation>>, usage: bool) -> Ended {
         Ended {
             outcome,
+            stream_opened: usage,
             degraded,
             provider_id: None,
             usage: usage.then(Usage::default),
@@ -1206,7 +1232,7 @@ mod tests {
     fn a_refusal_with_degradations_recorded_is_inconsistent() {
         let refused = || {
             CallOutcome::Refused(
-                RefusalReasons::new(vec![CompatibilityReason::VisionUnsupported]).unwrap(),
+                NonEmpty::from_vec(vec![CompatibilityReason::VisionUnsupported]).unwrap(),
             )
         };
         assert!(dispatch_of(ended(refused(), None, false)).is_ok());
@@ -1233,6 +1259,31 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_failed_stream_whose_provider_reported_no_usage_is_still_a_failure_in_its_stream() {
+        let got = dispatch_of(Ended {
+            outcome: CallOutcome::Failed(CallFailure::of_kind(LlmErrorKind::Network)),
+            stream_opened: true,
+            degraded: Some(Vec::new()),
+            provider_id: None,
+            usage: None,
+            response: None,
+        });
+        assert!(
+            matches!(
+                got,
+                Ok(CallDispatch::Sent {
+                    end: SentEnd::Streamed {
+                        usage: None,
+                        end: StreamEnd::Failed { response: None, .. },
+                    },
+                    ..
+                })
+            ),
+            "{got:?}"
+        );
     }
 
     #[test]

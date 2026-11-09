@@ -1,4 +1,4 @@
-//! Locates the tars home and the config file in it.
+//! Locates the tars home, the config file in it and the system config file.
 //!
 //! The default home is `~/.tars/` on every platform, not XDG or `~/Library/Application Support`:
 //! tars is a developer tool, and those live under `~/.<tool>/` (git, cargo, aws, ssh); the macOS
@@ -18,6 +18,14 @@ pub fn resolve_home(flag: Option<PathBuf>) -> Option<PathBuf> {
 /// resolves. It does not check that the file exists.
 pub fn default_config_path() -> Option<PathBuf> {
     resolve_home(None).map(|home| home.join("config.toml"))
+}
+
+/// Returns the system config file `$TARS_SYSTEM_CONFIG` names, `None` when it is unset or blank.
+/// There is no default location: a system layer is read only where the deployment names one.
+pub fn system_config_path() -> Option<PathBuf> {
+    std::env::var_os("TARS_SYSTEM_CONFIG")
+        .filter(|v| !is_blank(v))
+        .map(PathBuf::from)
 }
 
 fn home_from(

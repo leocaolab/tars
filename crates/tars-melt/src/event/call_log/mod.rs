@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use tars_types::telemetry::RetryAttempt;
 use tars_types::{
-    CallId, CompatibilityReason, Degradation, LlmErrorKind, Millis, OutputLimit, ProviderId,
-    SessionId, StopReason, TenantId, TraceId, Usage, ValidationReason, ValidationSummary,
+    CallId, CompatibilityReason, Degradation, LlmErrorKind, Millis, NonEmpty, OutputLimit,
+    ProviderId, SessionId, StopReason, TenantId, TraceId, Usage, ValidationReason,
+    ValidationSummary,
 };
 use uuid::Uuid;
 
@@ -91,7 +92,7 @@ impl LlmCallRow {
         self.dispatch.outcome()
     }
 
-    /// Returns what the drained stream used, when one was drained.
+    /// Returns what the drained stream used, when one was drained and its provider reported it.
     pub fn usage(&self) -> Option<Usage> {
         self.dispatch.usage()
     }
@@ -162,7 +163,9 @@ fn started_at(id: CallId) -> Millis {
 )]
 pub enum CallDispatch {
     /// The provider could not serve the request; nothing was sent and no layer ran.
-    Refused { reasons: RefusalReasons },
+    Refused {
+        reasons: NonEmpty<CompatibilityReason>,
+    },
     Sent {
         /// The parts of the request its provider was not sent, empty when it went out whole.
         degraded: Vec<Degradation>,
@@ -186,7 +189,7 @@ impl CallDispatch {
             Self::Sent {
                 end: SentEnd::Streamed { usage, .. },
                 ..
-            } => Some(*usage),
+            } => *usage,
             _ => None,
         }
     }
@@ -202,22 +205,6 @@ impl CallDispatch {
     }
 }
 
-/// Every way a provider could not serve a request; never empty, since only [`Self::new`] makes
-/// one.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RefusalReasons(Vec<CompatibilityReason>);
-
-impl RefusalReasons {
-    /// Returns `reasons`, or `None` when there are none.
-    pub fn new(reasons: Vec<CompatibilityReason>) -> Option<Self> {
-        (!reasons.is_empty()).then_some(Self(reasons))
-    }
-
-    pub fn as_slice(&self) -> &[CompatibilityReason] {
-        &self.0
-    }
-}
-
 /// How a sent call ended. A cancelled call has no usage, whether or not its stream had opened:
 /// the drop guard that writes it holds none.
 #[derive(Debug, Clone)]
@@ -226,8 +213,11 @@ pub enum SentEnd {
     FailedBeforeStream(CallFailure),
     /// The caller dropped the call, before the stream opened or before it ended.
     Cancelled,
-    /// A stream was drained.
-    Streamed { usage: Usage, end: StreamEnd },
+    /// A stream was drained; `usage` is `None` when the provider reported none.
+    Streamed {
+        usage: Option<Usage>,
+        end: StreamEnd,
+    },
 }
 
 impl SentEnd {
@@ -289,7 +279,7 @@ pub enum CallOutcome {
     /// The stream delivered its terminal event.
     Completed,
     /// The dispatch layer refused the call.
-    Refused(RefusalReasons),
+    Refused(NonEmpty<CompatibilityReason>),
     /// The call, or its stream, failed.
     Failed(CallFailure),
     /// The stream ended without a terminal event and without an error.
@@ -366,8 +356,8 @@ pub struct OtherFailure(LlmErrorKind);
 pub struct CallResponse {
     /// The serialized `ChatResponse`.
     pub body: CallBody,
-    /// The model the provider reports having answered with.
-    pub actual_model: String,
+    /// The model the provider reports having answered with; `None` when it did not say.
+    pub actual_model: Option<String>,
     pub stop_reason: Option<StopReason>,
 }
 
@@ -442,7 +432,7 @@ pub struct LlmCallSummary {
     pub call_id: CallId,
     pub tenant: TenantId,
     pub model: String,
-    /// `None` when there was no response.
+    /// `None` when there was no response, or the provider did not say which model answered.
     pub actual_model: Option<String>,
     pub outcome: CallOutcome,
     pub usage: Option<Usage>,
@@ -461,7 +451,7 @@ impl LlmCallSummary {
             call_id: row.call_id,
             tenant: row.tenant.clone(),
             model: row.model.clone(),
-            actual_model: row.response().map(|r| r.actual_model.clone()),
+            actual_model: row.response().and_then(|r| r.actual_model.clone()),
             outcome: row.outcome(),
             usage: row.usage(),
             provider_latency_ms: row.provider_latency_ms,

@@ -79,9 +79,9 @@ pub trait LlmProvider: Send + Sync + 'static {
         let mut s = self.stream(req, model, ctx).await?;
         let mut acc = ChatResponseBuilder::new();
         while let Some(event) = s.next().await {
-            acc.apply(event?);
+            acc.apply(event?)?;
         }
-        Ok(acc.finish())
+        Ok(acc.finish()?)
     }
 
     /// Estimates the request's token count. With `fast` it may divide the text's byte length by 4,
@@ -95,17 +95,7 @@ pub trait LlmProvider: Send + Sync + 'static {
                 Feature::ExactTokenCount,
             )));
         }
-        let mut chars: usize = req.system.as_deref().map_or(0, str::len);
-        for m in &req.messages {
-            for block in m.content() {
-                if let Some(t) = block.as_text() {
-                    // Saturates: the count gates budget checks, and a wrap would make it tiny.
-                    chars = chars.saturating_add(t.len());
-                }
-            }
-        }
-        // About 4 bytes per token for English text.
-        Ok(u64::try_from(chars).unwrap_or(u64::MAX).div_ceil(4))
+        Ok(tars_types::estimate_tokens(req.text_bytes()))
     }
 
     fn cost(&self, usage: &Usage) -> CostUsd {

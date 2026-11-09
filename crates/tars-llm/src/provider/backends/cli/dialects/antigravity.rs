@@ -113,7 +113,7 @@ impl CliDialect for AntigravityDialect {
             ChatEvent::Delta { text },
             ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
+                usage: Some(Usage::default()),
             },
         ])
     }

@@ -31,13 +31,13 @@ impl ClaudeCliProviderBuilder {
     pub fn new(id: ProviderId) -> Self {
         Self {
             id,
-            executable: "claude".to_string(),
-            timeout: Duration::from_secs(300),
+            executable: tars_config::providers::CLAUDE_CLI_EXECUTABLE.to_string(),
+            timeout: Duration::from_secs(tars_config::providers::CLI_TIMEOUT_SECS),
             capabilities: None,
             tools: ClaudeToolAccess::Disabled,
             bare: false,
             effort: None,
-            exclude_dynamic_sections: true,
+            exclude_dynamic_sections: tars_config::providers::CLAUDE_CLI_EXCLUDE_DYNAMIC_SECTIONS,
             extra_args: Vec::new(),
             wire: None,
         }
@@ -170,9 +170,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.text, "hello from claude");
-        assert_eq!(resp.usage.input_tokens, 15);
-        assert_eq!(resp.usage.output_tokens, 5);
-        assert_eq!(resp.usage.cached_input_tokens, 3);
+        assert_eq!(resp.usage.unwrap().input_tokens, 15);
+        assert_eq!(resp.usage.unwrap().output_tokens, 5);
+        assert_eq!(resp.usage.unwrap().cached_input_tokens, 3);
 
         let inv = runner.recorded.lock().unwrap().clone().unwrap();
         assert_eq!(inv.model, "opus");
@@ -266,7 +266,7 @@ mod tests {
             stop_sequences: vec![],
             seed: None,
             cache_directives: vec![],
-            thinking: Default::default(),
+            thinking: None,
             enable_chat_template_thinking: None,
         };
         let s = serialize_messages_for_cli(&req);
@@ -459,6 +459,15 @@ mod tests {
         let argv = build_argv(&inv);
         let t = idx(&argv, "--tools");
         assert_eq!(argv[t + 1], "Read,Bash(git *)");
+    }
+
+    #[test]
+    fn argv_tools_allow_empty_is_disabled_without_permission_bypass() {
+        let inv = make_invocation(|b| b.tools(ClaudeToolAccess::Allow(vec![])));
+        let argv = build_argv(&inv);
+        let t = idx(&argv, "--tools");
+        assert_eq!(argv[t + 1], "");
+        assert!(!argv.iter().any(|a| a == "--permission-mode"));
     }
 
     #[test]

@@ -2,7 +2,6 @@
 //! whether each one's model-list API answers. It never prints a secret, and every probe is
 //! bounded by a timeout.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -114,9 +113,9 @@ impl ProvidersError {
 
 pub async fn execute(
     args: ProvidersArgs,
-    config_flag: Option<PathBuf>,
+    config_paths: &crate::config::ConfigPaths,
 ) -> Result<(), ProvidersError> {
-    let config = crate::config::load(config_flag)?;
+    let config = crate::config::load(config_paths)?.config;
     let env: Arc<dyn EnvSource> = Arc::new(crate::home_env::load()?);
 
     let mut providers: Vec<(String, &ProviderConfig)> = config

@@ -181,10 +181,10 @@ impl ModelsError {
 /// the keys resolved over the home's `.env`.
 pub(crate) async fn execute(
     command: ModelsCommand,
-    config_flag: Option<PathBuf>,
+    config_paths: &crate::config::ConfigPaths,
 ) -> Result<(), ModelsError> {
     let home = tars_config::resolve_home(None).ok_or(ModelsError::NoHome)?;
-    let config = crate::config::load(config_flag)?;
+    let config = crate::config::load(config_paths)?.config;
     let env: Arc<dyn EnvSource> = Arc::new(crate::home_env::load()?);
 
     match command {
@@ -356,17 +356,29 @@ pub struct ProviderRefresh {
     pub limit_changes: Vec<LimitChange>,
 }
 
+/// Where a `<series>@latest` default resolved before a refresh.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Previous {
+    /// It resolved to the model it resolves to now.
+    Unchanged,
+    /// It resolved to another model.
+    Was { model: String },
+    /// It did not resolve; `error` says why.
+    Unresolvable { error: String },
+}
+
 /// Something a refresh means for the config or for tars's shipped model data.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Finding {
-    /// A `<series>@latest` default resolves to `model`; `previous` is where
-    /// it resolved before this refresh, when that differs.
+    /// A `<series>@latest` default resolves to `model`; `previous` is where it resolved
+    /// before this refresh.
     DefaultResolved {
         provider: String,
         spec: String,
         model: String,
-        previous: Option<String>,
+        previous: Previous,
     },
     /// A default spec that does not resolve against the refreshed library, or does not parse.
     DefaultUnresolvable {
@@ -406,7 +418,7 @@ impl std::fmt::Display for Finding {
                 provider,
                 spec,
                 model,
-                previous: Some(prev),
+                previous: Previous::Was { model: prev },
             } => write!(
                 f,
                 "{provider}: `{spec}` now resolves to {model} (was {prev})"
@@ -415,7 +427,17 @@ impl std::fmt::Display for Finding {
                 provider,
                 spec,
                 model,
-                previous: None,
+                previous: Previous::Unresolvable { error },
+            } => write!(
+                f,
+                "{provider}: `{spec}` now resolves to {model} (before this refresh it did not \
+                 resolve — {error})"
+            ),
+            Self::DefaultResolved {
+                provider,
+                spec,
+                model,
+                previous: Previous::Unchanged,
             } => write!(f, "{provider}: `{spec}` resolves to {model}"),
             Self::DefaultUnresolvable {
                 provider,
@@ -523,11 +545,13 @@ fn findings(
         match ModelSpec::parse(spec) {
             Ok(ModelSpec::Latest { .. }) => match after.resolve(catalog, spec) {
                 Ok(r) => {
-                    let previous = before
-                        .resolve(catalog, spec)
-                        .ok()
-                        .map(|p| p.id)
-                        .filter(|p| *p != r.id);
+                    let previous = match before.resolve(catalog, spec) {
+                        Ok(p) if p.id == r.id => Previous::Unchanged,
+                        Ok(p) => Previous::Was { model: p.id },
+                        Err(e) => Previous::Unresolvable {
+                            error: e.to_string(),
+                        },
+                    };
                     out.push(Finding::DefaultResolved {
                         provider: name.clone(),
                         spec: spec.to_string(),
@@ -927,7 +951,9 @@ mod tests {
             provider: "gemini_flash".into(),
             spec: "flash@latest".into(),
             model: "gemini-3.9-flash".into(),
-            previous: Some("gemini-3.8-flash".into()),
+            previous: Previous::Was {
+                model: "gemini-3.8-flash".into(),
+            },
         }));
         // provider.toml has no row for the new model — say so.
         assert!(got.contains(&Finding::ShippedMissingModel {
@@ -962,8 +988,31 @@ mod tests {
             provider: "gemini_flash".into(),
             spec: "flash@latest".into(),
             model: "gemini-3.9-flash".into(),
-            previous: None,
+            previous: Previous::Unchanged,
         }));
+    }
+
+    #[test]
+    fn a_latest_default_that_did_not_resolve_before_says_so() {
+        let cfg = gemini_cfg("flash@latest");
+        let providers = vec![("gemini_flash".to_string(), &cfg)];
+        let old = lib_with(gemini_row(
+            vec![live("not-a-flash", None)],
+            "2026-09-01T00:00:00Z",
+        ));
+        let new = lib_with(gemini_row(
+            full_gemini_list(&["gemini-3.9-flash"]),
+            "2026-09-14T00:00:00Z",
+        ));
+        let got = findings(&providers, Some(&old), &new);
+        let previous = got.iter().find_map(|f| match f {
+            Finding::DefaultResolved { previous, .. } => Some(previous),
+            _ => None,
+        });
+        assert!(
+            matches!(previous, Some(Previous::Unresolvable { error }) if error.contains("flash")),
+            "{got:?}"
+        );
     }
 
     #[test]

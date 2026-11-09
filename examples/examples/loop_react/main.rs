@@ -231,8 +231,9 @@ struct TurnReply {
     text: String,
     tool_calls: Vec<ToolCall>,
     stop_reason: Option<StopReason>,
-    usage: Usage,
-    actual_model: String,
+    /// `None` when the provider reported no usage; the totals then count it as zero.
+    usage: Option<Usage>,
+    actual_model: Option<String>,
 }
 
 /// Drain one streaming completion into a `TurnReply`. Native tool-calls
@@ -451,16 +452,16 @@ async fn run() -> Result<(), DemoError> {
             .await
             .map_err(|source| DemoError::Drain { turn, source })?;
 
-        total_in += reply.usage.input_tokens;
-        total_out += reply.usage.output_tokens;
+        total_in += reply.usage.map_or(0, |u| u.input_tokens);
+        total_out += reply.usage.map_or(0, |u| u.output_tokens);
 
         println!("── Turn {turn} ───────────────────────────────────────────");
         println!(
             "  LLM: stop={:?}  model={}  tokens in/out={}/{}",
             reply.stop_reason.unwrap_or(StopReason::Other),
-            reply.actual_model,
-            reply.usage.input_tokens,
-            reply.usage.output_tokens,
+            reply.actual_model.as_deref().unwrap_or("?"),
+            reply.usage.map_or(0, |u| u.input_tokens),
+            reply.usage.map_or(0, |u| u.output_tokens),
         );
         if !reply.text.trim().is_empty() {
             println!("  text: {}", reply.text.trim());

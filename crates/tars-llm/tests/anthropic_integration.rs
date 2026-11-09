@@ -89,7 +89,7 @@ async fn streaming_text_response_decodes_to_events() {
         match ev.expect("event") {
             ChatEvent::Started { actual_model, .. } => {
                 saw_started = true;
-                assert_eq!(actual_model, "claude-opus-4-7");
+                assert_eq!(actual_model.as_deref(), Some("claude-opus-4-7"));
             }
             ChatEvent::Delta { text: t } => text.push_str(&t),
             ChatEvent::Finished {
@@ -107,8 +107,8 @@ async fn streaming_text_response_decodes_to_events() {
     assert_eq!(text, "Hello, world!");
     assert_eq!(saw_finish, Some(StopReason::EndTurn));
     let u = usage.expect("usage seen");
-    assert_eq!(u.input_tokens, 10);
-    assert_eq!(u.output_tokens, 3);
+    assert_eq!(u.unwrap().input_tokens, 10);
+    assert_eq!(u.unwrap().output_tokens, 3);
 }
 
 #[tokio::test]
@@ -173,7 +173,7 @@ async fn streaming_tool_call_assembles_args_from_partial_json() {
         serde_json::Value::Object(resp.tool_calls[0].arguments.clone()),
         serde_json::json!({"q": "rust"})
     );
-    assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
+    assert_eq!(resp.stop_reason, StopReason::ToolUse);
 }
 
 #[tokio::test]

@@ -597,16 +597,16 @@ fn call_row(at_ms: Millis, request: String, response: String) -> LlmCallRow {
             degraded: Vec::new(),
             provider_id: Some(ProviderId::new("deepseek")),
             end: SentEnd::Streamed {
-                usage: Usage {
+                usage: Some(Usage {
                     input_tokens: 27_855,
                     output_tokens: 412,
                     cached_input_tokens: 26_880,
                     cache_creation_tokens: 0,
                     thinking_tokens: 0,
-                },
+                }),
                 end: StreamEnd::Completed(CallResponse {
                     body: CallBody::Present(response),
-                    actual_model: "deepseek-v4-flash".into(),
+                    actual_model: Some("deepseek-v4-flash".into()),
                     stop_reason: Some(StopReason::EndTurn),
                 }),
             },

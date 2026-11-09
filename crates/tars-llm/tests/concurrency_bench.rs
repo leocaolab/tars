@@ -58,11 +58,11 @@ impl LlmProvider for LatencyMock {
             Ok(ChatEvent::Delta { text: "ok".into() }),
             Ok(ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage: Usage {
+                usage: Some(Usage {
                     // A zero-token call would be refunded in full, and the limiter would not bind.
                     output_tokens: 100,
                     ..Default::default()
-                },
+                }),
             }),
         ];
         Ok(Box::pin(stream::iter(events)))

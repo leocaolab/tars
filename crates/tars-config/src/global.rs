@@ -1,7 +1,7 @@
 //! Holds the process-global [`Config`], installed once and never replaced.
 //!
 //! A process serves one tenant, so one immutable config is enough; several tenants are several
-//! processes. Both ways in, [`init_tars`] (read `<home>/config.toml`) and [`Config::set`] (take a
+//! processes. Both ways in, [`init_tars`] (read the config's layers) and [`Config::set`] (take a
 //! config the caller built), fail on a second call with [`ConfigError::AlreadyInitialized`]:
 //! succeeding silently would leave the second installer running against a config it cannot see.
 //! The provider registry is built from this config by the composition root that installed it,
@@ -12,21 +12,25 @@ use std::sync::OnceLock;
 
 use thiserror::Error;
 
-use crate::config::Config;
+use crate::config::{Config, LayerPaths, LayeredConfig};
 use crate::error::ConfigError;
 use crate::model_catalog::{ModelCatalog, install_catalog, load_catalog};
-use crate::paths::resolve_home;
+use crate::operator::OperatorLayers;
+use crate::paths::{resolve_home, system_config_path};
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
-/// The config and model catalog of one tars home, read but not installed.
+/// The config, operator sections and model catalog of one tars home, read but not installed.
 #[derive(Debug)]
 pub struct LoadedHome {
     pub config: Config,
+    /// Holds the operator sections the composition root takes before it installs the rest.
+    pub operator: OperatorLayers,
     pub catalog: ModelCatalog<'static>,
 }
 
-/// Reads `<home>/config.toml` and the model catalog with that home's `models.json` laid over the
+/// Reads the config's layers (the system file `$TARS_SYSTEM_CONFIG` names, then
+/// `<home>/config.toml`) and the model catalog with that home's `models.json` laid over the
 /// shipped provider data, installing neither: a composition root builds what it needs from them
 /// first and calls [`install`] only once all of it succeeded, so a failed start can be retried.
 ///
@@ -38,9 +42,16 @@ pub struct LoadedHome {
 /// error otherwise.
 pub fn load_tars(home: Option<PathBuf>) -> Result<LoadedHome, ConfigError> {
     let dir = resolve_home(home).ok_or(ConfigError::NoHome)?;
-    let config = Config::load_file(dir.join("config.toml"))?;
+    let LayeredConfig { config, operator } = Config::load_layers(&LayerPaths {
+        system: system_config_path(),
+        user: Some(dir.join("config.toml")),
+    })?;
     let catalog = load_catalog(&dir)?;
-    Ok(LoadedHome { config, catalog })
+    Ok(LoadedHome {
+        config,
+        operator,
+        catalog,
+    })
 }
 
 /// Installs a loaded home's catalog and config as the process globals.
@@ -49,28 +60,35 @@ pub fn load_tars(home: Option<PathBuf>) -> Result<LoadedHome, ConfigError> {
 ///
 /// Returns [`ConfigError::AlreadyInitialized`] when a config is already installed, before
 /// installing anything.
-pub fn install(loaded: LoadedHome) -> Result<(), ConfigError> {
+pub fn install(config: Config, catalog: ModelCatalog<'static>) -> Result<(), ConfigError> {
     if CONFIG.get().is_some() {
         return Err(ConfigError::AlreadyInitialized);
     }
-    install_catalog(loaded.catalog)?;
+    install_catalog(catalog)?;
     CONFIG
-        .set(loaded.config)
+        .set(config)
         .map_err(|_| ConfigError::AlreadyInitialized)
 }
 
 /// Loads `<home>` as [`load_tars`] does and installs it, for a root with nothing to build from
-/// it that can fail.
+/// it that can fail. Such a root takes no operator section, so a file that sets one is refused.
 ///
 /// # Errors
 ///
 /// Returns [`ConfigError::AlreadyInitialized`] when a config is already installed, before
-/// reading anything, and the errors of [`load_tars`] and [`install`] otherwise.
+/// reading anything, [`ConfigError::Operator`] when a file sets an operator section, and the
+/// errors of [`load_tars`] and [`install`] otherwise.
 pub fn init_tars(home: Option<PathBuf>) -> Result<(), ConfigError> {
     if CONFIG.get().is_some() {
         return Err(ConfigError::AlreadyInitialized);
     }
-    install(load_tars(home)?)
+    let LoadedHome {
+        config,
+        operator,
+        catalog,
+    } = load_tars(home)?;
+    operator.finish().map_err(ConfigError::Operator)?;
+    install(config, catalog)
 }
 
 impl Config {

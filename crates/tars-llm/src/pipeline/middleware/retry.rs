@@ -13,6 +13,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::LlmError;
 use crate::LlmEventStream;
@@ -24,22 +25,29 @@ use crate::pipeline::middleware::Middleware;
 use crate::pipeline::service::{Next, OpenFailure};
 
 /// Configures [`RetryMiddleware`]. The default makes 3 attempts, starts at 200 ms, doubles, and
-/// waits at most 30 s.
-#[derive(Clone, Debug)]
+/// waits at most 30 s. It reads from the `[llm.retry]` config section, each duration in
+/// milliseconds (`initial_backoff_ms`); a key left out keeps its default.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RetryConfig {
     /// Total attempts including the first; `1` disables retry and `0` acts as `1`.
     pub max_attempts: u32,
+    #[serde(rename = "initial_backoff_ms", with = "crate::duration_serde::millis")]
     pub initial_backoff: Duration,
+    #[serde(rename = "max_backoff_ms", with = "crate::duration_serde::millis")]
     pub max_backoff: Duration,
     pub multiplier: f64,
     /// Whether an error's `unavailable_for()` replaces the computed backoff.
     pub respect_retry_after: bool,
     /// The longest wait between attempts, for a `Retry-After` and a computed backoff alike. A
-    /// longer wait returns the error unchanged; `Duration::MAX` removes the bound.
+    /// longer wait returns the error unchanged; `Duration::MAX` removes the bound, and is the
+    /// one value the config file cannot write.
+    #[serde(rename = "max_wait_ms", with = "crate::duration_serde::millis")]
     pub max_wait: Duration,
     /// The ceiling of a pseudo-random offset added to each computed backoff, so many clients of
     /// one rate-limited provider do not retry in lockstep. It is not added to a `Retry-After`,
     /// whose cadence is the provider's. `ZERO` turns it off.
+    #[serde(rename = "jitter_ms", with = "crate::duration_serde::millis")]
     pub jitter: Duration,
 }
 
@@ -330,7 +338,7 @@ mod tests {
             // callers and could decrement past zero.
             let decremented = self
                 .remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                     (n > 0).then(|| n - 1)
                 })
                 .is_ok();
@@ -663,5 +671,41 @@ mod tests {
             .expect("the second attempt succeeds");
         while s.next().await.is_some() {}
         assert_eq!(observed.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_retry_section_sets_only_the_keys_it_names() {
+        let cfg: RetryConfig = toml::from_str("max_attempts = 5\ninitial_backoff_ms = 50\n")
+            .expect("a partial [llm.retry] reads");
+        assert_eq!(cfg.max_attempts, 5);
+        assert_eq!(cfg.initial_backoff, Duration::from_millis(50));
+        assert_eq!(cfg.max_wait, RetryConfig::default().max_wait);
+    }
+
+    #[test]
+    fn a_misspelt_retry_key_is_refused() {
+        let err = toml::from_str::<RetryConfig>("max_attemps = 5\n").unwrap_err();
+        assert!(err.to_string().contains("max_attemps"), "{err}");
+    }
+
+    #[test]
+    fn the_default_retry_writes_and_reads_back_unchanged() {
+        let written = toml::to_string(&RetryConfig::default()).expect("the default writes");
+        let read: RetryConfig = toml::from_str(&written).expect("and reads back");
+        assert_eq!(format!("{read:?}"), format!("{:?}", RetryConfig::default()));
+    }
+
+    #[test]
+    fn a_wait_finer_than_a_millisecond_does_not_write() {
+        let cfg = RetryConfig {
+            jitter: Duration::from_micros(1500),
+            ..RetryConfig::default()
+        };
+        assert!(toml::to_string(&cfg).is_err());
+        let cfg = RetryConfig {
+            jitter: Duration::from_micros(2000),
+            ..RetryConfig::default()
+        };
+        assert!(toml::to_string(&cfg).is_ok());
     }
 }

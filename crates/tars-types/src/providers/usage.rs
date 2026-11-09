@@ -194,22 +194,15 @@ impl Pricing {
         .all(|r| *r == Rate::ZERO)
     }
 
-    /// Returns a rough pre-call cost of `req` in US dollars: text bytes / 4 as input tokens, plus
-    /// the request's `max_output_tokens` (or `default_max_output`) at the output rate. It is not
-    /// an upper bound: bytes / 4 misjudges multi-byte scripts and images are not counted.
+    /// Returns a rough pre-call cost of `req` in US dollars: its text's [`crate::estimate_tokens`]
+    /// as input tokens, plus the request's `max_output_tokens` (or `default_max_output`) at the
+    /// output rate. It is not an upper bound: the byte estimate misjudges multi-byte scripts, and
+    /// images are not counted, their token cost being model-specific (Anthropic ~1.6k per image,
+    /// OpenAI by tile count).
     pub fn estimate_chat_cost(&self, req: &crate::ChatRequest, default_max_output: u32) -> f64 {
-        let mut input_bytes: usize = req.system.as_deref().map(str::len).unwrap_or(0);
-        for m in &req.messages {
-            for block in m.content() {
-                if let crate::ContentBlock::Text { text } = block {
-                    input_bytes = input_bytes.saturating_add(text.len());
-                }
-                // Images are not counted: their token cost is model-specific (Anthropic ~1.6k
-                // per image, OpenAI by tile count).
-            }
-        }
+        let input_tokens = crate::estimate_tokens(req.text_bytes());
         let max_output_tokens = req.max_output_tokens.unwrap_or(default_max_output);
-        self.input_per_million.cost_of(input_bytes as f64 / 4.0)
+        self.input_per_million.cost_of(input_tokens as f64)
             + self
                 .output_per_million
                 .cost_of(f64::from(max_output_tokens))

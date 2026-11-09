@@ -66,7 +66,7 @@ pub(super) fn render_file(
         ),
         None => (0, lines.len()),
     };
-    let shown = lines.get(start..end.max(start)).unwrap_or(&[]);
+    let shown = lines.iter().skip(start).take(end.saturating_sub(start));
     Ok(format!(
         "Here's the content of {path} with line numbers:\n{}",
         numbered(shown, start + 1)
@@ -84,9 +84,8 @@ fn clamp_line(n: i64, len: usize) -> usize {
     usize::try_from(n).map_or(0, |n| n.min(len))
 }
 
-fn numbered(lines: &[&str], first: usize) -> String {
+fn numbered<'a>(lines: impl Iterator<Item = &'a &'a str>, first: usize) -> String {
     lines
-        .iter()
         .enumerate()
         .map(|(i, line)| format!("{:>LINE_NUMBER_WIDTH$}\t{line}", first + i))
         .collect::<Vec<_>>()
@@ -171,7 +170,10 @@ pub(super) fn replace_snippet(text: &str, line: usize) -> String {
     let end = (line + SNIPPET_CONTEXT + 1).min(lines.len());
     format!(
         "The memory file has been edited. Here is the snippet showing the change (with line numbers):\n{}",
-        numbered(lines.get(start..end).unwrap_or(&[]), start + 1)
+        numbered(
+            lines.iter().skip(start).take(end.saturating_sub(start)),
+            start + 1
+        )
     )
 }
 

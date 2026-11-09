@@ -1,8 +1,6 @@
 //! Describes what a provider can do and how tars reaches it, for routing and middleware to
 //! consult before sending a request.
 
-use std::collections::HashSet;
-
 use serde::{Deserialize, Serialize};
 
 use crate::providers::usage::Pricing;
@@ -51,17 +49,14 @@ pub struct ProviderProfile {
     pub gen_ai_provider_name: Option<String>,
 
     /// The prompt-context window in tokens; `None` means no ceiling to enforce, either because
-    /// the provider documents none or because it is unknown.
+    /// the provider documents none or because it is unknown. The output ceiling is not here: it
+    /// is per model, the [`OutputLimit`](crate::OutputLimit) the service binds.
     pub max_context_tokens: Option<u32>,
-    /// The most output tokens a caller may request; `None` means no ceiling to enforce.
-    pub max_output_tokens: Option<u32>,
 
-    pub supports_tool_use: Support,
-    pub supports_parallel_tool_calls: bool,
+    pub tool_use: ToolUse,
     /// The mechanism that holds output to a schema; `None` when the profile has no data on it,
     /// written `null` as an unknown [`Support`] is.
     pub supports_structured_output: Option<StructuredOutputMode>,
-    pub supports_vision: Support,
     pub supports_thinking: Support,
     /// Whether the server reads the chat template's thinking switch
     /// (`chat_template_kwargs.enable_thinking`), as vLLM, mlx_lm.server and llama-server do; a
@@ -73,50 +68,13 @@ pub struct ProviderProfile {
     pub prompt_cache: PromptCacheKind,
     pub streaming: bool,
 
-    pub modalities_in: HashSet<Modality>,
-    pub modalities_out: HashSet<Modality>,
+    pub modalities_in: Modalities,
+    pub modalities_out: Modalities,
 
     pub pricing: Pricing,
 }
 
-/// Validation error for `ProviderProfile::validate`.
-#[derive(Debug, thiserror::Error)]
-pub enum ProviderProfileError {
-    #[error("modalities_in must be non-empty")]
-    EmptyModalitiesIn,
-    #[error("modalities_out must be non-empty")]
-    EmptyModalitiesOut,
-    #[error("supports_structured_output = ToolUseEmulation requires supports_tool_use = Supported")]
-    ToolUseEmulationNeedsToolUse,
-    #[error("supports_parallel_tool_calls = true requires supports_tool_use = Supported")]
-    ParallelToolCallsNeedsToolUse,
-}
-
 impl ProviderProfile {
-    /// Checks that the profile is consistent: it has input and output modalities, and tool-use
-    /// emulation or parallel tool calls come with tool use.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first inconsistency found.
-    pub fn validate(&self) -> Result<(), ProviderProfileError> {
-        if self.modalities_in.is_empty() {
-            return Err(ProviderProfileError::EmptyModalitiesIn);
-        }
-        if self.modalities_out.is_empty() {
-            return Err(ProviderProfileError::EmptyModalitiesOut);
-        }
-        if self.supports_structured_output == Some(StructuredOutputMode::ToolUseEmulation)
-            && self.supports_tool_use != Support::Supported
-        {
-            return Err(ProviderProfileError::ToolUseEmulationNeedsToolUse);
-        }
-        if self.supports_parallel_tool_calls && self.supports_tool_use != Support::Supported {
-            return Err(ProviderProfileError::ParallelToolCallsNeedsToolUse);
-        }
-        Ok(())
-    }
-
     /// Returns whether the provider holds output to the request's schema. JSON mode does not: it
     /// promises JSON of any shape. Tool-use emulation holds it as far as the profile knows the
     /// provider has tool use.
@@ -125,7 +83,7 @@ impl ProviderProfile {
             Some(StructuredOutputMode::None | StructuredOutputMode::JsonObjectMode) => {
                 Support::Unsupported
             }
-            Some(StructuredOutputMode::ToolUseEmulation) => self.supports_tool_use,
+            Some(StructuredOutputMode::ToolUseEmulation) => self.tool_use.support(),
             Some(StructuredOutputMode::StrictSchema) => Support::Supported,
             None => Support::Unknown,
         }
@@ -139,27 +97,23 @@ impl ProviderProfile {
             interface,
             gen_ai_provider_name: None,
             max_context_tokens: None,
-            max_output_tokens: None,
-            supports_tool_use: Support::Unsupported,
-            supports_parallel_tool_calls: false,
+            tool_use: ToolUse::Unsupported,
             supports_structured_output: Some(StructuredOutputMode::None),
-            supports_vision: Support::Unsupported,
             supports_thinking: Support::Unsupported,
             supports_chat_template_thinking: false,
             supports_cancel: false,
             prompt_cache: PromptCacheKind::None,
             streaming: false,
-            modalities_in: HashSet::from([Modality::Text]),
-            modalities_out: HashSet::from([Modality::Text]),
+            modalities_in: Modalities::text_only(),
+            modalities_out: Modalities::text_only(),
             pricing: Pricing::default(),
         }
     }
 
-    /// Returns a text-only profile with no extras: 32K context, 4K output, streaming.
+    /// Returns a text-only profile with no extras: 32K context, streaming.
     pub fn text_only_baseline(pricing: Pricing) -> Self {
         Self {
             max_context_tokens: Some(32_000),
-            max_output_tokens: Some(4_096),
             streaming: true,
             pricing,
             ..Self::nothing_claimed(InterfaceKind::Http)
@@ -172,10 +126,10 @@ impl ProviderProfile {
     /// the server answers for itself. The adapter streams, so `streaming` holds.
     pub fn undescribed_http() -> Self {
         Self {
-            supports_tool_use: Support::Unknown,
+            tool_use: ToolUse::Unknown,
             supports_structured_output: None,
-            supports_vision: Support::Unknown,
             supports_thinking: Support::Unknown,
+            modalities_in: Modalities::text_and_unknown(),
             streaming: true,
             ..Self::nothing_claimed(InterfaceKind::Http)
         }
@@ -251,6 +205,104 @@ pub enum PromptCacheKind {
     Delegated,
 }
 
+/// Whether a provider takes tools; calling several in one turn is something only a provider
+/// with tool use can do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolUse {
+    Unsupported,
+    /// The profile has no data on it, and a request with tools is still sent.
+    Unknown,
+    Supported {
+        /// Whether the model may call several tools in one turn.
+        parallel: bool,
+    },
+}
+
+impl ToolUse {
+    /// Returns what the profile knows of tool use, parallel calls aside.
+    pub fn support(self) -> Support {
+        match self {
+            Self::Unsupported => Support::Unsupported,
+            Self::Unknown => Support::Unknown,
+            Self::Supported { .. } => Support::Supported,
+        }
+    }
+
+    /// Returns whether the model may call several tools in one turn.
+    pub fn parallel(self) -> bool {
+        matches!(self, Self::Supported { parallel: true })
+    }
+}
+
+/// What a provider knows of each kind of content it takes in, or gives out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Modalities {
+    pub text: Support,
+    pub image: Support,
+    pub audio: Support,
+    pub video: Support,
+    pub pdf: Support,
+}
+
+impl Modalities {
+    /// Returns text alone, every other modality unsupported.
+    pub fn text_only() -> Self {
+        Self {
+            text: Support::Supported,
+            image: Support::Unsupported,
+            audio: Support::Unsupported,
+            video: Support::Unsupported,
+            pdf: Support::Unsupported,
+        }
+    }
+
+    /// Returns text, and nothing known of any other modality: a profile with no data on the
+    /// model claims none and refuses none.
+    pub fn text_and_unknown() -> Self {
+        Self {
+            text: Support::Supported,
+            image: Support::Unknown,
+            audio: Support::Unknown,
+            video: Support::Unknown,
+            pdf: Support::Unknown,
+        }
+    }
+
+    /// Returns `listed` as supported and every other modality as unsupported.
+    pub fn listed(listed: impl IntoIterator<Item = Modality>) -> Self {
+        listed.into_iter().fold(
+            Self {
+                text: Support::Unsupported,
+                ..Self::text_only()
+            },
+            |m, one| m.with(one, Support::Supported),
+        )
+    }
+
+    /// Returns what the profile knows of `m`.
+    pub fn of(&self, m: Modality) -> Support {
+        match m {
+            Modality::Text => self.text,
+            Modality::Image => self.image,
+            Modality::Audio => self.audio,
+            Modality::Video => self.video,
+            Modality::Pdf => self.pdf,
+        }
+    }
+
+    fn with(mut self, m: Modality, support: Support) -> Self {
+        *match m {
+            Modality::Text => &mut self.text,
+            Modality::Image => &mut self.image,
+            Modality::Audio => &mut self.audio,
+            Modality::Video => &mut self.video,
+            Modality::Pdf => &mut self.pdf,
+        } = support;
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Modality {
@@ -258,6 +310,7 @@ pub enum Modality {
     Image,
     Audio,
     Video,
+    Pdf,
 }
 
 #[cfg(test)]
@@ -267,39 +320,27 @@ mod tests {
     #[test]
     fn text_baseline_has_text_modalities() {
         let caps = ProviderProfile::text_only_baseline(Pricing::default());
-        assert!(caps.modalities_in.contains(&Modality::Text));
-        assert!(caps.modalities_out.contains(&Modality::Text));
-        assert_eq!(caps.modalities_in.len(), 1);
+        assert_eq!(caps.modalities_in, Modalities::text_only());
+        assert_eq!(caps.modalities_out, Modalities::text_only());
     }
 
     #[test]
-    fn validate_rejects_empty_modalities() {
-        let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
-        caps.modalities_in.clear();
-        assert!(matches!(
-            caps.validate(),
-            Err(ProviderProfileError::EmptyModalitiesIn)
-        ));
-
-        let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
-        caps.modalities_out.clear();
-        assert!(matches!(
-            caps.validate(),
-            Err(ProviderProfileError::EmptyModalitiesOut)
-        ));
+    fn a_listed_modality_is_supported_and_the_rest_are_not() {
+        let m = Modalities::listed([Modality::Text, Modality::Image]);
+        assert_eq!(m.of(Modality::Image), Support::Supported);
+        assert_eq!(m.of(Modality::Pdf), Support::Unsupported);
+        assert_eq!(
+            Modalities::text_and_unknown().of(Modality::Image),
+            Support::Unknown
+        );
     }
 
     #[test]
-    fn validate_rejects_tool_use_emulation_without_tool_use() {
-        let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
-        caps.supports_structured_output = Some(StructuredOutputMode::ToolUseEmulation);
-        assert!(matches!(
-            caps.validate(),
-            Err(ProviderProfileError::ToolUseEmulationNeedsToolUse)
-        ));
-
-        caps.supports_tool_use = Support::Supported;
-        assert!(caps.validate().is_ok());
+    fn parallel_tool_calls_are_only_where_tool_use_is() {
+        assert!(ToolUse::Supported { parallel: true }.parallel());
+        assert!(!ToolUse::Supported { parallel: false }.parallel());
+        assert!(!ToolUse::Unknown.parallel());
+        assert!(!ToolUse::Unsupported.parallel());
     }
 
     #[test]
@@ -307,9 +348,9 @@ mod tests {
         let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
         caps.supports_structured_output = Some(StructuredOutputMode::ToolUseEmulation);
         assert_eq!(caps.schema_enforcement(), Support::Unsupported);
-        caps.supports_tool_use = Support::Unknown;
+        caps.tool_use = ToolUse::Unknown;
         assert_eq!(caps.schema_enforcement(), Support::Unknown);
-        caps.supports_tool_use = Support::Supported;
+        caps.tool_use = ToolUse::Supported { parallel: false };
         assert_eq!(caps.schema_enforcement(), Support::Supported);
     }
 
@@ -359,30 +400,10 @@ mod tests {
     #[test]
     fn an_undescribed_server_claims_no_feature_and_no_ceiling() {
         let p = ProviderProfile::undescribed_http();
-        assert_eq!(p.supports_tool_use, Support::Unknown);
+        assert_eq!(p.tool_use, ToolUse::Unknown);
         assert_eq!(p.supports_structured_output, None);
         assert_eq!(p.supports_thinking, Support::Unknown);
-        assert_eq!(p.supports_vision, Support::Unknown);
+        assert_eq!(p.modalities_in.image, Support::Unknown);
         assert_eq!(p.max_context_tokens, None);
-        assert_eq!(p.max_output_tokens, None);
-        assert!(p.validate().is_ok());
-    }
-
-    #[test]
-    fn a_profile_that_claims_nothing_is_consistent() {
-        assert!(
-            ProviderProfile::nothing_claimed(InterfaceKind::Api)
-                .validate()
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn baseline_validates_clean() {
-        assert!(
-            ProviderProfile::text_only_baseline(Pricing::default())
-                .validate()
-                .is_ok()
-        );
     }
 }

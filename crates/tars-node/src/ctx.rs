@@ -1,4 +1,4 @@
-//! Turns the JS `{ tenant, session, trace, tags }` object into the [`Caller`] a handle
+//! Turns the JS `{ tenant, session, trace }` object into the [`Caller`] a handle
 //! carries.
 //!
 //! `RUN_CONTEXT` is a tokio task-local and does not cross the napi hop, so each handle is built
@@ -9,7 +9,7 @@
 //! A handle has no tenant of its own, so a ctx without one does not build:
 //!
 //! ```js
-//! const p = pipeline('critic', { tenant: 'acme', session: '01900000-0000-7000-8000-000000000abc', tags: ['dogfood'] });
+//! const p = pipeline('critic', { tenant: 'acme', session: '01900000-0000-7000-8000-000000000abc' });
 //! await p.complete({ model, user: 'review this' });
 //! ```
 
@@ -37,8 +37,6 @@ pub struct JsContext {
     pub session: Option<String>,
     /// Trace id for log correlation. Default: a random UUID.
     pub trace: Option<String>,
-    /// Cohort tags surfaced on every emitted pipeline event.
-    pub tags: Option<Vec<String>>,
 }
 
 /// Build the caller's [`Caller`] from the JS `ctx` argument. The
@@ -51,9 +49,6 @@ pub(crate) fn build_context(js: Option<JsContext>) -> Result<Caller, JsError> {
     let trace = parse_optional_id(CtxField::Trace, js.trace)?.unwrap_or_else(new_trace);
     let mut ctx = Caller::new(tenant, trace);
     ctx.session_id = parse_optional_id(CtxField::Session, js.session)?;
-    if let Some(tags) = js.tags {
-        ctx.tags = tags;
-    }
     Ok(ctx)
 }
 
@@ -85,7 +80,6 @@ mod tests {
             tenant: tenant.to_string(),
             session: None,
             trace: None,
-            tags: None,
         }
     }
 

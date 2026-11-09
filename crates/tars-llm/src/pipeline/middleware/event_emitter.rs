@@ -33,14 +33,13 @@ use crate::LlmError;
 use crate::LlmEventStream;
 use crate::ProviderError;
 use tars_melt::event::call_log::{
-    CallBody, CallDispatch, CallFailure, CallResponse, LlmCallRow, LlmCallTable, RefusalReasons,
-    SentEnd, StreamEnd,
+    CallBody, CallDispatch, CallFailure, CallResponse, LlmCallRow, LlmCallTable, SentEnd, StreamEnd,
 };
 use tars_melt::event::log::LogSink;
 use tars_types::{
     CallId, CallTelemetry, Caller, ChatEvent, ChatRequest, ChatResponse, ChatResponseBuilder,
-    Degradation, LlmErrorKind, LoggedCall, OutputLimit, ProviderId, SessionId, TenantId, TraceId,
-    ValidationReason, ValidationSummary,
+    CompatibilityReason, Degradation, LlmErrorKind, LoggedCall, NonEmpty, OutputLimit, ProviderId,
+    SessionId, TenantId, TraceId, ValidationReason, ValidationSummary,
 };
 use tars_utils::display_chain;
 
@@ -244,7 +243,10 @@ impl CallStart {
             request_sha256: Sha256::digest(request_body.as_bytes()).into(),
             request_body,
             has_tools: !req.tools.is_empty(),
-            has_thinking: !req.thinking.is_off(),
+            has_thinking: matches!(
+                req.thinking,
+                Some(tars_types::ThinkingMode::Auto | tars_types::ThinkingMode::Budget(_))
+            ),
             has_structured_output: req.structured_output.is_some(),
             temperature: req.temperature,
             max_output_tokens: req.max_output_tokens,
@@ -261,7 +263,7 @@ impl CallStart {
     reason = "almost every call is sent; boxing that variant would allocate per call for the rare refusal"
 )]
 enum CallEnd {
-    Refused(RefusalReasons),
+    Refused(NonEmpty<CompatibilityReason>),
     Sent { chain: Chain, ending: Ending },
 }
 
@@ -290,9 +292,9 @@ impl Ending {
 }
 
 /// Returns every reason a refusal names; `None` when its error is not a refusal or names none.
-fn refusal_reasons(e: &LlmError) -> Option<RefusalReasons> {
+fn refusal_reasons(e: &LlmError) -> Option<NonEmpty<CompatibilityReason>> {
     match e {
-        LlmError::Incompatible { reasons } => RefusalReasons::new(reasons.clone()),
+        LlmError::Incompatible { reasons } => Some(reasons.clone()),
         _ => None,
     }
 }
@@ -309,11 +311,25 @@ fn before_stream(e: &LlmError) -> Ending {
 }
 
 /// Ends a call whose stream is over: `terminal` says whether it delivered `Finished`, `failed`
-/// the last error it yielded.
-fn after_stream(terminal: bool, failed: Option<LlmErrorKind>, built: ChatResponse) -> Ending {
-    let usage = built.usage;
-    let validation_summary = built.validation_summary.clone();
-    let response = terminal.then(|| response_of(built));
+/// the last error it yielded or the way it broke the event protocol. A stream that delivered
+/// `Finished` but does not fold into a response failed as unfinished.
+fn after_stream(
+    terminal: bool,
+    failed: Option<LlmErrorKind>,
+    builder: ChatResponseBuilder,
+) -> Ending {
+    let usage = builder.usage();
+    let validation_summary = builder.validation_summary().clone();
+    let (failed, response) = match (terminal, failed) {
+        (false, failed) => (failed, None),
+        // [arc:intentional-handle] reason: the call already failed with `kind`; the response
+        // is kept only when it folds, and why it does not adds nothing the failure lacks.
+        (true, Some(kind)) => (Some(kind), builder.finish().ok().map(response_of)),
+        (true, None) => match builder.finish() {
+            Ok(built) => (None, Some(response_of(built))),
+            Err(_) => (Some(LlmErrorKind::Unfinished), None),
+        },
+    };
     let end = match (failed, response) {
         (Some(kind), response) => StreamEnd::Failed {
             failure: CallFailure::of_kind(kind),
@@ -340,7 +356,7 @@ fn response_of(built: ChatResponse) -> CallResponse {
     CallResponse {
         body,
         actual_model: built.actual_model,
-        stop_reason: built.stop_reason,
+        stop_reason: Some(built.stop_reason),
     }
 }
 
@@ -447,20 +463,24 @@ fn observe(
                     Ok(ChatEvent::Measured { telemetry }) => {
                         record.measured = std::mem::take(&mut record.measured).merge(telemetry.clone());
                     }
-                    Ok(ev) => builder.apply(ev.clone()),
+                    Ok(ev) => {
+                        if builder.apply(ev.clone()).is_err() {
+                            failed = Some(LlmErrorKind::StreamViolation);
+                        }
+                    }
                     Err(e) => failed = Some(e.kind()),
                 }
             }
             if matches!(item, Ok(ChatEvent::Finished { .. }))
                 && let Some((record, builder)) = open.take()
             {
-                record.finish(after_stream(true, failed, builder.finish()));
+                record.finish(after_stream(true, failed, builder));
             }
             yield item;
         }
 
         if let Some((record, builder)) = open.take() {
-            record.finish(after_stream(false, failed, builder.finish()));
+            record.finish(after_stream(false, failed, builder));
         }
     }
 }
@@ -858,7 +878,7 @@ mod tests {
             .build();
 
         let mut refused = ChatRequest::user("refused");
-        refused.thinking = tars_types::ThinkingMode::Auto;
+        refused.thinking = Some(tars_types::ThinkingMode::Auto);
         let refusal = svc.call(refused, Caller::test_default()).await.result;
         assert!(matches!(refusal, Err(LlmError::Incompatible { .. })));
         let _ = drain(
@@ -906,7 +926,7 @@ mod tests {
             .build();
 
         let mut refused = ChatRequest::user("refused");
-        refused.thinking = tars_types::ThinkingMode::Auto;
+        refused.thinking = Some(tars_types::ThinkingMode::Auto);
         let result = svc.call(refused, Caller::test_default()).await.result;
         let Err(LlmError::Incompatible { reasons }) = result else {
             panic!("the call is refused");
@@ -929,10 +949,7 @@ mod tests {
                 .clone()
         };
         assert!(!reasons.is_empty());
-        assert_eq!(
-            outcome_of("refused"),
-            CallOutcome::Refused(RefusalReasons::new(reasons).unwrap())
-        );
+        assert_eq!(outcome_of("refused"), CallOutcome::Refused(reasons));
         assert_eq!(outcome_of("served"), CallOutcome::Completed);
     }
 
@@ -950,7 +967,7 @@ mod tests {
             .layer(EventEmitterMiddleware::new(logged.sink.clone()))
             .build();
         let mut budgeted = ChatRequest::user("budgeted");
-        budgeted.thinking = tars_types::ThinkingMode::Budget(1024);
+        budgeted.thinking = Some(tars_types::ThinkingMode::Budget(1024));
 
         let call = svc.call(budgeted, Caller::test_default()).await;
         let _ = drain(call.result.unwrap()).await;
@@ -969,7 +986,10 @@ mod tests {
         let provider = Arc::new(ClaimsNothing {
             inner: MockProvider::new(ProviderId::new("p1"), CannedResponse::text("hello")),
             profile: tars_types::ProviderProfile {
-                supports_vision: tars_types::Support::Supported,
+                modalities_in: tars_types::Modalities::listed([
+                    tars_types::Modality::Text,
+                    tars_types::Modality::Image,
+                ]),
                 ..tars_types::ProviderProfile::nothing_claimed(tars_types::InterfaceKind::Http)
             },
         });
@@ -1040,7 +1060,7 @@ mod tests {
             .layer(EventEmitterMiddleware::new(logged.sink.clone()))
             .build();
         let mut refused = ChatRequest::user("refused");
-        refused.thinking = tars_types::ThinkingMode::Budget(1024);
+        refused.thinking = Some(tars_types::ThinkingMode::Budget(1024));
 
         let call = svc.call(refused, Caller::test_default()).await;
         assert!(matches!(call.result, Err(LlmError::Incompatible { .. })));
@@ -1114,7 +1134,7 @@ mod tests {
             .layer(EventEmitterMiddleware::new(logged.sink.clone()))
             .build();
         let mut refused = ChatRequest::user("refused");
-        refused.thinking = tars_types::ThinkingMode::Auto;
+        refused.thinking = Some(tars_types::ThinkingMode::Auto);
 
         let call = svc.call(refused, Caller::test_default()).await;
         assert!(matches!(call.result, Err(LlmError::Incompatible { .. })));

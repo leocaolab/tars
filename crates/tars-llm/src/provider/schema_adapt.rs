@@ -116,10 +116,10 @@ pub fn restore_maps(value: &mut Value, maps: &[MapPath]) {
 /// that is this object. A map at the object itself cannot be one: the object is not an array.
 pub fn restore_field_maps(object: &mut Map<String, Value>, maps: &[MapPath]) {
     for MapPath(steps) in maps {
-        if let Some((InstanceStep::Field(name), rest)) = steps.split_first() {
-            if let Some(v) = object.get_mut(name) {
-                restore_at(v, rest);
-            }
+        if let Some((InstanceStep::Field(name), rest)) = steps.split_first()
+            && let Some(v) = object.get_mut(name)
+        {
+            restore_at(v, rest);
         }
     }
 }
@@ -188,10 +188,10 @@ fn inline_refs(value: &mut Value) -> Result<(), SchemaAdaptError> {
         nodes: 0,
     };
     walk.resolve_node(value, 0)?;
-    if let Some(key) = key {
-        if let Value::Object(m) = value {
-            m.remove(key);
-        }
+    if let Some(key) = key
+        && let Value::Object(m) = value
+    {
+        m.remove(key);
     }
     Ok(())
 }
@@ -277,13 +277,12 @@ fn adapt_node(
                     Some(Value::Array(arr))
                         if arr.len() == 1 && matches!(arr.first(), Some(Value::Object(_)))
                 );
-                if flattenable {
-                    if let Some(Value::Array(arr)) = map.remove(combinator) {
-                        if let Some(Value::Object(inner)) = arr.into_iter().next() {
-                            for (k, v) in inner {
-                                map.insert(k, v);
-                            }
-                        }
+                if flattenable
+                    && let Some(Value::Array(arr)) = map.remove(combinator)
+                    && let Some(Value::Object(inner)) = arr.into_iter().next()
+                {
+                    for (k, v) in inner {
+                        map.insert(k, v);
                     }
                 }
             }

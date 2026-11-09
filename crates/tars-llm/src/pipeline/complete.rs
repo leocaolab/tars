@@ -2,7 +2,7 @@
 
 use futures::StreamExt;
 
-use crate::{LlmError, LlmService};
+use crate::{LlmError, LlmService, ProviderError};
 use tars_types::{Caller, ChatRequest, ChatResponse, ChatResponseBuilder};
 
 /// Drains `svc.call(req, ctx)` into one [`ChatResponse`]; a validation layer's filtered response
@@ -10,7 +10,8 @@ use tars_types::{Caller, ChatRequest, ChatResponse, ChatResponseBuilder};
 ///
 /// # Errors
 ///
-/// Returns the call's error or the first error the stream yields.
+/// Returns the call's error or the first error the stream yields; a stream that breaks the event
+/// protocol or never becomes a response fails as the provider's error of that kind.
 pub async fn complete_async(
     svc: LlmService,
     req: ChatRequest,
@@ -19,9 +20,9 @@ pub async fn complete_async(
     let mut stream = svc.call(req, ctx).await.result?;
     let mut builder = ChatResponseBuilder::new();
     while let Some(ev) = stream.next().await {
-        builder.apply(ev?);
+        builder.apply(ev?).map_err(ProviderError::from)?;
     }
-    Ok(builder.finish())
+    Ok(builder.finish().map_err(ProviderError::from)?)
 }
 
 #[cfg(test)]
@@ -43,6 +44,33 @@ mod tests {
         let resp = complete_async(svc, req, ctx).await.expect("call succeeds");
 
         assert_eq!(resp.text, "hello");
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_breaks_the_event_protocol_fails_the_call() {
+        let provider = MockProvider::new(
+            ProviderId::new("p"),
+            CannedResponse::Sequence(vec![
+                tars_types::ChatEvent::started("m"),
+                tars_types::ChatEvent::ToolCallArgsDelta {
+                    index: 0,
+                    args_delta: "{}".into(),
+                },
+                tars_types::ChatEvent::Finished {
+                    stop_reason: tars_types::StopReason::ToolUse,
+                    usage: None,
+                },
+            ]),
+        );
+        let svc = LlmService::of(provider, "m");
+        let got = complete_async(svc, ChatRequest::user("ping"), Caller::test_default()).await;
+        assert!(
+            matches!(
+                &got,
+                Err(e) if e.kind() == tars_types::LlmErrorKind::StreamViolation
+            ),
+            "{got:?}"
+        );
     }
 
     #[tokio::test]

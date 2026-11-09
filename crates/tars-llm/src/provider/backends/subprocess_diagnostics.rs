@@ -17,7 +17,17 @@ pub struct SubprocessDiagnostics {
     pub interpretation: String,
     pub session_log_path: Option<PathBuf>,
     pub session_log_summary: Option<String>,
-    pub worktree_diff_stat: Option<String>,
+    /// `Ok(None)` when the worktree has no changes.
+    pub worktree_diff_stat: Result<Option<String>, WorktreeDiffError>,
+}
+
+/// Why `git diff --shortstat HEAD` gave no answer about the worktree.
+#[derive(Debug, thiserror::Error)]
+pub enum WorktreeDiffError {
+    #[error("git did not start")]
+    Spawn(#[source] std::io::Error),
+    #[error("git failed ({status}): {stderr}")]
+    Failed { status: ExitStatus, stderr: String },
 }
 
 /// Returns what an exit code means: the shell's codes, 128 plus a signal, and claude-code's 145.
@@ -113,18 +123,26 @@ pub fn summarise_claude_session_log(path: &Path) -> Result<String, std::io::Erro
     ))
 }
 
-/// Returns `git diff --shortstat HEAD` in `repo`, or `None` when it is empty or git fails.
-pub fn worktree_diff_summary(repo: &Path) -> Option<String> {
+/// Returns `git diff --shortstat HEAD` in `repo`, or `None` when the worktree has no changes.
+///
+/// # Errors
+///
+/// Fails when git does not start, or exits non-zero (not a repository, no `HEAD`), so a failure
+/// is not shown as a clean worktree.
+pub fn worktree_diff_summary(repo: &Path) -> Result<Option<String>, WorktreeDiffError> {
     let out = std::process::Command::new("git")
         .args(["diff", "--shortstat", "HEAD"])
         .current_dir(repo)
         .output()
-        .ok()?;
+        .map_err(WorktreeDiffError::Spawn)?;
     if !out.status.success() {
-        return None;
+        return Err(WorktreeDiffError::Failed {
+            status: out.status,
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    Ok((!s.is_empty()).then_some(s))
 }
 
 /// Main entry point — given an `ExitStatus` and the context the child
@@ -188,8 +206,14 @@ impl std::fmt::Display for SubprocessDiagnostics {
         if let Some(summary) = &self.session_log_summary {
             writeln!(f, "  session state:  {summary}")?;
         }
-        if let Some(diff) = &self.worktree_diff_stat {
-            writeln!(f, "  worktree diff:  {diff}")?;
+        match &self.worktree_diff_stat {
+            Ok(Some(diff)) => writeln!(f, "  worktree diff:  {diff}")?,
+            Ok(None) => {}
+            Err(e) => writeln!(
+                f,
+                "  worktree diff:  unknown, {}",
+                tars_utils::display_chain(e)
+            )?,
         }
         writeln!(
             f,
@@ -252,6 +276,27 @@ mod tests {
         assert!(
             rendered.contains("claude -p -"),
             "command in output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_directory_git_cannot_diff_is_reported_not_shown_as_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let diag = diagnose_child_exit(
+            "claude -p -",
+            ExitStatus::from_raw(1 << 8),
+            Duration::from_secs(1),
+            dir.path(),
+            None,
+        );
+        assert!(
+            diag.worktree_diff_stat.is_err(),
+            "{:?}",
+            diag.worktree_diff_stat
+        );
+        assert!(
+            format!("{diag}").contains("worktree diff:  unknown"),
+            "{diag}"
         );
     }
 

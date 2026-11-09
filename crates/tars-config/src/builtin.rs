@@ -112,7 +112,7 @@ pub fn default_deepseek() -> ProviderConfig {
     }
 }
 
-/// Returns the Claude Code CLI: the `claude` binary with a 300 s timeout.
+/// Returns the Claude Code CLI with the `claude_cli` defaults of [`crate::providers`].
 ///
 /// `tools = disabled` turns off the CLI's own agent loop, which otherwise runs for minutes on a
 /// single call. `bare = false` keeps the OAuth and keychain login of `claude login`, which
@@ -121,13 +121,13 @@ pub fn default_deepseek() -> ProviderConfig {
 /// `docs/providers/claude-cli.md` has the measurements.
 pub fn default_claude_cli() -> ProviderConfig {
     ProviderConfig::ClaudeCli {
-        executable: "claude".into(),
-        timeout_secs: 300,
+        executable: crate::providers::CLAUDE_CLI_EXECUTABLE.into(),
+        timeout_secs: crate::providers::CLI_TIMEOUT_SECS,
         default_model: kb_default("claude_cli"),
         tools: crate::providers::ClaudeCliToolsConfig::default(),
         bare: false,
         effort: None,
-        exclude_dynamic_sections: true,
+        exclude_dynamic_sections: crate::providers::CLAUDE_CLI_EXCLUDE_DYNAMIC_SECTIONS,
         extra_args: Vec::new(),
     }
 }

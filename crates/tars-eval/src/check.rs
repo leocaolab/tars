@@ -207,13 +207,15 @@ mod tests {
     fn resp_text(text: &str) -> ChatResponse {
         use tars_types::ChatResponseBuilder;
         let mut b = ChatResponseBuilder::new();
-        b.apply(tars_types::ChatEvent::started("m"));
-        b.apply(tars_types::ChatEvent::Delta { text: text.into() });
+        b.apply(tars_types::ChatEvent::started("m")).unwrap();
+        b.apply(tars_types::ChatEvent::Delta { text: text.into() })
+            .unwrap();
         b.apply(tars_types::ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-        });
-        b.finish()
+            usage: Some(Usage::default()),
+        })
+        .unwrap();
+        b.finish().unwrap()
     }
 
     #[test]

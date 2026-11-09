@@ -42,8 +42,15 @@ fn happy_path_body() -> String {
 fn registry_from_toml(toml_str: &str) -> ProviderRegistry {
     let cfg = Config::from_toml(toml_str).expect("config parses");
     let http = HttpClient::default_arc().expect("http base");
-    ProviderRegistry::from_config(cfg.providers(), tars_config::catalog(), http, basic(), None)
-        .expect("registry builds")
+    ProviderRegistry::from_config(
+        cfg.providers(),
+        tars_config::catalog(),
+        http,
+        tars_llm::OutputReserve::default(),
+        basic(),
+        None,
+    )
+    .expect("registry builds")
 }
 
 // ── 1. Happy path ───────────────────────────────────────────────────────────
@@ -94,7 +101,7 @@ async fn happy_path_pipeline_parses_real_sse_into_usage() {
         .expect("stream open");
 
     let mut text = String::new();
-    let mut finish: Option<(StopReason, tars_types::Usage)> = None;
+    let mut finish: Option<(StopReason, Option<tars_types::Usage>)> = None;
     while let Some(ev) = stream.next().await {
         match ev.expect("event") {
             ChatEvent::Delta { text: t } => text.push_str(&t),
@@ -108,6 +115,7 @@ async fn happy_path_pipeline_parses_real_sse_into_usage() {
     assert_eq!(text, "hello");
     let (stop, usage) = finish.expect("Finished event");
     assert_eq!(stop, StopReason::EndTurn);
+    let usage = usage.unwrap();
     assert_eq!(usage.input_tokens, 7);
     assert_eq!(usage.output_tokens, 1);
 

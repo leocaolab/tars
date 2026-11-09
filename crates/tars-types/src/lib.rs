@@ -12,6 +12,7 @@
 pub mod ask;
 pub mod env;
 pub mod ids;
+pub mod non_empty;
 pub mod principal;
 pub mod providers;
 pub mod run_context;
@@ -36,6 +37,7 @@ pub use ids::{
     ParseTenantIdError, ParseTraceIdError, ParseTrajectoryIdError, PrincipalId, ProviderId,
     SessionId, SessionIdError, TaskId, TenantId, TraceId, TrajectoryId, UtcDay,
 };
+pub use non_empty::{EmptyListError, NonEmpty};
 pub use principal::{Principal, PrincipalKind, Scope};
 pub use providers::auth::Auth;
 pub use providers::cache::{CacheDirective, CacheHitInfo, ProviderCacheHandle, systemtime_millis};
@@ -50,11 +52,12 @@ pub use providers::http_extras::HttpOverrides;
 pub use providers::model::ThinkingMode;
 pub use providers::output_limit::{CatalogSource, OutputLimit};
 pub use providers::provider_profile::{
-    InterfaceKind, Modality, PromptCacheKind, ProviderProfile, ProviderProfileError,
-    StructuredOutputMode, Support,
+    InterfaceKind, Modalities, Modality, PromptCacheKind, ProviderProfile, StructuredOutputMode,
+    Support, ToolUse,
 };
-pub use providers::response::{ChatResponse, ChatResponseBuilder};
+pub use providers::response::{ChatResponse, ChatResponseBuilder, StreamViolation, Unfinished};
 pub use providers::schema::{JsonSchema, SchemaRootError, schema_root};
+pub use providers::token_estimate::{BYTES_PER_TOKEN, estimate_tokens};
 pub use providers::tools::{
     ArgumentText, BlankToolNameError, JsonKind, MalformedArguments, ToolCall, ToolChoice, ToolSpec,
     arguments_object, parse_arguments,
@@ -67,7 +70,7 @@ pub use step::cap::{
     CapSpecProblem, Effect, EffectTierGate, EmptyIdempotencyKey, GatedCap, IdempotencyKey,
     InvalidArgs, NoopGate,
 };
-pub use step::context::StepContext;
+pub use step::context::{DurableRun, StepContext};
 pub use step::fn_step::FnStep;
 pub use step::goal::{Acceptance, Goal, GoalExt, Judgement, SimpleGoal};
 pub use step::intent::{ChatIntent, Intent, JsonIntent, StrIntent};

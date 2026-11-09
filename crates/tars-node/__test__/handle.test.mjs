@@ -75,7 +75,7 @@ test('provider(role) layer-1 also completes through the mock', async () => {
 });
 
 test('pipeline(role, ctx) binds an explicit context and still completes', async () => {
-  const scoped = pipeline('critic', { tenant: TENANT, session: '01900000-0000-7000-8000-000000000abc', tags: ['dogfood'] });
+  const scoped = pipeline('critic', { tenant: TENANT, session: '01900000-0000-7000-8000-000000000abc' });
   const r = await scoped.complete({ model: 'mock-model', user: 'review this' });
   assert.match(r.text, /handle spine ok/);
 });

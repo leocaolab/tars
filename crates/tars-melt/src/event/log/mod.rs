@@ -16,6 +16,8 @@ mod parquet;
 mod scope;
 mod seal;
 mod sink;
+#[cfg(feature = "parquet")]
+mod tenant_dir;
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -37,6 +39,8 @@ pub use parquet::{
 pub use scope::{TenantScope, TimeWindow, WindowError};
 pub use seal::SealPolicy;
 pub use sink::{BufferedSink, SinkConfig};
+#[cfg(feature = "parquet")]
+pub use tenant_dir::{ParseTenantDirError, TENANT_PREFIX, parse_tenant_dir, tenant_dir};
 
 /// A table's name, restricted to `[a-z_]+` so it is safe as a directory name. The table's owner
 /// declares it once as an associated `const`, so an invalid name fails the build.
@@ -269,6 +273,11 @@ pub enum LogError {
     #[cfg(feature = "parquet")]
     #[error("{}: not a `date=YYYY-MM-DD` partition directory", path.display())]
     PartitionDay { path: std::path::PathBuf },
+    /// The writer's clock reads an instant with no UTC day, so no day is swept or frozen until
+    /// it is set.
+    #[cfg(feature = "parquet")]
+    #[error("the clock reads {reading:?}, which falls on no UTC day; past days are not swept")]
+    ClockOutOfRange { reading: std::time::SystemTime },
     #[cfg(feature = "parquet")]
     #[error("{}: rows do not decode", path.display())]
     Decode {

@@ -26,14 +26,11 @@ impl CodexCliProviderBuilder {
     pub fn new(id: ProviderId) -> Self {
         Self {
             id,
-            executable: "codex".to_string(),
-            // `codex exec` runs a whole agent loop.
-            timeout: Duration::from_secs(600),
+            executable: tars_config::providers::CODEX_CLI_EXECUTABLE.to_string(),
+            timeout: Duration::from_secs(tars_config::providers::CODEX_CLI_TIMEOUT_SECS),
             sandbox: CodexSandbox::ReadOnly,
             capabilities: None,
-            // Callers may run outside a git repository, where codex would refuse with an unclear
-            // error.
-            skip_git_repo_check: true,
+            skip_git_repo_check: tars_config::providers::CODEX_CLI_SKIP_GIT_REPO_CHECK,
             wire: None,
         }
     }
@@ -147,9 +144,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.text, "hi");
-        assert_eq!(response.usage.input_tokens, 10);
-        assert_eq!(response.usage.output_tokens, 2);
-        assert!(response.is_finished());
+        assert_eq!(response.usage.unwrap().input_tokens, 10);
+        assert_eq!(response.usage.unwrap().output_tokens, 2);
 
         let inv = runner.recorded.lock().unwrap().clone().unwrap();
         assert_eq!(inv.model, "gpt-5");
@@ -173,7 +169,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.text, "answer");
-        assert_eq!(response.usage.thinking_tokens, 5);
+        assert_eq!(response.usage.unwrap().thinking_tokens, 5);
     }
 
     #[tokio::test]

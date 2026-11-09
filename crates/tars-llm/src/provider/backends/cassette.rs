@@ -46,7 +46,12 @@ fn fingerprint_of_canon(canon: &str) -> String {
 
 /// Returns the canonical text of a request: the model, then the whole serialized request.
 pub fn canon_request(req: &ChatRequest, model: &str) -> String {
-    let body = serde_json::to_string(req).unwrap_or_else(|_| format!("{req:?}"));
+    // A Debug fallback would make a fingerprint that changes across Rust releases.
+    let body = serde_json::to_string(req).expect(
+        "ChatRequest serializes: its maps (tool schemas, arguments) are serde_json maps with \
+         string keys, it has no custom Serialize that fails, and serde_json writes a non-finite \
+         temperature as null",
+    );
     format!("model={model}\0{body}")
 }
 
@@ -305,15 +310,34 @@ impl CassetteProvider {
     }
 }
 
-/// Writes the cassette file; a failure is logged, and an empty `map` writes nothing.
+/// Why a recording session's cassette file was not written.
+#[derive(Debug, thiserror::Error)]
+pub enum WriteCassetteError {
+    #[error("cannot create the cassette directory {}", path.display())]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot write the cassette file {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot serialize the cassette")]
+    Encode(#[source] serde_json::Error),
+}
+
+/// Writes the cassette file; an empty `map` writes nothing.
 fn write_cassette(
     map: &HashMap<String, Recording>,
     caps: &ProviderProfile,
     output_limits: &Mutex<BTreeMap<String, OutputLimit>>,
     path: &std::path::Path,
-) {
+) -> Result<(), WriteCassetteError> {
     if map.is_empty() {
-        return;
+        return Ok(());
     }
     let file = CassetteFile::new(
         Some(caps.clone()),
@@ -323,18 +347,31 @@ fn write_cassette(
             .clone(),
         map.values().cloned(),
     );
-    match serde_json::to_string_pretty(&file) {
-        Ok(json) => {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::write(path, json) {
-                tracing::warn!(error = %e, path = %path.display(), "cassette flush failed");
-            } else {
-                tracing::debug!(path = %path.display(), entries = file.recordings.len(), "cassette flushed");
-            }
-        }
-        Err(e) => tracing::warn!(error = %e, "cassette serialize failed"),
+    let json = serde_json::to_string_pretty(&file).map_err(WriteCassetteError::Encode)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| WriteCassetteError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(path, json).map_err(|source| WriteCassetteError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    tracing::debug!(path = %path.display(), entries = file.recordings.len(), "cassette flushed");
+    Ok(())
+}
+
+/// Writes the cassette file when the provider is dropped and logs a failure, since a destructor
+/// has no caller to tell.
+fn flush_cassette(
+    map: &HashMap<String, Recording>,
+    caps: &ProviderProfile,
+    output_limits: &Mutex<BTreeMap<String, OutputLimit>>,
+    path: &std::path::Path,
+) {
+    if let Err(e) = write_cassette(map, caps, output_limits, path) {
+        tracing::warn!(error = %tars_utils::display_chain(&e), "cassette flush failed");
     }
 }
 
@@ -409,9 +446,11 @@ impl LlmProvider for CassetteProvider {
                         guard.clone()
                     };
                     // Written now, not only on drop: a host that leaves through
-                    // `std::process::exit` runs no destructors.
+                    // `std::process::exit` runs no destructors. A recording that is lost fails the
+                    // call, so whoever records sees it.
                     if let Some(path) = flush_path {
-                        write_cassette(&snapshot, &self.capabilities, output_limits, path);
+                        write_cassette(&snapshot, &self.capabilities, output_limits, path)
+                            .map_err(ProviderError::CassetteNotWritten)?;
                     }
                 }
                 Ok(Box::pin(stream::iter(events)))
@@ -430,7 +469,7 @@ impl Drop for CassetteProvider {
         } = &self.mode
         {
             let map = captured.lock().unwrap_or_else(|e| e.into_inner());
-            write_cassette(&map, &self.capabilities, output_limits, path);
+            flush_cassette(&map, &self.capabilities, output_limits, path);
         }
     }
 }
@@ -516,7 +555,7 @@ mod tests {
             },
             ChatEvent::Finished {
                 stop_reason: StopReason::ToolUse,
-                usage: Usage::default(),
+                usage: Some(Usage::default()),
             },
         ]);
         let real = MockProvider::with_responses(ProviderId::new("real"), vec![tool_resp]);
@@ -537,7 +576,7 @@ mod tests {
     #[test]
     fn cassette_file_round_trips_capabilities() {
         let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
-        caps.supports_tool_use = tars_types::Support::Supported;
+        caps.tool_use = tars_types::ToolUse::Supported { parallel: false };
         let limit = OutputLimit::Configured { tokens: 4242 };
         let file = CassetteFile {
             capabilities: Some(caps.clone()),
@@ -549,7 +588,7 @@ mod tests {
         let back = CassetteFile::read(&written_cassette(&dir, &json)).unwrap();
         assert_eq!(back.output_limits.get("m"), Some(&limit));
         assert_eq!(
-            back.capabilities.unwrap().supports_tool_use,
+            back.capabilities.unwrap().tool_use.support(),
             tars_types::Support::Supported,
             "caps survive the cassette file"
         );
@@ -676,5 +715,51 @@ mod tests {
             Err(CassetteFileError::Decode { path: named, .. }) => assert_eq!(named, path),
             other => panic!("expected Decode, got {:?}", other.map(|_| ())),
         }
+    }
+
+    #[test]
+    fn a_cassette_directory_that_cannot_be_created_is_the_reported_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"").unwrap();
+        let path = blocker.join("sub").join("c.json");
+        let map = HashMap::from([(
+            "k".to_string(),
+            Recording {
+                request: String::new(),
+                events: Vec::new(),
+            },
+        )]);
+        let caps = ProviderProfile::text_only_baseline(Pricing::default());
+
+        let err = write_cassette(&map, &caps, &Mutex::new(BTreeMap::new()), &path).unwrap_err();
+
+        assert!(
+            matches!(&err, WriteCassetteError::CreateDir { path, .. } if *path == blocker.join("sub")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recording_that_cannot_be_written_fails_the_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"").unwrap();
+        let inner = MockProvider::new(ProviderId::new("inner"), CannedResponse::text("hi"));
+        let cassette = CassetteProvider::record_to(
+            ProviderId::new("cass"),
+            inner,
+            Some(blocker.join("c.json")),
+        );
+
+        let sent = cassette
+            .stream(req("q"), "test-model", Caller::test_default())
+            .await;
+
+        assert!(
+            matches!(sent, Err(ProviderError::CassetteNotWritten(_))),
+            "{:?}",
+            sent.err()
+        );
     }
 }

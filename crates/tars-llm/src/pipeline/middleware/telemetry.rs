@@ -237,7 +237,9 @@ fn wrap_stream(
             match &ev {
                 Ok(ChatEvent::Finished { stop_reason, usage }) => {
                     saw_terminal = true;
-                    record_usage(&span, usage);
+                    if let Some(usage) = usage {
+                        record_usage(&span, usage);
+                    }
                     span.record("gen_ai.response.finish_reasons", stop_reason.as_str());
                     let total_ms = started.elapsed().as_millis() as u64;
                     tracing::info!(
@@ -247,10 +249,10 @@ fn wrap_stream(
                         model = %model,
                         elapsed_ms = total_ms,
                         stop_reason = ?stop_reason,
-                        input_tokens = usage.input_tokens,
-                        output_tokens = usage.output_tokens,
-                        cached_input_tokens = usage.cached_input_tokens,
-                        thinking_tokens = usage.thinking_tokens,
+                        input_tokens = usage.map(|u| u.input_tokens),
+                        output_tokens = usage.map(|u| u.output_tokens),
+                        cached_input_tokens = usage.map(|u| u.cached_input_tokens),
+                        thinking_tokens = usage.map(|u| u.thinking_tokens),
                     );
                     if !measured {
                         measured = true;
@@ -713,13 +715,13 @@ mod tests {
                 Ok(ChatEvent::Delta { text: "ok".into() }),
                 Ok(ChatEvent::Finished {
                     stop_reason: StopReason::EndTurn,
-                    usage: Usage {
+                    usage: Some(Usage {
                         input_tokens: 100,
                         output_tokens: 20,
                         cached_input_tokens: 40,
                         thinking_tokens: 5,
                         ..Default::default()
-                    },
+                    }),
                 }),
             ],
         );
@@ -776,7 +778,7 @@ mod tests {
         use tracing::Instrument as _;
         let scripted = ScriptedProvider::new(vec![Ok(ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
+            usage: Some(Usage::default()),
         })]);
         let pipeline = LlmService::builder(scripted, "m-child")
             .layer(TelemetryMiddleware::new())
@@ -799,7 +801,7 @@ mod tests {
     async fn a_provider_tars_cannot_name_is_left_off_the_span() {
         let scripted = ScriptedProvider::new(vec![Ok(ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
+            usage: Some(Usage::default()),
         })]);
         let pipeline = LlmService::builder(scripted, "m-anon")
             .layer(TelemetryMiddleware::new())
@@ -989,11 +991,11 @@ mod tests {
             Ok(ChatEvent::Delta { text: "ok".into() }),
             Ok(ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage: Usage {
+                usage: Some(Usage {
                     input_tokens: 7,
                     output_tokens: 11,
                     ..Default::default()
-                },
+                }),
             }),
         ]);
         let pipeline = LlmService::builder(scripted, "test-model")
@@ -1029,7 +1031,7 @@ mod tests {
             caps: ProviderProfile::nothing_claimed(tars_types::InterfaceKind::Http),
             events: Mutex::new(Some(vec![Ok(ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
-                usage: Usage::default(),
+                usage: Some(Usage::default()),
             })])),
         });
         let pipeline = Arc::new(
@@ -1038,7 +1040,7 @@ mod tests {
                 .build(),
         );
         let mut thinking = ChatRequest::user("x");
-        thinking.thinking = tars_types::ThinkingMode::Auto;
+        thinking.thinking = Some(tars_types::ThinkingMode::Auto);
 
         let ((), refused) = with_capture(|_| async {
             let refusal = pipeline.call(thinking, Caller::test_default()).await.result;

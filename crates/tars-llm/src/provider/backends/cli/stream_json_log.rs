@@ -78,11 +78,10 @@ async fn stream_child(
                         let parsed: Result<Value, _> = serde_json::from_str(&line);
                         match parsed {
                             Ok(ev) => {
-                                if session_short == "????????" {
-                                    if let Some(sid) = ev.get("session_id").and_then(|v| v.as_str())
-                                    {
-                                        session_short = sid.chars().take(8).collect();
-                                    }
+                                if session_short == "????????"
+                                    && let Some(sid) = ev.get("session_id").and_then(|v| v.as_str())
+                                {
+                                    session_short = sid.chars().take(8).collect();
                                 }
                                 emit_event_summary(&ev, &session_short);
                                 if ev.get("type").and_then(|v| v.as_str()) == Some("result") {
@@ -291,29 +290,8 @@ fn emit_event_summary(ev: &Value, sid: &str) {
         // Their text was already logged delta by delta.
         "assistant" | "user" => {}
         "result" => {
-            let dur = ev.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(-1);
-            let usage = ev.get("usage");
-            let tin = usage
-                .and_then(|v| v.get("input_tokens"))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let tout = usage
-                .and_then(|v| v.get("output_tokens"))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let tcached = usage
-                .and_then(|v| v.get("cache_read_input_tokens"))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let cost = ev
-                .get("total_cost_usd")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            let subtype = ev.get("subtype").and_then(|v| v.as_str()).unwrap_or("?");
-            tracing::info!(
-                target: "crate::cli::stream",
-                "[claude_cli {sid}] result {subtype} dur={dur}ms in={tin} out={tout} cached={tcached} cost=${cost:.4}"
-            );
+            let summary = result_summary(ev);
+            tracing::info!(target: "crate::cli::stream", "[claude_cli {sid}] {summary}");
         }
         other => {
             tracing::debug!(target: "crate::cli::stream", "[claude_cli {sid}] {other}");
@@ -321,8 +299,53 @@ fn emit_event_summary(ev: &Value, sid: &str) {
     }
 }
 
+/// Returns the log line of a `result` event; a count or cost it does not carry shows as `?`, so
+/// it is not read as zero spent.
+fn result_summary(ev: &Value) -> String {
+    let dur = ev.get("duration_ms").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let usage = ev.get("usage");
+    let count = |key: &str| {
+        usage
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_i64())
+            .map_or_else(|| "?".to_string(), |n| n.to_string())
+    };
+    let cost = ev
+        .get("total_cost_usd")
+        .and_then(|v| v.as_f64())
+        .map_or_else(|| "?".to_string(), |c| format!("{c:.4}"));
+    let subtype = ev.get("subtype").and_then(|v| v.as_str()).unwrap_or("?");
+    format!(
+        "result {subtype} dur={dur}ms in={} out={} cached={} cost=${cost}",
+        count("input_tokens"),
+        count("output_tokens"),
+        count("cache_read_input_tokens"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_result_without_usage_or_cost_logs_unknown_not_zero() {
+        let line = result_summary(&serde_json::json!({"type": "result", "subtype": "success"}));
+        assert!(line.contains("in=? out=? cached=? cost=$?"), "{line}");
+    }
+
+    #[test]
+    fn a_result_with_usage_and_cost_logs_them() {
+        let line = result_summary(&serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 12,
+            "usage": {"input_tokens": 3, "output_tokens": 4, "cache_read_input_tokens": 0},
+            "total_cost_usd": 0.5
+        }));
+        assert!(
+            line.contains("dur=12ms in=3 out=4 cached=0 cost=$0.5000"),
+            "{line}"
+        );
+    }
+
     use super::*;
     use std::collections::HashSet;
     use std::process::Stdio;

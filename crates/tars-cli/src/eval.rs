@@ -343,17 +343,18 @@ fn regressions(d: &RunDiff) -> Vec<Regression> {
 /// Fails when the config or the home's `.env` cannot be loaded, when the subcommand fails, when a run has a failed case, and when a diff finds a regression.
 pub async fn execute(
     args: EvalArgs,
-    config_path: Option<PathBuf>,
+    config_paths: &config::ConfigPaths,
     sandbox: Option<SandboxMode>,
 ) -> Result<(), EvalError> {
     match args.command {
         EvalCommand::Run(a) => {
             let checks = check_set(a.checks, a.judge_provider, a.judge_model)?;
-            let cfg = config::load(config_path)?;
+            let config::LoadedConfig { config: cfg, llm } = config::load(config_paths)?;
             let run = run_eval(
                 RunRequest {
                     registry: build_registry_with_breakers(
                         &cfg,
+                        &llm,
                         Arc::new(crate::home_env::load()?),
                     )
                     .map_err(EvalError::Registry)?,
@@ -365,6 +366,7 @@ pub async fn execute(
                     max_output_tokens: a.max_output_tokens,
                     checks,
                     case_deadline: a.case_timeout.map(Duration::from_secs),
+                    retry: llm.retry,
                 },
                 |event| eprint!("{}", render::progress(event)),
             )
@@ -411,12 +413,13 @@ pub async fn execute(
             }
         }
         EvalCommand::Judge(a) => {
-            let cfg = config::load(config_path)?;
+            let config::LoadedConfig { config: cfg, llm } = config::load(config_paths)?;
             let judge = a.judge.clone();
             let judged = run_judge(
                 JudgeRequest {
                     registry: build_registry_with_breakers(
                         &cfg,
+                        &llm,
                         Arc::new(crate::home_env::load()?),
                     )
                     .map_err(EvalError::Registry)?,
@@ -424,6 +427,7 @@ pub async fn execute(
                     run: a.run,
                     judge: a.judge,
                     judge_model: a.judge_model,
+                    retry: llm.retry,
                 },
                 |started| eprintln!("{}", render::judging(started, judge.as_str())),
             )
@@ -508,7 +512,11 @@ mod tests {
             }),
         };
 
-        let err = execute(args, Some(config), None).await.unwrap_err();
+        let paths = config::ConfigPaths {
+            user: Some(config),
+            system: None,
+        };
+        let err = execute(args, &paths, None).await.unwrap_err();
         let msg = tars_utils::display_chain(&err);
         assert!(!msg.contains("multiple providers"), "{msg}");
         assert!(msg.contains("no-such-run"), "{msg}");

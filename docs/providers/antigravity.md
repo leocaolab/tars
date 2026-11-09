@@ -82,7 +82,9 @@ bash side effects confined to the worktree.
 
 Unlike `claude_cli` (which *strips* auth env to force a
 subscription path), antigravity's env-strip table is **empty**: those
-keys **pass through** the sandbox to `agy` untouched
+keys **pass through** the sandbox to `agy` untouched. They and the system
+variables (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, the temp directories, `TERM`, `TZ`, the locale (`LANG`, `LANGUAGE`, `LC_*`), the `XDG_*` directories, proxies (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) and CA bundles (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`)) are all `agy` gets; no other variable of the tars
+process reaches it
 (`crates/tars-llm/src/provider/backends/cli/dialects/antigravity.rs:31-32`,
 `:100-107` — empty strip table; `env()` names them for the record at
 `:140-144`). There is no `auth` field on the config block — the provider

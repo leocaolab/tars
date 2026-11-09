@@ -427,8 +427,8 @@ fn impl_target(trimmed: &str) -> Option<&str> {
         None => rest,
     };
     // The type is what stands before the opening brace, after any `Trait for`.
-    let head = rest.split('{').next().unwrap_or(rest).trim();
-    let target = head.rsplit(" for ").next().unwrap_or(head).trim();
+    let head = rest.split_once('{').map_or(rest, |(head, _)| head).trim();
+    let target = head.rsplit_once(" for ").map_or(head, |(_, ty)| ty).trim();
     // The name is the leading path; a generic argument list is not part of it: `Ty<'a>` is `Ty`.
     let end = target
         .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))

@@ -17,8 +17,6 @@ export interface JsContext {
   session?: string
   /** Trace id for log correlation. Default: a random UUID. */
   trace?: string
-  /** Cohort tags surfaced on every emitted pipeline event. */
-  tags?: Array<string>
 }
 /**
  * Installs the process-global config and builds the provider registry, so a bad provider or key
@@ -100,32 +98,31 @@ export interface CompleteOptions {
   maxOutputTokens?: number
   /** Unset leaves the provider's default. */
   temperature?: number
-  /** `true` lets the provider choose the thinking depth, `false` turns thinking off. */
+  /**
+   * `true` lets the provider choose the thinking depth, `false` turns thinking off; absent
+   * leaves the provider's default.
+   */
   thinking?: boolean
   /** A JSON Schema the reply must conform to; its root must be an object. */
   responseSchema?: any
   /** Whether the provider enforces `response_schema` (default) or takes it as a hint. */
   responseSchemaStrict?: boolean
-  /**
-   * Added to the context's tags, which the pipeline's events carry; a raw `Provider` emits
-   * no events.
-   */
-  tags?: Array<string>
 }
 /** What `complete()` resolves to. */
 export interface CompleteResult {
   text: string
-  usage: UsageJs
+  /** The tokens the call used; absent when the provider reported none. */
+  usage?: UsageJs
   /**
    * The model the provider reports having used, which routing can make differ from the one
-   * asked for.
+   * asked for; absent when the provider did not say.
    */
   model?: string
   /**
    * One of `end_turn`, `max_tokens`, `stop_sequence`, `tool_use`, `content_filter`,
    * `cancelled`, `other`.
    */
-  stopReason?: string
+  stopReason: string
   /**
    * The parts of the request the provider served it without (`structured_output`,
    * `chat_template_thinking`); empty when it served all of it.

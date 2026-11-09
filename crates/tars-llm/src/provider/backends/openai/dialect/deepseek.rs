@@ -23,11 +23,11 @@ impl OpenAiDialect for DeepSeekDialect {
     }
 
     /// Moves DSML tool calls out of the text; see [`lift_dsml`].
-    fn finalize(&self, r: &mut tars_types::ChatResponse) {
-        if r.text.contains(DSML) {
-            let (text, calls) = lift_dsml(&r.text);
-            r.text = text;
-            r.tool_calls.extend(calls);
+    fn finalize(&self, text: &mut String, tool_calls: &mut Vec<tars_types::ToolCall>) {
+        if text.contains(DSML) {
+            let (lifted, calls) = lift_dsml(text);
+            *text = lifted;
+            tool_calls.extend(calls);
         }
     }
 
@@ -39,11 +39,13 @@ impl OpenAiDialect for DeepSeekDialect {
     ) -> Result<Value, ProviderError> {
         let mut body = adapter.build_request_default(req, model)?;
 
-        let mode = match req.thinking {
-            ThinkingMode::Off => "disabled",
-            ThinkingMode::Auto | ThinkingMode::Budget(_) => "enabled",
-        };
-        body["thinking"] = json!({ "type": mode });
+        if let Some(mode) = req.thinking {
+            let switch = match mode {
+                ThinkingMode::Off => "disabled",
+                ThinkingMode::Auto | ThinkingMode::Budget(_) => "enabled",
+            };
+            body["thinking"] = json!({ "type": switch });
+        }
 
         Ok(body)
     }
@@ -68,9 +70,24 @@ mod tests {
             stop_sequences: vec![],
             seed: None,
             cache_directives: vec![],
-            thinking: t,
+            thinking: Some(t),
             enable_chat_template_thinking: None,
         }
+    }
+
+    #[test]
+    fn a_request_that_says_nothing_about_thinking_sends_no_thinking_field() {
+        let adapter = OpenAiAdapter::new(
+            DEFAULT_BASE_URL.into(),
+            HttpOverrides::default(),
+            crate::provider::backends::openai::adapter::profile_with(Some(
+                StructuredOutputMode::JsonObjectMode,
+            )),
+        );
+        let body = DeepSeekDialect
+            .build_request(&adapter, &ChatRequest::user("hi"), "deepseek-v4-flash")
+            .unwrap();
+        assert!(body.get("thinking").is_none(), "{body}");
     }
 
     #[test]
@@ -274,36 +291,25 @@ mod dsml_tests {
 
     #[test]
     fn finalize_lifts_markup_out_of_an_assembled_response() {
-        use tars_types::ChatResponse;
-        let mut r = ChatResponse {
-            text: ANSWER.to_string(),
-            ..Default::default()
-        };
-        DeepSeekDialect.finalize(&mut r);
+        let (mut text, mut tool_calls) = (ANSWER.to_string(), Vec::new());
+        DeepSeekDialect.finalize(&mut text, &mut tool_calls);
 
-        assert_eq!(r.tool_calls.len(), 2, "{:?}", r.tool_calls);
-        assert_eq!(r.tool_calls[0].name, "grep");
+        assert_eq!(tool_calls.len(), 2, "{:?}", tool_calls);
+        assert_eq!(tool_calls[0].name, "grep");
+        assert_eq!(tool_calls[0].arguments["pattern"], "struct JournaledReason");
         assert_eq!(
-            r.tool_calls[0].arguments["pattern"],
-            "struct JournaledReason"
-        );
-        assert_eq!(
-            r.text, "I need the failure shape first.",
+            text, "I need the failure shape first.",
             "the words, not the markup"
         );
     }
 
     #[test]
     fn finalize_leaves_an_ordinary_response_alone() {
-        use tars_types::ChatResponse;
         let plain = "Let me read the file.\n\n{\"action\":\"fs_read\",\"path\":\"a.rs\"}";
-        let mut r = ChatResponse {
-            text: plain.to_string(),
-            ..Default::default()
-        };
-        DeepSeekDialect.finalize(&mut r);
-        assert!(r.tool_calls.is_empty());
-        assert_eq!(r.text, plain);
+        let (mut text, mut tool_calls) = (plain.to_string(), Vec::new());
+        DeepSeekDialect.finalize(&mut text, &mut tool_calls);
+        assert!(tool_calls.is_empty());
+        assert_eq!(text, plain);
     }
 
     #[test]

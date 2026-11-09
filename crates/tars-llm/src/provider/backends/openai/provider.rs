@@ -15,7 +15,7 @@ use crate::provider::auth::{Auth, AuthResolver};
 use crate::provider::batch::BatchSubmitter;
 use crate::provider::error::{ParseProblem, RequestRefusal};
 use crate::provider::http_base::{
-    ERROR_BODY_CAP_BYTES, HttpAdapter, HttpClient, HttpOverrides, apply_extra_headers,
+    ERROR_BODY_CAP_BYTES, HttpAdapter, HttpClient, HttpOverrides, insert_extra_headers,
     read_bounded_body, stream_via_adapter, truncate_utf8,
 };
 use crate::provider::wire::WireRecorder;
@@ -261,16 +261,13 @@ fn finalized_text(dialect: &dyn OpenAiDialect, text: String) -> Vec<tars_types::
     if text.is_empty() {
         return Vec::new();
     }
-    let mut r = tars_types::ChatResponse {
-        text,
-        ..Default::default()
-    };
-    dialect.finalize(&mut r);
+    let (mut text, mut tool_calls) = (text, Vec::new());
+    dialect.finalize(&mut text, &mut tool_calls);
     let mut events = Vec::new();
-    if !r.text.is_empty() {
-        events.push(tars_types::ChatEvent::Delta { text: r.text });
+    if !text.is_empty() {
+        events.push(tars_types::ChatEvent::Delta { text });
     }
-    for (index, c) in r.tool_calls.into_iter().enumerate() {
+    for (index, c) in tool_calls.into_iter().enumerate() {
         events.push(tars_types::ChatEvent::ToolCallStart {
             index,
             id: c.id.clone(),
@@ -349,10 +346,10 @@ impl LlmProvider for OpenAiProvider {
         let mut s = self.stream(req, model, ctx).await?;
         let mut acc = tars_types::ChatResponseBuilder::new();
         while let Some(event) = s.next().await {
-            acc.apply(event?);
+            acc.apply(event?)?;
         }
-        let mut r = acc.finish();
-        dialect.finalize(&mut r);
+        let mut r = acc.finish()?;
+        dialect.finalize(&mut r.text, &mut r.tool_calls);
         Ok(r)
     }
 
@@ -402,11 +399,12 @@ impl BatchSubmitter for OpenAiProvider {
 
         let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let mut auth_only = openai_auth_only_headers(&auth)?;
-        apply_extra_headers(
+        insert_extra_headers(
             self.adapter.extras(),
             self.http.env.as_ref(),
             &mut auth_only,
-        );
+        )
+        .map_err(ProviderError::ExtraHeader)?;
 
         let file_part = reqwest::multipart::Part::bytes(jsonl.into_bytes())
             .file_name("batch.jsonl")
@@ -454,7 +452,8 @@ impl BatchSubmitter for OpenAiProvider {
         // the account's storage until deleted; a cleanup DELETE could fail or hang in turn.
         let create_url = self.adapter.batches_url("")?;
         let mut headers = self.adapter.build_headers(&auth)?;
-        apply_extra_headers(self.adapter.extras(), self.http.env.as_ref(), &mut headers);
+        insert_extra_headers(self.adapter.extras(), self.http.env.as_ref(), &mut headers)
+            .map_err(ProviderError::ExtraHeader)?;
         let body = json!({
             "input_file_id": input_file_id,
             "endpoint": "/v1/chat/completions",
@@ -528,7 +527,8 @@ impl BatchSubmitter for OpenAiProvider {
     async fn cancel(&self, id: &BatchJobId, ctx: &Caller) -> Result<(), ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let mut headers = self.adapter.build_headers(&auth)?;
-        apply_extra_headers(self.adapter.extras(), self.http.env.as_ref(), &mut headers);
+        insert_extra_headers(self.adapter.extras(), self.http.env.as_ref(), &mut headers)
+            .map_err(ProviderError::ExtraHeader)?;
         let url = self
             .adapter
             .batches_url(&format!("/{}/cancel", id.as_str()))?;
@@ -556,7 +556,8 @@ impl OpenAiProvider {
     async fn file_content(&self, file_id: &str, ctx: &Caller) -> Result<String, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let mut headers = openai_auth_only_headers(&auth)?;
-        apply_extra_headers(self.adapter.extras(), self.http.env.as_ref(), &mut headers);
+        insert_extra_headers(self.adapter.extras(), self.http.env.as_ref(), &mut headers)
+            .map_err(ProviderError::ExtraHeader)?;
         let url = self.adapter.files_url(&format!("/{file_id}/content"))?;
         let resp = self
             .http
@@ -583,7 +584,8 @@ impl OpenAiProvider {
     ) -> Result<Value, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let mut headers = self.adapter.build_headers(&auth)?;
-        apply_extra_headers(self.adapter.extras(), self.http.env.as_ref(), &mut headers);
+        insert_extra_headers(self.adapter.extras(), self.http.env.as_ref(), &mut headers)
+            .map_err(ProviderError::ExtraHeader)?;
         let url = self.adapter.batches_url(&format!("/{}", id.as_str()))?;
         let resp = self
             .http
@@ -708,7 +710,7 @@ mod dialect_seam_tests {
             stop_sequences: vec![],
             seed: None,
             cache_directives: vec![],
-            thinking: Default::default(),
+            thinking: None,
             enable_chat_template_thinking: None,
         };
 
@@ -737,7 +739,7 @@ mod dialect_seam_tests {
             stop_sequences: vec![],
             seed: None,
             cache_directives: vec![],
-            thinking: t,
+            thinking: Some(t),
             enable_chat_template_thinking: None,
         }
     }
@@ -819,7 +821,7 @@ mod whole_text_stream_tests {
     fn finished() -> Result<ChatEvent, ProviderError> {
         Ok(ChatEvent::Finished {
             stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
+            usage: Some(Usage::default()),
         })
     }
 
@@ -835,9 +837,9 @@ mod whole_text_stream_tests {
     fn assemble(events: Vec<Result<ChatEvent, ProviderError>>) -> ChatResponse {
         let mut b = ChatResponseBuilder::new();
         for e in events {
-            b.apply(e.expect("this stream carries no error"));
+            b.apply(e.expect("this stream carries no error")).unwrap();
         }
-        b.finish()
+        b.finish().unwrap()
     }
 
     #[tokio::test]
@@ -871,15 +873,12 @@ mod whole_text_stream_tests {
     #[test]
     fn no_single_chunk_carries_a_call() {
         for chunk in ONE_CALL {
-            let mut r = ChatResponse {
-                text: (*chunk).to_string(),
-                ..Default::default()
-            };
-            DeepSeekDialect.finalize(&mut r);
+            let (mut text, mut tool_calls) = ((*chunk).to_string(), Vec::new());
+            DeepSeekDialect.finalize(&mut text, &mut tool_calls);
             assert!(
-                r.tool_calls.is_empty(),
+                tool_calls.is_empty(),
                 "chunk {chunk:?} yielded {:?}",
-                r.tool_calls
+                tool_calls
             );
         }
     }
@@ -962,7 +961,7 @@ mod whole_text_stream_tests {
 
         assert_eq!(r.text, "Let me read the file first.");
         assert!(r.tool_calls.is_empty(), "{:?}", r.tool_calls);
-        assert_eq!(r.stop_reason, Some(StopReason::EndTurn));
+        assert_eq!(r.stop_reason, StopReason::EndTurn);
     }
 
     #[tokio::test]

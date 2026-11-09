@@ -37,7 +37,10 @@ pub trait TypedCap: Send + Sync {
 }
 
 pub fn schema_of<T: schemars::JsonSchema>() -> Value {
-    serde_json::to_value(schemars::schema_for!(T)).unwrap_or(Value::Null)
+    serde_json::to_value(schemars::schema_for!(T)).expect(
+        "a schemars RootSchema serializes: its maps are keyed by strings and none of its types \
+         has a Serialize that fails",
+    )
 }
 
 #[async_trait::async_trait]
@@ -65,7 +68,7 @@ impl<T: TypedCap> Cap for T {
         })?;
         let out = self.call(input, ctx).await?;
         serde_json::to_value(out)
-            .map_err(|e| CapError::ExecuteFatal(format!("{}: reply did not encode: {e}", T::NAME)))
+            .map_err(|e| CapError::Defect(format!("{}: reply did not encode: {e}", T::NAME)))
     }
 }
 
@@ -161,6 +164,41 @@ mod tests {
             msg.contains("\"start\":7"),
             "carries the raw arguments: {msg}"
         );
+    }
+
+    struct Unencodable;
+
+    /// A reply serde cannot write as JSON: a map whose keys are not strings.
+    #[derive(Serialize, schemars::JsonSchema)]
+    struct Pairs {
+        by_pair: std::collections::BTreeMap<(u8, u8), u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl TypedCap for Unencodable {
+        const NAME: &'static str = "pairs";
+        const DOC: &'static str = "Return pairs.";
+        const EFFECT: Effect = Effect::Read;
+        type In = Read;
+        type Out = Pairs;
+
+        async fn call(&self, _input: Read, _ctx: &CapCtx) -> Result<Pairs, CapError> {
+            Ok(Pairs {
+                by_pair: [((1, 2), 3)].into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_does_not_encode_is_a_defect_the_model_does_not_see() {
+        let err = Cap::invoke(&Unencodable, json!({ "path": "a" }), &ctx())
+            .await
+            .expect_err("the reply has non-string keys");
+        assert!(matches!(err, CapError::Defect(_)), "{err}");
+        assert!(matches!(
+            err.failure(&json!({})),
+            crate::Reason::Defect { .. }
+        ));
     }
 
     #[test]

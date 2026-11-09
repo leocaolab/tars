@@ -700,15 +700,6 @@ impl DurableStore for MemDurableStore {
         self.state().await.enqueue(spec, now)
     }
 
-    async fn claim_ready(
-        &self,
-        owner: &str,
-        now: Millis,
-        ttl: Millis,
-    ) -> Result<Option<ClaimedTask>, DurableStoreError> {
-        self.claim_ready_excluding(owner, now, ttl, &[]).await
-    }
-
     async fn claim_ready_excluding(
         &self,
         owner: &str,

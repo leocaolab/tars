@@ -16,11 +16,17 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
+/// The durable store row a run executes and the job that task belongs to. A durable run has
+/// both; outside one there is neither.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurableRun {
+    pub task_id: TaskId,
+    pub job_id: JobId,
+}
+
 #[derive(Clone)]
 pub struct StepContext {
-    task_id: Option<TaskId>,
-    /// The job scope a `spawn` cap stamps its children into.
-    job_scope: Option<JobId>,
+    run: Option<DurableRun>,
     pub trajectory_id: Option<String>,
     /// The claim held by the runner that supervises this run; `None` when nothing does.
     claim: Option<crate::LeaseToken>,
@@ -37,9 +43,8 @@ impl Default for StepContext {
         Self {
             cancel: CancellationToken::new(),
             trajectory_id: None,
-            task_id: None,
+            run: None,
             request_context: None,
-            job_scope: None,
             caps: Arc::new(BTreeMap::new()),
             claim: None,
         }
@@ -113,25 +118,26 @@ impl StepContext {
         self.claim
     }
 
-    /// Sets the durable task this run belongs to.
-    pub fn with_task_id(mut self, id: TaskId) -> Self {
-        self.task_id = Some(id);
+    /// Sets the durable task this run executes and the job a `spawn` cap stamps its children
+    /// into.
+    pub fn with_durable_run(mut self, task_id: TaskId, job_id: JobId) -> Self {
+        self.run = Some(DurableRun { task_id, job_id });
         self
+    }
+
+    /// Returns the durable task and its job, or `None` outside a durable run.
+    pub fn durable_run(&self) -> Option<&DurableRun> {
+        self.run.as_ref()
     }
 
     /// Returns the durable task id, or `None` outside a durable run.
     pub fn task_id(&self) -> Option<&TaskId> {
-        self.task_id.as_ref()
-    }
-    /// Sets the job a `spawn` cap stamps this run's children into.
-    pub fn with_job_scope(mut self, job_id: JobId) -> Self {
-        self.job_scope = Some(job_id);
-        self
+        self.run.as_ref().map(|r| &r.task_id)
     }
 
     /// Returns the job this run belongs to, or `None` outside a durable run.
     pub fn job_scope(&self) -> Option<&JobId> {
-        self.job_scope.as_ref()
+        self.run.as_ref().map(|r| &r.job_id)
     }
 
     /// Grants the caps the step may invoke, replacing any earlier grant.

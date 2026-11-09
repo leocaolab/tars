@@ -1,8 +1,10 @@
 //! Defines a chain layer ([`Middleware`]) and how layers are stacked into an [`LlmService`].
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::{LlmEventStream, LlmProvider};
 use tars_types::{Caller, ChatRequest};
@@ -16,6 +18,25 @@ pub(crate) mod retry;
 pub(crate) mod telemetry;
 pub(crate) mod tenant_budget;
 pub(crate) mod validation;
+
+/// The output tokens assumed for a request that still has no `max_output_tokens`: a layer that
+/// prices or reserves a call counts it, and Anthropic, whose API requires a `max_tokens`, sends it.
+/// `LlmService` fills an unset request from the bound model's `OutputLimit`, so only a request
+/// whose limit nobody states gets here unset. It reads from the `[llm.reserve]` config section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OutputReserve {
+    pub output_tokens: NonZeroU32,
+}
+
+impl Default for OutputReserve {
+    fn default() -> Self {
+        const DEFAULT_OUTPUT_TOKENS: NonZeroU32 = NonZeroU32::new(4_096).unwrap();
+        Self {
+            output_tokens: DEFAULT_OUTPUT_TOKENS,
+        }
+    }
+}
 
 /// One layer of an [`LlmService`]'s chain. A layer that needs the model reads [`Next::model`].
 #[async_trait]

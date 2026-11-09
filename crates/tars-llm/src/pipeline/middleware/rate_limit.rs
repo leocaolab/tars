@@ -33,7 +33,7 @@ use futures::StreamExt;
 use crate::LlmEventStream;
 use tars_types::{Caller, ChatRequest, Usage};
 
-use crate::pipeline::middleware::Middleware;
+use crate::pipeline::middleware::{Middleware, OutputReserve};
 use crate::pipeline::service::{Next, OpenFailure};
 
 /// Configuration for [`TpmRateLimiter`].
@@ -48,12 +48,12 @@ pub struct TpmRateLimitConfig {
 }
 
 impl TpmRateLimitConfig {
-    /// Returns a config with a one-second burst and a 4096-token output reserve.
+    /// Returns a config with a one-second burst and the default [`OutputReserve`].
     pub fn new(tokens_per_minute: NonZeroU32) -> Self {
         Self {
             tokens_per_minute,
             burst_tokens: None,
-            reserved_output_tokens: 4_096,
+            reserved_output_tokens: OutputReserve::default().output_tokens.get(),
         }
     }
 
@@ -316,17 +316,9 @@ fn tokens_counted(usage: &Usage) -> u32 {
     u32::try_from(usage.input_tokens.saturating_add(usage.output_tokens)).unwrap_or(u32::MAX)
 }
 
-/// Returns bytes/4 over `system` and every text block.
+/// Returns the estimated tokens of `system` and every text block, rounded down.
 fn estimate_input_tokens(req: &ChatRequest) -> u32 {
-    let mut chars = req.system.as_deref().map_or(0, str::len);
-    for m in &req.messages {
-        for b in m.content() {
-            if let Some(t) = b.as_text() {
-                chars += t.len();
-            }
-        }
-    }
-    u32::try_from(chars / 4).unwrap_or(u32::MAX)
+    u32::try_from(req.text_bytes() / tars_types::BYTES_PER_TOKEN).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

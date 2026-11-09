@@ -2,7 +2,8 @@
 //!
 //! The cap applies to one request, not to a running total; [`TenantBudgetMiddleware`] keeps the
 //! running total. The estimate is [`Pricing::estimate_chat_cost`]: bytes/4 input tokens plus the
-//! request's `max_output_tokens`, else the output bound the middleware was built with. It is not
+//! request's `max_output_tokens` (which `LlmService` fills from the model's output limit), else
+//! the output bound the middleware was built with. It is not
 //! an upper bound: it undercounts multi-byte scripts and images, and providers that bill thinking
 //! separately (Gemini) are undercounted by their thinking cap.
 //!
@@ -20,7 +21,7 @@ use crate::LlmError;
 use crate::LlmEventStream;
 use tars_types::{Caller, ChatRequest, Pricing, ProviderProfile};
 
-use crate::pipeline::middleware::Middleware;
+use crate::pipeline::middleware::{Middleware, OutputReserve};
 use crate::pipeline::service::{Next, OpenFailure};
 
 /// Refuses any call whose estimated USD cost exceeds `cap_usd`.
@@ -42,7 +43,8 @@ pub enum BudgetConfigError {
 }
 
 impl PerCallBudgetMiddleware {
-    /// Builds the middleware from a provider's capabilities.
+    /// Builds the middleware from a provider's pricing, assuming the default [`OutputReserve`] for a
+    /// request that reaches it with no `max_output_tokens`.
     ///
     /// # Errors
     ///
@@ -51,7 +53,7 @@ impl PerCallBudgetMiddleware {
         Self::from_parts(
             cap_usd,
             capabilities.pricing,
-            default_max_output_tokens(capabilities),
+            OutputReserve::default().output_tokens.get(),
         )
     }
 
@@ -93,13 +95,6 @@ fn validate_cap(cap_usd: f64) -> Result<(), BudgetConfigError> {
     } else {
         Err(BudgetConfigError::InvalidCap { value: cap_usd })
     }
-}
-
-/// Returns the output tokens a budget estimate assumes for a request that sets none. A provider
-/// with no output cap is a local one priced at $0, where the bound does not matter; paid
-/// providers state a cap.
-pub(crate) fn default_max_output_tokens(capabilities: &ProviderProfile) -> u32 {
-    capabilities.max_output_tokens.unwrap_or(4_096)
 }
 
 #[async_trait]
@@ -209,7 +204,6 @@ mod tests {
                 // the budget, and the pipeline would refuse them before it.
                 caps: ProviderProfile {
                     max_context_tokens: None,
-                    max_output_tokens: None,
                     ..ProviderProfile::text_only_baseline(Pricing::default())
                 },
                 inner: mock,
@@ -332,8 +326,7 @@ mod tests {
 
     #[test]
     fn pricing_new_from_capabilities() {
-        let mut caps = ProviderProfile::text_only_baseline(priced(3.0, 15.0));
-        caps.max_output_tokens = Some(4096);
+        let caps = ProviderProfile::text_only_baseline(priced(3.0, 15.0));
         let mw = PerCallBudgetMiddleware::new(0.10, &caps).unwrap();
         assert_eq!(mw.pricing.input_per_million.usd_per_million(), 3.0);
         assert_eq!(mw.default_max_output_tokens, 4096);

@@ -581,7 +581,7 @@ async fn the_real_runner_hands_back_what_a_failed_delegate_printed() {
 /// Returns a fresh directory and a script in it that saves its stdin to `got_stdin` and prints
 /// `stdout`.
 #[cfg(unix)]
-fn stdin_keeping_delegate(name: &str, stdout: &str) -> (std::path::PathBuf, String) {
+fn stdin_keeping_delegate(name: &str, stdout: &[&str]) -> (std::path::PathBuf, String) {
     use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("tars_wire_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -591,8 +591,13 @@ fn stdin_keeping_delegate(name: &str, stdout: &str) -> (std::path::PathBuf, Stri
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\ncat > '{}'\nprintf '%s\\n' '{stdout}'\n",
-            dir.join("got_stdin").display()
+            "#!/bin/sh\ncat > '{}'\nprintf '%s\\n' {}\n",
+            dir.join("got_stdin").display(),
+            stdout
+                .iter()
+                .map(|line| format!("'{line}'"))
+                .collect::<Vec<_>>()
+                .join(" ")
         ),
     )
     .unwrap();
@@ -622,7 +627,10 @@ async fn a_stdin_delegates_request_bytes_are_what_went_into_its_stdin() {
     use tars_llm::provider::backends::cli::{CodexCliDialect, CodexSandbox};
     let (dir, script) = stdin_keeping_delegate(
         "stdin",
-        r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"hi"}}"#,
+        &[
+            r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"hi"}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}"#,
+        ],
     );
     let wire = Wire::new();
     let ctx = logged_ctx().with_cwd(&dir);

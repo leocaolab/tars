@@ -97,6 +97,10 @@ here — it is deliberately hidden to keep the subscription path active. If
 codex can't authenticate, its own error surfaces verbatim (§2), not a
 tars sentinel.
 
+**Passed env** — codex gets only the system variables (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, the temp directories, `TERM`, `TZ`, the locale (`LANG`, `LANGUAGE`, `LC_*`), the `XDG_*` directories, proxies (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) and CA bundles (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`)) and
+`CODEX_HOME`; no other variable of the tars process reaches it
+(`crates/tars-llm/src/provider/backends/cli/subprocess.rs`, `passes_env`).
+
 codex's home (`$CODEX_HOME`, default `~/.codex` — its config, sessions,
 logs) is granted into the write-jail so login state survives the sandbox
 (`codex.rs:161-171`).

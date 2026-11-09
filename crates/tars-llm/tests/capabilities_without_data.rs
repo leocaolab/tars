@@ -55,6 +55,7 @@ fn registry_provider(toml: &str, id: &str) -> Arc<dyn LlmProvider> {
         cfg.providers(),
         tars_config::catalog(),
         HttpClient::default_arc().unwrap(),
+        tars_llm::OutputReserve::default(),
         basic(),
         None,
     )
@@ -83,7 +84,7 @@ async fn call(p: Arc<dyn LlmProvider>, req: ChatRequest) -> Result<Vec<ChatEvent
 /// tars-node `complete({ thinking: true })` builds this request.
 fn thinking_request() -> ChatRequest {
     let mut req = ChatRequest::user("ping");
-    req.thinking = ThinkingMode::Auto;
+    req.thinking = Some(ThinkingMode::Auto);
     req.enable_chat_template_thinking = Some(true);
     req
 }

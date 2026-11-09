@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::ProviderError;
+use crate::pipeline::middleware::OutputReserve;
 use crate::provider::error::{
     CredentialError, CredentialKind, ParseProblem, ProviderRefusal, RequestRefusal, status_error,
 };
@@ -25,33 +26,46 @@ use super::mapping::{map_stop_reason, parse_usage, truncate};
 /// may not take it.
 pub(super) const STRUCTURED_OUTPUT_TOOL: &str = "__respond_with__";
 
-/// Returns an event's content-block `index`, 0 when it is missing.
+/// Returns an event's content-block `index`.
 ///
 /// # Errors
 ///
-/// Fails with `Parse` when it does not fit `usize`, rather than land in the wrong slot.
+/// Fails with `Parse` when it is missing or does not fit `usize`, rather than land in the wrong
+/// slot and merge two blocks.
 fn block_index(v: &Value) -> Result<usize, ProviderError> {
-    let raw = v.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
-    usize::try_from(raw).map_err(|_| ProviderError::Parse {
+    let parse_error = |problem| ProviderError::Parse {
         at: "anthropic sse",
         line: None,
-        problem: Box::new(ParseProblem::IndexOverflow(raw)),
-        raw: None,
-    })
+        problem: Box::new(problem),
+        raw: Some(truncate(&v.to_string(), 200)),
+    };
+    let raw = v
+        .get("index")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| parse_error(ParseProblem::Missing("index")))?;
+    usize::try_from(raw).map_err(|_| parse_error(ParseProblem::IndexOverflow(raw)))
 }
 
 pub struct AnthropicAdapter {
     pub(super) base_url: String,
     pub(super) api_version: String,
     pub(super) extras: HttpOverrides,
+    /// Is sent as `max_tokens`, which the API requires, for a request that sets no limit.
+    output_reserve: OutputReserve,
 }
 
 impl AnthropicAdapter {
-    pub(super) fn new(base_url: String, api_version: String, extras: HttpOverrides) -> Self {
+    pub(super) fn new(
+        base_url: String,
+        api_version: String,
+        extras: HttpOverrides,
+        output_reserve: OutputReserve,
+    ) -> Self {
         Self {
             base_url,
             api_version,
             extras,
+            output_reserve,
         }
     }
 
@@ -148,25 +162,22 @@ impl AnthropicAdapter {
             return;
         };
         let marker = cache_control(ttl);
-        if let Some(system_blocks) = body.get_mut("system").and_then(|s| s.as_array_mut()) {
-            if let Some(last) = system_blocks.last_mut() {
-                last["cache_control"] = marker.clone();
-            }
+        if let Some(system_blocks) = body.get_mut("system").and_then(|s| s.as_array_mut())
+            && let Some(last) = system_blocks.last_mut()
+        {
+            last["cache_control"] = marker.clone();
         }
         // Not the last message: after an assistant turn that would cache the model's output
         // instead of the user's context.
-        if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-            if let Some(last_user) = messages
+        if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut())
+            && let Some(last_user) = messages
                 .iter_mut()
                 .rev()
                 .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-            {
-                if let Some(blocks) = last_user.get_mut("content").and_then(|c| c.as_array_mut()) {
-                    if let Some(last_block) = blocks.last_mut() {
-                        last_block["cache_control"] = marker;
-                    }
-                }
-            }
+            && let Some(blocks) = last_user.get_mut("content").and_then(|c| c.as_array_mut())
+            && let Some(last_block) = blocks.last_mut()
+        {
+            last_block["cache_control"] = marker;
         }
     }
 
@@ -230,7 +241,9 @@ impl HttpAdapter for AnthropicAdapter {
             return Err(ProviderError::InvalidRequest(RequestRefusal::EmptyMessages));
         }
 
-        let max_tokens = req.max_output_tokens.unwrap_or(4096);
+        let max_tokens = req
+            .max_output_tokens
+            .unwrap_or(self.output_reserve.output_tokens.get());
         if max_tokens == 0 {
             return Err(ProviderError::InvalidRequest(
                 RequestRefusal::ZeroMaxOutputTokens,
@@ -322,11 +335,14 @@ impl HttpAdapter for AnthropicAdapter {
         }
 
         match req.thinking {
-            tars_types::ThinkingMode::Off => {}
-            tars_types::ThinkingMode::Auto => {
+            None => {}
+            Some(tars_types::ThinkingMode::Off) => {
+                body["thinking"] = json!({"type": "disabled"});
+            }
+            Some(tars_types::ThinkingMode::Auto) => {
                 body["thinking"] = json!({"type": "enabled", "budget_tokens": 4096});
             }
-            tars_types::ThinkingMode::Budget(b) => {
+            Some(tars_types::ThinkingMode::Budget(b)) => {
                 body["thinking"] = json!({"type": "enabled", "budget_tokens": b});
             }
         }
@@ -364,8 +380,7 @@ impl HttpAdapter for AnthropicAdapter {
                 let model = v
                     .pointer("/message/model")
                     .and_then(|m| m.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .map(str::to_string);
                 let cache_hit = v
                     .pointer("/message/usage")
                     .and_then(|u| u.as_object())
@@ -384,7 +399,9 @@ impl HttpAdapter for AnthropicAdapter {
             }
             "content_block_start" => {
                 let index = block_index(&v)?;
-                let cb = v.get("content_block").cloned().unwrap_or(Value::Null);
+                let cb = v
+                    .get("content_block")
+                    .ok_or_else(|| event_without("content_block", &raw.data))?;
                 match cb.get("type").and_then(|t| t.as_str()) {
                     Some("tool_use") => {
                         // Without them the tool result cannot be routed back.
@@ -409,21 +426,21 @@ impl HttpAdapter for AnthropicAdapter {
                     }
                     Some("text") => {
                         // A text block can start with text already in it.
-                        if let Some(t) = cb.get("text").and_then(|s| s.as_str()) {
-                            if !t.is_empty() {
-                                out.push(ChatEvent::Delta {
-                                    text: t.to_string(),
-                                });
-                            }
+                        if let Some(t) = cb.get("text").and_then(|s| s.as_str())
+                            && !t.is_empty()
+                        {
+                            out.push(ChatEvent::Delta {
+                                text: t.to_string(),
+                            });
                         }
                     }
                     Some("thinking") => {
-                        if let Some(t) = cb.get("thinking").and_then(|s| s.as_str()) {
-                            if !t.is_empty() {
-                                out.push(ChatEvent::ThinkingDelta {
-                                    text: t.to_string(),
-                                });
-                            }
+                        if let Some(t) = cb.get("thinking").and_then(|s| s.as_str())
+                            && !t.is_empty()
+                        {
+                            out.push(ChatEvent::ThinkingDelta {
+                                text: t.to_string(),
+                            });
                         }
                     }
                     _ => {}
@@ -431,7 +448,9 @@ impl HttpAdapter for AnthropicAdapter {
             }
             "content_block_delta" => {
                 let index = block_index(&v)?;
-                let delta = v.get("delta").cloned().unwrap_or(Value::Null);
+                let delta = v
+                    .get("delta")
+                    .ok_or_else(|| event_without("delta", &raw.data))?;
                 match delta.get("type").and_then(|t| t.as_str()) {
                     Some("text_delta") => {
                         if let Some(t) = delta.get("text").and_then(|s| s.as_str()) {
@@ -464,15 +483,15 @@ impl HttpAdapter for AnthropicAdapter {
                 // Text and thinking blocks were never in the buffer. A tool call whose arguments do
                 // not parse is held: the stop reason, which says whether the output was cut off,
                 // normally comes in the `message_delta` after the block closes.
-                if buf.is_inflight(index) {
-                    if let Some(call) = buf.finalize_or_hold(index, None)? {
-                        out.push(ChatEvent::ToolCallEnd {
-                            index,
-                            id: call.id,
-                            parsed_args: call.arguments,
-                            thought_signature: call.thought_signature,
-                        });
-                    }
+                if buf.is_inflight(index)
+                    && let Some(call) = buf.finalize_or_hold(index, None)?
+                {
+                    out.push(ChatEvent::ToolCallEnd {
+                        index,
+                        id: call.id,
+                        parsed_args: call.arguments,
+                        thought_signature: call.thought_signature,
+                    });
                 }
             }
             "message_delta" => {
@@ -494,7 +513,7 @@ impl HttpAdapter for AnthropicAdapter {
                 if let (Some(stop), Some(u)) = (stop, usage) {
                     out.push(ChatEvent::Finished {
                         stop_reason: stop,
-                        usage: parse_usage(&u),
+                        usage: Some(parse_usage(&u)),
                     });
                     buf.mark_finished();
                 }
@@ -595,6 +614,16 @@ fn bad_request(message: String) -> ProviderError {
 
 /// Returns the error of a `tool_use` content block that lacks `field` or has it empty: without
 /// it the tool result cannot be routed back.
+/// Returns the error of a content-block event that lacks `field`, carrying the event's text.
+fn event_without(field: &'static str, data: &str) -> ProviderError {
+    ProviderError::Parse {
+        at: "anthropic sse",
+        line: None,
+        problem: Box::new(ParseProblem::Missing(field)),
+        raw: Some(truncate(data, 200)),
+    }
+}
+
 fn tool_use_without(field: &'static str) -> ProviderError {
     ProviderError::Parse {
         at: "anthropic content_block_start tool_use",
@@ -737,6 +766,7 @@ mod overflow_tests {
             "https://api.anthropic.com".into(),
             "2023-06-01".into(),
             HttpOverrides::default(),
+            OutputReserve::default(),
         );
         let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"input length and `max_tokens` exceed context limit: 197202 + 21333 > 200000, decrease input length or `max_tokens` and try again"}}"#;
         let err = a.classify_error(
@@ -771,6 +801,7 @@ mod tests {
             DEFAULT_BASE_URL.into(),
             DEFAULT_API_VERSION.into(),
             HttpOverrides::default(),
+            OutputReserve::default(),
         )
     }
 
@@ -800,7 +831,7 @@ mod tests {
         match out.as_slice() {
             [ChatEvent::Finished { stop_reason, usage }] => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
-                assert_eq!(usage.output_tokens, 9);
+                assert_eq!(usage.unwrap().output_tokens, 9);
             }
             other => panic!("expected one Finished, got {other:?}"),
         }
@@ -1000,6 +1031,18 @@ mod tests {
     }
 
     #[test]
+    fn thinking_off_is_sent_as_disabled_and_an_unset_thinking_is_not_sent() {
+        let a = adapter();
+        let mut req = ChatRequest::user("hi");
+        let unset = a.translate_request(&req, "claude-opus-4-7").unwrap();
+        assert!(unset.get("thinking").is_none(), "{unset}");
+
+        req.thinking = Some(tars_types::ThinkingMode::Off);
+        let off = a.translate_request(&req, "claude-opus-4-7").unwrap();
+        assert_eq!(off["thinking"], json!({"type": "disabled"}));
+    }
+
+    #[test]
     fn translate_request_promotes_system_to_top_level() {
         let a = adapter();
         let req = ChatRequest::user("hello").with_system("you are concise");
@@ -1052,6 +1095,64 @@ mod tests {
         assert_eq!(h.get("anthropic-version").unwrap(), DEFAULT_API_VERSION);
     }
 
+    fn missing_field(result: Result<Vec<ChatEvent>, ProviderError>) -> Option<&'static str> {
+        match result {
+            Err(ProviderError::Parse { problem, raw, .. }) if raw.is_some() => match *problem {
+                ParseProblem::Missing(field) => Some(field),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_content_block_event_without_an_index_is_a_parse_error_not_slot_zero() {
+        let start = (
+            "content_block_start",
+            r#"{"type":"content_block_start","content_block":{"type":"tool_use","id":"c1","name":"f"}}"#,
+        );
+        assert_eq!(
+            missing_field(events_of(&adapter(), &[start])),
+            Some("index")
+        );
+    }
+
+    #[test]
+    fn a_content_block_start_without_its_block_is_a_parse_error() {
+        let start = (
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0}"#,
+        );
+        assert_eq!(
+            missing_field(events_of(&adapter(), &[start])),
+            Some("content_block")
+        );
+    }
+
+    #[test]
+    fn a_content_block_delta_without_its_delta_is_a_parse_error() {
+        let delta = (
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0}"#,
+        );
+        assert_eq!(
+            missing_field(events_of(&adapter(), &[TOOL_START, delta])),
+            Some("delta")
+        );
+    }
+
+    #[test]
+    fn a_message_start_without_a_model_reports_no_model() {
+        let start = (
+            "message_start",
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":3}}}"#,
+        );
+        match events_of(&adapter(), &[start]).unwrap().as_slice() {
+            [ChatEvent::Started { actual_model, .. }] => assert_eq!(*actual_model, None),
+            other => panic!("expected one Started, got {other:?}"),
+        }
+    }
+
     #[test]
     fn map_stop_reasons() {
         assert_eq!(map_stop_reason("end_turn"), StopReason::EndTurn);
@@ -1059,5 +1160,25 @@ mod tests {
         assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
         assert_eq!(map_stop_reason("stop_sequence"), StopReason::StopSequence);
         assert_eq!(map_stop_reason("???"), StopReason::Other);
+    }
+
+    #[test]
+    fn a_request_without_a_limit_sends_the_output_reserve_and_one_with_a_limit_sends_it() {
+        let reserve = OutputReserve {
+            output_tokens: std::num::NonZeroU32::new(1_000).expect("1000 is not zero"),
+        };
+        let a = AnthropicAdapter::new(
+            DEFAULT_BASE_URL.into(),
+            DEFAULT_API_VERSION.into(),
+            HttpOverrides::default(),
+            reserve,
+        );
+        let mut req = ChatRequest::user("hi");
+        let unset = a.translate_request(&req, "claude-opus-4-7").unwrap();
+        assert_eq!(unset["max_tokens"], json!(1_000));
+
+        req.max_output_tokens = Some(77);
+        let set = a.translate_request(&req, "claude-opus-4-7").unwrap();
+        assert_eq!(set["max_tokens"], json!(77));
     }
 }

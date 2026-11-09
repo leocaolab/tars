@@ -321,7 +321,7 @@ macro_rules! cli_conformance_suite {
 
 
                 assert!(
-                    matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model == model),
+                    matches!(&events[0], ChatEvent::Started { actual_model, .. } if actual_model.as_deref() == Some(model)),
                     "first event must be Started({model}), got {:?}",
                     events[0],
                 );

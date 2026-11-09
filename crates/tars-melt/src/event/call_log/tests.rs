@@ -40,10 +40,10 @@ fn dispatch(outcome: CallOutcome) -> CallDispatch {
         CallOutcome::Completed => sent(
             Some(ProviderId::new("p")),
             SentEnd::Streamed {
-                usage,
+                usage: Some(usage),
                 end: StreamEnd::Completed(CallResponse {
                     body: CallBody::Present(r#"{"text":"hi"}"#.into()),
-                    actual_model: "m-2026".into(),
+                    actual_model: Some("m-2026".into()),
                     stop_reason: Some(StopReason::EndTurn),
                 }),
             },
@@ -53,7 +53,7 @@ fn dispatch(outcome: CallOutcome) -> CallDispatch {
         CallOutcome::Unterminated => sent(
             None,
             SentEnd::Streamed {
-                usage,
+                usage: Some(usage),
                 end: StreamEnd::Unterminated,
             },
         ),
@@ -306,7 +306,7 @@ fn degraded_is_a_list_of_what_was_left_out_empty_when_nothing_and_null_on_a_refu
     let written = [Some(both), Some(Vec::new()), None];
     let refused = || {
         CallOutcome::Refused(
-            RefusalReasons::new(vec![CompatibilityReason::VisionUnsupported]).unwrap(),
+            NonEmpty::from_vec(vec![CompatibilityReason::VisionUnsupported]).unwrap(),
         )
     };
     let rows: Vec<LlmCallRow> = written
@@ -371,7 +371,7 @@ fn a_refused_call_s_reasons_round_trip_through_a_parquet_file_and_a_served_call_
             max_context_tokens: 8,
         },
     ];
-    let refused = CallOutcome::Refused(RefusalReasons::new(reasons).unwrap());
+    let refused = CallOutcome::Refused(NonEmpty::from_vec(reasons).unwrap());
     let rows = [
         row("t", MIDNIGHT, refused.clone()),
         row("t", MIDNIGHT + 1, CallOutcome::Completed),
@@ -482,7 +482,7 @@ fn only_a_sent_call_gives_what_its_request_was_sent_without() {
         "t",
         MIDNIGHT,
         CallOutcome::Refused(
-            RefusalReasons::new(vec![CompatibilityReason::VisionUnsupported]).unwrap(),
+            NonEmpty::from_vec(vec![CompatibilityReason::VisionUnsupported]).unwrap(),
         ),
     );
     assert_eq!(sent.degraded(), Some(unsent.as_slice()));

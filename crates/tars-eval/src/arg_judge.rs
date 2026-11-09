@@ -125,7 +125,7 @@ pub async fn args_match_judged(
 /// Returns a JSON value's string form for a cache key; serde_json's `Map` is key-ordered, so equal
 /// values give equal strings.
 fn canonical(v: &Value) -> String {
-    serde_json::to_string(v).unwrap_or_default()
+    v.to_string()
 }
 
 /// Reads a yes or a no from the first word of the judge reply's first non-empty line, ignoring

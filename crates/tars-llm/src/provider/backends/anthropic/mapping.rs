@@ -1,7 +1,7 @@
 //! Reads Anthropic's stop reasons, usage, batch objects, batch result files and whole messages.
 //! Nothing here does IO.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::adapter::error_of_type;
 use crate::provider::error::ParseProblem;
@@ -9,7 +9,7 @@ use crate::{BatchResultItem, BatchStatus, ProviderError};
 use tars_types::{BatchItemId, ChatEvent, ChatResponse, ChatResponseBuilder, StopReason, Usage};
 
 /// Returns the stop reason of an Anthropic `stop_reason`; an unknown one is `Other`.
-pub(super) fn map_stop_reason(s: &str) -> StopReason {
+pub(crate) fn map_stop_reason(s: &str) -> StopReason {
     match s {
         "end_turn" => StopReason::EndTurn,
         "max_tokens" => StopReason::MaxTokens,
@@ -56,8 +56,16 @@ pub(super) use crate::provider::http_base::truncate;
 ///
 /// # Errors
 ///
-/// Fails with `Parse` when `processing_status` is missing or unknown.
+/// Fails with `Parse` when `processing_status` is missing or unknown, or `request_counts` or one
+/// of its five counts is missing: Anthropic always sends all five, and a guessed 0 would turn an
+/// expired batch into a completed one.
 pub(super) fn translate_batch_status(v: &Value) -> Result<BatchStatus, ProviderError> {
+    let unread = |problem| ProviderError::Parse {
+        at: "anthropic batch status",
+        line: None,
+        problem: Box::new(problem),
+        raw: Some(truncate(&v.to_string(), 300)),
+    };
     let status = v
         .get("processing_status")
         .and_then(|s| s.as_str())
@@ -65,18 +73,20 @@ pub(super) fn translate_batch_status(v: &Value) -> Result<BatchStatus, ProviderE
 
     let counts = v
         .get("request_counts")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    // `BatchStatus` counts in u32; a larger count is clamped, not wrapped. An absent count is 0.
-    let get = |k: &str| {
-        let n = counts.get(k).and_then(|n| n.as_u64()).unwrap_or(0);
-        u32::try_from(n).unwrap_or(u32::MAX)
+        .ok_or_else(|| unread(ParseProblem::Missing("request_counts")))?;
+    // `BatchStatus` counts in u32; a larger count is clamped, not wrapped.
+    let get = |k: &'static str| {
+        counts
+            .get(k)
+            .and_then(Value::as_u64)
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+            .ok_or_else(|| unread(ParseProblem::Missing(k)))
     };
-    let processing = get("processing");
-    let succeeded = get("succeeded");
-    let errored = get("errored");
-    let canceled = get("canceled");
-    let expired = get("expired");
+    let processing = get("processing")?;
+    let succeeded = get("succeeded")?;
+    let errored = get("errored")?;
+    let canceled = get("canceled")?;
+    let expired = get("expired")?;
     let processed = succeeded
         .saturating_add(errored)
         .saturating_add(canceled)
@@ -85,12 +95,12 @@ pub(super) fn translate_batch_status(v: &Value) -> Result<BatchStatus, ProviderE
 
     match status {
         "in_progress" => Ok(BatchStatus::InProgress {
-            processed,
+            processed: Some(processed),
             total,
             eta: None,
         }),
         "canceling" => Ok(BatchStatus::InProgress {
-            processed,
+            processed: Some(processed),
             total,
             eta: None,
         }),
@@ -166,23 +176,15 @@ pub(super) fn parse_batch_results(text: &str) -> Result<Vec<BatchResultItem>, Pr
                 })?;
                 message_to_chat_response(message)
             }
-            "errored" => {
-                let err = result_val
-                    .get("error")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                let err_type = err.get("type").and_then(|t| t.as_str()).unwrap_or("error");
-                let err_msg = err
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .map_or_else(|| err.to_string(), str::to_string);
-                Err(error_of_type(err_type, err_msg).unwrap_or_else(|message| {
-                    ProviderError::BatchItemFailed {
-                        code: err_type.to_string(),
-                        message,
-                    }
-                }))
-            }
+            "errored" => match result_val.get("error") {
+                Some(err) => Err(batch_item_error(err)),
+                None => Err(ProviderError::Parse {
+                    at: "anthropic batch results",
+                    line: Some(n),
+                    problem: Box::new(ParseProblem::Missing("result.error")),
+                    raw: Some(truncate(line, 300)),
+                }),
+            },
             "canceled" => Err(ProviderError::BatchItemCanceled),
             "expired" => Err(ProviderError::BatchItemExpired),
             other => Err(results_line_error(
@@ -202,6 +204,28 @@ pub(super) fn parse_batch_results(text: &str) -> Result<Vec<BatchResultItem>, Pr
     Ok(items)
 }
 
+/// Returns the error of one errored batch item from Anthropic's `{type, message}` error object:
+/// a type this build knows decides; otherwise the item fails in Anthropic's words, with no code
+/// when the object names no type.
+fn batch_item_error(err: &Value) -> ProviderError {
+    let message = err
+        .get("message")
+        .and_then(|m| m.as_str())
+        .map_or_else(|| err.to_string(), str::to_string);
+    match err.get("type").and_then(|t| t.as_str()) {
+        Some(err_type) => error_of_type(err_type, message).unwrap_or_else(|message| {
+            ProviderError::BatchItemFailed {
+                code: Some(err_type.to_string()),
+                message,
+            }
+        }),
+        None => ProviderError::BatchItemFailed {
+            code: None,
+            message,
+        },
+    }
+}
+
 /// Returns a whole message as a response, reading its text, thinking and `tool_use` blocks as a
 /// stream of the same message would; one with no `stop_reason` has no stop reason, as a stream
 /// that never said it.
@@ -211,17 +235,15 @@ pub(super) fn parse_batch_results(text: &str) -> Result<Vec<BatchResultItem>, Pr
 /// `Parse` carrying the block's text when a `tool_use` block has no id or name, or its `input`
 /// is not an object: the call could not be routed back.
 pub(super) fn message_to_chat_response(msg: &Value) -> Result<ChatResponse, ProviderError> {
-    let model = msg
-        .get("model")
-        .and_then(|m| m.as_str())
-        .unwrap_or("anthropic");
     let mut acc = ChatResponseBuilder::new();
-    acc.apply(ChatEvent::started(model));
+    if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
+        acc.apply(ChatEvent::started(model))?;
+    }
 
     if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
         for (index, block) in blocks.iter().enumerate() {
             for event in block_events(index, block)? {
-                acc.apply(event);
+                acc.apply(event)?;
             }
         }
     }
@@ -235,9 +257,9 @@ pub(super) fn message_to_chat_response(msg: &Value) -> Result<ChatResponse, Prov
         .and_then(|u| u.as_object())
         .map(parse_usage);
     if let Some(end) = ChatEvent::stream_end(stop_reason, usage) {
-        acc.apply(end);
+        acc.apply(end)?;
     }
-    Ok(acc.finish())
+    Ok(acc.finish()?)
 }
 
 /// Returns the events of one content block of a whole message, at position `index`; a block of
@@ -306,6 +328,59 @@ fn tool_use_error(block: &Value, problem: ParseProblem) -> ProviderError {
 mod tests {
     use super::*;
 
+    fn missing_field(err: &ProviderError) -> Option<&'static str> {
+        match err {
+            ProviderError::Parse { problem, raw, .. } if raw.is_some() => match **problem {
+                ParseProblem::Missing(field) => Some(field),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_batch_without_request_counts_is_a_parse_error_not_a_completed_batch() {
+        let v = serde_json::json!({"processing_status": "ended"});
+        let err = translate_batch_status(&v).unwrap_err();
+        assert_eq!(missing_field(&err), Some("request_counts"));
+    }
+
+    #[test]
+    fn a_batch_missing_one_count_is_a_parse_error_naming_it() {
+        let v = serde_json::json!({
+            "processing_status": "ended",
+            "request_counts": {"processing": 0, "succeeded": 0, "errored": 0, "canceled": 0}
+        });
+        let err = translate_batch_status(&v).unwrap_err();
+        assert_eq!(missing_field(&err), Some("expired"));
+    }
+
+    #[test]
+    fn an_errored_item_without_an_error_object_fails_with_its_line() {
+        let line = r#"{"custom_id": "a", "result": {"type": "errored"}}"#;
+        let items = parse_batch_results(line).unwrap();
+        let err = items[0].result.as_ref().expect_err("errored");
+        assert_eq!(missing_field(err), Some("result.error"));
+    }
+
+    #[test]
+    fn an_errored_item_whose_error_names_no_type_has_no_code() {
+        let line =
+            r#"{"custom_id": "a", "result": {"type": "errored", "error": {"message": "boom"}}}"#;
+        let items = parse_batch_results(line).unwrap();
+        let err = items[0].result.as_ref().expect_err("errored");
+        assert!(
+            matches!(err, ProviderError::BatchItemFailed { code: None, message } if message == "boom"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_batch_message_without_a_model_reports_no_model() {
+        let msg = serde_json::json!({"content": [], "stop_reason": "end_turn"});
+        assert_eq!(message_to_chat_response(&msg).unwrap().actual_model, None);
+    }
+
     #[test]
     fn an_errored_item_without_a_message_carries_its_error_object() {
         let line = r#"{"custom_id": "a", "result": {"type": "errored", "error": {"type": "weird_error", "detail": 7}}}"#;
@@ -325,20 +400,27 @@ mod tests {
     }
 
     #[test]
-    fn a_message_with_no_stop_reason_has_none_and_keeps_its_usage() {
+    fn a_message_with_no_stop_reason_is_unfinished() {
         let msg = serde_json::json!({
             "model": "claude",
             "content": [{ "type": "text", "text": "hi" }],
             "usage": { "input_tokens": 10, "output_tokens": 4 }
         });
-        let r = message_to_chat_response(&msg).unwrap();
-        assert_eq!(r.stop_reason, None);
-        assert_eq!(r.usage.output_tokens, 4);
+        let r = message_to_chat_response(&msg);
+        assert!(
+            matches!(
+                r,
+                Err(ProviderError::Unfinished(
+                    tars_types::Unfinished::NoStopReason
+                ))
+            ),
+            "{r:?}"
+        );
 
         let msg =
             serde_json::json!({ "model": "claude", "content": [], "stop_reason": "max_tokens" });
         let r = message_to_chat_response(&msg).unwrap();
-        assert_eq!(r.stop_reason, Some(StopReason::MaxTokens));
+        assert_eq!(r.stop_reason, StopReason::MaxTokens);
     }
 
     #[test]

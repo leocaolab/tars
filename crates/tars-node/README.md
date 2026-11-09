@@ -65,8 +65,8 @@ const resp = await pipeline.complete({
 });
 
 console.log(resp.text);              // assistant text
-console.log(resp.usage.inputTokens); // tokens billed in
-console.log(resp.usage.outputTokens);
+console.log(resp.usage?.inputTokens); // tokens billed in; usage is absent when the provider reported none
+console.log(resp.usage?.outputTokens);
 console.log(resp.stopReason);        // "end_turn" / "max_tokens" / ...
 ```
 

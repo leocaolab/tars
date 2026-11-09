@@ -273,7 +273,7 @@ pub(crate) async fn reply_text(
     let mut acc = ChatResponseBuilder::new();
     let mut seen = 0usize;
     while let Some(event) = stream.next().await {
-        acc.apply(event?);
+        acc.apply(event?).map_err(ProviderError::from)?;
         seen += 1;
         if seen > MAX_STREAM_EVENTS {
             return Err(JudgeError::StreamTooLong {
@@ -281,7 +281,7 @@ pub(crate) async fn reply_text(
             });
         }
     }
-    Ok(acc.finish().text)
+    Ok(acc.finish().map_err(ProviderError::from)?.text)
 }
 
 /// Fills each placeholder of `template` with the item's field; see [`fill_template`].

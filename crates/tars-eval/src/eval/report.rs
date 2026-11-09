@@ -58,12 +58,14 @@ impl Manifest {
         self.case_count() - self.success_count()
     }
 
-    /// Returns the sum of `Usage` across the cases whose call completed.
+    /// Returns the sum of `Usage` across the cases whose call completed and whose provider
+    /// reported it.
     pub fn total_usage(&self) -> Usage {
         self.cases
             .iter()
             .filter(|c| c.succeeded())
-            .fold(Usage::default(), |total, c| total.merge(c.usage))
+            .filter_map(|c| c.usage)
+            .fold(Usage::default(), Usage::merge)
     }
 
     /// Rolls each of [`Self::checks`] up over the cases, in that order.
@@ -210,8 +212,8 @@ fn is_one_segment(name: &str) -> bool {
 pub struct CaseReport {
     pub case_id: CaseId,
     pub wall_clock_ms: u64,
-    /// What the provider reported spending, on a failed call too.
-    pub usage: Usage,
+    /// What the provider reported spending, on a failed call too; `None` when it reported none.
+    pub usage: Option<Usage>,
     /// Length of the text received in chars, all of it or what came before the failure; the text
     /// is in `<case>/output.txt`.
     pub output_chars: u64,
@@ -370,7 +372,7 @@ mod tests {
         CaseReport {
             case_id: id.parse().unwrap(),
             wall_clock_ms: 0,
-            usage: Usage::default(),
+            usage: Some(Usage::default()),
             output_chars: 0,
             tool_trajectory: Vec::new(),
             outcome: CaseOutcome::Ok { checks },
@@ -478,7 +480,7 @@ mod tests {
         let report = CaseReport {
             case_id: "d".parse().unwrap(),
             wall_clock_ms: 1,
-            usage: Usage::default(),
+            usage: Some(Usage::default()),
             output_chars: 0,
             tool_trajectory: Vec::new(),
             outcome: CaseOutcome::Error {

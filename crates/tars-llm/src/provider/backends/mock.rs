@@ -69,11 +69,11 @@ impl MockProvider {
 
     /// Returns a mock that answers call `n` with `responses[n]` and every call after the last
     /// with the last, so a tool loop runs without the test calling `set_response` between turns.
+    /// Given no responses, every call fails with `Internal` rather than answer a made-up text.
     pub fn with_responses(id: ProviderId, responses: Vec<CannedResponse>) -> Arc<Self> {
-        let fallback = responses
-            .last()
-            .cloned()
-            .unwrap_or_else(|| CannedResponse::text(""));
+        let fallback = responses.last().cloned().unwrap_or_else(|| {
+            CannedResponse::Error("MockProvider::with_responses was given no responses".into())
+        });
         Arc::new(Self {
             id,
             capabilities: mock_capabilities(),
@@ -150,11 +150,11 @@ impl LlmProvider for MockProvider {
                     Ok(ChatEvent::Delta { text: text.clone() }),
                     Ok(ChatEvent::Finished {
                         stop_reason: StopReason::EndTurn,
-                        usage: Usage {
+                        usage: Some(Usage {
                             input_tokens: 0,
-                            output_tokens: text.len() as u64 / 4,
+                            output_tokens: tars_types::estimate_tokens(text.len()),
                             ..Default::default()
-                        },
+                        }),
                     }),
                 ];
                 Ok(Box::pin(stream::iter(events)))
@@ -171,6 +171,15 @@ impl LlmProvider for MockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_mock_given_no_responses_fails_each_call_instead_of_answering_empty_text() {
+        let p = MockProvider::with_responses(ProviderId::new("mock"), Vec::new());
+        let result = p
+            .stream(ChatRequest::user("ping"), "m", Caller::test_default())
+            .await;
+        assert!(matches!(result, Err(ProviderError::Internal(_))));
+    }
 
     #[tokio::test]
     async fn text_response_yields_three_events() {
@@ -212,7 +221,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.text, "hello world");
-        assert!(r.is_finished());
     }
 
     #[tokio::test]

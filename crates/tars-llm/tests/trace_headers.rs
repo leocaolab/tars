@@ -52,6 +52,7 @@ async fn a_provider_request_carries_the_configured_trace_headers_and_skips_an_in
             Arc::new(ProcessEnv),
         )
         .unwrap(),
+        tars_llm::OutputReserve::default(),
         basic(),
         None,
     )

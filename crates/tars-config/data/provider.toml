@@ -89,7 +89,7 @@ cache_write = 12.50
 context = 1_050_000
 max_output = 128_000
 thinking = "only"            # reasoning.effort low..max; no `none`
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.openai.models]]
@@ -102,7 +102,7 @@ cache_write = 2.50
 context = 1_050_000
 max_output = 128_000
 thinking = "only"            # reasoning.effort low..max; no `none`
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.openai.models]]
@@ -115,7 +115,7 @@ cache_write = 1.25
 context = 1_050_000
 max_output = 128_000
 thinking = "optional"        # reasoning.effort none..high
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.openai.models]]
@@ -128,7 +128,7 @@ cache_write = 2.50
 context = 1_050_000
 max_output = 128_000
 thinking = "optional"        # reasoning.effort none..max
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.openai.models]]
@@ -141,7 +141,7 @@ cache_write = 0.125
 context = 1_050_000
 max_output = 128_000
 thinking = "optional"        # reasoning.effort none..max
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 # gpt-5.6-sol: 4.00 / 20.00 is a promotional price through 2026-11-30, which the docs call a
@@ -156,7 +156,7 @@ cache_write = 5.00
 context = 1_050_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 aliases = ["gpt-5.6"]
 
@@ -170,7 +170,7 @@ cache_write = 2.50
 context = 1_050_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.openai.models]]
@@ -183,7 +183,7 @@ cache_write = 0.25
 context = 1_050_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.openai.models]]
@@ -195,7 +195,7 @@ cached_input = 0.50
 context = 1_050_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.openai.models]]
@@ -207,7 +207,7 @@ output = 180.00
 context = 1_050_000
 max_output = 128_000
 thinking = "only"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"                # NOTE: gpt-5.5-pro has NO streaming (per-model; the
                             # block-level streaming=true can't express this)
 
@@ -220,7 +220,7 @@ cached_input = 0.25
 context = 1_050_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.openai.models]]
@@ -232,7 +232,7 @@ cached_input = 0.075
 context = 400_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.openai.models]]
@@ -244,7 +244,7 @@ cached_input = 0.02
 context = 400_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.openai.models]]
@@ -256,7 +256,7 @@ output = 180.00
 context = 1_050_000
 max_output = 128_000
 thinking = "only"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 # ───────────────────────────────── Anthropic ──────────────────────────────────
@@ -288,7 +288,7 @@ cache_write = 12.50               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "only"            # adaptive always-on; explicit `disabled` or `budget_tokens` → 400
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -301,7 +301,7 @@ cache_write = 5.00               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "only"            # adaptive always-on; `disabled` → 400
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -315,7 +315,7 @@ context = 1_000_000
 max_output = 128_000
 thinking = "only"            # `disabled` → 400; the lowest setting, `between_tools`, only turns
                              # off up-front thinking
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -328,7 +328,7 @@ cache_write = 0.125              # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"        # adaptive by default; `disabled` accepted at effort ≤ high
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -341,7 +341,7 @@ cache_write = 6.25               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"        # adaptive by DEFAULT (unlike 4.8/4.7); `disabled` only at effort ≤ high
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -354,7 +354,7 @@ cache_write = 12.50               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "only"
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -367,7 +367,7 @@ cache_write = 6.25               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -380,7 +380,7 @@ cache_write = 6.25               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -393,7 +393,7 @@ cache_write = 6.25               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -406,7 +406,7 @@ cache_write = 2.50               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -419,7 +419,7 @@ cache_write = 3.75               # 5m write = 1.25× base input (1h = 2×)
 context = 1_000_000
 max_output = 128_000
 thinking = "optional"
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 [[providers.anthropic.models]]
@@ -432,7 +432,7 @@ cache_write = 1.25               # 5m write = 1.25× base input (1h = 2×)
 context = 200_000
 max_output = 64_000
 thinking = "optional"
-modalities = ["text", "vision", "pdf"]
+modalities = ["text", "image", "pdf"]
 status = "ga"
 
 # ─────────────────────────────────── Gemini ───────────────────────────────────
@@ -471,7 +471,7 @@ context = 1_048_576          # one window shared by input, thinking and output
 max_output = 65_536          # synchronous default; up to 1_048_576 with long decode
 thinking = "only"            # levels low/medium/high, default medium
 thinking_param = "level"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "ga"
 
 # 3.6 / 3.7 / 3.8 flash: prices are the intro rate through 2026-12-31; from
@@ -488,7 +488,7 @@ thinking = "only"            # levels low/medium/high, default medium. `minimal`
                              # rejected — verified live 2026-09-14: "Thinking level
                              # MINIMAL is not supported for this model".
 thinking_param = "level"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "ga"
 
 [[providers.gemini.models]]
@@ -501,7 +501,7 @@ context = 1_048_576
 max_output = 65_536
 thinking = "only"            # levels low/medium/high (docs); no `minimal`
 thinking_param = "level"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "deprecated"        # gone from AI Studio and the pricing page; the endpoint stays and
                              # routes requests to gemini-3.8-flash
 
@@ -515,7 +515,7 @@ context = 1_048_576
 max_output = 65_536
 thinking = "optional"        # `minimal` accepted — verified live 2026-09-14
 thinking_param = "level"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "ga"
 
 [[providers.gemini.models]]
@@ -528,7 +528,7 @@ context = 1_048_576
 max_output = 65_536
 thinking = "optional"        # default level `minimal` (docs)
 thinking_param = "level"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "ga"
 
 [[providers.gemini.models]]
@@ -542,7 +542,7 @@ max_output = 65_536
 thinking = "optional"        # verified live: thinkingBudget:0 gives 0 thinking tokens, though
                              # the level enum's floor suggests "only"
 thinking_param = "level"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "deprecated"        # gone from AI Studio and the pricing page (the price above is the
                              # last one listed); the endpoint stays and routes to gemini-3.6-flash
 
@@ -556,7 +556,7 @@ context = 1_048_576
 max_output = 65_536
 thinking = "optional"        # default level `minimal` = off; only `*-pro` is thinking-only
 thinking_param = "level"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "ga"               # audio input 0.50 in / 0.05 cached
 # thinking-off unverified. The deprecations page lists a shutdown date of 2027-05-07 (the
 # earliest possible) with gemini-3.5-flash-lite as the replacement.
@@ -571,7 +571,7 @@ context = 1_048_576
 max_output = 65_536
 thinking = "optional"        # levels minimal/low/medium/high, default high; thinking-off unverified
 thinking_param = "level"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "preview"
 
 [[providers.gemini.models]]
@@ -584,7 +584,7 @@ context = 1_048_576
 max_output = 65_536
 thinking = "only"
 thinking_param = "level"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "preview"
 
 [[providers.gemini.models]]
@@ -597,7 +597,7 @@ context = 1_048_576
 max_output = 65_536
 thinking = "only"
 thinking_param = "budget"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "deprecated"        # from 2026-12-01 requests route to gemini-3.8-flash, billed at its rates
 
 [[providers.gemini.models]]
@@ -610,7 +610,7 @@ context = 1_048_576
 max_output = 65_536
 thinking = "optional"
 thinking_param = "budget"
-modalities = ["text", "vision", "audio", "video"]
+modalities = ["text", "image", "audio", "video"]
 status = "deprecated"       # audio input 1.00. From 2026-12-01 requests route to
                             # gemini-3.5-flash-lite, billed at its rates.
 
@@ -624,7 +624,7 @@ context = 1_048_576
 max_output = 65_536
 thinking = "optional"
 thinking_param = "budget"
-modalities = ["text", "vision", "audio", "video", "pdf"]
+modalities = ["text", "image", "audio", "video", "pdf"]
 status = "ga"               # audio input 0.30
 
 # ────────────────────────────────── DeepSeek ──────────────────────────────────
@@ -655,7 +655,7 @@ cached_input = 0.006         # off-peak 0.003
 context = 1_000_000
 max_output = 393_216
 thinking = "optional"
-modalities = ["text", "vision"]  # served by DeepSeek-V4.1-Flash-1017, which takes images
+modalities = ["text", "image"]  # served by DeepSeek-V4.1-Flash-1017, which takes images
 status = "ga"
 aliases = ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"]  # legacy names of retired models,
                                                                  # still accepted; served and
@@ -701,7 +701,7 @@ cached_input = 0.50
 context = 500_000
 # max_output UNKNOWN — no cap documented
 thinking = "only"            # reasoning efforts low/medium/high/xhigh; no `none`
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.xai.models]]
@@ -713,7 +713,7 @@ cached_input = 0.50
 context = 500_000
 # max_output UNKNOWN — no cap documented
 thinking = "only"            # reasoning efforts low/medium/high/xhigh; no `none`
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 
 [[providers.xai.models]]
@@ -725,7 +725,7 @@ cached_input = 0.30
 context = 500_000
 # max_output UNKNOWN — no cap documented, couldn't find
 thinking = "only"            # reasoning efforts low/medium/high/xhigh; no `none`
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 aliases = ["grok-4.5-latest", "grok-build-latest"]
 
@@ -738,7 +738,7 @@ cached_input = 0.20
 context = 1_000_000
 # max_output UNKNOWN
 thinking = "optional"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 aliases = ["grok-4.3-latest", "grok-latest"]
 
@@ -751,7 +751,7 @@ cached_input = 0.20
 context = 1_000_000
 # max_output UNKNOWN
 thinking = "only"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 aliases = ["grok-4.20"]
 
@@ -764,7 +764,7 @@ cached_input = 0.20
 context = 1_000_000
 # max_output UNKNOWN
 thinking = "none"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 aliases = ["grok-4.20-non-reasoning"]
 
@@ -777,7 +777,7 @@ cached_input = 0.20
 context = 256_000
 # max_output UNKNOWN
 thinking = "optional"
-modalities = ["text", "vision"]
+modalities = ["text", "image"]
 status = "ga"
 aliases = ["grok-code-fast-1"]
 

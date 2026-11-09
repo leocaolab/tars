@@ -77,8 +77,8 @@ async fn streaming_text_response_decodes_to_events() {
     assert_eq!(text, "Hello, world!");
     assert_eq!(saw_finish, Some(StopReason::EndTurn));
     let u = usage.expect("usage seen");
-    assert_eq!(u.input_tokens, 12);
-    assert_eq!(u.output_tokens, 3);
+    assert_eq!(u.unwrap().input_tokens, 12);
+    assert_eq!(u.unwrap().output_tokens, 3);
 }
 
 // DeepSeek's reasoner streams its reasoning in `delta.reasoning_content`, apart from
@@ -164,7 +164,7 @@ async fn complete_aggregates_streaming_response() {
         .expect("complete ok");
 
     assert_eq!(resp.text, "foobar");
-    assert_eq!(resp.stop_reason, Some(StopReason::EndTurn));
+    assert_eq!(resp.stop_reason, StopReason::EndTurn);
 }
 
 #[tokio::test]
@@ -273,7 +273,7 @@ async fn streaming_tool_call_emits_start_delta_end() {
         serde_json::Value::Object(resp.tool_calls[0].arguments.clone()),
         serde_json::json!({"q": "rust"})
     );
-    assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
+    assert_eq!(resp.stop_reason, StopReason::ToolUse);
 }
 
 #[tokio::test]
@@ -339,6 +339,28 @@ const TOOL_HALF_CHUNK: &str = r#"{"model":"gpt-4o","choices":[{"index":0,"delta"
 
 /// Returns what `complete` gives for a stream whose body is `body` as written.
 async fn complete_over(body: String) -> Result<tars_types::ChatResponse, tars_llm::ProviderError> {
+    let (_server, provider) = provider_over(body).await;
+    provider
+        .complete(ChatRequest::user("x"), "gpt-4o", Caller::test_default())
+        .await
+}
+
+async fn events_over(body: String) -> Vec<ChatEvent> {
+    let (_server, provider) = provider_over(body).await;
+    let stream = provider
+        .stream(ChatRequest::user("x"), "gpt-4o", Caller::test_default())
+        .await
+        .unwrap();
+    stream.map(Result::unwrap).collect().await
+}
+
+/// Returns a provider served `body` by a mock server, which serves only while it is kept.
+async fn provider_over(
+    body: String,
+) -> (
+    MockServer,
+    std::sync::Arc<tars_llm::provider::backends::openai::OpenAiProvider>,
+) {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -352,9 +374,7 @@ async fn complete_over(body: String) -> Result<tars_types::ChatResponse, tars_ll
     let provider = OpenAiProviderBuilder::new(ProviderId::new("oa"), Auth::inline("k"))
         .base_url(server.uri())
         .build(HttpClient::default_arc().unwrap(), basic());
-    provider
-        .complete(ChatRequest::user("x"), "gpt-4o", Caller::test_default())
-        .await
+    (server, provider)
 }
 
 #[tokio::test]
@@ -396,21 +416,31 @@ async fn a_body_of_text_that_ends_before_done_is_a_cut_stream() {
 #[tokio::test]
 async fn a_done_after_the_tool_start_chunk_is_a_call_without_arguments() {
     let body = format!("data: {TOOL_START_CHUNK}\n\ndata: [DONE]\n\n");
-    let resp = complete_over(body).await.unwrap();
+    let events = events_over(body).await;
+    let ends: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            ChatEvent::ToolCallEnd { parsed_args, .. } => Some(parsed_args),
+            _ => None,
+        })
+        .collect();
     assert!(
-        matches!(resp.tool_calls.as_slice(), [call] if call.arguments.is_empty()),
-        "{resp:?}"
+        matches!(ends.as_slice(), [args] if args.is_empty()),
+        "{events:?}"
     );
 }
 
 #[tokio::test]
-async fn a_usage_chunk_with_no_finish_reason_before_it_sends_no_finished() {
+async fn a_usage_chunk_with_no_finish_reason_before_it_leaves_the_call_unfinished() {
     let body = sse_body(&[
         r#"{"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}"#,
         r#"{"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
     ]);
-    let resp = complete_over(body).await.unwrap();
-    assert_eq!(resp.stop_reason, None, "{resp:?}");
+    let resp = complete_over(body).await;
+    assert!(
+        matches!(resp, Err(tars_llm::ProviderError::Unfinished(_))),
+        "{resp:?}"
+    );
 }
 
 #[tokio::test]
@@ -420,7 +450,7 @@ async fn a_usage_chunk_after_a_finished_with_usage_does_not_replace_its_stop_rea
         r#"{"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
     ]);
     let resp = complete_over(body).await.unwrap();
-    assert_eq!(resp.stop_reason, Some(StopReason::MaxTokens), "{resp:?}");
+    assert_eq!(resp.stop_reason, StopReason::MaxTokens, "{resp:?}");
 }
 
 #[tokio::test]
@@ -438,12 +468,20 @@ async fn a_usage_chunk_with_no_finish_reason_before_it_keeps_its_usage() {
         r#"{"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}"#,
         r#"{"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":500,"total_tokens":1500}}"#,
     ]);
-    let resp = complete_over(body).await.unwrap();
-    assert_eq!(resp.stop_reason, None, "{resp:?}");
-    assert_eq!(
-        (resp.usage.input_tokens, resp.usage.output_tokens),
-        (1000, 500),
-        "{resp:?}"
+    let events = events_over(body).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ChatEvent::Finished { .. })),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ChatEvent::UsageProgress { usage }
+                if (usage.input_tokens, usage.output_tokens) == (1000, 500)
+        )),
+        "{events:?}"
     );
 }
 

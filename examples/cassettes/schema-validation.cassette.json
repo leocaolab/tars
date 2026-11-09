@@ -2,10 +2,12 @@
   "capabilities": {
     "max_context_tokens": 128000,
     "max_output_tokens": 16384,
-    "supports_tool_use": true,
-    "supports_parallel_tool_calls": true,
+    "tool_use": {
+      "supported": {
+        "parallel": true
+      }
+    },
     "supports_structured_output": "json_object_mode",
-    "supports_vision": false,
     "supports_thinking": false,
     "supports_cancel": true,
     "prompt_cache": {
@@ -14,12 +16,20 @@
       }
     },
     "streaming": true,
-    "modalities_in": [
-      "text"
-    ],
-    "modalities_out": [
-      "text"
-    ],
+    "modalities_in": {
+      "text": true,
+      "image": false,
+      "audio": false,
+      "video": false,
+      "pdf": false
+    },
+    "modalities_out": {
+      "text": true,
+      "image": false,
+      "audio": false,
+      "video": false,
+      "pdf": false
+    },
     "pricing": {
       "input_per_million": 0.0,
       "output_per_million": 0.0,

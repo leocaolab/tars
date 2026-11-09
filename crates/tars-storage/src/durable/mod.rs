@@ -699,25 +699,24 @@ pub trait DurableStore: FiberStore {
         owner: &str,
         now: Millis,
         ttl: Millis,
-    ) -> Result<Option<ClaimedTask>, DurableStoreError>;
+    ) -> Result<Option<ClaimedTask>, DurableStoreError> {
+        self.claim_ready_excluding(owner, now, ttl, &[]).await
+    }
 
     /// Claims one ready task whose `agent_key` is not in `excluded`, as
     /// [`claim_ready`](DurableStore::claim_ready) does. The
     /// runtime's `QueueRunner` passes the keys at their in-flight cap,
     /// so a waiting task of a full key never blocks a ready task of a free one.
     ///
-    /// The default ignores `excluded` and claims any ready task; `MemDurableStore` and
-    /// `SqliteDurableStore` override it.
+    /// Every store implements it: a default that ignored `excluded` would let a store run a
+    /// key past its cap without anyone seeing.
     async fn claim_ready_excluding(
         &self,
         owner: &str,
         now: Millis,
         ttl: Millis,
         excluded: &[AgentKey],
-    ) -> Result<Option<ClaimedTask>, DurableStoreError> {
-        let _ = excluded;
-        self.claim_ready(owner, now, ttl).await
-    }
+    ) -> Result<Option<ClaimedTask>, DurableStoreError>;
 
     /// Fails a task for good (a permanent error: a bad rebuild, an unrepresentable
     /// result) without counting an attempt, appends its `Failed` event carrying `reason`

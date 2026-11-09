@@ -66,6 +66,7 @@ tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 wiremock.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 which = "6"
 futures.workspace = true
 
@@ -88,6 +89,10 @@ required-features = ["cli"]
 
 [[test]]
 name = "codex_cli_smoke"
+required-features = ["cli"]
+
+[[test]]
+name = "delegate_cli_env"
 required-features = ["cli"]
 
 [[test]]

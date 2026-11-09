@@ -115,15 +115,15 @@ impl StreamDecodeState {
     pub fn on_start(&mut self, index: usize, id: String, name: String) {
         // Keeps any arguments already received: some providers send deltas before the start, and
         // a duplicate start is logged, not allowed to erase them.
-        if let Some(entry) = self.inflight.get(&index) {
-            if !entry.id.is_empty() || !entry.name.is_empty() {
-                tracing::warn!(
-                    index,
-                    old_id = %entry.id,
-                    new_id = %id,
-                    "duplicate ToolCallStart for index; preserving accumulated args",
-                );
-            }
+        if let Some(entry) = self.inflight.get(&index)
+            && (!entry.id.is_empty() || !entry.name.is_empty())
+        {
+            tracing::warn!(
+                index,
+                old_id = %entry.id,
+                new_id = %id,
+                "duplicate ToolCallStart for index; preserving accumulated args",
+            );
         }
         let entry = self.inflight.entry(index).or_default();
         // A partial start chunk with an empty id or name does not erase a known one.
@@ -850,7 +850,7 @@ mod tests {
             Some(ChatEvent::Finished {
                 stop_reason: StopReason::EndTurn,
                 usage,
-            }) if usage.output_tokens == 5
+            }) if usage.unwrap().output_tokens == 5
         ));
     }
 

@@ -8,7 +8,7 @@ pub use deepseek::DeepSeekDialect;
 use serde_json::Value;
 
 use crate::ProviderError;
-use tars_types::{ChatEvent, ChatRequest, ChatResponse, Usage};
+use tars_types::{ChatEvent, ChatRequest, ChatResponse, ToolCall, Usage};
 
 use crate::provider::http_base::SseEvent;
 use crate::provider::tool_buffer::StreamDecodeState;
@@ -55,13 +55,14 @@ pub trait OpenAiDialect: Send + Sync {
     /// the same message reading, this dialect's usage, then [`Self::finalize`].
     fn parse_response(&self, raw: &Value) -> Result<ChatResponse, ProviderError> {
         let mut r = openai_chat_completion_to_chat_response(raw, |u| self.parse_usage(u))?;
-        self.finalize(&mut r);
+        self.finalize(&mut r.text, &mut r.tool_calls);
         Ok(r)
     }
 
-    /// Fixes a whole response, for what no single event shows; by default it changes nothing.
-    /// It runs on every path: streamed (when [`Self::text_is_only_whole`]), `complete` and batch.
-    fn finalize(&self, _r: &mut ChatResponse) {}
+    /// Fixes a whole response's text and tool calls, for what no single event shows; by default
+    /// it changes nothing. It runs on every path: streamed (when [`Self::text_is_only_whole`]),
+    /// `complete` and batch.
+    fn finalize(&self, _text: &mut String, _tool_calls: &mut Vec<ToolCall>) {}
 }
 
 /// OpenAI itself, and every server that follows it.
@@ -160,11 +161,11 @@ pub(super) mod both_paths {
                 .parse_event(&adapter, &event, &mut buf)
                 .expect("each chunk parses")
             {
-                acc.apply(ev);
+                acc.apply(ev).expect("the stream keeps the protocol");
             }
         }
-        let mut streamed = acc.finish();
-        dialect.finalize(&mut streamed);
+        let mut streamed = acc.finish().expect("the stream finishes");
+        dialect.finalize(&mut streamed.text, &mut streamed.tool_calls);
         (whole, streamed)
     }
 
@@ -210,20 +211,26 @@ mod tests {
         assert_eq!(via_dialect.text, direct.text);
         assert_eq!(via_dialect.text, "hello world");
         assert_eq!(via_dialect.stop_reason, direct.stop_reason);
-        assert_eq!(via_dialect.usage.input_tokens, direct.usage.input_tokens);
-        assert_eq!(via_dialect.usage.output_tokens, direct.usage.output_tokens);
         assert_eq!(
-            via_dialect.usage.thinking_tokens,
-            direct.usage.thinking_tokens
+            via_dialect.usage.unwrap().input_tokens,
+            direct.usage.unwrap().input_tokens
         );
         assert_eq!(
-            via_dialect.usage.cached_input_tokens,
-            direct.usage.cached_input_tokens
+            via_dialect.usage.unwrap().output_tokens,
+            direct.usage.unwrap().output_tokens
         );
-        assert_eq!(via_dialect.usage.input_tokens, 12);
-        assert_eq!(via_dialect.usage.output_tokens, 8);
-        assert_eq!(via_dialect.usage.thinking_tokens, 3);
-        assert_eq!(via_dialect.usage.cached_input_tokens, 4);
+        assert_eq!(
+            via_dialect.usage.unwrap().thinking_tokens,
+            direct.usage.unwrap().thinking_tokens
+        );
+        assert_eq!(
+            via_dialect.usage.unwrap().cached_input_tokens,
+            direct.usage.unwrap().cached_input_tokens
+        );
+        assert_eq!(via_dialect.usage.unwrap().input_tokens, 12);
+        assert_eq!(via_dialect.usage.unwrap().output_tokens, 8);
+        assert_eq!(via_dialect.usage.unwrap().thinking_tokens, 3);
+        assert_eq!(via_dialect.usage.unwrap().cached_input_tokens, 4);
     }
 
     #[test]
@@ -279,7 +286,7 @@ mod tests {
         assert_eq!(whole.tool_calls.len(), 2, "{:?}", whole.tool_calls);
         assert_eq!(whole.tool_calls[1].id, "call_b");
         assert_eq!(whole.tool_calls[1].arguments["path"], "b.rs");
-        assert_eq!(whole.usage.thinking_tokens, 12);
+        assert_eq!(whole.usage.unwrap().thinking_tokens, 12);
     }
 
     #[test]

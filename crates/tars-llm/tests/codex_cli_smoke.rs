@@ -53,7 +53,7 @@ async fn codex_cli_say_hi_against_real_binary() {
                 println!("[evt {event_count:>2}] Degraded    unsent={unsent:?}");
             }
             Ok(ChatEvent::Started { actual_model, .. }) => {
-                println!("[evt {event_count:>2}] Started     model={actual_model}");
+                println!("[evt {event_count:>2}] Started     model={actual_model:?}");
             }
             Ok(ChatEvent::Delta { text }) => {
                 println!("[evt {event_count:>2}] Delta       text={text:?}");
@@ -85,10 +85,10 @@ async fn codex_cli_say_hi_against_real_binary() {
                 println!(
                     "[evt {event_count:>2}] Finished    stop={stop_reason:?} \
                      in={} out={} cached={} thinking={}",
-                    usage.input_tokens,
-                    usage.output_tokens,
-                    usage.cached_input_tokens,
-                    usage.thinking_tokens,
+                    usage.unwrap().input_tokens,
+                    usage.unwrap().output_tokens,
+                    usage.unwrap().cached_input_tokens,
+                    usage.unwrap().thinking_tokens,
                 );
                 saw_finished = true;
             }

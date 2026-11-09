@@ -256,6 +256,10 @@ pub enum CapError {
     /// reach the model, which may ask for something else.
     #[error("fatal execute error: {0}")]
     ExecuteFatal(String),
+    /// Our own code failed around the cap (a reply that would not encode): nothing the model
+    /// sent or could change, so it goes to the caller as a defect and never to the model.
+    #[error("defect: {0}")]
+    Defect(String),
 }
 
 /// How a call's arguments were wrong.
@@ -301,6 +305,7 @@ impl CapError {
             ),
             Self::ExecuteTransient(m) => Reason::Transient(m),
             Self::ExecuteFatal(m) => Reason::CallFailed(m),
+            Self::Defect(m) => Reason::defect(m),
         }
     }
 }

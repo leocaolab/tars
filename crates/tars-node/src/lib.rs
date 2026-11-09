@@ -44,7 +44,7 @@ use crate::ctx::build_context;
 use crate::errors::{REGISTRY_ERROR, config_to_js, llm_reason, registry_to_js};
 
 use tars_config::Config;
-use tars_llm::{ChainOptions, LlmService};
+use tars_llm::{ChainOptions, LlmService, RetryConfig};
 use tars_llm::{LlmProvider, ProviderRegistry};
 use tars_types::{
     Caller, ChatRequest, ContentBlock, JsonSchema, Message, ParseProviderIdError, ProviderId,
@@ -82,28 +82,27 @@ pub struct CompleteOptions {
     pub max_output_tokens: Option<u32>,
     /// Unset leaves the provider's default.
     pub temperature: Option<f64>,
-    /// `true` lets the provider choose the thinking depth, `false` turns thinking off.
+    /// `true` lets the provider choose the thinking depth, `false` turns thinking off; absent
+    /// leaves the provider's default.
     pub thinking: Option<bool>,
     /// A JSON Schema the reply must conform to; its root must be an object.
     pub response_schema: Option<serde_json::Value>,
     /// Whether the provider enforces `response_schema` (default) or takes it as a hint.
     pub response_schema_strict: Option<bool>,
-    /// Added to the context's tags, which the pipeline's events carry; a raw `Provider` emits
-    /// no events.
-    pub tags: Option<Vec<String>>,
 }
 
 /// What `complete()` resolves to.
 #[napi(object)]
 pub struct CompleteResult {
     pub text: String,
-    pub usage: UsageJs,
+    /// The tokens the call used; absent when the provider reported none.
+    pub usage: Option<UsageJs>,
     /// The model the provider reports having used, which routing can make differ from the one
-    /// asked for.
+    /// asked for; absent when the provider did not say.
     pub model: Option<String>,
     /// One of `end_turn`, `max_tokens`, `stop_sequence`, `tool_use`, `content_filter`,
     /// `cancelled`, `other`.
-    pub stop_reason: Option<String>,
+    pub stop_reason: String,
     /// The parts of the request the provider served it without (`structured_output`,
     /// `chat_template_thinking`); empty when it served all of it.
     pub degraded: Vec<String>,
@@ -124,11 +123,14 @@ pub struct UsageJs {
 /// provider's default, the role's) would key the call to a model the caller did not ask for.
 struct ProviderHandle {
     provider: Arc<dyn LlmProvider>,
+    retry: RetryConfig,
 }
 
 impl ProviderHandle {
     fn for_model(&self, model: &str) -> LlmService {
-        LlmService::default_chain(Arc::clone(&self.provider), model, ChainOptions::default())
+        let mut opts = ChainOptions::default();
+        opts.retry = Some(self.retry.clone());
+        LlmService::default_chain(Arc::clone(&self.provider), model, opts)
     }
 }
 
@@ -165,7 +167,12 @@ impl Pipeline {
         let ctx = factory_context(ctx)?;
         let cfg = Config::load_file(&path).map_err(config_to_js)?;
         let provider = build_provider_from_cfg(&cfg, &provider_id)?;
-        Ok(Self::from_provider(provider_id, provider, ctx))
+        Ok(Self::from_provider(
+            provider_id,
+            provider,
+            RetryConfig::default(),
+            ctx,
+        ))
     }
 
     /// Builds a pipeline from inline TOML shaped like a config file; it fails as
@@ -182,7 +189,12 @@ impl Pipeline {
         let ctx = factory_context(ctx)?;
         let cfg = Config::from_toml(&toml_text).map_err(config_to_js)?;
         let provider = build_provider_from_cfg(&cfg, &provider_id)?;
-        Ok(Self::from_provider(provider_id, provider, ctx))
+        Ok(Self::from_provider(
+            provider_id,
+            provider,
+            RetryConfig::default(),
+            ctx,
+        ))
     }
 
     /// Returns the id of the provider this pipeline was built over.
@@ -200,9 +212,15 @@ impl Pipeline {
 }
 
 impl Pipeline {
-    /// Puts `provider` behind the default chain (retry, telemetry and the rest).
-    pub(crate) fn from_provider(id: String, provider: Arc<dyn LlmProvider>, ctx: Caller) -> Self {
-        let service = ProviderHandle { provider };
+    /// Puts `provider` behind the default chain (retry, telemetry and the rest), retrying per
+    /// `retry`.
+    pub(crate) fn from_provider(
+        id: String,
+        provider: Arc<dyn LlmProvider>,
+        retry: RetryConfig,
+        ctx: Caller,
+    ) -> Self {
+        let service = ProviderHandle { provider, retry };
         Self { id, service, ctx }
     }
 }
@@ -223,7 +241,7 @@ pub(crate) async fn drive_complete(
     caller: &Caller,
     opts: CompleteOptions,
 ) -> Result<CompleteResult> {
-    let ctx = call_context(caller, opts.tags.clone());
+    let ctx = caller.for_call();
     let req = build_request(opts)?;
     RUN_CONTEXT
         .scope(ctx.clone(), async move {
@@ -232,27 +250,19 @@ pub(crate) async fn drive_complete(
                 .map_err(llm_reason)?;
             Ok(CompleteResult {
                 text: resp.text,
-                usage: UsageJs {
-                    input_tokens: resp.usage.input_tokens as u32,
-                    output_tokens: resp.usage.output_tokens as u32,
-                    cached_input_tokens: resp.usage.cached_input_tokens as u32,
-                    cache_creation_tokens: resp.usage.cache_creation_tokens as u32,
-                    thinking_tokens: resp.usage.thinking_tokens as u32,
-                },
-                model: Some(resp.actual_model),
-                stop_reason: resp.stop_reason.map(|r| stop_reason_str(&r).to_string()),
+                usage: resp.usage.map(|usage| UsageJs {
+                    input_tokens: usage.input_tokens as u32,
+                    output_tokens: usage.output_tokens as u32,
+                    cached_input_tokens: usage.cached_input_tokens as u32,
+                    cache_creation_tokens: usage.cache_creation_tokens as u32,
+                    thinking_tokens: usage.thinking_tokens as u32,
+                }),
+                model: resp.actual_model,
+                stop_reason: stop_reason_str(&resp.stop_reason).to_string(),
                 degraded: resp.degraded.iter().map(|d| d.kind().to_string()).collect(),
             })
         })
         .await
-}
-
-/// Returns the context for one call of `caller`, with `tags` added to the caller's and no call
-/// stamp of the caller's.
-fn call_context(caller: &Caller, tags: Option<Vec<String>>) -> Caller {
-    let mut ctx = caller.for_call();
-    ctx.tags.extend(tags.into_iter().flatten());
-    ctx
 }
 
 // ── Builder helpers ──────────────────────────────────────────────────
@@ -321,7 +331,7 @@ fn build_request(opts: CompleteOptions) -> Result<ChatRequest> {
         stop_sequences: Vec::new(),
         seed: None,
         cache_directives: Vec::new(),
-        thinking: opts.thinking.map(map_thinking).unwrap_or_default(),
+        thinking: opts.thinking.map(map_thinking),
         enable_chat_template_thinking: opts.thinking,
     };
     if let Some(user) = opts.user {
@@ -400,7 +410,6 @@ canned_response = "ok"
             tenant: "acme".to_string(),
             session: None,
             trace: None,
-            tags: None,
         };
         let pipeline =
             Pipeline::from_str(MOCK_CONFIG.to_string(), "demo".to_string(), Some(ctx)).unwrap();
@@ -465,28 +474,12 @@ canned_response = "ok"
             tenant: "acme".to_string(),
             session: None,
             trace: None,
-            tags: None,
         };
         let Err(err) = Pipeline::from_str(MOCK_CONFIG.to_string(), String::new(), Some(ctx)) else {
             panic!("an empty provider id built a pipeline");
         };
         assert_eq!(err.status, INVALID_ARG);
         assert!(err.reason.starts_with("providerId: "), "{}", err.reason);
-    }
-
-    #[test]
-    fn a_calls_tags_are_added_to_the_callers_and_not_kept_for_the_next_call() {
-        let caller = Caller::new(
-            tars_types::TenantId::new("acme"),
-            tars_types::TraceId::new("t"),
-        )
-        .with_tags(["cohort"]);
-
-        let tagged = call_context(&caller, Some(vec!["run-1".to_string()]));
-        let untagged = call_context(&caller, None);
-
-        assert_eq!(tagged.tags, ["cohort", "run-1"]);
-        assert_eq!(untagged.tags, ["cohort"]);
     }
 
     fn options_with_schema(schema: serde_json::Value) -> CompleteOptions {
@@ -500,7 +493,6 @@ canned_response = "ok"
             thinking: None,
             response_schema: Some(schema),
             response_schema_strict: None,
-            tags: None,
         }
     }
 

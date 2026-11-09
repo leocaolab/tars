@@ -38,6 +38,11 @@ pub enum ConfigError {
     )]
     AlreadyInitialized,
 
+    /// Carries every operator section that did not assemble: one a file set that nobody takes, a
+    /// misspelt one, or one whose values its owner refuses.
+    #[error("operator sections:\n{0}")]
+    Operator(crate::operator::SectionErrors),
+
     /// Means `<home>/models.json` exists but could not be read, or a catalog was already installed.
     #[error(transparent)]
     Catalog(#[from] crate::model_catalog::CatalogError),

@@ -13,5 +13,6 @@ pub mod output_limit;
 pub mod provider_profile;
 pub mod response;
 pub mod schema;
+pub mod token_estimate;
 pub mod tools;
 pub mod usage;

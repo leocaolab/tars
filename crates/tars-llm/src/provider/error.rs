@@ -157,11 +157,17 @@ pub enum ProviderError {
     #[error("the response body ended before the end of the stream{}", cut_inside(open_call.as_ref()))]
     StreamCut { open_call: Option<ReceivedToolCall> },
 
-    /// The stream ended without saying why the turn stopped: no `Finished` came before its end and
-    /// no error either. The reply may be cut short. It is permanent: a server that sends no stop
-    /// reason (some OpenAI-compatible proxies drop `finish_reason`) sends none again.
-    #[error("the stream ended without saying why the turn stopped")]
-    Unfinished,
+    /// The stream ended without becoming a response: no `Finished` came before its end and no
+    /// error either, or it finished with tool calls left open. The reply may be cut short. It is
+    /// permanent: a server that sends no stop reason (some OpenAI-compatible proxies drop
+    /// `finish_reason`) sends none again.
+    #[error(transparent)]
+    Unfinished(#[from] tars_types::Unfinished),
+
+    /// The stream's tool-call events came in an order no response folds from: the adapter or the
+    /// provider broke the event protocol. It is permanent.
+    #[error(transparent)]
+    StreamViolation(#[from] tars_types::StreamViolation),
 
     /// The provider stated in its `x-should-retry` header a class other than `error`'s own, and
     /// its statement decides the class; [`ProviderError::stated`] builds it only then.
@@ -191,6 +197,16 @@ pub enum ProviderError {
         #[source]
         source: InvalidHeaderValue,
     },
+
+    /// A header the provider's config adds does not make a valid one, so the request was not
+    /// sent. Its value is not kept, since it may be a credential.
+    #[error("a configured extra header")]
+    ExtraHeader(#[source] crate::provider::http_base::ExtraHeaderError),
+
+    /// A recording cassette got the provider's answer but could not write its file; the
+    /// recording is kept in memory and written again when the cassette is dropped.
+    #[error("the cassette recording was not written")]
+    CassetteNotWritten(#[source] crate::provider::backends::cassette::WriteCassetteError),
 
     #[error("the claude_sdk daemon script")]
     DaemonScript(#[source] DaemonScriptError),
@@ -234,9 +250,13 @@ pub enum ProviderError {
     #[error("the batch expired before this item ran")]
     BatchItemExpired,
 
-    /// A batch item failed with an error code this build does not map, in the provider's words.
-    #[error("the batch item failed ({code}): {message}")]
-    BatchItemFailed { code: String, message: String },
+    /// A batch item failed with an error code this build does not map, in the provider's words;
+    /// `code` is `None` when the provider named none.
+    #[error("the batch item failed{}: {message}", code.as_deref().map(|c| format!(" ({c})")).unwrap_or_default())]
+    BatchItemFailed {
+        code: Option<String>,
+        message: String,
+    },
 
     /// A bug in tars: an invariant of its own code broke.
     #[error("internal: {0}")]
@@ -248,8 +268,8 @@ pub enum ProviderError {
 pub enum DaemonScriptError {
     #[error(
         "no `script_path` is configured and none of the default locations exist \
-         ($TARS_CLAUDE_SDK_SCRIPT, `tools/claude-daemon/server.mjs` walking up from the working \
-         directory, `~/.tars/claude-daemon/server.mjs`)"
+         (`tools/claude-daemon/server.mjs` walking up from the working directory, \
+         `~/.tars/claude-daemon/server.mjs`)"
     )]
     NotFound,
 
@@ -577,6 +597,8 @@ impl ProviderError {
             | Encode(_)
             | InvalidUrl { .. }
             | InvalidHeader { .. }
+            | ExtraHeader(_)
+            | CassetteNotWritten(_)
             | DaemonScript(_)
             | DaemonExited
             | Sandbox(_)
@@ -585,7 +607,8 @@ impl ProviderError {
             | CliSubprocessDied { .. }
             | TimedOut { .. }
             | IncompleteToolCall { .. }
-            | Unfinished => ErrorClass::Permanent,
+            | Unfinished(_)
+            | StreamViolation(_) => ErrorClass::Permanent,
         }
     }
 
@@ -632,7 +655,8 @@ impl ProviderError {
             Unavailable { .. } => K::Unavailable,
             Network(_) => K::Network,
             StreamCut { .. } => K::StreamCut,
-            Unfinished => K::Unfinished,
+            Unfinished(_) => K::Unfinished,
+            StreamViolation(_) => K::StreamViolation,
             Stated { error, .. } => error.kind(),
             Parse { .. } => K::Parse,
             CliSubprocessDied { .. } => K::CliSubprocessDied,
@@ -643,6 +667,8 @@ impl ProviderError {
             Encode(_) => K::Encode,
             InvalidUrl { .. } => K::InvalidUrl,
             InvalidHeader { .. } => K::InvalidHeader,
+            ExtraHeader(_) => K::InvalidHeader,
+            CassetteNotWritten(_) => K::Io,
             DaemonScript(_) => K::DaemonScript,
             Spawn { .. } => K::Spawn,
             Io { .. } => K::Io,
@@ -867,7 +893,8 @@ mod tests {
             | ProviderError::Unavailable { .. }
             | ProviderError::Network(_)
             | ProviderError::StreamCut { .. }
-            | ProviderError::Unfinished
+            | ProviderError::Unfinished(_)
+            | ProviderError::StreamViolation(_)
             | ProviderError::Stated { .. }
             | ProviderError::Parse { .. }
             | ProviderError::CliSubprocessDied { .. }
@@ -878,6 +905,8 @@ mod tests {
             | ProviderError::Encode(_)
             | ProviderError::InvalidUrl { .. }
             | ProviderError::InvalidHeader { .. }
+            | ProviderError::ExtraHeader(_)
+            | ProviderError::CassetteNotWritten(_)
             | ProviderError::DaemonScript(_)
             | ProviderError::Spawn { .. }
             | ProviderError::Io { .. }
@@ -909,7 +938,10 @@ mod tests {
             ProviderError::RequestTimeout("request timeout".into()),
             ProviderError::ProviderTimedOut("request timed out".into()),
             ProviderError::StreamCut { open_call: None },
-            ProviderError::Unfinished,
+            ProviderError::Unfinished(tars_types::Unfinished::NoStopReason),
+            ProviderError::StreamViolation(tars_types::StreamViolation::ArgsWithoutStart {
+                index: 0,
+            }),
             ProviderError::Stated {
                 class: ErrorClass::Permanent,
                 error: Box::new(ProviderError::ModelOverloaded),
@@ -953,6 +985,15 @@ mod tests {
                 header: "anthropic-version",
                 source: reqwest::header::HeaderValue::from_str("\n").unwrap_err(),
             },
+            ProviderError::ExtraHeader(crate::provider::http_base::ExtraHeaderError::Name {
+                header: "bad name".into(),
+                source: reqwest::header::HeaderName::from_bytes(b"bad name").unwrap_err(),
+            }),
+            ProviderError::CassetteNotWritten(
+                crate::provider::backends::cassette::WriteCassetteError::Encode(
+                    serde_json::from_str::<u8>("x").unwrap_err(),
+                ),
+            ),
             ProviderError::DaemonScript(DaemonScriptError::NotFound),
             ProviderError::Spawn {
                 program: "node".into(),
@@ -980,7 +1021,7 @@ mod tests {
             ProviderError::BatchItemCanceled,
             ProviderError::BatchItemExpired,
             ProviderError::BatchItemFailed {
-                code: "server_error".into(),
+                code: Some("server_error".into()),
                 message: "m".into(),
             },
             ProviderError::Internal("i".into()),
@@ -1009,6 +1050,8 @@ mod tests {
                         | ProviderError::Encode(_)
                         | ProviderError::InvalidUrl { .. }
                         | ProviderError::InvalidHeader { .. }
+                        | ProviderError::ExtraHeader(_)
+                        | ProviderError::CassetteNotWritten(_)
                         | ProviderError::DaemonScript(_)
                         | ProviderError::Spawn { .. }
                         | ProviderError::Io { .. }

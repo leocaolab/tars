@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
 
+use crate::pipeline::middleware::OutputReserve;
 use crate::{BatchResultItem, BatchStatus, ProviderError};
 use tars_types::{BatchItemId, BatchJobId, Caller, ChatRequest, ProviderId, ProviderProfile};
 
@@ -13,7 +14,7 @@ use crate::provider::auth::{Auth, AuthResolver};
 use crate::provider::batch::BatchSubmitter;
 use crate::provider::error::{ParseProblem, RequestRefusal};
 use crate::provider::http_base::{
-    ERROR_BODY_CAP_BYTES, HttpAdapter, HttpClient, HttpOverrides, apply_extra_headers,
+    ERROR_BODY_CAP_BYTES, HttpAdapter, HttpClient, HttpOverrides, insert_extra_headers,
     read_bounded_body, stream_via_adapter, truncate_utf8,
 };
 use crate::provider::wire::WireRecorder;
@@ -34,6 +35,7 @@ pub struct AnthropicProviderBuilder {
     capabilities: Option<ProviderProfile>,
     extras: HttpOverrides,
     output_limits: tars_config::OutputLimitRule,
+    output_reserve: OutputReserve,
     wire: Option<WireRecorder>,
 }
 
@@ -47,6 +49,7 @@ impl AnthropicProviderBuilder {
             capabilities: None,
             extras: HttpOverrides::default(),
             output_limits: tars_config::OutputLimitRule::catalog("anthropic"),
+            output_reserve: OutputReserve::default(),
             wire: None,
         }
     }
@@ -56,6 +59,10 @@ impl AnthropicProviderBuilder {
     builder_setter!(capabilities: opt ProviderProfile);
     builder_setter!(extras: HttpOverrides);
     builder_setter!(output_limits: tars_config::OutputLimitRule);
+    builder_setter! {
+        /// Sets the `max_tokens` sent for a request that sets no limit.
+        output_reserve: OutputReserve
+    }
     builder_setter! {
         /// Sets where each attempt's raw bytes are recorded; `None` records none.
         wire: Option<WireRecorder>
@@ -71,6 +78,7 @@ impl AnthropicProviderBuilder {
             self.base_url,
             self.api_version,
             self.extras,
+            self.output_reserve,
         ));
         Arc::new(AnthropicProvider {
             id: self.id,
@@ -151,7 +159,8 @@ impl AnthropicProvider {
     async fn batch_headers(&self, ctx: &Caller) -> Result<HeaderMap, ProviderError> {
         let auth = self.auth_resolver.resolve(&self.auth, ctx).await?;
         let mut headers = self.adapter.build_headers(&auth)?;
-        apply_extra_headers(self.adapter.extras(), self.http.env.as_ref(), &mut headers);
+        insert_extra_headers(self.adapter.extras(), self.http.env.as_ref(), &mut headers)
+            .map_err(ProviderError::ExtraHeader)?;
         Ok(headers)
     }
 }
