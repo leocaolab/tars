@@ -30,6 +30,8 @@ import { Pipeline } from '../../crates/tars-node/index.js';
 
 const CONFIG = process.env.TARS_EXAMPLE_CONFIG ?? 'examples/tars.toml';
 const PROVIDER = process.env.TARS_EXAMPLE_PROVIDER ?? 'cassette_schema';
+// An example's tenant: a real deployment passes whose work the calls are.
+const TENANT = 'example-tenant';
 const MODEL = 'qwen/qwen3-coder-30b';
 
 const SCHEMA = {
@@ -56,7 +58,7 @@ function checkShape(data) {
 }
 
 async function main() {
-  const pipe = Pipeline.fromConfigPath(CONFIG, PROVIDER);
+  const pipe = Pipeline.fromConfigPath(CONFIG, PROVIDER, { tenant: TENANT });
 
   // `responseSchema` (decode-time enforcement) needs a strict-capable
   // provider (Gemini / OpenAI / Anthropic); a local LM Studio model may

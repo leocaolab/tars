@@ -1,49 +1,44 @@
-//! `fs.write_file` — create or overwrite a file with given contents.
+//! `fs.write_file`: creates or overwrites a file, creating its parent directories.
 //!
-//! The write half of the filesystem builtins (sibling of
-//! [`super::read_file`]). A tars-native coding Agent (Session loop over a
-//! pure-inference provider) needs this to act on a worktree — the
-//! `ToolContext::cwd` the Session sets IS the agent's working tree, so the
-//! side effect lands exactly where the orchestrator scoped it, not in the
-//! process cwd.
-//!
-//! Side effect: **Reversible** — a write can be rolled back
-//! by restoring the prior bytes; the Session/worktree owns that snapshot.
+//! Where it may write is the write jail's decision (see `write_jail`): under the tool's root
+//! and the sandbox's writable roots, never under `ReadOnly` or a protected git directory, and
+//! never through a symlink. A refused write is an `is_error` result the model can recover from,
+//! and so is a path the filesystem rejects for its shape or its permissions (a component that is
+//! a file, a target that is a directory, a file it may not open).
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use tokio_util::sync::CancellationToken;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::json;
 
 use tars_types::JsonSchema;
 
-use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
-use crate::{SandboxMode, SandboxPolicy};
+use super::write_jail::{WriteAccess, WriteError, WriteJail, replace_contents};
+use crate::tool::{FsOp, Tool, ToolEnv, ToolError, ToolOutput};
+use tars_sandbox::{ResolveRootError, canonical_root};
 
-/// 1 MiB default cap on a single write — a coding edit, not a data dump.
-const DEFAULT_MAX_BYTES: usize = 1 << 20;
+/// Caps the bytes one write may carry unless the tool is built with another cap.
+pub(super) const DEFAULT_MAX_BYTES: NonZeroUsize =
+    NonZeroUsize::new(1 << 20).expect("1 MiB is not zero");
 
 pub struct WriteFileTool {
-    /// If set, the resolved path must sit inside this directory. `None`
-    /// = no jail (trusted CLI context only).
+    /// Holds the canonical directory a resolved path must sit inside, when set.
     root: Option<PathBuf>,
-    /// Hard cap on bytes written per invocation.
-    max_bytes: usize,
+    max_bytes: NonZeroUsize,
 }
 
 #[derive(Debug, Deserialize)]
 struct WriteFileArgs {
-    /// File path. Absolute or relative to [`ToolContext::cwd`].
     path: String,
-    /// Full new contents. Overwrites any existing file.
     content: String,
 }
 
 impl WriteFileTool {
-    /// Construct without a jail. Writes anywhere the process can. Tests +
-    /// trusted local CLI use this.
+    /// Returns a tool with no root of its own; it writes anywhere the process can unless
+    /// [`ToolEnv::sandbox`] confines it.
     pub fn new() -> Self {
         Self {
             root: None,
@@ -51,146 +46,23 @@ impl WriteFileTool {
         }
     }
 
-    /// Constrain writes to `root` (canonicalized eagerly). A path that
-    /// resolves outside is rejected as a logical error (the model adapts).
-    pub fn with_root(root: impl AsRef<Path>) -> Option<Self> {
-        let canonical_root = std::fs::canonicalize(root.as_ref()).ok()?;
-        Some(Self {
-            root: Some(canonical_root),
+    /// Confines writes to `root`, refusing a path outside it with an `is_error` result.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `root` cannot be canonicalized.
+    pub fn with_root(root: impl AsRef<Path>) -> Result<Self, ResolveRootError> {
+        Ok(Self {
+            root: Some(canonical_root(root.as_ref())?),
             max_bytes: DEFAULT_MAX_BYTES,
         })
     }
 
-    /// Override the max-bytes cap. Chainable.
-    pub fn max_bytes(mut self, n: usize) -> Self {
+    /// Sets the byte cap.
+    pub fn max_bytes(mut self, n: NonZeroUsize) -> Self {
         self.max_bytes = n;
         self
     }
-
-    /// The set of write constraints in force for this call. Each entry is a
-    /// list of roots the target must sit under; the target must satisfy EVERY
-    /// constraint (defense in depth = AND). Two independent sources:
-    ///
-    /// * `self.root` — the per-tool `with_root` jail (kept working).
-    /// * `ctx.sandbox` — uniform confinement: `WorkspaceWrite` constrains to
-    ///   the canonicalized `writable_roots` (a `WorkspaceWrite` with none →
-    ///   an empty constraint that nothing satisfies → fail-closed deny-all).
-    ///   `ReadOnly` is handled earlier (all writes denied). `DangerFullAccess`
-    ///   adds no constraint, so the default policy imposes nothing new.
-    ///
-    /// A writable root that can't be canonicalized is dropped (fail-closed:
-    /// fewer allowed roots, never more).
-    fn write_constraints(&self, sandbox: &SandboxPolicy) -> Vec<Vec<PathBuf>> {
-        let mut constraints: Vec<Vec<PathBuf>> = Vec::new();
-        if let Some(root) = &self.root {
-            constraints.push(vec![root.clone()]);
-        }
-        if sandbox.mode == SandboxMode::WorkspaceWrite {
-            let roots: Vec<PathBuf> = sandbox
-                .writable_roots
-                .iter()
-                .filter_map(|p| std::fs::canonicalize(p).ok())
-                .collect();
-            constraints.push(roots);
-        }
-        constraints
-    }
-
-    /// Resolve an input path against `cwd`, deny outright under `ReadOnly`,
-    /// then (if any jail is in force) verify the nearest EXISTING ancestor —
-    /// which defeats `..` traversal and existing-symlink escapes even when the
-    /// leaf file doesn't exist yet. This is a cheap PRE-check; the actual write
-    /// re-verifies the materialized parent's canonical path (TOCTOU close).
-    fn resolve(
-        &self,
-        input: &str,
-        cwd: Option<&Path>,
-        sandbox: &SandboxPolicy,
-    ) -> Result<PathBuf, ToolResult> {
-        let raw = Path::new(input);
-        let combined = if raw.is_absolute() {
-            raw.to_path_buf()
-        } else if let Some(cwd) = cwd {
-            cwd.join(raw)
-        } else if let Some(root) = &self.root {
-            // With a jail and no per-call cwd, the jail IS the frame of reference. It
-            // used to fall through to the process's working directory, so a relative
-            // path was resolved against one directory and then checked against a
-            // different one. Best case that is a guaranteed "outside the allowed root"
-            // on every relative path; worst case — a jail that happens to contain the
-            // process cwd — it silently reads and writes the wrong tree.
-            root.join(raw)
-        } else {
-            raw.to_path_buf()
-        };
-
-        // ReadOnly mode: no write may land anywhere. Report the real target.
-        if sandbox.mode == SandboxMode::ReadOnly {
-            return Err(ToolResult::error(format!(
-                "write to `{}` denied: sandbox mode is read-only",
-                combined.display()
-            )));
-        }
-
-        let constraints = self.write_constraints(sandbox);
-        if constraints.is_empty() {
-            // No jail (DangerFullAccess + no `with_root`) — today's default,
-            // unchanged: the un-canonicalized combined path is written as-is.
-            return Ok(combined);
-        }
-
-        // Walk up to the nearest existing ancestor and canonicalize it.
-        let mut anchor = combined.as_path();
-        let existing = loop {
-            if anchor.exists() {
-                break anchor.to_path_buf();
-            }
-            match anchor.parent() {
-                Some(p) => anchor = p,
-                None => {
-                    return Err(ToolResult::error(format!(
-                        "cannot resolve a real ancestor of `{}`",
-                        combined.display()
-                    )));
-                }
-            }
-        };
-        let canonical_existing = std::fs::canonicalize(&existing).map_err(|e| {
-            ToolResult::error(format!("cannot resolve `{}`: {e}", existing.display()))
-        })?;
-        if !satisfies(&canonical_existing, &constraints) {
-            return Err(denied_outside(&combined, &constraints));
-        }
-        Ok(combined)
-    }
-}
-
-/// True iff `canonical` sits under at least one root of EVERY constraint.
-/// An empty constraint (e.g. `WorkspaceWrite` with no writable roots) is
-/// satisfied by nothing — fail-closed.
-fn satisfies(canonical: &Path, constraints: &[Vec<PathBuf>]) -> bool {
-    constraints
-        .iter()
-        .all(|roots| roots.iter().any(|r| canonical.starts_with(r)))
-}
-
-/// Build the deny message, naming the real allowed roots so the failure is
-/// legible (never a bare sentinel).
-fn denied_outside(target: &Path, constraints: &[Vec<PathBuf>]) -> ToolResult {
-    let allowed: Vec<String> = constraints
-        .iter()
-        .flatten()
-        .map(|r| r.display().to_string())
-        .collect();
-    let roots = if allowed.is_empty() {
-        "(no writable roots)".to_string()
-    } else {
-        allowed.join(", ")
-    };
-    ToolResult::error(format!(
-        "path `{}` resolves outside the allowed write root(s): {roots}",
-        target.display(),
-    ))
 }
 
 impl Default for WriteFileTool {
@@ -217,7 +89,7 @@ impl Tool for WriteFileTool {
         S.get_or_init(|| {
             JsonSchema::strict(
                 "WriteFileArgs",
-                json!({
+                tars_types::json_object! {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
@@ -231,7 +103,7 @@ impl Tool for WriteFileTool {
                         }
                     },
                     "required": ["path", "content"]
-                }),
+                },
             )
         })
     }
@@ -239,82 +111,56 @@ impl Tool for WriteFileTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+        env: &ToolEnv,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
         let parsed: WriteFileArgs =
-            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+            serde_json::from_value(args).map_err(ToolError::InvalidArguments)?;
 
-        if parsed.content.len() > self.max_bytes {
-            return Ok(ToolResult::error(format!(
+        if parsed.content.len() > self.max_bytes.get() {
+            return Ok(ToolOutput::error(format!(
                 "refusing to write {} bytes; cap is {} (fs.write_file)",
                 parsed.content.len(),
                 self.max_bytes
             )));
         }
 
-        let resolved = match self.resolve(&parsed.path, ctx.cwd.as_deref(), &ctx.sandbox) {
-            Ok(p) => p,
-            Err(result) => return Ok(result),
+        let admitted = WriteJail::of(self.root.as_deref(), env)
+            .and_then(|jail| jail.admit_create(Path::new(&parsed.path)));
+        let target = match admitted {
+            Ok(t) => t,
+            Err(e) => return e.into_tool(),
         };
+        let content = parsed.content;
+        let written = target.path();
 
-        let basename = resolved
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| resolved.display().to_string());
-
-        let constraints = self.write_constraints(&ctx.sandbox);
-        let content_len = parsed.content.len();
-
-        // Race the write against cancel — a coding loop that's been
-        // cancelled must not keep mutating the tree. The async builds the full
-        // result so a post-canonicalization escape surfaces as an is_error
-        // result (recoverable), consistent with the pre-check.
-        let write = async {
-            let target = if let Some(parent) = resolved.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    ToolError::Execute(format!("create parent of `{}`: {e}", resolved.display()))
-                })?;
-                if constraints.is_empty() {
-                    // Unjailed (default) path — write the combined path as-is.
-                    resolved.clone()
-                } else {
-                    // TOCTOU close: the pre-check canonicalized the nearest
-                    // EXISTING ancestor, but the write follows the WHOLE path.
-                    // A symlink swapped into the (now-materialized) parent
-                    // between the pre-check and here would redirect the write
-                    // outside the root. Canonicalize the real parent NOW and
-                    // re-verify containment, then target `real_parent/basename`
-                    // so the bytes can only land inside an allowed root.
-                    let real_parent = tokio::fs::canonicalize(parent).await.map_err(|e| {
-                        ToolError::Execute(format!(
-                            "canonicalize parent of `{}`: {e}",
-                            resolved.display()
-                        ))
-                    })?;
-                    if !satisfies(&real_parent, &constraints) {
-                        return Ok(denied_outside(&resolved, &constraints));
-                    }
-                    match resolved.file_name() {
-                        Some(name) => real_parent.join(name),
-                        None => resolved.clone(),
-                    }
-                }
-            } else {
-                resolved.clone()
-            };
-
-            tokio::fs::write(&target, parsed.content.as_bytes())
-                .await
-                .map_err(|e| ToolError::Execute(format!("write `{}`: {e}", target.display())))?;
-            Ok(ToolResult::titled_success(
-                format!("Wrote {basename}"),
-                format!("wrote {content_len} bytes to {}", target.display()),
-            ))
+        // Cancellation returns at once; a write already handed to the blocking pool finishes.
+        let write = tokio::task::spawn_blocking(move || {
+            let mut file = target.open(WriteAccess::Create)?;
+            replace_contents(&mut file, content.as_bytes()).map_err(|source| WriteError::Io {
+                op: FsOp::Write,
+                path: target.path(),
+                source,
+            })?;
+            Ok::<_, WriteError>(content.len())
+        });
+        let joined = tokio::select! {
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+            r = write => r,
         };
-
-        tokio::select! {
-            _ = ctx.cancel.cancelled() => Err(ToolError::Cancelled),
-            res = write => res,
+        match joined {
+            Ok(Ok(len)) => Ok(ToolOutput::titled_success(
+                format!(
+                    "Wrote {}",
+                    written.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                format!("wrote {len} bytes to {}", written.display()),
+            )),
+            Ok(Err(e)) => e.into_tool(),
+            Err(source) => Err(ToolError::TaskLost {
+                tool: "fs.write_file",
+                source,
+            }),
         }
     }
 }
@@ -325,16 +171,17 @@ mod tests {
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
-    fn ctx(cwd: Option<PathBuf>) -> ToolContext {
-        ToolContext {
-            cancel: CancellationToken::new(),
+    use crate::SandboxPolicy;
+
+    fn ctx(cwd: Option<PathBuf>) -> ToolEnv {
+        ToolEnv {
             cwd,
             ..Default::default()
         }
     }
 
     #[test]
-    fn name_pins_to_doc_05_convention() {
+    fn the_tool_is_named_fs_write_file() {
         assert_eq!(WriteFileTool::new().name(), "fs.write_file");
     }
 
@@ -348,7 +195,8 @@ mod tests {
         let r = tool
             .execute(
                 json!({ "path": "sub/hello.txt", "content": "hi" }),
-                ctx(Some(dir.clone())),
+                &ctx(Some(dir.clone())),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -369,7 +217,8 @@ mod tests {
         let r = tool
             .execute(
                 json!({ "path": "../escape.txt", "content": "x" }),
-                ctx(Some(dir.clone())),
+                &ctx(Some(dir.clone())),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -377,14 +226,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A `ToolContext` carrying an explicit sandbox policy (no `with_root`).
-    fn ctx_sandboxed(cwd: Option<PathBuf>, sandbox: SandboxPolicy) -> ToolContext {
-        ToolContext {
-            cancel: CancellationToken::new(),
+    fn ctx_sandboxed(cwd: Option<PathBuf>, sandbox: SandboxPolicy) -> ToolEnv {
+        ToolEnv {
             cwd,
             sandbox,
             ..Default::default()
         }
+    }
+
+    fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(dir.path()).unwrap();
+        (dir, path)
+    }
+
+    async fn write_hook(cwd: PathBuf, root: PathBuf) -> ToolOutput {
+        WriteFileTool::new()
+            .execute(
+                json!({"path": "../.git/hooks/pre-commit", "content": "#!/bin/sh\n"}),
+                &ctx_sandboxed(Some(cwd), SandboxPolicy::workspace_write(&root)),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_empty_git_in_the_workdir_does_not_open_the_repositorys_hooks() {
+        let (_d, repo) = canonical_tempdir();
+        std::fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(repo.join("pkg/.git")).unwrap();
+        let r = write_hook(repo.join("pkg"), repo.clone()).await;
+        assert!(r.is_error, "{}", r.content);
+        assert!(!repo.join(".git/hooks/pre-commit").exists());
+    }
+
+    #[tokio::test]
+    async fn a_submodule_workdir_does_not_open_the_superprojects_hooks() {
+        let (_d, repo) = canonical_tempdir();
+        std::fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(repo.join(".git/modules/sub")).unwrap();
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
+        let r = write_hook(repo.join("sub"), repo.clone()).await;
+        assert!(r.is_error, "{}", r.content);
+        assert!(!repo.join(".git/hooks/pre-commit").exists());
+    }
+
+    #[tokio::test]
+    async fn a_git_file_naming_a_pruned_worktree_still_lets_the_write_through() {
+        let (_d, wt) = canonical_tempdir();
+        std::fs::write(
+            wt.join(".git"),
+            "gitdir: /nonexistent/repo/.git/worktrees/wt\n",
+        )
+        .unwrap();
+        let r = WriteFileTool::new()
+            .execute(
+                json!({"path": "a.txt", "content": "x"}),
+                &ctx_sandboxed(Some(wt.clone()), SandboxPolicy::workspace_write(&wt)),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!r.is_error, "{}", r.content);
+        assert!(wt.join("a.txt").exists());
     }
 
     #[tokio::test]
@@ -393,12 +299,12 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let sandbox = SandboxPolicy::workspace_write(dir.path());
 
-        // Inside the writable root: allowed.
         let tool = WriteFileTool::new();
         let inside = tool
             .execute(
                 json!({ "path": "sub/ok.txt", "content": "hi" }),
-                ctx_sandboxed(Some(dir.path().to_path_buf()), sandbox.clone()),
+                &ctx_sandboxed(Some(dir.path().to_path_buf()), sandbox.clone()),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -412,12 +318,12 @@ mod tests {
             "hi"
         );
 
-        // Absolute path outside every writable root: rejected, no file created.
         let escapee = outside.path().join("escape.txt");
         let r = tool
             .execute(
                 json!({ "path": escapee.to_str().unwrap(), "content": "x" }),
-                ctx_sandboxed(Some(dir.path().to_path_buf()), sandbox),
+                &ctx_sandboxed(Some(dir.path().to_path_buf()), sandbox),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -437,10 +343,11 @@ mod tests {
         let r = tool
             .execute(
                 json!({ "path": "in_workspace.txt", "content": "x" }),
-                ctx_sandboxed(
+                &ctx_sandboxed(
                     Some(dir.path().to_path_buf()),
                     SandboxPolicy::read_only(false),
                 ),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -451,15 +358,14 @@ mod tests {
 
     #[tokio::test]
     async fn danger_full_access_imposes_no_new_restriction() {
-        // The default policy (DangerFullAccess, empty roots) must leave the
-        // historical behaviour intact: an absolute path anywhere writes fine.
         let outside = tempfile::tempdir().unwrap();
         let target = outside.path().join("anywhere.txt");
         let tool = WriteFileTool::new();
         let r = tool
             .execute(
                 json!({ "path": target.to_str().unwrap(), "content": "ok" }),
-                ctx_sandboxed(None, SandboxPolicy::default()),
+                &ctx_sandboxed(None, SandboxPolicy::default()),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -473,23 +379,20 @@ mod tests {
 
     #[tokio::test]
     async fn toctou_symlinked_parent_swap_cannot_escape() {
-        // A symlinked directory swapped into the path after the ancestor
-        // pre-check must not let the write escape: the post-canonicalization
-        // re-check resolves the real parent and denies it.
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        // `root/link` -> outside (a symlink whose target is OUTSIDE the root).
         let link = root.path().join("link");
         std::os::unix::fs::symlink(outside.path(), &link).unwrap();
 
         let sandbox = SandboxPolicy::workspace_write(root.path());
         let tool = WriteFileTool::new();
-        // `root/link/pwned.txt` — the nearest existing ancestor is `root/link`,
-        // which canonicalizes OUTSIDE root, so even the pre-check denies it.
+        // The symlink exists before the call, so the first check refuses it; the second check
+        // is not reached.
         let r = tool
             .execute(
                 json!({ "path": link.join("pwned.txt").to_str().unwrap(), "content": "x" }),
-                ctx_sandboxed(Some(root.path().to_path_buf()), sandbox),
+                &ctx_sandboxed(Some(root.path().to_path_buf()), sandbox),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -501,5 +404,227 @@ mod tests {
             !outside.path().join("pwned.txt").exists(),
             "no bytes may land outside"
         );
+    }
+
+    #[tokio::test]
+    async fn a_dangling_leaf_symlink_out_of_the_root_is_not_written_through() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let escapee = outside.path().join("not_yet.txt");
+        let leaf = root.path().join("leaf.txt");
+        std::os::unix::fs::symlink(&escapee, &leaf).unwrap();
+
+        let r = WriteFileTool::new()
+            .execute(
+                json!({ "path": leaf.to_str().unwrap(), "content": "x" }),
+                &ctx_sandboxed(
+                    Some(root.path().to_path_buf()),
+                    SandboxPolicy::workspace_write(root.path()),
+                ),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            r.is_error,
+            "a dangling leaf link must be refused: {}",
+            r.content
+        );
+        assert!(!escapee.exists(), "no bytes may land outside");
+    }
+
+    #[tokio::test]
+    async fn a_leaf_symlink_inside_the_root_is_not_followed_either() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real.txt");
+        std::fs::write(&real, "before").unwrap();
+        let leaf = root.path().join("leaf.txt");
+        std::os::unix::fs::symlink(&real, &leaf).unwrap();
+
+        let r = WriteFileTool::with_root(root.path())
+            .unwrap()
+            .execute(
+                json!({ "path": "leaf.txt", "content": "after" }),
+                &ctx(Some(root.path().to_path_buf())),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
+        assert!(r.content.contains("symbolic link"), "{}", r.content);
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "before");
+    }
+
+    #[tokio::test]
+    async fn an_unconfined_write_follows_a_leaf_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        let leaf = dir.path().join("leaf.txt");
+        std::os::unix::fs::symlink(&real, &leaf).unwrap();
+
+        let r = WriteFileTool::new()
+            .execute(
+                json!({ "path": leaf.to_str().unwrap(), "content": "through" }),
+                &ctx(None),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "through");
+    }
+
+    #[tokio::test]
+    async fn a_writable_root_that_does_not_resolve_refuses_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone");
+        let r = WriteFileTool::new()
+            .execute(
+                json!({ "path": "a.txt", "content": "x" }),
+                &ctx_sandboxed(
+                    Some(dir.path().to_path_buf()),
+                    SandboxPolicy::workspace_write(&gone),
+                ),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error);
+        assert!(r.content.contains("cannot be resolved"), "{}", r.content);
+        assert!(!dir.path().join("a.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_refused_write_leaves_no_directories_outside() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let deep = outside.path().join("a/b/c.txt");
+        let r = WriteFileTool::new()
+            .execute(
+                json!({ "path": deep.to_str().unwrap(), "content": "x" }),
+                &ctx_sandboxed(
+                    Some(root.path().to_path_buf()),
+                    SandboxPolicy::workspace_write(root.path()),
+                ),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error);
+        assert!(!outside.path().join("a").exists());
+    }
+
+    #[tokio::test]
+    async fn dot_dot_after_a_missing_directory_creates_nothing_outside_the_root() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let r = WriteFileTool::with_root(&root)
+            .unwrap()
+            .execute(
+                json!({ "path": "nope/../../escaped_dir/x.txt", "content": "x" }),
+                &ctx(Some(root.clone())),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
+        assert!(!base.path().join("escaped_dir").exists());
+        assert!(!root.join("nope").exists());
+    }
+
+    #[tokio::test]
+    async fn dot_dot_after_a_missing_directory_under_workspace_write_creates_nothing_outside() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let r = WriteFileTool::new()
+            .execute(
+                json!({ "path": "nope/../../escaped_ww/a/b/x.txt", "content": "x" }),
+                &ctx_sandboxed(Some(root.clone()), SandboxPolicy::workspace_write(&root)),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
+        assert!(!base.path().join("escaped_ww").exists());
+    }
+
+    #[tokio::test]
+    async fn dot_dot_through_an_existing_directory_still_writes_inside() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("a")).unwrap();
+        let r = WriteFileTool::with_root(root.path())
+            .unwrap()
+            .execute(
+                json!({ "path": "a/../b/x.txt", "content": "x" }),
+                &ctx(Some(root.path().to_path_buf())),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!r.is_error, "{}", r.content);
+        assert!(root.path().join("b/x.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hard_link_to_a_file_outside_the_root_is_not_written() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let outside = base.path().join("outside.txt");
+        std::fs::write(&outside, "before").unwrap();
+        std::fs::hard_link(&outside, root.join("leaf.txt")).unwrap();
+        let r = WriteFileTool::with_root(&root)
+            .unwrap()
+            .execute(
+                json!({ "path": "leaf.txt", "content": "after" }),
+                &ctx_sandboxed(Some(root.clone()), SandboxPolicy::workspace_write(&root)),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "before");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fifo_at_the_leaf_is_refused_without_blocking() {
+        let root = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let tool = WriteFileTool::with_root(root.path()).unwrap();
+        let env = ctx(Some(root.path().to_path_buf()));
+        let write = tool.execute(
+            json!({ "path": "pipe", "content": "x" }),
+            &env,
+            CancellationToken::new(),
+        );
+        let r = tokio::time::timeout(std::time::Duration::from_secs(5), write)
+            .await
+            .expect("the open does not block on a FIFO")
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn a_component_that_is_a_file_is_the_models_to_fix() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file"), "x").unwrap();
+        let r = WriteFileTool::new()
+            .execute(
+                json!({ "path": "file/inner.txt", "content": "x" }),
+                &ctx(Some(root.path().to_path_buf())),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
     }
 }

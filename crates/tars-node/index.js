@@ -310,14 +310,16 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { init, isInitialized, tarsHome, provider, pipeline, hello, blessCheck, Pipeline, Provider } = nativeBinding
+const { init, isInitialized, tarsHome, provider, pipeline, roleProvider, roleModel, Provider, hello, killSpawnedChildren, Pipeline } = nativeBinding
 
 module.exports.init = init
 module.exports.isInitialized = isInitialized
 module.exports.tarsHome = tarsHome
 module.exports.provider = provider
 module.exports.pipeline = pipeline
-module.exports.hello = hello
-module.exports.blessCheck = blessCheck
-module.exports.Pipeline = Pipeline
+module.exports.roleProvider = roleProvider
+module.exports.roleModel = roleModel
 module.exports.Provider = Provider
+module.exports.hello = hello
+module.exports.killSpawnedChildren = killSpawnedChildren
+module.exports.Pipeline = Pipeline

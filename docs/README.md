@@ -1,29 +1,13 @@
 # tars documentation
 
-Everything here is written for someone **using** tars. Design rationale,
-architecture rewrites, roadmaps and internal audits are not published — they live
-in the private working repo, and they change faster than anything you should
-build against.
+| Document | What's inside |
+|---|---|
+| [`USER-GUIDE.md`](./USER-GUIDE.md) | Getting started: install, config, checking your setup, the call shapes, decoding a structured reply, typed errors, when not to use tars. |
+| [`providers/`](./providers/) | One page per provider that needs more than an API key: Anthropic, and the subscription CLIs (claude, codex, opencode, antigravity) — how each is invoked, what it can and cannot do, how it is sandboxed. |
+| [`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md) | Retry, per-call and per-tenant budgets, rate limits and the circuit breaker, and how to stack them. |
+| [`recipes/batch.md`](./recipes/batch.md) | Batch APIs (about half the price, up to a 24 h SLA) behind one trait. |
+| [`observability.md`](./observability.md) | Seeing what a call did: the Parquet call log, `tars events`, and the live tracing stream. |
+| [`eval-methodology.md`](./eval-methodology.md) | What a corpus replay and judge pass measure, and how to compare two runs with the right statistics. |
 
-| Path | What's inside |
-|------|---------------|
-| [`USER-GUIDE.md`](./USER-GUIDE.md) | Start here. Five-minute getting started, the three call shapes, and when *not* to reach for tars. |
-| [`providers/`](./providers/) | One page per provider — [anthropic](./providers/anthropic.md), [bedrock](./providers/bedrock.md), [claude-cli](./providers/claude-cli.md), [antigravity](./providers/antigravity.md), [opencode](./providers/opencode.md). Auth, models, and the quirks each one actually has. |
-| [`recipes/`](./recipes/) | Task-shaped: [batch](./recipes/batch.md), [cost and reliability](./recipes/cost-and-reliability.md). |
-| [`observability.md`](./observability.md) | How to see what a run did, at three grains. |
-
-## Reading order
-
-**Using tars** — `USER-GUIDE.md`, then the page for your provider. Most people
-never need to leave those two.
-
-**Something cost more than you expected, or failed in a way you cannot see** —
-[`observability.md`](./observability.md).
-
-**Batching, retries, budgets** — [`recipes/`](./recipes/).
-
-## What is authoritative
-
-[CHANGELOG.md](../CHANGELOG.md) is the record of what actually shipped. If a doc
-here disagrees with the code, the code is right and the doc is a bug — please
-open an issue.
+[CHANGELOG.md](../CHANGELOG.md) is the record of what shipped. If a document
+disagrees with the code, the code is right and the document is a bug.

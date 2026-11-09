@@ -3,7 +3,7 @@
 // (examples/tars.toml → `cassette_schema`), so this asserts on a real
 // model's reply deterministically with NO live provider — it runs in CI.
 //
-// Bless when the pinned reply should change: re-record with
+// When the pinned reply should change, re-record with
 // TARS_CASSETTE_RECORD=1 (needs LM Studio once), commit the new cassette;
 // the git diff of the .json is the review surface.
 //
@@ -28,7 +28,9 @@ const USER =
 async function completePinned() {
   // Cassette paths in tars.toml are cwd-relative → run from repo root.
   process.chdir(REPO_ROOT);
-  const pipe = Pipeline.fromConfigPath('examples/tars.toml', 'cassette_schema');
+  const pipe = Pipeline.fromConfigPath('examples/tars.toml', 'cassette_schema', {
+    tenant: 'test-tenant',
+  });
   return pipe.complete({
     model: 'qwen/qwen3-coder-30b',
     system: SYSTEM,
@@ -50,8 +52,6 @@ test('pinned reply is deterministic (byte-identical replay)', async () => {
   assert.equal(a, b);
 });
 
-test('severity bucket snapshot (bless by updating on intended change)', async () => {
-  const severity = JSON.parse((await completePinned()).text).severity;
-  const bucket = (s) => (s >= 9 ? 'critical' : s >= 7 ? 'high' : 'moderate');
-  assert.equal(bucket(severity), 'high'); // pinned severity is 8
+test('pinned reply severity is 8', async () => {
+  assert.equal(JSON.parse((await completePinned()).text).severity, 8);
 });

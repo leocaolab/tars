@@ -1,124 +1,214 @@
-//! `fs.read_file` — read a UTF-8 text file.
+//! `fs.read_file`: reads a UTF-8 text file, whole or a line window, up to a byte cap. A file over
+//! the cap is read whole only as a window: its lines are streamed, those outside the window counted
+//! and dropped, and the cap bounds the lines kept.
 //!
-//! ## Why this is the first builtin
-//!
-//! Read-only (no rollback story to design before shipping; Saga
-//! compensation is future work), useful in tests, exercises every
-//! [`Tool`] trait responsibility (schema-driven args, async I/O,
-//! cancellation, error handling, size-cap, jail). Once it works the
-//! pattern for writing additional read-only tools (`fs.list_dir`,
-//! `git.fetch_pr_diff`, `web.fetch`) becomes mechanical.
-//!
-//! ## Safety
-//!
-//! - **Path jail**: optional. When constructed via [`ReadFileTool::with_root`],
-//!   any path that resolves outside `root` is rejected. When constructed
-//!   via [`ReadFileTool::new`], no jail — the tool reads anywhere the
-//!   process can. Production callers should use `with_root` to constrain
-//!   the LLM to a specific repo / workspace.
-//! - **Symlink handling**: paths are canonicalized via
-//!   [`std::fs::canonicalize`] before the jail check, so a symlink
-//!   pointing outside the root is also rejected. The canonicalization
-//!   itself only fails when the file doesn't exist, which we surface
-//!   as a `not found` `is_error` result rather than a hard error.
-//! - **Size cap**: hard limit on bytes read. Default 256 KiB — enough
-//!   for typical source files, small enough that a worst-case "read
-//!   /var/log/..." doesn't blow up the LLM context.
-//! - **UTF-8 only**: binary files surface as an `is_error` result;
-//!   the model gets a clean signal to try a different path rather
-//!   than hallucinating content from byte garbage.
+//! Where it may read is the read jail's decision (see `read_jail`). A confined path is
+//! canonicalized before the check, so a symlink out of the roots is refused, and then opened
+//! without following a symlink at any component, so one put there after the check is refused
+//! too. Only a regular file is read; a FIFO would block the read forever. A missing, binary,
+//! oversized or unreadable file is an `is_error` result the model can recover from, not a
+//! [`ToolError`].
 
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, OnceLock};
+use tokio_util::sync::CancellationToken;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::json;
 
 use tars_types::JsonSchema;
 
-use crate::SandboxMode;
-use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
+use super::model_can_fix;
+use super::read_jail::{OpenError, Reach, ReadJail, ReadPath};
+use crate::tool::{FsOp, Tool, ToolEnv, ToolError, ToolOutput};
+use tars_sandbox::{ResolveRootError, canonical_root};
 
-/// Default max bytes read by `fs.read_file`. ~256 KiB.
-pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024;
+/// Caps the bytes one call reads.
+pub const DEFAULT_MAX_BYTES: NonZeroU64 = NonZeroU64::new(256 * 1024).expect("256 KiB is not zero");
 
-/// Description prompt — externalized to `read_file.txt` so prompt
-/// diffs review cleanly separately from Rust changes.
-/// `include_str!` is **compile-time**: editing the .txt still needs
-/// `cargo build`. This is deliberate — the compile-time embed is the
-/// correct enterprise security posture (prompts baked into the
-/// signed binary, no runtime mutation surface, no per-tenant
-/// contamination via shared filesystem). Trailing newline trimmed
-/// because the file naturally ends with one and that's noise.
+/// Holds the description from `read_file.txt`, embedded at compile time so that no file on the
+/// host can change a prompt at run time.
 static DESCRIPTION_TRIMMED: LazyLock<String> =
     LazyLock::new(|| include_str!("read_file.txt").trim_end().to_string());
 
 pub struct ReadFileTool {
-    /// If set, all paths must resolve inside this directory after
-    /// canonicalization. `None` = no jail (use only in trusted
-    /// contexts).
+    /// Holds the directory a canonicalized path must sit inside, when set.
     root: Option<PathBuf>,
-    /// Hard cap on bytes read per invocation.
-    max_bytes: u64,
+    max_bytes: NonZeroU64,
 }
 
-/// Cut `content` down to lines `start..=end`, 1-based and inclusive.
-///
-/// Returns the slice and a note naming what was returned out of what — a window
-/// that does not say it is a window reads as the whole file, and an agent that
-/// believes it has seen a file it has not will edit against context that is not
-/// there. `None` for a range that is not a range.
-///
-/// This exists because the alternative is what an agent actually did without it:
-/// `grep` for the line number, then pull the entire 33 KB file to look at ten lines
-/// around it, and carry those 33 KB in every later prompt.
-fn window(content: &str, start: Option<u32>, end: Option<u32>) -> Option<(String, String)> {
+/// Lines `start..=end` of a file of `total` lines, 1-based and inclusive. `1 <= start <= end <=
+/// total` holds because only [`line_range`] makes one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LineWindow {
+    start: usize,
+    end: usize,
+    total: usize,
+}
+
+/// Says why a requested window names no lines of the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineRangeError {
+    ZeroStart,
+    EndBeforeStart { start: u32, end: u32 },
+    PastEnd { start: u32, total: usize },
+}
+
+impl std::fmt::Display for LineRangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroStart => f.write_str("lines are 1-based; `start` 0 names no line"),
+            Self::EndBeforeStart { start, end } => {
+                write!(f, "`end` {end} precedes `start` {start}")
+            }
+            Self::PastEnd { start, total } => {
+                write!(
+                    f,
+                    "`start` {start} is past the last line; the file has {total}"
+                )
+            }
+        }
+    }
+}
+
+/// Returns the lines a window asks for, `end` cut to the last line; `None` asks for the whole
+/// file.
+fn line_range(
+    start: Option<u32>,
+    end: Option<u32>,
+    total: usize,
+) -> Result<Option<LineWindow>, LineRangeError> {
     if start.is_none() && end.is_none() {
-        return Some((content.to_string(), String::new()));
+        return Ok(None);
     }
     let start = start.unwrap_or(1);
     if start == 0 {
-        return None;
+        return Err(LineRangeError::ZeroStart);
     }
+    if let Some(end) = end
+        && end < start
+    {
+        return Err(LineRangeError::EndBeforeStart { start, end });
+    }
+    if start as usize > total {
+        return Err(LineRangeError::PastEnd { start, total });
+    }
+    Ok(Some(LineWindow {
+        start: start as usize,
+        end: end.map_or(total, |e| (e as usize).min(total)),
+        total,
+    }))
+}
+
+/// Returns the window's text and a note naming which lines of how many they are, since a window
+/// that does not say so reads as the whole file.
+fn window(
+    content: &str,
+    start: Option<u32>,
+    end: Option<u32>,
+) -> Result<(String, String), LineRangeError> {
     let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len() as u32;
-    let end = end.unwrap_or(total).min(total);
-    if end < start {
-        return None;
+    let Some(LineWindow { start, end, total }) = line_range(start, end, lines.len())? else {
+        return Ok((content.to_string(), String::new()));
+    };
+    Ok(window_text(&lines[start - 1..end], start, end, total))
+}
+
+/// Returns the text of lines `start..=end` of `total` and the note that names them.
+fn window_text(lines: &[&str], start: usize, end: usize, total: usize) -> (String, String) {
+    (
+        lines.join("\n") + "\n",
+        format!(" lines {start}-{end} of {total}"),
+    )
+}
+
+/// Returns whether 1-based line `n` falls in a window from `first` to `last`, `None` meaning to
+/// the end.
+fn in_window(n: usize, first: usize, last: Option<usize>) -> bool {
+    n >= first && last.is_none_or(|last| n <= last)
+}
+
+/// Reads `file` as a stream for the lines `start..=end` asks for, keeping only those and counting
+/// the rest, so a file of any size costs at most `cap` bytes of kept lines. Lines end at `\n`,
+/// and a `\r` before it is not part of the line, as for [`str::lines`].
+fn stream_window(
+    file: impl std::io::Read,
+    start: Option<u32>,
+    end: Option<u32>,
+    cap: u64,
+) -> Result<(String, String), ReadFileError> {
+    use std::io::BufRead;
+
+    // The range is checked first, as far as it can be without the file's length, so a range
+    // that names no line is refused before the file is read.
+    line_range(start, end, usize::MAX).map_err(ReadFileError::Range)?;
+    let first = start.map_or(1, |s| s as usize);
+    let last = end.map(|e| e as usize);
+
+    let mut reader = std::io::BufReader::new(file);
+    let mut kept: Vec<Vec<u8>> = Vec::new();
+    let mut kept_bytes = 0u64;
+    let mut line = 1usize;
+    let mut partial = false;
+    loop {
+        let buf = reader.fill_buf().map_err(ReadFileError::Io)?;
+        if buf.is_empty() {
+            break;
+        }
+        let (chunk, ends_line) = match buf.iter().position(|&b| b == b'\n') {
+            Some(i) => (&buf[..i], true),
+            None => (buf, false),
+        };
+        if in_window(line, first, last) {
+            if !partial {
+                kept.push(Vec::new());
+            }
+            kept_bytes += (chunk.len() + usize::from(ends_line)) as u64;
+            if kept_bytes > cap {
+                return Err(ReadFileError::WindowTooLarge { cap });
+            }
+            if let Some(current) = kept.last_mut() {
+                current.extend_from_slice(chunk);
+                if ends_line && current.last() == Some(&b'\r') {
+                    current.pop();
+                }
+            }
+        }
+        let used = chunk.len() + usize::from(ends_line);
+        reader.consume(used);
+        if ends_line {
+            line += 1;
+            partial = false;
+        } else {
+            partial = true;
+        }
     }
-    // Past the end of the file is an empty window, not an error: a caller asking for
-    // lines 900-910 of a 500-line file has learned something true.
-    let body: Vec<&str> = lines
-        .iter()
-        .skip(start.saturating_sub(1) as usize)
-        .take((end - start + 1) as usize)
-        .copied()
-        .collect();
-    let note = format!(" lines {start}-{end} of {total}");
-    Some((
-        body.join("\n") + if body.is_empty() { "" } else { "\n" },
-        note,
-    ))
+    // A last line with no `\n` after it is a line; an empty remainder is not.
+    let total = if partial { line } else { line - 1 };
+    let text: Vec<String> = kept
+        .into_iter()
+        .map(|bytes| String::from_utf8(bytes).map_err(|_| ReadFileError::NotUtf8))
+        .collect::<Result<_, _>>()?;
+    let lines: Vec<&str> = text.iter().map(String::as_str).collect();
+    match line_range(start, end, total).map_err(ReadFileError::Range)? {
+        Some(LineWindow { start, end, total }) => Ok(window_text(&lines, start, end, total)),
+        None => Ok((lines.join("\n") + "\n", String::new())),
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct ReadFileArgs {
-    /// File path. Absolute or relative to [`ToolContext::cwd`] (or
-    /// the process cwd when context's cwd is unset).
     path: String,
-    /// First line to return, 1-based and inclusive. Omit for the whole file.
     #[serde(default)]
     start: Option<u32>,
-    /// Last line to return, 1-based and inclusive. Omit to read to the end.
     #[serde(default)]
     end: Option<u32>,
 }
 
 impl ReadFileTool {
-    /// Construct without a jail. The tool can read anywhere the
-    /// process can. Use only in trusted contexts (CLI run by the
-    /// user against their own filesystem). Tests use this.
+    /// Returns a tool with no root of its own; it reads anywhere the process can unless
+    /// [`ToolEnv::sandbox`] confines it to `cwd` and the readable roots.
     pub fn new() -> Self {
         Self {
             root: None,
@@ -126,107 +216,23 @@ impl ReadFileTool {
         }
     }
 
-    /// Constrain reads to `root`. Any path that resolves outside
-    /// `root` after canonicalization is rejected with an
-    /// `is_error` result (not a hard `ToolError` — the model should
-    /// try a different path rather than abort the loop).
+    /// Confines reads to `root` and the call's readable roots, refusing a path outside them with
+    /// an `is_error` result. `root` is canonicalized now, so a symlink to it behaves as the root.
     ///
-    /// `root` itself is canonicalized eagerly so symlinks-to-the-root
-    /// behave the same as the root directly. If `root` doesn't exist
-    /// or can't be canonicalized, returns `None` — caller decides
-    /// how to surface the misconfiguration.
-    pub fn with_root(root: impl AsRef<Path>) -> Option<Self> {
-        let canonical_root = std::fs::canonicalize(root.as_ref()).ok()?;
-        Some(Self {
-            root: Some(canonical_root),
+    /// # Errors
+    ///
+    /// Fails when `root` cannot be canonicalized.
+    pub fn with_root(root: impl AsRef<Path>) -> Result<Self, ResolveRootError> {
+        Ok(Self {
+            root: Some(canonical_root(root.as_ref())?),
             max_bytes: DEFAULT_MAX_BYTES,
         })
     }
 
-    /// Override the max-bytes cap (default 256 KiB). Chainable.
-    pub fn max_bytes(mut self, n: u64) -> Self {
+    /// Sets the byte cap; the default is 256 KiB.
+    pub fn max_bytes(mut self, n: NonZeroU64) -> Self {
         self.max_bytes = n;
         self
-    }
-
-    /// Resolve an input path against the optional `cwd` hint, then enforce
-    /// the read jail. Two independent sources of confinement, both applied:
-    ///
-    /// * `self.root` — the per-tool `with_root` jail (kept working, enforced
-    ///   in every mode, defense in depth).
-    /// * `ctx.sandbox` — when the mode is confining (`ReadOnly` /
-    ///   `WorkspaceWrite`) AND read roots are defined (`cwd` + `readable_roots`),
-    ///   the path must resolve under one of them. Mirrors the glob/grep jail
-    ///   so all fs tools read the same allowed-read set. `DangerFullAccess`
-    ///   (the default) adds nothing, so default behaviour is unchanged.
-    ///
-    /// Returns the canonicalized path to actually open.
-    fn resolve(&self, input: &str, ctx: &ToolContext) -> Result<PathBuf, ToolResult> {
-        let cwd = ctx.cwd.as_deref();
-        let raw = Path::new(input);
-        let combined = if raw.is_absolute() {
-            raw.to_path_buf()
-        } else if let Some(cwd) = cwd {
-            cwd.join(raw)
-        } else if let Some(root) = &self.root {
-            // With a jail and no per-call cwd, the jail IS the frame of reference. It
-            // used to fall through to the process's working directory, so a relative
-            // path was resolved against one directory and then checked against a
-            // different one. Best case that is a guaranteed "outside the allowed root"
-            // on every relative path; worst case — a jail that happens to contain the
-            // process cwd — it silently reads and writes the wrong tree.
-            root.join(raw)
-        } else {
-            raw.to_path_buf()
-        };
-
-        let sandbox_confined = ctx.sandbox.mode != SandboxMode::DangerFullAccess;
-        if self.root.is_none() && !sandbox_confined {
-            // No jail at all — today's default, unchanged.
-            return Ok(combined);
-        }
-
-        // Any jail needs a canonical path. Canonicalization fails if the file
-        // doesn't exist; surface that as the same "not found"-shaped message
-        // the actual read would, so callers see one consistent error.
-        let canonical = std::fs::canonicalize(&combined).map_err(|e| {
-            ToolResult::error(format!("cannot resolve path `{}`: {e}", combined.display(),))
-        })?;
-
-        // The per-tool `with_root` jail (enforced in every mode).
-        if let Some(root) = &self.root {
-            if !canonical.starts_with(root) {
-                return Err(ToolResult::error(format!(
-                    "path `{}` resolves outside the allowed root `{}`",
-                    canonical.display(),
-                    root.display(),
-                )));
-            }
-        }
-
-        // Sandbox read confinement: when a confining mode is active AND at
-        // least one read root is defined, the path must sit under one of them.
-        if sandbox_confined {
-            let read_roots: Vec<PathBuf> = cwd
-                .into_iter()
-                .map(Path::to_path_buf)
-                .chain(ctx.readable_roots.iter().cloned())
-                .filter_map(|p| std::fs::canonicalize(&p).ok())
-                .collect();
-            if !read_roots.is_empty() && !read_roots.iter().any(|r| canonical.starts_with(r)) {
-                return Err(ToolResult::error(format!(
-                    "path `{}` resolves outside the allowed read root(s): {}",
-                    canonical.display(),
-                    read_roots
-                        .iter()
-                        .map(|r| r.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                )));
-            }
-        }
-
-        Ok(canonical)
     }
 }
 
@@ -243,10 +249,6 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        // Externalized to a sibling .txt file (see DESCRIPTION_TRIMMED
-        // above) so prompt diffs review cleanly. The trailing newline
-        // from the .txt is harmless to the LLM but would clutter
-        // equality assertions; trim it once.
         DESCRIPTION_TRIMMED.as_str()
     }
 
@@ -255,7 +257,7 @@ impl Tool for ReadFileTool {
         S.get_or_init(|| {
             JsonSchema::strict(
                 "ReadFileArgs",
-                json!({
+                tars_types::json_object! {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
@@ -273,7 +275,7 @@ impl Tool for ReadFileTool {
                         }
                     },
                     "required": ["path"]
-                }),
+                },
             )
         })
     }
@@ -281,55 +283,65 @@ impl Tool for ReadFileTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+        env: &ToolEnv,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
         let parsed: ReadFileArgs =
-            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+            serde_json::from_value(args).map_err(ToolError::InvalidArguments)?;
 
-        let resolved = match self.resolve(&parsed.path, &ctx) {
+        let admitted =
+            ReadJail::of(self.root.as_deref(), env, Reach::Path).admit(Path::new(&parsed.path));
+        let read_path = match admitted {
             Ok(p) => p,
-            Err(result) => return Ok(result),
+            Err(refusal) => return Ok(ToolOutput::error(refusal.to_string())),
         };
-        // Use the basename for titles — full path is in `content` for
-        // the LLM; the title is for human eyeballs scanning trajectory
-        // logs and wants compact identifiers.
+        let resolved = read_path.path().to_path_buf();
         let basename = resolved
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| resolved.display().to_string());
 
-        // Race the actual read against cancel — fast-fail rather
-        // than letting an upstream Drop wait for the file syscall.
+        let cap = self.max_bytes.get();
+        let (start, end) = (parsed.start, parsed.end);
+        let read = tokio::task::spawn_blocking(move || read_lines(&read_path, start, end, cap));
         let bytes = tokio::select! {
             biased;
-            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-            r = read_capped(&resolved, self.max_bytes) => r,
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+            r = read => match r {
+                Ok(r) => r,
+                Err(source) => return Err(ToolError::TaskLost {
+                tool: "fs.read_file",
+                source,
+            }),
+            },
         };
 
         match bytes {
-            Ok(ReadOutcome::Ok(content)) => {
-                let Some((body, note)) = window(&content, parsed.start, parsed.end) else {
-                    return Ok(ToolResult::titled_error(
-                        format!("{basename}: bad line range"),
-                        format!(
-                            "lines are 1-based and `end` must not precede `start`; got {:?}..{:?}",
-                            parsed.start, parsed.end
-                        ),
-                    ));
-                };
+            Ok((body, note)) => {
                 let title = format!("Read {basename} ({} bytes){note}", body.len());
-                Ok(ToolResult::titled_success(title, body))
+                Ok(ToolOutput::titled_success(title, body))
             }
-            Ok(ReadOutcome::TooLarge { size }) => Ok(ToolResult::titled_error(
+            Err(ReadFileError::Range(bad)) => Ok(ToolOutput::titled_error(
+                format!("{basename}: bad line range"),
+                bad.to_string(),
+            )),
+            Err(ReadFileError::TooLarge { size }) => Ok(ToolOutput::titled_error(
                 format!("{basename} too large ({size} bytes)"),
                 format!(
                     "file `{}` is {size} bytes, exceeds the {} byte cap; \
-                     read a more specific path or increase the cap",
+                     read a window of it with `start` and `end`",
                     resolved.display(),
                     self.max_bytes,
                 ),
             )),
-            Ok(ReadOutcome::NotUtf8) => Ok(ToolResult::titled_error(
+            Err(ReadFileError::WindowTooLarge { cap }) => Ok(ToolOutput::titled_error(
+                format!("{basename}: window too large"),
+                format!(
+                    "the lines asked for from `{}` exceed the {cap} byte cap; ask for fewer lines",
+                    resolved.display(),
+                ),
+            )),
+            Err(ReadFileError::NotUtf8) => Ok(ToolOutput::titled_error(
                 format!("{basename} is not UTF-8"),
                 format!(
                     "file `{}` is not valid UTF-8 (binary?); fs.read_file only \
@@ -337,57 +349,108 @@ impl Tool for ReadFileTool {
                     resolved.display(),
                 ),
             )),
-            Ok(ReadOutcome::NotFound) => Ok(ToolResult::titled_error(
+            Err(ReadFileError::Open(OpenError::NotFound)) => Ok(ToolOutput::titled_error(
                 format!("{basename} not found"),
                 format!("file `{}` not found", resolved.display()),
             )),
-            Err(e) => Err(ToolError::Execute(format!(
-                "reading `{}`: {e}",
-                resolved.display(),
-            ))),
+            Err(ReadFileError::Open(OpenError::WrongKind)) => Ok(ToolOutput::titled_error(
+                format!("{basename} is not a regular file"),
+                format!(
+                    "`{}` is not a regular file; fs.read_file reads files, fs.list_dir lists \
+                     directories",
+                    resolved.display(),
+                ),
+            )),
+            Err(ReadFileError::Open(OpenError::Symlink)) => Ok(ToolOutput::titled_error(
+                format!("{basename} is a symbolic link"),
+                format!(
+                    "`{}`, or a directory on the way to it, became a symbolic link after it was \
+                     checked; a confined read does not follow it",
+                    resolved.display(),
+                ),
+            )),
+            Err(ReadFileError::Open(OpenError::Io(e)) | ReadFileError::Io(e))
+                if model_can_fix(e.kind()) =>
+            {
+                Ok(ToolOutput::titled_error(
+                    format!("{basename} cannot be read"),
+                    format!("reading `{}`: {e}", resolved.display()),
+                ))
+            }
+            Err(ReadFileError::Open(OpenError::Io(source)) | ReadFileError::Io(source)) => {
+                Err(ToolError::Io {
+                    op: FsOp::Read,
+                    path: resolved,
+                    source,
+                })
+            }
         }
     }
 }
 
-enum ReadOutcome {
-    Ok(String),
-    TooLarge { size: u64 },
+/// Says why a file was not read. A directory, FIFO, socket or device is the wrong kind: only a
+/// regular file is read.
+enum ReadFileError {
+    Open(OpenError),
+    /// The file is over the cap and no window was asked for.
+    TooLarge {
+        size: u64,
+    },
+    /// The lines a window over a file past the cap asks for are themselves over the cap.
+    WindowTooLarge {
+        cap: u64,
+    },
+    Range(LineRangeError),
     NotUtf8,
-    NotFound,
+    Io(std::io::Error),
 }
 
-async fn read_capped(path: &Path, cap: u64) -> std::io::Result<ReadOutcome> {
-    use tokio::fs;
-    use tokio::io::AsyncReadExt;
-
-    // Stat first so we can reject too-large files before allocating
-    // the Vec; saves wasted syscalls on `read /var/log/messages`.
-    let meta = match fs::metadata(path).await {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ReadOutcome::NotFound),
-        Err(e) => return Err(e),
-    };
-    if meta.len() > cap {
-        return Ok(ReadOutcome::TooLarge { size: meta.len() });
+/// Opens `path`, a regular file, and returns the text `start..=end` asks for with its note: the
+/// whole file when it is at most `cap` bytes, else, when a window was asked for, the window read
+/// as a stream. The open does not block on a FIFO; it blocks on the filesystem, so it runs on the
+/// blocking pool.
+fn read_lines(
+    path: &ReadPath,
+    start: Option<u32>,
+    end: Option<u32>,
+    cap: u64,
+) -> Result<(String, String), ReadFileError> {
+    let file = path.open().map_err(ReadFileError::Open)?;
+    // The size and kind are checked on the opened file, before anything is read or allocated.
+    let meta = file.metadata().map_err(ReadFileError::Io)?;
+    if !meta.is_file() {
+        return Err(ReadFileError::Open(OpenError::WrongKind));
     }
-
-    let file = fs::File::open(path).await?;
-    let mut buf = Vec::with_capacity(meta.len() as usize);
-    // `take(cap)` is a belt-and-suspenders against a file growing
-    // between the metadata check and the actual read.
-    file.take(cap).read_to_end(&mut buf).await?;
-    match String::from_utf8(buf) {
-        Ok(s) => Ok(ReadOutcome::Ok(s)),
-        Err(_) => Ok(ReadOutcome::NotUtf8),
+    if meta.len() <= cap {
+        let content = read_capped(file, meta.len(), cap)?;
+        return window(&content, start, end).map_err(ReadFileError::Range);
     }
+    if start.is_none() && end.is_none() {
+        return Err(ReadFileError::TooLarge { size: meta.len() });
+    }
+    stream_window(file, start, end, cap)
+}
+
+/// Reads `file`, of `len` bytes at its open, whole, up to `cap` bytes.
+fn read_capped(file: std::fs::File, len: u64, cap: u64) -> Result<String, ReadFileError> {
+    use std::io::Read;
+
+    let mut buf = Vec::with_capacity(len as usize);
+    // `take(cap)` bounds a file that grew after the size check.
+    file.take(cap)
+        .read_to_end(&mut buf)
+        .map_err(ReadFileError::Io)?;
+    String::from_utf8(buf).map_err(|_| ReadFileError::NotUtf8)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
+    use crate::SandboxPolicy;
     use crate::tool::Tool;
 
     async fn write(path: &Path, content: &[u8]) {
@@ -395,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn name_and_description_pin_to_doc_05_convention() {
+    fn the_tool_is_named_fs_read_file() {
         let t = ReadFileTool::new();
         assert_eq!(t.name(), "fs.read_file");
         assert!(t.description().to_lowercase().contains("read"));
@@ -406,14 +469,14 @@ mod tests {
         let t = ReadFileTool::new();
         let schema = t.input_schema();
         assert!(schema.strict);
-        let required: Vec<&str> = schema.schema["required"]
+        let required: Vec<&str> = schema.schema()["required"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(required, vec!["path"]);
-        assert_eq!(schema.schema["additionalProperties"], json!(false));
+        assert_eq!(schema.schema()["additionalProperties"], json!(false));
     }
 
     #[tokio::test]
@@ -426,25 +489,24 @@ mod tests {
         let r = tool
             .execute(
                 json!({"path": path.to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content, "hello world");
-        // L-3: trajectory-readable title with basename + size.
-        assert_eq!(r.title, "Read hello.txt (11 bytes)");
+        assert_eq!(r.title.as_deref(), Some("Read hello.txt (11 bytes)"));
     }
 
     #[tokio::test]
     async fn missing_file_yields_is_error_not_hard_error() {
-        // Hard errors break the agent loop; an `is_error` Ok lets
-        // the LLM try a different path on the next turn.
         let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::new());
         let r = tool
             .execute(
                 json!({"path": "/nonexistent/path/to/nothing.txt"}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -462,7 +524,8 @@ mod tests {
         let r = tool
             .execute(
                 json!({"path": path.to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -480,11 +543,13 @@ mod tests {
         let path = dir.path().join("big.txt");
         write(&path, &vec![b'a'; 1024]).await;
 
-        let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::new().max_bytes(100));
+        let tool: Arc<dyn Tool> =
+            Arc::new(ReadFileTool::new().max_bytes(NonZeroU64::new(100).unwrap()));
         let r = tool
             .execute(
                 json!({"path": path.to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -507,29 +572,28 @@ mod tests {
         let inside = dir.path().join("ok.txt");
         write(&inside, b"inside").await;
 
-        // Create something outside the jail root.
         let outside_dir = tempfile::tempdir().unwrap();
         let outside = outside_dir.path().join("naughty.txt");
         write(&outside, b"escaped").await;
 
         let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::with_root(dir.path()).unwrap());
 
-        // Inside is fine.
         let r = tool
             .execute(
                 json!({"path": inside.to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content, "inside");
 
-        // Outside is blocked.
         let r = tool
             .execute(
                 json!({"path": outside.to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -544,19 +608,20 @@ mod tests {
         write(&path, b"rel ok").await;
 
         let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::with_root(dir.path()).unwrap());
-        let ctx = ToolContext {
+        let ctx = ToolEnv {
             cwd: Some(dir.path().to_path_buf()),
             ..Default::default()
         };
-        let r = tool.execute(json!({"path": "rel.txt"}), ctx).await.unwrap();
+        let r = tool
+            .execute(json!({"path": "rel.txt"}), &ctx, CancellationToken::new())
+            .await
+            .unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content, "rel ok");
     }
 
     #[tokio::test]
     async fn sandbox_confines_reads_to_readable_roots() {
-        use crate::{SandboxMode, SandboxPolicy};
-
         let allowed = tempfile::tempdir().unwrap();
         let inside = allowed.path().join("ok.txt");
         write(&inside, b"inside").await;
@@ -565,21 +630,19 @@ mod tests {
         let outside = outside_dir.path().join("secret.txt");
         write(&outside, b"secret").await;
 
-        // No `with_root`; confinement comes purely from the sandbox policy.
         let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::new());
-        let ctx = ToolContext {
-            sandbox: SandboxPolicy {
-                mode: SandboxMode::ReadOnly,
-                writable_roots: vec![],
-                network: false,
-            },
+        let ctx = ToolEnv {
+            sandbox: SandboxPolicy::read_only(false),
             readable_roots: vec![allowed.path().to_path_buf()],
             ..Default::default()
         };
 
-        // Inside a readable root: allowed.
         let r = tool
-            .execute(json!({"path": inside.to_str().unwrap()}), ctx.clone())
+            .execute(
+                json!({"path": inside.to_str().unwrap()}),
+                &ctx.clone(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         assert!(
@@ -589,14 +652,17 @@ mod tests {
         );
         assert_eq!(r.content, "inside");
 
-        // Outside every read root: rejected.
         let r = tool
-            .execute(json!({"path": outside.to_str().unwrap()}), ctx)
+            .execute(
+                json!({"path": outside.to_str().unwrap()}),
+                &ctx,
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         assert!(r.is_error, "read outside readable_roots must be rejected");
         assert!(
-            r.content.contains("outside the allowed read root"),
+            r.content.contains("outside the allowed root"),
             "got: {}",
             r.content
         );
@@ -604,21 +670,22 @@ mod tests {
 
     #[tokio::test]
     async fn default_sandbox_does_not_restrict_reads() {
-        // DangerFullAccess (the default) must not add any read confinement:
-        // an absolute path anywhere still reads, even with readable_roots set
-        // that do NOT contain it.
         let bystander = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("free.txt");
         write(&path, b"free").await;
 
         let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::new());
-        let ctx = ToolContext {
+        let ctx = ToolEnv {
             readable_roots: vec![bystander.path().to_path_buf()],
-            ..Default::default() // sandbox = DangerFullAccess
+            ..Default::default()
         };
         let r = tool
-            .execute(json!({"path": path.to_str().unwrap()}), ctx)
+            .execute(
+                json!({"path": path.to_str().unwrap()}),
+                &ctx,
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         assert!(
@@ -633,7 +700,11 @@ mod tests {
     async fn invalid_args_yield_typed_invalid_arguments_error() {
         let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::new());
         let err = tool
-            .execute(json!({"not_path": "x"}), ToolContext::default())
+            .execute(
+                json!({"not_path": "x"}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
             .await
             .expect_err("should reject malformed args");
         assert!(matches!(err, ToolError::InvalidArguments(_)));
@@ -647,23 +718,19 @@ mod tests {
 
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let ctx = ToolContext {
-            cancel,
+        let ctx = ToolEnv {
             cwd: None,
             ..Default::default()
         };
 
         let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::new());
         let err = tool
-            .execute(json!({"path": path.to_str().unwrap()}), ctx)
+            .execute(json!({"path": path.to_str().unwrap()}), &ctx, cancel)
             .await
             .expect_err("pre-cancelled should fast-fail");
         assert!(matches!(err, ToolError::Cancelled));
     }
-    /// A cap jailed to a worktree is asked for `src/lib.rs` and must get the
-    /// worktree's copy. Resolving it against the process's working directory instead
-    /// is only ever caught by the jail when the two are unrelated — and when the jail
-    /// contains the process cwd, nothing catches it and the wrong file comes back.
+
     #[tokio::test]
     async fn a_relative_path_resolves_inside_the_jail_not_the_process_cwd() {
         let jail = tempfile::tempdir().unwrap();
@@ -673,7 +740,11 @@ mod tests {
 
         let tool: Arc<dyn Tool> = Arc::new(ReadFileTool::with_root(&root).unwrap());
         let r = tool
-            .execute(json!({ "path": "src/lib.rs" }), ToolContext::default())
+            .execute(
+                json!({ "path": "src/lib.rs" }),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
 
@@ -683,5 +754,331 @@ mod tests {
             r.content
         );
         assert!(r.content.contains("the worktree copy"), "{}", r.content);
+    }
+
+    #[test]
+    fn no_window_asks_for_the_whole_file() {
+        assert_eq!(line_range(None, None, 500), Ok(None));
+    }
+
+    #[test]
+    fn a_window_ending_past_the_last_line_is_cut_to_it() {
+        assert_eq!(
+            line_range(Some(499), Some(510), 500),
+            Ok(Some(LineWindow {
+                start: 499,
+                end: 500,
+                total: 500
+            }))
+        );
+    }
+
+    #[test]
+    fn a_window_starting_on_the_last_line_is_one_line() {
+        assert_eq!(
+            line_range(Some(500), None, 500),
+            Ok(Some(LineWindow {
+                start: 500,
+                end: 500,
+                total: 500
+            }))
+        );
+    }
+
+    #[test]
+    fn a_window_starting_past_the_last_line_says_how_many_there_are() {
+        assert_eq!(
+            line_range(Some(501), Some(510), 500),
+            Err(LineRangeError::PastEnd {
+                start: 501,
+                total: 500
+            })
+        );
+        assert_eq!(
+            line_range(Some(900), Some(910), 500),
+            Err(LineRangeError::PastEnd {
+                start: 900,
+                total: 500
+            })
+        );
+    }
+
+    #[test]
+    fn an_end_before_the_start_is_named_as_such() {
+        assert_eq!(
+            line_range(Some(10), Some(9), 500),
+            Err(LineRangeError::EndBeforeStart { start: 10, end: 9 })
+        );
+        assert_eq!(
+            line_range(Some(10), Some(10), 500),
+            Ok(Some(LineWindow {
+                start: 10,
+                end: 10,
+                total: 500
+            }))
+        );
+    }
+
+    #[test]
+    fn a_zero_start_names_no_line() {
+        assert_eq!(
+            line_range(Some(0), None, 500),
+            Err(LineRangeError::ZeroStart)
+        );
+        assert_eq!(
+            line_range(Some(1), None, 500),
+            Ok(Some(LineWindow {
+                start: 1,
+                end: 500,
+                total: 500
+            }))
+        );
+    }
+
+    fn confining(cwd: Option<PathBuf>, readable_roots: Vec<PathBuf>) -> ToolEnv {
+        ToolEnv {
+            cwd,
+            sandbox: crate::SandboxPolicy::read_only(false),
+            readable_roots,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_confining_sandbox_with_no_read_root_refuses_the_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        write(&path, b"secret").await;
+        let r = ReadFileTool::new()
+            .execute(
+                json!({"path": path.to_str().unwrap()}),
+                &confining(None, vec![]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("no cwd and no readable roots"),
+            "{}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_root_that_does_not_resolve_refuses_the_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        write(&path, b"secret").await;
+        let r = ReadFileTool::new()
+            .execute(
+                json!({"path": path.to_str().unwrap()}),
+                &confining(None, vec![dir.path().join("gone")]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
+        assert!(r.content.contains("cannot be resolved"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn a_stale_readable_root_does_not_refuse_a_read_inside_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        write(&root.path().join("a.rs"), b"x\n").await;
+        let ctx = ToolEnv {
+            cwd: Some(root.path().to_path_buf()),
+            sandbox: crate::SandboxPolicy::workspace_write(root.path()),
+            readable_roots: vec![root.path().join("deps-not-fetched-yet")],
+        };
+        let r = ReadFileTool::new()
+            .execute(json!({ "path": "a.rs" }), &ctx, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!r.is_error, "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn a_tool_with_a_root_also_reads_the_readable_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let dep = tempfile::tempdir().unwrap();
+        write(&dep.path().join("lib.rs"), b"dep\n").await;
+        let ctx = ToolEnv {
+            cwd: Some(root.path().to_path_buf()),
+            readable_roots: vec![dep.path().to_path_buf()],
+            ..Default::default()
+        };
+        let path = dep.path().join("lib.rs");
+        let r = ReadFileTool::with_root(root.path())
+            .unwrap()
+            .execute(
+                json!({ "path": path.to_str().unwrap() }),
+                &ctx,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(r.content, "dep\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fifo_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let tool = ReadFileTool::new();
+        let env = ToolEnv::default();
+        let read = tool.execute(
+            json!({ "path": fifo.to_str().unwrap() }),
+            &env,
+            CancellationToken::new(),
+        );
+        let r = tokio::time::timeout(std::time::Duration::from_secs(5), read)
+            .await
+            .expect("the open does not block on a FIFO")
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
+        assert!(r.content.contains("not a regular file"), "{}", r.content);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_socket_is_not_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let _l = std::os::unix::net::UnixListener::bind(root.join("s.sock")).unwrap();
+        for sandbox in [
+            SandboxPolicy::default(),
+            SandboxPolicy::workspace_write(&root),
+        ] {
+            let ctx = ToolEnv {
+                cwd: Some(root.clone()),
+                sandbox,
+                ..Default::default()
+            };
+            let r = ReadFileTool::new()
+                .execute(json!({ "path": "s.sock" }), &ctx, CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(r.is_error, "{}", r.content);
+            assert!(r.content.contains("not a regular file"), "{}", r.content);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_root_directory_is_not_a_regular_file() {
+        let ctx = ToolEnv {
+            cwd: Some(PathBuf::from("/")),
+            sandbox: SandboxPolicy::read_only(true),
+            readable_roots: vec![PathBuf::from("/")],
+        };
+        let r = ReadFileTool::new()
+            .execute(json!({ "path": "/" }), &ctx, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
+        assert!(r.content.contains("not a regular file"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn a_window_of_a_file_over_the_cap_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.rs");
+        let body: String = (0..40_000).map(|i| format!("line {i}\n")).collect();
+        assert!(body.len() as u64 > DEFAULT_MAX_BYTES.get());
+        write(&path, body.as_bytes()).await;
+        let r = ReadFileTool::new()
+            .execute(
+                json!({"path": path.to_str().unwrap(), "start": 2, "end": 3}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(r.content, "line 1\nline 2\n");
+        assert!(
+            r.title.as_deref().unwrap().ends_with("lines 2-3 of 40000"),
+            "{:?}",
+            r.title
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_over_the_cap_is_refused_as_too_many_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.rs");
+        let body: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        write(&path, body.as_bytes()).await;
+        let r = ReadFileTool::new()
+            .max_bytes(NonZeroU64::new(100).unwrap())
+            .execute(
+                json!({"path": path.to_str().unwrap(), "start": 1, "end": 500}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error);
+        assert!(r.content.contains("ask for fewer lines"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn a_file_over_the_cap_without_a_window_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.rs");
+        write(&path, &[b'a'; 200]).await;
+        let r = ReadFileTool::new()
+            .max_bytes(NonZeroU64::new(100).unwrap())
+            .execute(
+                json!({"path": path.to_str().unwrap()}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error);
+        assert!(
+            r.content.contains("exceeds the 100 byte cap"),
+            "{}",
+            r.content
+        );
+    }
+
+    #[test]
+    fn a_streamed_window_reads_the_lines_a_whole_read_would() {
+        let text = "one\r\ntwo\n\nfour\nfive";
+        for (start, end) in [
+            (Some(1), Some(2)),
+            (Some(2), None),
+            (None, Some(3)),
+            (Some(5), Some(9)),
+            (Some(3), Some(3)),
+        ] {
+            let streamed = stream_window(text.as_bytes(), start, end, 1 << 20).ok();
+            assert_eq!(
+                streamed,
+                window(text, start, end).ok(),
+                "{start:?}..{end:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_streamed_window_past_the_last_line_says_how_many_there_are() {
+        let got = stream_window("a\nb\n".as_bytes(), Some(3), None, 1 << 20);
+        assert!(matches!(
+            got,
+            Err(ReadFileError::Range(LineRangeError::PastEnd {
+                start: 3,
+                total: 2
+            }))
+        ));
     }
 }

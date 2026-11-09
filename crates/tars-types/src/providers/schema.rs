@@ -1,44 +1,38 @@
-//! JSON Schema wrapper for structured output and tool input/output.
-//!
-//! Stays deliberately thin: we don't validate at this layer (that's the
-//! Pipeline / Agent's job). We only carry the schema document plus a
-//! `strict` hint that maps to OpenAI/Anthropic/Gemini's strict modes.
+//! Carries a JSON Schema for structured output and tool input, with a `strict` hint the
+//! adapters map to each vendor's strict mode. It does not validate output against the schema.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
-/// A JSON Schema document plus metadata controlling how the Provider
-/// adapter should request strict validation.
+use crate::providers::tools::JsonKind;
+
+/// A JSON Schema document and how strictly the provider should hold its output to it.
 ///
-/// Provider-side translation:
+/// The adapters send it as:
 /// - **OpenAI**: `response_format = { type: "json_schema", strict, schema }`
 /// - **Gemini**: `responseSchema = schema` + `responseMimeType = "application/json"`
 /// - **Anthropic**: emulated via a forced `tool_choice`
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JsonSchema {
-    /// The schema document. Must be a JSON object at the root.
-    ///
-    /// **Not enforced by the [`strict`](Self::strict) /
-    /// [`loose`](Self::loose) constructors** — they accept any
-    /// `serde_json::Value` so call sites that build from a known-good
-    /// object literal stay ergonomic. The root-object invariant is
-    /// checked at the provider trust boundary via
-    /// [`is_root_object`](Self::is_root_object) /
-    /// [`validate`](Self::validate); adapters MUST call one of those
-    /// before translating the schema to the wire format, since a
-    /// non-object root would produce an invalid `response_format` /
-    /// `responseSchema` payload.
-    pub schema: serde_json::Value,
-    /// If true, ask the provider to enforce structural compliance at
-    /// decode time (when supported). When false, the provider is free
-    /// to use a "loose" json mode.
+    /// The schema document. Its root is an object, as every vendor payload (`response_format`,
+    /// `responseSchema`, a tool's `input_schema`) requires: only the constructors and
+    /// deserialization make one.
+    schema: Map<String, Value>,
+    /// Whether to ask the provider to enforce the schema while decoding, where it can; when
+    /// false the provider may use a loose JSON mode.
     pub strict: bool,
-    /// Optional name — useful for OpenAI which wants an identifier on
-    /// the schema, and for diagnostics.
+    /// The schema's name, which OpenAI requires on a schema.
     pub name: Option<String>,
 }
 
+/// A schema document whose root is not a JSON object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a JSON Schema's root must be an object, got a JSON {0}")]
+pub struct SchemaRootError(pub JsonKind);
+
 impl JsonSchema {
-    pub fn strict(name: impl Into<String>, schema: serde_json::Value) -> Self {
+    /// Returns a schema the provider is asked to enforce, named `name`.
+    pub fn strict(name: impl Into<String>, schema: Map<String, Value>) -> Self {
         Self {
             schema,
             strict: true,
@@ -46,7 +40,8 @@ impl JsonSchema {
         }
     }
 
-    pub fn loose(schema: serde_json::Value) -> Self {
+    /// Returns an unnamed schema the provider may hold output to loosely.
+    pub fn loose(schema: Map<String, Value>) -> Self {
         Self {
             schema,
             strict: false,
@@ -54,22 +49,41 @@ impl JsonSchema {
         }
     }
 
-    /// True iff the schema document's root is a JSON object, as the
-    /// type's documented invariant requires.
-    pub fn is_root_object(&self) -> bool {
-        self.schema.is_object()
+    pub fn schema(&self) -> &Map<String, Value> {
+        &self.schema
     }
 
-    /// Enforce the root-object invariant at a trust boundary (provider
-    /// adapter before wire translation). `Err` carries the offending
-    /// JSON value kind for diagnostics.
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.is_root_object() {
-            Ok(())
-        } else {
-            Err("JsonSchema.schema root must be a JSON object")
-        }
+    /// Returns the schema document as a JSON value, for a payload that embeds it.
+    pub fn to_value(&self) -> Value {
+        Value::Object(self.schema.clone())
     }
+}
+
+/// Returns the root object of a schema document that arrived as any JSON value (from a caller,
+/// a file, another language), for [`JsonSchema::strict`] or [`JsonSchema::loose`].
+///
+/// # Errors
+///
+/// Returns [`SchemaRootError`] when the root is not an object.
+pub fn schema_root(schema: Value) -> Result<Map<String, Value>, SchemaRootError> {
+    match schema {
+        Value::Object(map) => Ok(map),
+        other => Err(SchemaRootError(JsonKind::of(&other))),
+    }
+}
+
+/// Builds a JSON object from `"key": value` pairs, each value one token tree that `json!` takes
+/// (a literal, a `{...}` or `[...]` group, or a parenthesised expression). Unlike `json!({...})`,
+/// it returns the `Map` itself, so a schema written as a literal needs no check that its root is
+/// an object.
+#[macro_export]
+macro_rules! json_object {
+    ($($key:literal : $value:tt),* $(,)?) => {{
+        #[allow(unused_mut)]
+        let mut map = $crate::__private::serde_json::Map::new();
+        $(map.insert(::std::string::String::from($key), $crate::__private::serde_json::json!($value));)*
+        map
+    }};
 }
 
 #[cfg(test)]
@@ -79,8 +93,39 @@ mod tests {
 
     #[test]
     fn strict_constructor_sets_flag() {
-        let s = JsonSchema::strict("greeting", json!({"type":"object"}));
+        let s = JsonSchema::strict("greeting", crate::json_object! {"type": "object"});
         assert!(s.strict);
         assert_eq!(s.name.as_deref(), Some("greeting"));
+    }
+
+    #[test]
+    fn a_json_object_literal_is_the_map_json_would_hold() {
+        let n = 3;
+        let map = crate::json_object! {
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "required": ["a"],
+            "maxProperties": (n),
+        };
+        assert_eq!(
+            Value::Object(map),
+            json!({"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"], "maxProperties": 3})
+        );
+        assert!(crate::json_object! {}.is_empty());
+    }
+
+    #[test]
+    fn a_schema_is_made_only_from_an_object_root() {
+        assert!(schema_root(json!({"type": "object"})).is_ok());
+        assert_eq!(
+            schema_root(json!([])).unwrap_err(),
+            SchemaRootError(JsonKind::Array)
+        );
+        assert!(
+            serde_json::from_value::<JsonSchema>(json!({"schema": true, "strict": false})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<JsonSchema>(json!({"schema": {}, "strict": false})).is_ok()
+        );
     }
 }

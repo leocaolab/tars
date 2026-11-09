@@ -1,34 +1,29 @@
-//! [`ToolRegistry`] — name-keyed lookup + dispatch helper.
+//! Holds tools by name, lists them as [`ToolSpec`]s for a request, and turns a [`ToolCall`] into
+//! the [`Message::Tool`] the next turn sees.
 //!
-//! Two responsibilities:
+//! A failed call is a message, not an error: an unknown tool or a tool that fails becomes an
+//! `is_error` message the model can recover from, so the agent loop goes on.
 //!
-//! 1. **Lookup table**. Holds `Arc<dyn Tool>` by name; produces
-//!    [`ToolSpec`] vectors the agent can drop straight into
-//!    [`tars_types::ChatRequest::tools`] so the model sees what's
-//!    available.
-//! 2. **Dispatch helper**. Given an LLM-emitted [`ToolCall`], looks
-//!    up the tool, runs it, and packages the result as the
-//!    [`Message::Tool`] the next LLM turn needs to see. Lookup-miss
-//!    and execute-failure both produce an `is_error=true` message
-//!    rather than bubbling up — the agent loop wants to feed
-//!    *something* back so the model can adapt; an
-//!    abort-on-tool-not-found would lose recoverable state.
+//! It runs every tool it holds and does not decide whether a call is allowed: registering a
+//! tool is granting it. A caller that needs a per-call decision grants the tool as a cap behind
+//! a `tars_types::GatedCap`, whose gate decides.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use thiserror::Error;
 
 use tars_types::{ContentBlock, Message, ToolCall, ToolSpec};
 
-use crate::tool::{Tool, ToolContext, ToolError};
+use tars_utils::display_chain;
 
-/// Errors that escape the registry (i.e., aren't quietly turned into
-/// `is_error=true` messages by the dispatcher).
+use crate::tool::{Tool, ToolEnv, ToolError};
+
 #[derive(Debug, Error)]
-pub enum ToolRegistryError {
-    #[error("tool with name `{0}` is already registered")]
-    Duplicate(String),
+#[error("tool with name `{name}` is already registered")]
+pub struct DuplicateToolError {
+    pub name: String,
 }
 
 #[derive(Clone, Default)]
@@ -41,20 +36,22 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// Add a tool. Errors on duplicate name — silent overwrite would
-    /// be a footgun (registering two `fs.read_file` impls + losing
-    /// the first one quietly is exactly the kind of bug that takes
-    /// hours to spot).
-    pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolRegistryError> {
+    /// Adds a tool.
+    ///
+    /// # Errors
+    ///
+    /// [`DuplicateToolError`] when a tool of that name is already registered; the first
+    /// one stays.
+    pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), DuplicateToolError> {
         let name = tool.name().to_string();
         if self.tools.contains_key(&name) {
-            return Err(ToolRegistryError::Duplicate(name));
+            return Err(DuplicateToolError { name });
         }
         self.tools.insert(name, tool);
         Ok(())
     }
 
-    pub fn register_owned<T: Tool>(&mut self, tool: T) -> Result<(), ToolRegistryError> {
+    pub fn register_owned<T: Tool>(&mut self, tool: T) -> Result<(), DuplicateToolError> {
         self.register(Arc::new(tool))
     }
 
@@ -74,16 +71,9 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 
-    /// Project the registry into [`ToolSpec`]s ready for
-    /// [`tars_types::ChatRequest::tools`], in a DETERMINISTIC order (sorted by
-    /// tool name). The backing store is a `HashMap`, whose iteration order
-    /// varies run-to-run; an unsorted projection makes `ChatRequest.tools`
-    /// non-deterministic, which in turn makes anything derived from the request
-    /// — the cassette/cache `request_fingerprint` above all — unstable even on
-    /// the same machine (the SAME logical fixer call hashes differently each
-    /// run and MISSes replay). Tool order carries no meaning to the model (the
-    /// tool set is a set), so sorting is a free way to make every request, and
-    /// thus every fingerprint, reproducible.
+    /// Returns the [`ToolSpec`]s for [`tars_types::ChatRequest::tools`], sorted by name. The map's
+    /// iteration order changes from run to run, and an unsorted list would change the request's
+    /// fingerprint, so a cached or recorded call would miss.
     pub fn to_tool_specs(&self) -> Vec<ToolSpec> {
         let mut specs: Vec<ToolSpec> = self
             .tools
@@ -98,36 +88,30 @@ impl ToolRegistry {
         specs
     }
 
-    /// Dispatch one LLM-emitted tool call into the [`Message::Tool`]
-    /// the next turn needs.
-    ///
-    /// Lookup miss + execute error + cancellation all produce an
-    /// `is_error=true` message rather than `Result::Err` — the agent
-    /// loop wants something to feed back to the model so it can
-    /// adapt. The only way the loop should drop out is if the
-    /// underlying *agent* fails (LLM call errored), not if a tool
-    /// did.
-    pub async fn dispatch(&self, call: &ToolCall, ctx: ToolContext) -> Message {
-        let outcome = self.execute(call, ctx).await;
+    /// Runs one tool call and returns the [`Message::Tool`] for the next turn. An unknown tool, a
+    /// [`ToolError`] and a cancellation all become an `is_error` message, logged at `warn`.
+    pub async fn dispatch(
+        &self,
+        call: &ToolCall,
+        env: &ToolEnv,
+        cancel: CancellationToken,
+    ) -> Message {
+        let outcome = self.execute(call, env, cancel).await;
         let (title, content, is_error) = match outcome {
             Ok(result) => (result.title, result.content, result.is_error),
             Err(e) => {
-                let msg = format!("tool error ({}): {e}", e.classification());
+                let msg = format!("tool error ({}): {}", e.classification(), display_chain(&e));
                 tracing::warn!(
                     tool = %call.name,
                     call_id = %call.id,
-                    error = %e,
+                    error = %display_chain(&e),
                     "tool dispatch failed",
                 );
-                (String::new(), msg, true)
+                (None, msg, true)
             }
         };
-        // Surface the title (when present) on the trace so trajectory
-        // log readers + future TUI consumers see the one-line summary
-        // without parsing the content blob. The title is NOT placed
-        // into Message::Tool — that's the LLM-visible payload, where
-        // the full content matters.
-        if !title.is_empty() {
+        // The title goes to the log only; the model sees the content.
+        if let Some(title) = title {
             tracing::info!(
                 tool = %call.name,
                 call_id = %call.id,
@@ -146,12 +130,21 @@ impl ToolRegistry {
     async fn execute(
         &self,
         call: &ToolCall,
-        ctx: ToolContext,
-    ) -> Result<crate::tool::ToolResult, ToolError> {
-        let tool = self.tools.get(&call.name).ok_or_else(|| {
-            ToolError::Execute(format!("no tool registered with name `{}`", call.name))
-        })?;
-        tool.execute(call.arguments.clone(), ctx).await
+        env: &ToolEnv,
+        cancel: CancellationToken,
+    ) -> Result<crate::tool::ToolOutput, ToolError> {
+        let tool = self
+            .tools
+            .get(&call.name)
+            .ok_or_else(|| ToolError::UnknownTool {
+                name: call.name.clone(),
+            })?;
+        tool.execute(
+            serde_json::Value::Object(call.arguments.clone()),
+            env,
+            cancel,
+        )
+        .await
     }
 }
 
@@ -164,27 +157,25 @@ mod tests {
 
     use tars_types::JsonSchema;
 
-    use crate::tool::ToolResult;
+    use crate::tool::ToolOutput;
 
-    /// Stub Tool that records the args it saw + returns whatever the
-    /// constructor was given. `Arc<Mutex<...>>` for thread safety
-    /// since the dispatcher might be called from any task.
+    /// Returns the outcome it was built with; an `Err` fails as a foreign tool with that message.
     struct EchoTool {
         name: &'static str,
-        outcome: Result<ToolResult, ToolError>,
+        outcome: Result<ToolOutput, &'static str>,
     }
 
     impl EchoTool {
         fn ok(name: &'static str, content: &'static str) -> Self {
             Self {
                 name,
-                outcome: Ok(ToolResult::success(content)),
+                outcome: Ok(ToolOutput::success(content)),
             }
         }
         fn fails(name: &'static str) -> Self {
             Self {
                 name,
-                outcome: Err(ToolError::Execute("nope".into())),
+                outcome: Err("nope"),
             }
         }
     }
@@ -199,21 +190,19 @@ mod tests {
         }
         fn input_schema(&self) -> &JsonSchema {
             static S: OnceLock<JsonSchema> = OnceLock::new();
-            S.get_or_init(|| JsonSchema::strict("Args", json!({"type": "object"})))
+            S.get_or_init(|| {
+                JsonSchema::strict("Args", tars_types::json_object! {"type": "object"})
+            })
         }
         async fn execute(
             &self,
             _args: serde_json::Value,
-            _ctx: ToolContext,
-        ) -> Result<ToolResult, ToolError> {
-            self.outcome
-                .as_ref()
-                .map(Clone::clone)
-                .map_err(|e| match e {
-                    ToolError::Execute(s) => ToolError::Execute(s.clone()),
-                    ToolError::InvalidArguments(s) => ToolError::InvalidArguments(s.clone()),
-                    ToolError::Cancelled => ToolError::Cancelled,
-                })
+            _env: &ToolEnv,
+            _cancel: CancellationToken,
+        ) -> Result<ToolOutput, ToolError> {
+            self.outcome.clone().map_err(|message| ToolError::Foreign {
+                message: message.to_string(),
+            })
         }
     }
 
@@ -231,10 +220,9 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register_owned(EchoTool::ok("a", "x")).unwrap();
         match reg.register_owned(EchoTool::ok("a", "y")) {
-            Err(ToolRegistryError::Duplicate(name)) => assert_eq!(name, "a"),
+            Err(DuplicateToolError { name }) => assert_eq!(name, "a"),
             other => panic!("expected Duplicate, got {other:?}"),
         }
-        // Original is preserved.
         assert_eq!(reg.len(), 1);
     }
 
@@ -252,11 +240,7 @@ mod tests {
 
     #[test]
     fn to_tool_specs_is_deterministically_ordered() {
-        // The backing store is a HashMap (random iteration order). The
-        // projection MUST be name-sorted so `ChatRequest.tools` — and every
-        // fingerprint/cache derived from it — is stable run to run. Register in
-        // a deliberately non-sorted order and across two independent registries
-        // to defeat any incidental ordering.
+        // Unsorted names across two registries, so an incidental order cannot pass.
         let names_in = [
             "fs.read_file",
             "bash.run",
@@ -287,8 +271,14 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.register_owned(EchoTool::ok("a", "result text"))
             .unwrap();
-        let call = ToolCall::new("call_1", "a", json!({"q": "x"}));
-        let msg = reg.dispatch(&call, ToolContext::default()).await;
+        let call = ToolCall::new(
+            "call_1",
+            "a",
+            json!({"q": "x"}).as_object().unwrap().clone(),
+        );
+        let msg = reg
+            .dispatch(&call, &ToolEnv::default(), CancellationToken::new())
+            .await;
         match msg {
             Message::Tool {
                 tool_call_id,
@@ -308,7 +298,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Tool that records whether it ran and what `ctx.sandbox.network` it saw.
+    /// Records whether it ran and the `ctx.sandbox.network` it saw.
     struct RanTool {
         name: &'static str,
         ran: Arc<AtomicBool>,
@@ -333,35 +323,38 @@ mod tests {
         }
         fn input_schema(&self) -> &JsonSchema {
             static S: OnceLock<JsonSchema> = OnceLock::new();
-            S.get_or_init(|| JsonSchema::strict("Args", json!({"type": "object"})))
+            S.get_or_init(|| {
+                JsonSchema::strict("Args", tars_types::json_object! {"type": "object"})
+            })
         }
         async fn execute(
             &self,
             _args: serde_json::Value,
-            ctx: ToolContext,
-        ) -> Result<ToolResult, ToolError> {
-            *self.sandbox_network_seen.lock().unwrap() = Some(ctx.sandbox.network);
+            env: &ToolEnv,
+            _cancel: CancellationToken,
+        ) -> Result<ToolOutput, ToolError> {
+            *self.sandbox_network_seen.lock().unwrap() = Some(env.sandbox.network());
             self.ran.store(true, Ordering::SeqCst);
-            Ok(ToolResult::success("ran"))
+            Ok(ToolOutput::success("ran"))
         }
     }
 
-    // A tool observes the sandbox policy threaded through ctx.
     #[tokio::test]
     async fn tool_sees_sandbox_policy() {
         let tool = RanTool::new("a");
         let seen = tool.sandbox_network_seen.clone();
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(tool)).unwrap();
-        let ctx = ToolContext {
-            sandbox: SandboxPolicy {
-                network: false,
-                ..Default::default()
-            },
+        let ctx = ToolEnv {
+            sandbox: SandboxPolicy::DangerFullAccess { network: false },
             ..Default::default()
         };
         let _ = reg
-            .dispatch(&ToolCall::new("c1", "a", json!({})), ctx)
+            .dispatch(
+                &ToolCall::new("c1", "a", json!({}).as_object().unwrap().clone()),
+                &ctx,
+                CancellationToken::new(),
+            )
             .await;
         assert_eq!(
             *seen.lock().unwrap(),
@@ -373,8 +366,10 @@ mod tests {
     #[tokio::test]
     async fn dispatch_lookup_miss_yields_is_error_message() {
         let reg = ToolRegistry::new();
-        let call = ToolCall::new("call_1", "ghost", json!({}));
-        let msg = reg.dispatch(&call, ToolContext::default()).await;
+        let call = ToolCall::new("call_1", "ghost", json!({}).as_object().unwrap().clone());
+        let msg = reg
+            .dispatch(&call, &ToolEnv::default(), CancellationToken::new())
+            .await;
         match msg {
             Message::Tool {
                 tool_call_id,
@@ -397,8 +392,10 @@ mod tests {
     async fn dispatch_execute_failure_yields_is_error_message() {
         let mut reg = ToolRegistry::new();
         reg.register_owned(EchoTool::fails("a")).unwrap();
-        let call = ToolCall::new("call_1", "a", json!({}));
-        let msg = reg.dispatch(&call, ToolContext::default()).await;
+        let call = ToolCall::new("call_1", "a", json!({}).as_object().unwrap().clone());
+        let msg = reg
+            .dispatch(&call, &ToolEnv::default(), CancellationToken::new())
+            .await;
         match msg {
             Message::Tool {
                 is_error, content, ..

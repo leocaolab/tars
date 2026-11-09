@@ -1,4 +1,4 @@
-//! Model specs — what a config or caller writes where a model id goes.
+//! Parses what a config or caller writes where a model id goes.
 //!
 //! A spec is either a concrete provider-side id (`gemini-3.8-flash`,
 //! `qwen/qwen3-coder-30b`), passed through untouched, or `<series>@latest`
@@ -8,14 +8,14 @@
 //! `{version}` slot.
 //!
 //! Resolution happens once, when a model is bound to a provider, so everything
-//! downstream (events, cache keys, cassette fingerprints) sees the concrete id
+//! downstream (events, cassette fingerprints) sees the concrete id
 //! that actually ran — never the moving `@latest`.
 
 use thiserror::Error;
 
 use tars_types::CatalogSource;
 
-/// The only version keyword a spec accepts today.
+/// The only version keyword a spec accepts.
 const LATEST: &str = "latest";
 
 /// A parsed model spec.
@@ -28,19 +28,25 @@ pub enum ModelSpec<'a> {
 }
 
 impl<'a> ModelSpec<'a> {
-    /// Parse a spec. Any `@` makes it a series spec; the part after it must be
-    /// `latest`.
-    pub fn parse(spec: &'a str) -> Result<Self, ModelSpecError> {
+    /// Parses a spec; any `@` makes it a series spec, and the part after it must be `latest`.
+    /// Whitespace around the spec is not part of it, as no provider names a model with it; a
+    /// blank spec names no model and is refused, so no provider is sent one.
+    pub fn parse(raw: &'a str) -> Result<Self, ParseModelSpecError> {
+        let spec = raw.trim();
+        if spec.is_empty() {
+            return Err(ParseModelSpecError::Blank {
+                spec: raw.to_string(),
+            });
+        }
         match spec.split_once('@') {
             None => Ok(Self::Concrete(spec)),
             Some((series, LATEST)) if !series.is_empty() => Ok(Self::Latest { series }),
-            Some((series, version)) => Err(ModelSpecError::BadSpec {
+            Some(("", _)) => Err(ParseModelSpecError::NoSeriesBeforeAt {
                 spec: spec.to_string(),
-                detail: if series.is_empty() {
-                    "no series before `@` (write e.g. `flash@latest`)".to_string()
-                } else {
-                    format!("version `{version}` is not supported — only `{series}@latest` is")
-                },
+            }),
+            Some((series, version)) => Err(ParseModelSpecError::UnsupportedVersion {
+                series: series.to_string(),
+                version: version.to_string(),
             }),
         }
     }
@@ -56,12 +62,26 @@ pub struct ResolvedModel {
     pub picked_from: Option<CatalogSource>,
 }
 
-/// Why a spec did not resolve. Carries the provider, the spec and what was
-/// searched, so the message says what to fix.
+/// Says why a spec does not parse.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-pub enum ModelSpecError {
-    #[error("model spec `{spec}`: {detail}")]
-    BadSpec { spec: String, detail: String },
+pub enum ParseModelSpecError {
+    #[error("the model spec {spec:?} is blank; name a model id or `<series>@latest`")]
+    Blank { spec: String },
+    #[error("model spec `{spec}`: no series before `@` (write e.g. `flash@latest`)")]
+    NoSeriesBeforeAt { spec: String },
+    #[error(
+        "model spec `{series}@{version}`: version `{version}` is not supported — only \
+         `{series}@latest` is"
+    )]
+    UnsupportedVersion { series: String, version: String },
+}
+
+/// Says why a spec did not resolve, naming the provider, the spec and what was searched so the
+/// message says what to fix.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ResolveModelSpecError {
+    #[error(transparent)]
+    Parse(#[from] ParseModelSpecError),
     #[error(
         "model spec `{series}@latest`: provider `{provider}` defines no model series in \
          data/provider.toml — use a concrete model id"
@@ -79,24 +99,57 @@ pub enum ModelSpecError {
     },
     #[error(
         "model spec `{series}@latest`: no {provider} model id matches `{pattern}` in the \
-         {searched} ({candidates} ids searched)"
+         {} ({candidates} ids searched)",
+        list_searched(searched)
     )]
     NoMatch {
         provider: String,
         series: String,
-        pattern: String,
-        /// Human description of the list searched.
-        searched: String,
+        pattern: Box<SeriesPattern>,
+        searched: CatalogSource,
         candidates: usize,
     },
 }
 
-/// A series pattern (`gemini-{version}-flash`) split around its `{version}`
-/// slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SeriesPattern<'a> {
-    prefix: &'a str,
-    suffix: &'a str,
+/// Returns how a message names the id list a spec was resolved against.
+fn list_searched(searched: &CatalogSource) -> String {
+    match searched {
+        CatalogSource::Live { queried_at } => format!("live model list from {queried_at}"),
+        CatalogSource::Shipped { verified } => {
+            format!("shipped provider.toml (verified {verified})")
+        }
+    }
+}
+
+/// A series pattern (`gemini-{version}-flash`) split around its one `{version}` slot. The data
+/// file's patterns are parsed when it loads, so a pattern without exactly one slot never reaches
+/// a resolution.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(try_from = "String")]
+pub struct SeriesPattern {
+    prefix: String,
+    suffix: String,
+}
+
+impl TryFrom<String> for SeriesPattern {
+    type Error = ParseSeriesPatternError;
+
+    fn try_from(pattern: String) -> Result<Self, Self::Error> {
+        Self::parse(&pattern).ok_or(ParseSeriesPatternError { pattern })
+    }
+}
+
+/// Says that a series pattern does not hold exactly one `{version}` slot.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("series pattern `{pattern}` needs exactly one {{version}}")]
+pub struct ParseSeriesPatternError {
+    pattern: String,
+}
+
+impl std::fmt::Display for SeriesPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{VERSION_SLOT}{}", self.prefix, self.suffix)
+    }
 }
 
 /// Where a matched id sits in its series: its version, and whether it is a
@@ -111,25 +164,30 @@ pub struct SeriesRank {
 const VERSION_SLOT: &str = "{version}";
 const PREVIEW_SUFFIX: &str = "-preview";
 
-impl<'a> SeriesPattern<'a> {
-    /// Split a pattern at its single `{version}` slot. `None` when the slot is
-    /// missing or repeated — an authoring bug the KB test catches.
-    pub fn parse(pattern: &'a str) -> Option<Self> {
+impl SeriesPattern {
+    /// Splits a pattern at its single `{version}` slot; returns `None` when the slot is missing
+    /// or repeated.
+    pub fn parse(pattern: &str) -> Option<Self> {
         let (prefix, suffix) = pattern.split_once(VERSION_SLOT)?;
         if suffix.contains(VERSION_SLOT) {
             return None;
         }
-        Some(Self { prefix, suffix })
+        Some(Self {
+            prefix: prefix.to_string(),
+            suffix: suffix.to_string(),
+        })
     }
 
-    /// Rank `id` within this series, or `None` if it is not a member. The
-    /// version is dot-separated numbers; one trailing `-preview` is allowed.
+    /// Ranks `id` within this series, or returns `None` if it is not a member. The version is
+    /// dot-separated numbers; one trailing `-preview` is allowed.
     pub fn rank(&self, id: &str) -> Option<SeriesRank> {
         let (base, ga) = match id.strip_suffix(PREVIEW_SUFFIX) {
             Some(base) => (base, false),
             None => (id, true),
         };
-        let version = base.strip_prefix(self.prefix)?.strip_suffix(self.suffix)?;
+        let version = base
+            .strip_prefix(self.prefix.as_str())?
+            .strip_suffix(self.suffix.as_str())?;
         if version.is_empty() {
             return None;
         }
@@ -144,7 +202,7 @@ impl<'a> SeriesPattern<'a> {
         Some(SeriesRank { version, ga })
     }
 
-    /// The newest member of this series among `ids`.
+    /// Returns the newest member of this series among `ids`.
     pub fn latest<'i>(&self, ids: impl IntoIterator<Item = &'i str>) -> Option<&'i str> {
         ids.into_iter()
             .filter_map(|id| self.rank(id).map(|r| (r, id)))
@@ -170,6 +228,26 @@ mod tests {
         let err = ModelSpec::parse("flash@3.7").unwrap_err();
         assert!(err.to_string().contains("only `flash@latest`"), "{err}");
         assert!(ModelSpec::parse("@latest").is_err());
+    }
+
+    #[test]
+    fn a_blank_spec_is_refused_and_whitespace_around_an_id_is_not_part_of_it() {
+        assert_eq!(
+            ModelSpec::parse(""),
+            Err(ParseModelSpecError::Blank {
+                spec: String::new()
+            })
+        );
+        assert_eq!(
+            ModelSpec::parse(" \t"),
+            Err(ParseModelSpecError::Blank { spec: " \t".into() })
+        );
+        assert_eq!(ModelSpec::parse("m"), Ok(ModelSpec::Concrete("m")));
+        assert_eq!(ModelSpec::parse(" m\n"), Ok(ModelSpec::Concrete("m")));
+        assert_eq!(
+            ModelSpec::parse(" flash@latest "),
+            Ok(ModelSpec::Latest { series: "flash" })
+        );
     }
 
     #[test]

@@ -1,9 +1,5 @@
-//! Auth specifications.
-//!
-//! [`Auth`] is the *plan* for authentication: "use this secret as the
-//! API key", "delegate to the underlying CLI", "no auth needed". The
-//! concrete header injection happens at the Provider adapter — see
-//! `tars-provider`'s `ResolvedAuth` for the runtime side.
+//! Says how a provider authenticates, without resolving anything: tars-llm resolves an
+//! [`Auth`] into its `ResolvedAuth` and the adapter writes the headers.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,33 +8,31 @@ use crate::secret::SecretRef;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Auth {
-    /// Backend doesn't authenticate (local OpenAI-compatible servers,
-    /// the in-process mock, etc.).
+    /// The backend does not authenticate, as with a local OpenAI-compatible server or the mock.
     None,
-    /// Use whatever credentials the underlying tool / CLI already
-    /// has (e.g. user's `claude login` session). Provider neither sees
-    /// nor needs the credential.
+    /// The underlying tool or CLI uses the credential it already has (a `claude login`
+    /// session); tars never sees it.
     Delegate,
-    /// Look up an API key / bearer token via [`SecretRef`].
+    /// An API key or bearer token read from a [`SecretRef`].
     Secret { secret: SecretRef },
 }
 
 impl Auth {
-    /// Sugar: use a process env var.
+    /// Returns a secret read from the env var `var`.
     pub fn env(var: impl Into<String>) -> Self {
         Self::Secret {
             secret: SecretRef::env(var),
         }
     }
 
-    /// Sugar: inline plaintext (test/dev only).
+    /// Returns an inline plaintext secret, for tests and dev configs.
     pub fn inline(value: impl Into<String>) -> Self {
         Self::Secret {
             secret: SecretRef::inline(value),
         }
     }
 
-    /// Sugar: file-backed secret.
+    /// Returns a secret read from the file at `path`.
     pub fn file(path: impl Into<std::path::PathBuf>) -> Self {
         Self::Secret {
             secret: SecretRef::File { path: path.into() },

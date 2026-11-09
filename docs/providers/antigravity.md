@@ -11,9 +11,7 @@ delegate that runs in plain-**text** output mode — the whole printed
 answer becomes the response.
 
 This is a **local/dev "bring your own agent CLI"** path, not a
-production default. The spec is
-`architecture/32-cli-delegates.md`;
-this is the user-facing walkthrough.
+production default; this is the user-facing walkthrough.
 
 ---
 
@@ -68,8 +66,7 @@ counts, so `Usage` comes back as zeros rather than a fabricated number.
 ## 3. Sandboxing
 
 `agy` is spawned through the shared `tars-sandbox` OS-jail primitive
-(`build_sandboxed_command`), the same jail every CLI delegate runs in
-(Doc 32 CUJ-3). It is **write-jailed to the request's worktree**, which
+(`build_sandboxed_command`), the same jail every CLI delegate runs in. It is **write-jailed to the request's worktree**, which
 is also its cwd. `--dangerously-skip-permissions` disables `agy`'s own
 interactive gate, and the OS sandbox is what actually keeps its file /
 bash side effects confined to the worktree.
@@ -83,27 +80,49 @@ bash side effects confined to the worktree.
 - **OAuth login** — `agy`'s own interactive login session, or
 - **API key env** — `GEMINI_API_KEY` or `ANTIGRAVITY_API_KEY`.
 
-Unlike `claude_cli` / `gemini_cli` (which *strip* auth env to force a
+Unlike `claude_cli` (which *strips* auth env to force a
 subscription path), antigravity's env-strip table is **empty**: those
-keys **pass through** the sandbox to `agy` untouched. There is no `auth`
-field on the config block — tars neither manages nor injects the
-credential; it just makes sure `agy`'s auth env survives into the
-sandboxed process. If `agy` can't authenticate, its own error is carried
-out verbatim (no sentinel).
+keys **pass through** the sandbox to `agy` untouched
+(`crates/tars-llm/src/provider/backends/cli/dialects/antigravity.rs:31-32`,
+`:100-107` — empty strip table; `env()` names them for the record at
+`:140-144`). There is no `auth` field on the config block — the provider
+is wired with `Auth::Delegate`, which resolves to `ResolvedAuth::None`
+("the spawned tool/CLI carries its own credential; tars injects nothing",
+`crates/tars-llm/src/provider/auth.rs:137-139`; `Auth::Delegate` doc at
+`crates/tars-types/src/providers/auth.rs:17-20`). tars neither manages nor
+injects the credential; it just makes sure `agy`'s auth env survives into
+the sandboxed process. If `agy` can't authenticate, its own error is
+carried out verbatim (no sentinel).
 
 ---
 
 ## 5. Model selection
 
-`default_model` is passed straight to `agy --model`, e.g.:
+`default_model` is passed straight to `agy --model`
+(`crates/tars-llm/src/provider/backends/cli/dialects/antigravity.rs:60-73`,
+`build_agy_argv`). Set it via the config field `default_model` or TOML
+`[providers.antigravity] default_model = "…"` (§6).
+
+The only id **confirmed** to work is the shipped default:
 
 ```
-gemini-2.5-pro
+gemini-3.1-pro
 ```
+
+(`crates/tars-config/data/provider.toml:806-825` — default
+`gemini-3.1-pro`, `billed = "subscription"`.) Other model strings the
+Antigravity account may expose (e.g. Gemini 3.5 Flash, Claude Sonnet/Opus,
+GPT-OSS-120B) are **undocumented** and not verified — treat them as
+unknown until confirmed against your own account.
 
 tars requires the model to be explicit before the request reaches the
 CLI provider — an unresolved tier hint is rejected with `InvalidRequest`
 rather than guessed at.
+
+> ⚠️ **Gotcha — your account must recognize the id.** The id is handed
+> verbatim to `agy --model`; a stale or unsupported id is rejected by
+> `agy` itself, and its own error is carried out verbatim (no tars
+> sentinel). Same failure class as codex's stale `gpt-5.x`.
 
 ### Prompt size cap
 
@@ -118,7 +137,7 @@ A larger rendered prompt is rejected up front with a clean
 ```toml
 [providers.antigravity]
 type = "antigravity"
-default_model = "gemini-2.5-pro"
+default_model = "gemini-3.1-pro"   # the only confirmed id — see §5
 
 # All optional — values shown are defaults.
 executable = "agy"          # resolved on PATH; use an absolute path if ~/.local/bin isn't on PATH
@@ -137,12 +156,9 @@ loop) is owned by `agy`, not tars.
 
 ## 7. See also
 
-- `architecture/32-cli-delegates.md` —
-  the `AgentCliBackend` + `CliDialect` spec that antigravity is an impl
-  of (F5); antigravity is its first `OutputMode::Text` dialect
 - [`opencode.md`](./opencode.md) — the sibling delegate, in JSON event
   mode with per-step usage
 - [`claude-cli.md`](./claude-cli.md) — the other subprocess provider
-- Implementation: `crates/tars-provider/src/backends/cli/dialects/antigravity.rs`;
+- Implementation: `crates/tars-llm/src/provider/backends/cli/dialects/antigravity.rs`;
   config variant `ProviderConfig::Antigravity` in
   `crates/tars-config/src/providers.rs`

@@ -1,33 +1,26 @@
-//! Secret references and protected strings.
-//!
-//! [`SecretRef`] describes *where* a secret can be fetched from; it
-//! never contains the value itself in the long-lived case (env / file
-//! variants). The one exception, [`SecretRef::Inline`], holds the
-//! plaintext directly — useful for tests and dev configs, but the
-//! contained [`SecretString`] redacts on Display/Debug so a stray
-//! `tracing::info!(secret = %s, …)` doesn't leak it.
+//! Names where a secret comes from ([`SecretRef`]) and holds a plaintext one ([`SecretString`])
+//! so that formatting or serializing it never prints the value. This module does not read env
+//! vars or files; the resolver in tars-llm does.
 
 use std::fmt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Pointer to where a secret value lives. Resolved (potentially
-/// asynchronously) at use time by an external resolver — Provider
-/// layer never touches a `SecretRef` directly except to forward it.
+/// Where a secret value lives. An auth resolver reads it at use time; everything else only
+/// forwards it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SecretRef {
-    /// Test/dev only — production should
-    /// emit a startup warning if any inline secret is observed.
+    /// The plaintext itself, for tests and dev configs; the resolver warns once when it reads one.
     Inline {
         value: SecretString,
     },
     Env {
         var: String,
     },
-    /// Entire contents are the secret (trimmed of trailing
-    /// newline). Useful for K8s secret mounts.
+    /// A file whose whole contents, trimmed of surrounding whitespace, are the secret, as in a
+    /// K8s secret mount.
     File {
         path: PathBuf,
     },
@@ -45,22 +38,12 @@ impl SecretRef {
     }
 }
 
-/// String wrapper whose `Display` / `Debug` outputs redact the value.
-/// Use this for any plaintext credential that shouldn't end up in
-/// logs / error chains / panic messages.
+/// A plaintext credential whose `Display`, `Debug` and `Serialize` never print the value, so it
+/// stays out of logs, error chains, panic messages and emitted JSON.
 ///
-/// **Caveat**: this is a runtime hygiene layer, not a memory-protection
-/// guarantee. A determined attacker with process memory access can
-/// still read the bytes. The goal is to prevent *accidental* leakage
-/// via the standard formatting machinery.
-/// `Serialize` is implemented manually to emit `"<redacted>"` rather
-/// than the plaintext — the audit (`tars-types-src-secret-2`) called
-/// out the original `#[serde(transparent)]` derive as the primary
-/// leak path. `Deserialize` stays transparent so config files
-/// (`{value = "sk-…"}`) continue to load. We never round-trip a secret
-/// in this codebase: configs flow read-only from disk through
-/// runtime, and any request/response/cache JSON we emit must not
-/// contain a secret.
+/// `Serialize` writes `"<redacted>"` while `Deserialize` reads the plaintext, so a config file
+/// (`{value = "sk-…"}`) loads but a serialized secret does not round-trip. This guards against
+/// accidental leaks through formatting, not against a reader of process memory.
 #[derive(Clone)]
 pub struct SecretString(String);
 
@@ -81,8 +64,7 @@ impl SecretString {
         Self(value.into())
     }
 
-    /// Be deliberate: anything you do with this
-    /// reference can leak the secret if mishandled.
+    /// Returns the plaintext; whatever the caller does with it can leak the secret.
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -148,9 +130,6 @@ mod tests {
 
     #[test]
     fn inline_serializes_redacted_not_plaintext() {
-        // Audit `tars-types-src-secret-2`: previous behaviour
-        // serialized the plaintext via #[serde(transparent)]. The
-        // contract now is "Serialize redacts; Deserialize accepts".
         let r = SecretRef::inline("sk-proj-x");
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["value"], "<redacted>");
@@ -162,8 +141,6 @@ mod tests {
 
     #[test]
     fn inline_deserialize_still_accepts_plaintext() {
-        // Configs on disk look like `{value = "sk-…"}` — the load path
-        // must keep working after the Serialize redaction landed.
         let r: SecretRef = serde_json::from_value(serde_json::json!({
             "source": "inline",
             "value": "sk-proj-x"

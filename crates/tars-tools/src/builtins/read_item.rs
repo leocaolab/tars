@@ -1,120 +1,124 @@
-//! `read_item` — read a *definition*, not a slice of a file.
+//! Finds a definition in a source file by name, so an agent reads the whole item instead of
+//! guessing a line window around a `grep` hit; a window that cuts a function in half looks like
+//! a short function. It also outlines a file and classifies the places a name appears.
 //!
-//! # Why lines are the wrong unit
-//!
-//! An agent that wants `RepoScope::blame` has two ways to ask for it today, and both
-//! are wrong in the same way: read the whole 33 KB file, or `grep` for the line
-//! number and then guess a window around it.
-//!
-//! The guess is the problem. Observed in a real run, an agent asked for lines 1–80
-//! and then 150–230 of one file to see one function — two guesses, 160 lines fetched
-//! for the ~20 that mattered. And a wrong guess is **invisible**: a window that cuts
-//! a function in half looks exactly like a function that is that short, so the agent
-//! edits against context that is not there.
-//!
-//! A definition has real boundaries. Asking for it by name returns all of it or says
-//! it is not there — no guessing, and no way to be silently half-right.
-//!
-//! # Where language knowledge belongs
-//!
-//! [`ItemFinder`] is the seam. This crate ships the Rust one, because tars's own
-//! agents work on tars. A consumer with a parser plugs its own in — arc already has
-//! tree-sitter across eight languages and a `SymbolDef` carrying `sig_span` and
-//! `body_span`, which is exactly this shape.
-//!
-//! The Rust finder here is deliberately not a parser. It matches a declaration line
-//! and balances braces from it, which either finds the item or does not — the failure
-//! mode is "not found", never "here is most of it".
+//! The language knowledge is behind [`ItemFinder`]; this crate ships only [`RustItemFinder`], which
+//! matches declaration lines and balances braces rather than parsing.
 
 use std::path::Path;
 
 use serde::Serialize;
 
-/// What a finder can actually answer.
-///
-/// Declared rather than discovered, because **"not supported" and "nothing found"
-/// must not look the same**. A driver with no call-graph support returning an empty
-/// reference list says "nobody uses this", which is the opposite of what it knows.
-/// arc's `LangCaps` exists for the same reason and this mirrors it.
+/// The declaration keyword of a definition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct Support {
+#[serde(rename_all = "lowercase")]
+pub enum ItemKind {
+    Fn,
+    Struct,
+    Enum,
+    Trait,
+    Impl,
+    Type,
+    Const,
+    Static,
+    Mod,
+}
+
+impl ItemKind {
+    /// Every kind, in the order a declaration line is tried against them.
+    const ALL: [ItemKind; 9] = [
+        ItemKind::Fn,
+        ItemKind::Struct,
+        ItemKind::Enum,
+        ItemKind::Trait,
+        ItemKind::Impl,
+        ItemKind::Type,
+        ItemKind::Const,
+        ItemKind::Static,
+        ItemKind::Mod,
+    ];
+
+    /// Returns the keyword as Rust source spells it.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            ItemKind::Fn => "fn",
+            ItemKind::Struct => "struct",
+            ItemKind::Enum => "enum",
+            ItemKind::Trait => "trait",
+            ItemKind::Impl => "impl",
+            ItemKind::Type => "type",
+            ItemKind::Const => "const",
+            ItemKind::Static => "static",
+            ItemKind::Mod => "mod",
+        }
+    }
+}
+
+/// The questions a finder can answer. It is declared so that "not supported" does not look like
+/// "nothing found": an empty reference list from a finder without reference support would say
+/// that nobody uses the name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct FinderSupport {
     pub items: bool,
     pub imports: bool,
     pub refs: bool,
 }
 
-/// One definition, with enough around it to be worth reading.
+/// One definition with the doc comment and attributes above it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Item {
-    /// Qualified name — `RepoScope::blame`, not `blame`. arc's `SymbolDef.qname`.
-    pub name: String,
-    /// `fn`, `struct`, `enum`, `trait`, `impl` — whatever the finder recognised.
-    pub kind: String,
-    /// 1-based, inclusive, so it lines up with what `grep -n` reports.
-    pub start_line: u32,
-    pub end_line: u32,
-    /// The text, including the doc comment and attributes above it.
-    ///
-    /// The doc comment is not decoration: in this codebase it routinely carries the
-    /// reason the code is shaped the way it is, and an agent that changes the code
-    /// without it is changing something it has only half read.
+    /// The declaration; its lines span the doc comment and attributes, as `text` does.
+    #[serde(flatten)]
+    pub sig: ItemSignature,
+    /// The source, including the doc comment and attributes above the declaration, since the
+    /// doc comment often says why the code has its shape.
     pub text: String,
 }
 
-/// What a file says it is, before you read any of it.
-///
-/// The rung between "this file exists" and "here are 39 KB". It is also what makes
-/// asking for a definition by name possible at all: you cannot ask for
-/// `RepoScope::blame` if you do not know it is there.
+/// A file's headline, imports and definitions without their bodies, so an agent can learn what
+/// names to ask for before reading the file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Outline {
-    /// The first line of the module doc — what the file claims to be, in its own
-    /// words. Written by whoever wrote the file, so it beats anything inferred.
+    /// The first non-empty line of the module doc.
     pub headline: Option<String>,
-    /// What it pulls in. The cheapest description of what a file depends on.
     pub imports: Vec<String>,
-    /// Every definition, signature only.
-    pub items: Vec<ItemSig>,
+    /// The top-level definitions and the members of `impl` blocks.
+    pub items: Vec<ItemSignature>,
     pub lines: u32,
 }
 
-/// One definition's head: enough to decide whether to ask for its body.
+/// One definition's declaration, without its body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct ItemSig {
-    /// Qualified name. arc's `SymbolDef.qname`.
+pub struct ItemSignature {
+    /// The qualified name, such as `RepoScope::blame`.
     pub name: String,
-    pub kind: String,
-    /// Visible outside its module — Rust `pub`, Python no leading `_`, TS `export`.
-    ///
-    /// The question "can changing this break another crate" is answered by this field
-    /// and nothing else, and it is the first thing a refactor needs to know.
+    pub kind: ItemKind,
+    /// Says whether the declaration is visible outside its module (Rust `pub`, Python no
+    /// leading `_`, TypeScript `export`).
     pub exported: bool,
+    /// The first line, 1-based and inclusive, as `grep -n` counts.
     pub start_line: u32,
     pub end_line: u32,
-    /// The declaration line, trimmed. Not the body.
+    /// The declaration line, trimmed.
     pub signature: String,
 }
 
-/// How a name appears at one place.
-///
-/// The distinction that matters for "what breaks if I change this": a definition is
-/// the thing being changed, a call is what must be updated, and an import is what
-/// must still resolve afterwards. Lumping them together — which is what a bare grep
-/// does — puts the definition in the list of things to fix.
+/// How a name appears at one place. When the name changes, the definition is what changes, a
+/// call is what must be updated and an import is what must still resolve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub enum RefKind {
+pub enum OccurrenceKind {
     Definition,
     Call,
     Import,
-    /// Named, but not in a way this finder can classify — a type position, a macro
-    /// argument, a comment. Reported as itself rather than guessed at.
+    /// Names it in a way the finder does not classify, such as a type position, a macro
+    /// argument or a comment.
     Mention,
 }
 
 /// One place a name appears.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct Ref {
-    pub kind: RefKind,
+pub struct Occurrence {
+    pub kind: OccurrenceKind,
     pub line: u32,
     /// The line, trimmed.
     pub text: String,
@@ -122,55 +126,42 @@ pub struct Ref {
 
 /// Finds definitions in a source file.
 pub trait ItemFinder: Send + Sync {
-    /// Does this finder handle that file?
+    /// Returns whether this finder handles the file at `path`.
     fn handles(&self, path: &Path) -> bool;
 
-    /// What it can answer. See [`Support`] — an unsupported question must be
-    /// distinguishable from one that was asked and came back empty.
-    fn support(&self) -> Support;
+    /// Returns the questions this finder answers.
+    fn support(&self) -> FinderSupport;
 
-    /// The definition called `name`, or `None`.
-    ///
-    /// `None` means "not found here", never "found part of it" — a partial answer is
-    /// the failure this whole module exists to avoid.
+    /// Returns the definition called `name`, or `None` when it is not found or its block does
+    /// not close.
     fn find(&self, source: &str, name: &str) -> Option<Item>;
 
-    /// Everything the file defines, signatures only.
+    /// Returns the file's [`Outline`].
     fn outline(&self, source: &str) -> Outline;
 
-    /// Every place `name` appears in this file, classified.
-    ///
-    /// **Textual, and it says so.** It finds what is written; it does not resolve
-    /// trait dispatch, macro expansion, or re-exports. A caller wanting completeness
-    /// has the compiler for that — this is for deciding where to look first, which is
-    /// the question an agent actually has before it starts.
-    fn refs(&self, source: &str, name: &str) -> Vec<Ref>;
+    /// Returns every line where `name` appears as a whole token, classified. It matches text
+    /// and does not resolve trait dispatch, macro expansion or re-exports, so it tells where to
+    /// look first, not every use.
+    fn refs(&self, source: &str, name: &str) -> Vec<Occurrence>;
 }
 
-/// Rust, by declaration line and brace balance.
-pub struct RustItems;
+/// Finds Rust items by declaration line and brace balance.
+pub struct RustItemFinder;
 
-/// The declaration keywords worth asking for by name.
-const KINDS: &[&str] = &[
-    "fn", "struct", "enum", "trait", "impl", "type", "const", "static", "mod",
-];
-
-impl ItemFinder for RustItems {
+impl ItemFinder for RustItemFinder {
     fn handles(&self, path: &Path) -> bool {
         path.extension().is_some_and(|e| e == "rs")
     }
 
-    fn support(&self) -> Support {
-        // `refs` is textual, and says so at its own definition. It is supported in
-        // the sense that asking is meaningful; completeness is the compiler's job.
-        Support {
+    fn support(&self) -> FinderSupport {
+        FinderSupport {
             items: true,
             imports: true,
             refs: true,
         }
     }
 
-    fn refs(&self, source: &str, name: &str) -> Vec<Ref> {
+    fn refs(&self, source: &str, name: &str) -> Vec<Occurrence> {
         source
             .lines()
             .enumerate()
@@ -180,15 +171,15 @@ impl ItemFinder for RustItems {
                     return None;
                 }
                 let kind = if Self::declaration(t).map(|(_, n)| n) == Some(name.to_string()) {
-                    RefKind::Definition
+                    OccurrenceKind::Definition
                 } else if t.starts_with("use ") || t.starts_with("pub use ") {
-                    RefKind::Import
+                    OccurrenceKind::Import
                 } else if t.contains(&format!("{name}(")) || t.contains(&format!(".{name}(")) {
-                    RefKind::Call
+                    OccurrenceKind::Call
                 } else {
-                    RefKind::Mention
+                    OccurrenceKind::Mention
                 };
-                Some(Ref {
+                Some(Occurrence {
                     kind,
                     line: i as u32 + 1,
                     text: t.to_string(),
@@ -200,13 +191,11 @@ impl ItemFinder for RustItems {
     fn outline(&self, source: &str) -> Outline {
         let lines: Vec<&str> = source.lines().collect();
 
-        // The file's own words about itself, from the module doc. Anything inferred
-        // would be a guess competing with a statement.
         let headline = lines
             .iter()
-            .find_map(|l| l.trim_start().strip_prefix("//!"))
+            .filter_map(|l| l.trim_start().strip_prefix("//!"))
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .find(|s| !s.is_empty())
             .map(str::to_string);
 
         let imports = lines
@@ -215,9 +204,7 @@ impl ItemFinder for RustItems {
             .map(|u| u.trim_end_matches(';').trim().to_string())
             .collect();
 
-        // Only top-level definitions and the members of `impl` blocks. Everything
-        // nested deeper is an implementation detail of something already listed, and
-        // listing it turns the outline back into the wall of text it replaces.
+        // Lines indented past one level are skipped: they belong to something already listed.
         let mut items = Vec::new();
         let mut current_impl: Option<String> = None;
         let mut impl_ends = 0usize;
@@ -237,22 +224,21 @@ impl ItemFinder for RustItems {
                 i += 1;
                 continue;
             };
-            // Inside an `impl`, a method's name is qualified by the type — that is
-            // what a caller writes and therefore what it should be asked for by.
+            // A method is named `Type::method`, as a caller writes it.
             let qname = match (&current_impl, kind) {
-                (_, "impl") => format!("impl {name}"),
+                (_, ItemKind::Impl) => format!("impl {name}"),
                 (Some(ty), _) if i < impl_ends => format!("{ty}::{name}"),
                 _ => name.clone(),
             };
-            items.push(ItemSig {
+            items.push(ItemSignature {
                 name: qname,
-                kind: kind.to_string(),
-                exported: t.starts_with("pub"),
+                kind,
+                exported: is_exported(t),
                 start_line: i as u32 + 1,
                 end_line: end as u32 + 1,
-                signature: t.trim_end_matches('{').trim().to_string(),
+                signature: signature_of(t),
             });
-            if kind == "impl" {
+            if kind == ItemKind::Impl {
                 current_impl = Some(name);
                 impl_ends = end;
                 i += 1;
@@ -270,10 +256,8 @@ impl ItemFinder for RustItems {
     }
 
     fn find(&self, source: &str, name: &str) -> Option<Item> {
-        // `Type::method` — search the type's `impl` blocks, not the type itself. The
-        // struct declaration does not contain the method, and a method can live in
-        // any of several blocks (`impl T`, `impl Trait for T`), so every one of them
-        // is tried and the answer comes from whichever actually has it.
+        // `Type::method` is looked for in every `impl` block of the type, `impl T` and
+        // `impl Trait for T` alike, since the caller cannot know which one holds it.
         if let Some((ty, method)) = name.split_once("::") {
             let lines: Vec<&str> = source.lines().collect();
             for (i, l) in lines.iter().enumerate() {
@@ -286,10 +270,13 @@ impl ItemFinder for RustItems {
                 let block = lines[i..=end].join("\n");
                 if let Some(inner) = self.find(&block, method) {
                     return Some(Item {
-                        name: name.to_string(),
-                        start_line: i as u32 + inner.start_line,
-                        end_line: i as u32 + inner.end_line,
-                        ..inner
+                        sig: ItemSignature {
+                            name: name.to_string(),
+                            start_line: i as u32 + inner.sig.start_line,
+                            end_line: i as u32 + inner.sig.end_line,
+                            ..inner.sig
+                        },
+                        text: inner.text,
                     });
                 }
             }
@@ -298,14 +285,11 @@ impl ItemFinder for RustItems {
 
         let lines: Vec<&str> = source.lines().collect();
         let (decl, kind) = lines.iter().enumerate().find_map(|(i, l)| {
-            let t = l.trim_start();
-            KINDS
-                .iter()
-                .find_map(|k| declares(t, k, name).then_some((i, *k)))
+            let (kind, at) = declared_keyword(l.trim_start())?;
+            declares(&l.trim_start()[at + kind.keyword().len()..], name).then_some((i, kind))
         })?;
 
-        // Everything attached above it. A doc comment and its attributes are part of
-        // the definition even though the compiler lets them float.
+        // The doc comment and attributes directly above belong to the item.
         let mut start = decl;
         while start > 0 {
             let prev = lines[start - 1].trim_start();
@@ -317,49 +301,97 @@ impl ItemFinder for RustItems {
         }
 
         let end = balance_from(&lines, decl)?;
+        let declared = lines[decl].trim_start();
         Some(Item {
-            name: name.to_string(),
-            kind: kind.to_string(),
-            start_line: start as u32 + 1,
-            end_line: end as u32 + 1,
+            sig: ItemSignature {
+                name: name.to_string(),
+                kind,
+                exported: is_exported(declared),
+                start_line: start as u32 + 1,
+                end_line: end as u32 + 1,
+                signature: signature_of(declared),
+            },
             text: lines[start..=end].join("\n"),
         })
     }
 }
 
-impl RustItems {
-    /// The declaration keyword and name on this line, if it declares something.
-    fn declaration(trimmed: &str) -> Option<(&'static str, String)> {
-        for kind in KINDS {
-            let Some(at) = trimmed.find(kind) else {
-                continue;
-            };
-            if !trimmed[..at].split_whitespace().all(|w| {
-                matches!(
-                    w,
-                    "pub" | "async" | "unsafe" | "const" | "extern" | "default"
-                ) || w.starts_with("pub(")
-            }) {
-                continue;
-            }
-            let rest = trimmed[at + kind.len()..].trim_start();
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if !name.is_empty() {
-                return Some((kind, name));
-            }
+impl RustItemFinder {
+    /// Returns the declaration keyword and name on this line, if it declares something.
+    fn declaration(trimmed: &str) -> Option<(ItemKind, String)> {
+        let (kind, at) = declared_keyword(trimmed)?;
+        if kind == ItemKind::Impl {
+            return impl_target(&trimmed[at..]).map(|target| (kind, target.to_string()));
         }
-        None
+        let rest = trimmed[at + kind.keyword().len()..].trim_start();
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        (!name.is_empty()).then_some((kind, name))
     }
 }
 
-/// Does this line contain `name` as a whole token?
-///
-/// Whole-token, so `blame` does not match `blame_range` — the same reason `declares`
-/// checks the boundary. A substring match here would report every longer name that
-/// happens to start the same way as something that breaks.
+/// Returns the keyword a trimmed line declares an item with and where it starts, reading whole
+/// words: the modifiers before it (`pub`, `pub(crate)`, `async`, `unsafe`, `default`, `extern`
+/// with its ABI string, and `const` before `fn`) are passed over, and the first other word must
+/// be the keyword itself, so `const fn_count` is a `const` and `fn x()` called in an expression is
+/// nothing.
+fn declared_keyword(trimmed: &str) -> Option<(ItemKind, usize)> {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut at = 0;
+    loop {
+        at += trimmed[at..].len() - trimmed[at..].trim_start().len();
+        let rest = &trimmed[at..];
+        let word_len = rest.find(|c: char| !is_ident(c)).unwrap_or(rest.len());
+        let word = &rest[..word_len];
+        let after = &rest[word_len..];
+        let modifier_len = match word {
+            "pub" => match after.strip_prefix('(') {
+                Some(scope) => word_len + 1 + scope.find(')')? + 1,
+                None => word_len,
+            },
+            "async" | "unsafe" | "default" => word_len,
+            "extern" => {
+                let abi = after.trim_start();
+                match abi.strip_prefix('"') {
+                    Some(quoted) => rest.len() - abi.len() + 1 + quoted.find('"')? + 1,
+                    None => word_len,
+                }
+            }
+            "const" if next_word(after) == Some("fn") || next_word(after) == Some("unsafe") => {
+                word_len
+            }
+            _ => {
+                let kind = ItemKind::ALL.into_iter().find(|k| k.keyword() == word)?;
+                return Some((kind, at));
+            }
+        };
+        at += modifier_len;
+    }
+}
+
+/// Returns the first word of `s` after any leading whitespace.
+fn next_word(s: &str) -> Option<&str> {
+    let s = s.trim_start();
+    let end = s
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(s.len());
+    (end > 0).then(|| &s[..end])
+}
+
+/// Returns whether a trimmed declaration line makes its item visible outside its module.
+fn is_exported(trimmed: &str) -> bool {
+    trimmed.starts_with("pub")
+}
+
+/// Returns a trimmed declaration line without the brace that opens its block.
+fn signature_of(trimmed: &str) -> String {
+    trimmed.trim_end_matches('{').trim().to_string()
+}
+
+/// Returns whether `line` contains `name` as a whole token, so `blame` does not match
+/// `blame_range`.
 fn mentions(line: &str, name: &str) -> bool {
     let boundary = |c: char| !(c.is_alphanumeric() || c == '_');
     let mut from = 0usize;
@@ -376,89 +408,211 @@ fn mentions(line: &str, name: &str) -> bool {
     false
 }
 
-/// Is this the head of an `impl` block for `ty`?
-///
-/// Matches both `impl Ty` and `impl Trait for Ty`, because a method the caller named
-/// as `Ty::method` can be in either and the caller has no reason to know which.
+/// Returns whether this line opens an `impl Ty` or `impl Trait for Ty` block.
 fn is_impl_of(trimmed: &str, ty: &str) -> bool {
-    let Some(rest) = trimmed.strip_prefix("impl") else {
-        return false;
-    };
+    impl_target(trimmed) == Some(ty)
+}
+
+/// Returns the type an `impl` line implements for, the `Ty` of `impl<T> Trait for Ty<T> {`, or
+/// `None` when the line does not start with `impl` or the type has no name of its own (`[T; 3]`,
+/// `(A, B)`, `&T`).
+fn impl_target(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix("impl")?;
+    if !rest.starts_with(|c: char| c == '<' || c.is_whitespace()) {
+        return None;
+    }
     let rest = rest.trim_start();
-    // `impl<T> Ty` — step over the generics.
-    let rest = if let Some(after) = rest.strip_prefix('<') {
-        match after.find('>') {
-            Some(i) => after[i + 1..].trim_start(),
-            None => return false,
-        }
-    } else {
-        rest
+    let rest = match rest.strip_prefix('<') {
+        Some(generics) => generics[closing_angle(generics)? + 1..].trim_start(),
+        None => rest,
     };
     // The type is what stands before the opening brace, after any `Trait for`.
     let head = rest.split('{').next().unwrap_or(rest).trim();
     let target = head.rsplit(" for ").next().unwrap_or(head).trim();
-    // Ignore a generic argument list on the type itself: `Ty<'a>` is still `Ty`.
-    let target = target.split(['<', ' ']).next().unwrap_or(target);
-    target == ty
+    // The name is the leading path; a generic argument list is not part of it: `Ty<'a>` is `Ty`.
+    let end = target
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'))
+        .unwrap_or(target.len());
+    let name = &target[..end];
+    name.starts_with(|c: char| c.is_alphabetic() || c == '_')
+        .then_some(name)
 }
 
-/// Does this line declare `kind name`?
-///
-/// Matched on the token rather than with `contains`, so `fn blame_range` is not
-/// returned for `blame` and a call site is not mistaken for a definition.
-fn declares(trimmed: &str, kind: &str, name: &str) -> bool {
-    let Some(at) = trimmed.find(kind) else {
-        return false;
-    };
-    // Only modifiers may precede it — otherwise this is a use, not a declaration.
-    if !trimmed[..at].split_whitespace().all(|w| {
-        matches!(
-            w,
-            "pub" | "async" | "unsafe" | "const" | "extern" | "default"
-        ) || w.starts_with("pub(")
-    }) {
-        return false;
+/// Returns the index in `s` of the `>` that closes a generic list opened just before `s`; the
+/// `>` of an `->` does not close it.
+fn closing_angle(s: &str) -> Option<usize> {
+    let mut depth = 1u32;
+    let mut prev = ' ';
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' if prev != '-' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        prev = c;
     }
-    let rest = trimmed[at + kind.len()..].trim_start();
-    let Some(after) = rest.strip_prefix(name) else {
+    None
+}
+
+/// Returns whether `after_keyword`, the rest of a declaration line after its keyword, names
+/// `name` as a whole token, so `fn blame_range` is not `blame`.
+fn declares(after_keyword: &str, name: &str) -> bool {
+    let Some(after) = after_keyword.trim_start().strip_prefix(name) else {
         return false;
     };
     // `fn blame(` and `fn blame<T>` yes; `fn blame_range(` no.
     after.is_empty() || !after.starts_with(|c: char| c.is_alphanumeric() || c == '_')
 }
 
-/// The line the block opened at `decl` closes on.
-///
-/// `None` when it never balances — a truncated file, or a declaration with no body.
-/// Returning the rest of the file instead would be the silent half-answer this
-/// module exists to prevent.
+/// Returns the line the item declared at `decl` ends on: where its block closes, or, for an item
+/// with no block, the `;` that ends it. `None` means it never ends, as in a truncated file.
+/// Delimiters inside comments, string and raw string literals and char literals are not counted,
+/// and a literal or block comment may span lines. A `;` inside parentheses or brackets (`[u8;
+/// 32]`) does not end the item.
 fn balance_from(lines: &[&str], decl: usize) -> Option<usize> {
-    let mut depth = 0i32;
+    let mut lex = LexState::Code;
+    let mut depth = 0u32;
+    let mut nest = 0u32;
     let mut seen = false;
     for (i, line) in lines.iter().enumerate().skip(decl) {
-        let mut in_str = false;
-        let mut prev = ' ';
-        for c in line.chars() {
-            match c {
-                '"' if prev != '\\' => in_str = !in_str,
-                '{' if !in_str => {
+        let chars: Vec<char> = line.chars().collect();
+        let mut at = 0;
+        while at < chars.len() {
+            let (next, delim) = step(lex, &chars, at);
+            lex = next.lex;
+            at = next.at;
+            match delim {
+                Some('{') => {
                     depth += 1;
                     seen = true;
                 }
-                '}' if !in_str => {
+                Some('}') if depth > 0 => {
                     depth -= 1;
                     if seen && depth == 0 {
                         return Some(i);
                     }
                 }
+                Some('(' | '[') => nest += 1,
+                Some(')' | ']') => nest = nest.saturating_sub(1),
                 // A one-line `type X = Y;` or `const N: u32 = 1;` never opens a brace.
-                ';' if !in_str && !seen => return Some(i),
+                Some(';') if !seen && nest == 0 => return Some(i),
                 _ => {}
             }
-            prev = c;
+        }
+        if lex == LexState::LineComment {
+            lex = LexState::Code;
         }
     }
     None
+}
+
+/// Where the lexer is between two characters of Rust source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LexState {
+    Code,
+    LineComment,
+    /// Inside a block comment, at this nesting depth (Rust block comments nest).
+    BlockComment(u32),
+    Str,
+    /// Inside a raw string closed by `"` and this many `#`.
+    RawStr(usize),
+}
+
+/// The lexer's position after one step: its state and the next index to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Cursor {
+    lex: LexState,
+    at: usize,
+}
+
+/// Reads one token of `chars` at `at` in state `lex`, and returns where it leaves the lexer and
+/// the delimiter or semicolon it read in code, if it was one.
+fn step(lex: LexState, chars: &[char], at: usize) -> (Cursor, Option<char>) {
+    let c = chars[at];
+    let peek = |k: usize| chars.get(at + k).copied();
+    let to = |lex, len| Cursor { lex, at: at + len };
+    match lex {
+        LexState::LineComment => (to(lex, chars.len() - at), None),
+        LexState::BlockComment(n) => match (c, peek(1)) {
+            ('*', Some('/')) if n == 1 => (to(LexState::Code, 2), None),
+            ('*', Some('/')) => (to(LexState::BlockComment(n - 1), 2), None),
+            ('/', Some('*')) => (to(LexState::BlockComment(n + 1), 2), None),
+            _ => (to(lex, 1), None),
+        },
+        LexState::Str => match c {
+            '\\' => (to(lex, 2.min(chars.len() - at)), None),
+            '"' => (to(LexState::Code, 1), None),
+            _ => (to(lex, 1), None),
+        },
+        LexState::RawStr(hashes) => {
+            let closes = c == '"' && (1..=hashes).all(|k| peek(k) == Some('#'));
+            if closes {
+                (to(LexState::Code, 1 + hashes), None)
+            } else {
+                (to(lex, 1), None)
+            }
+        }
+        LexState::Code => code_step(chars, at),
+    }
+}
+
+/// Reads one token in code: a comment or literal opening, a char literal whole, or one char.
+fn code_step(chars: &[char], at: usize) -> (Cursor, Option<char>) {
+    let c = chars[at];
+    let peek = |k: usize| chars.get(at + k).copied();
+    let to = |lex, len| Cursor { lex, at: at + len };
+    let starts_token = at == 0 || !is_ident(chars[at - 1]);
+    match c {
+        '/' if peek(1) == Some('/') => (to(LexState::LineComment, 2), None),
+        '/' if peek(1) == Some('*') => (to(LexState::BlockComment(1), 2), None),
+        '"' => (to(LexState::Str, 1), None),
+        'r' | 'b' if starts_token => match raw_string_open(&chars[at..]) {
+            Some((hashes, len)) => (to(LexState::RawStr(hashes), len), None),
+            None => (to(LexState::Code, 1), None),
+        },
+        '\'' => (to(LexState::Code, char_literal_len(&chars[at..])), None),
+        '{' | '}' | ';' | '(' | ')' | '[' | ']' => (to(LexState::Code, 1), Some(c)),
+        _ => (to(LexState::Code, 1), None),
+    }
+}
+
+/// Returns the `#` count and length of a raw string opening (`r"`, `r#"`, `br##"`) at the start
+/// of `rest`, or `None` when it is an identifier that starts with `r` or `b`.
+fn raw_string_open(rest: &[char]) -> Option<(usize, usize)> {
+    let after_b = usize::from(rest.first() == Some(&'b'));
+    if rest.get(after_b) != Some(&'r') {
+        return None;
+    }
+    let hashes = rest[after_b + 1..]
+        .iter()
+        .take_while(|&&c| c == '#')
+        .count();
+    let quote = after_b + 1 + hashes;
+    (rest.get(quote) == Some(&'"')).then_some((hashes, quote + 1))
+}
+
+/// Returns how many chars the `'` at the start of `rest` begins: a whole char literal (`'{'`,
+/// `'\''`, `'\u{7b}'`), or just the quote of a lifetime or label (`'a`).
+fn char_literal_len(rest: &[char]) -> usize {
+    match rest.get(1) {
+        // The escaped char is skipped before looking for the closing quote, so `'\''` closes
+        // at its fourth char.
+        Some('\\') => rest
+            .get(3..)
+            .and_then(|t| t.iter().position(|&c| c == '\''))
+            .map_or(1, |k| k + 4),
+        Some(_) if rest.get(2) == Some(&'\'') => 3,
+        _ => 1,
+    }
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 #[cfg(test)]
@@ -492,12 +646,10 @@ impl RepoScope {
 pub type Line = u32;
 "#;
 
-    /// The whole point: a definition comes back whole, with the doc comment that says
-    /// why it is shaped the way it is.
     #[test]
     fn a_function_comes_back_with_its_doc_comment_and_nothing_after_it() {
-        let it = RustItems.find(SRC, "blame").expect("found");
-        assert_eq!(it.kind, "fn");
+        let it = RustItemFinder.find(SRC, "blame").expect("found");
+        assert_eq!(it.sig.kind, ItemKind::Fn);
         assert!(
             it.text.starts_with("    /// Who last touched"),
             "{}",
@@ -511,11 +663,9 @@ pub type Line = u32;
         );
     }
 
-    /// A brace inside a string literal is not a brace. Counting it would end the
-    /// function early and hand back something that does not compile.
     #[test]
     fn a_brace_inside_a_string_does_not_close_the_block() {
-        let it = RustItems.find(SRC, "blame").unwrap();
+        let it = RustItemFinder.find(SRC, "blame").unwrap();
         assert!(it.text.contains("a } brace in a string"));
         assert!(
             it.text.contains("vec![rel.to_string()"),
@@ -524,100 +674,82 @@ pub type Line = u32;
         );
     }
 
-    /// `blame` must not return `blame_range`. Matching on `contains` would.
     #[test]
     fn a_longer_name_starting_with_the_same_prefix_is_a_different_item() {
-        let short = RustItems.find(SRC, "blame").unwrap();
-        let long = RustItems.find(SRC, "blame_range").unwrap();
-        assert_ne!(short.start_line, long.start_line);
+        let short = RustItemFinder.find(SRC, "blame").unwrap();
+        let long = RustItemFinder.find(SRC, "blame_range").unwrap();
+        assert_ne!(short.sig.start_line, long.sig.start_line);
         assert!(long.text.contains("blame_range"));
     }
 
-    /// Line numbers are 1-based so they line up with `grep -n`, which is where the
-    /// agent got the name in the first place.
     #[test]
     fn line_numbers_are_one_based_and_match_the_source() {
-        let it = RustItems.find(SRC, "RepoScope").unwrap();
+        let it = RustItemFinder.find(SRC, "RepoScope").unwrap();
         let lines: Vec<&str> = SRC.lines().collect();
-        assert!(lines[it.start_line as usize - 1].contains("/// What a scope is"));
-        assert!(lines[it.end_line as usize - 1].trim() == "}");
+        assert!(lines[it.sig.start_line as usize - 1].contains("/// What a scope is"));
+        assert!(lines[it.sig.end_line as usize - 1].trim() == "}");
     }
 
-    /// A struct's attributes come with it — `#[derive(Debug)]` is part of what the
-    /// type is, not decoration above it.
     #[test]
     fn attributes_above_a_definition_belong_to_it() {
-        let it = RustItems.find(SRC, "RepoScope").unwrap();
+        let it = RustItemFinder.find(SRC, "RepoScope").unwrap();
         assert!(it.text.contains("#[derive(Debug)]"), "{}", it.text);
     }
 
-    /// `Type::method` narrows to that impl first, so a method name that appears in
-    /// several impls resolves to the one asked for.
     #[test]
     fn a_qualified_name_resolves_within_its_impl() {
-        let it = RustItems.find(SRC, "RepoScope::blame").expect("found");
+        let it = RustItemFinder.find(SRC, "RepoScope::blame").expect("found");
         assert!(it.text.contains("pub fn blame(&self"), "{}", it.text);
         let lines: Vec<&str> = SRC.lines().collect();
         assert!(
-            lines[it.start_line as usize - 1].contains("Who last touched"),
+            lines[it.sig.start_line as usize - 1].contains("Who last touched"),
             "the qualified line numbers are absolute, not relative to the impl"
         );
     }
 
-    /// A one-line item with no block still has an end.
     #[test]
     fn a_declaration_with_no_body_ends_at_its_semicolon() {
-        let it = RustItems.find(SRC, "Line").expect("found");
-        assert_eq!(it.kind, "type");
+        let it = RustItemFinder.find(SRC, "Line").expect("found");
+        assert_eq!(it.sig.kind, ItemKind::Type);
         assert!(it.text.contains("pub type Line = u32;"), "{}", it.text);
     }
 
-    /// Not found is not found. A partial answer is the failure this exists to avoid,
-    /// so there is no "closest match".
     #[test]
     fn something_that_is_not_there_is_reported_absent_rather_than_approximated() {
-        assert!(RustItems.find(SRC, "nonexistent").is_none());
-        assert!(RustItems.find(SRC, "RepoScope::nonexistent").is_none());
+        assert!(RustItemFinder.find(SRC, "nonexistent").is_none());
+        assert!(RustItemFinder.find(SRC, "RepoScope::nonexistent").is_none());
     }
 
-    /// A call is not a definition.
     #[test]
     fn a_use_of_a_name_is_not_mistaken_for_its_definition() {
         let src = "fn caller() {\n    other.blame(1);\n}\n";
         assert!(
-            RustItems.find(src, "blame").is_none(),
+            RustItemFinder.find(src, "blame").is_none(),
             "a call site is not a definition"
         );
     }
 
-    /// An unbalanced file yields nothing rather than the rest of the file.
     #[test]
     fn a_block_that_never_closes_is_not_answered_with_the_remainder() {
         let src = "pub fn broken() {\n    let x = 1;\n";
-        assert!(RustItems.find(src, "broken").is_none());
+        assert!(RustItemFinder.find(src, "broken").is_none());
     }
-    /// Against a real 39 KB file, on the case that motivated this.
-    ///
-    /// A refactor of `RepoScope::blame` needs `RepoScope::blame`. Reading the file to
-    /// get it costs 39,576 bytes; guessing a window around the `grep` hit is what an
-    /// agent actually did — two windows, ~10.7 KB, for the ~20 lines that mattered.
-    /// Asking for the definition costs under a kilobyte and cannot be half-right.
-    #[test]
-    fn a_definition_from_a_real_file_costs_a_fraction_of_the_file() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tars-git/src/repo.rs");
-        let Ok(src) = std::fs::read_to_string(path) else {
-            return; // not a checkout with that crate; nothing to assert against
-        };
 
-        let it = RustItems
-            .find(&src, "RepoScope::blame")
+    /// A sample with the shapes of a real module, owned by this crate so that another crate's
+    /// wording cannot turn these tests red.
+    const SAMPLE: &str = include_str!("../../tests/fixtures/outline_sample.rs");
+
+    #[test]
+    fn a_definition_costs_a_fraction_of_the_file() {
+        let it = RustItemFinder
+            .find(SAMPLE, "RepoScope::blame")
             .expect("the function is there");
-        assert_eq!(it.kind, "fn");
+        assert_eq!(it.sig.kind, ItemKind::Fn);
         assert!(
-            it.text.len() < src.len() / 20,
+            it.text.len() < SAMPLE.len() / 4,
             "{} of {} bytes",
             it.text.len(),
-            src.len()
+            SAMPLE.len()
         );
         assert!(
             it.text.contains("pub fn blame("),
@@ -625,45 +757,38 @@ pub type Line = u32;
             it.text
         );
         assert!(
-            it.text.trim_end().ends_with('}'),
-            "and all of the body: {}",
+            it.text.trim_end().ends_with('}') && it.text.contains("unwrap_or_default"),
+            "and all of the body, past the braces in literals and comments: {}",
             it.text
         );
         assert!(
-            it.text.contains("///"),
+            it.text.contains("/// Returns who last touched"),
             "with the doc comment that says why it is shaped that way"
         );
 
-        // A type, a free function, and a private helper all resolve the same way.
         for name in ["BlameLine", "patch_paths", "RepoScope::safe_rev"] {
-            let found = RustItems
-                .find(&src, name)
+            let found = RustItemFinder
+                .find(SAMPLE, name)
                 .unwrap_or_else(|| panic!("{name} not found"));
             assert!(
-                found.start_line > 0 && found.end_line >= found.start_line,
+                found.sig.start_line > 0 && found.sig.end_line >= found.sig.start_line,
                 "{name}"
             );
         }
     }
 
-    /// The rung between "this file exists" and "here are 39 KB". Against the real
-    /// file: an outline of a 974-line source costs a fraction of it, and it is what
-    /// makes asking for a definition by name possible — you cannot ask for
-    /// `RepoScope::blame` if you do not know it is there.
     #[test]
-    fn an_outline_of_a_real_file_lists_what_can_be_asked_for() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tars-git/src/repo.rs");
-        let Ok(src) = std::fs::read_to_string(path) else {
-            return;
-        };
-
-        let o = RustItems.outline(&src);
-        assert!(
-            o.headline.as_deref().unwrap_or("").contains("RepoScope"),
-            "{:?}",
-            o.headline
+    fn an_outline_lists_what_can_be_asked_for() {
+        let o = RustItemFinder.outline(SAMPLE);
+        assert_eq!(
+            o.headline.as_deref(),
+            Some(
+                "`RepoScope` answers questions about one checkout: who touched a line, what a \
+                 patch changes."
+            ),
+            "the first non-empty `//!` line, past an empty one"
         );
-        assert!(o.lines > 900);
+        assert_eq!(o.lines as usize, SAMPLE.lines().count());
         assert!(
             o.imports.iter().any(|i| i.contains("std::path")),
             "{:?}",
@@ -671,28 +796,28 @@ pub type Line = u32;
         );
 
         let names: Vec<&str> = o.items.iter().map(|i| i.name.as_str()).collect();
-        // Qualified, because that is what a caller writes and therefore what it
-        // should be asked for by.
         for want in [
             "RepoScope",
             "RepoScope::blame",
             "RepoScope::apply",
+            "RepoScope::safe_rev",
             "BlameLine",
             "patch_paths",
+            "Line",
+            "MAX_LINES",
         ] {
             assert!(names.contains(&want), "{want} missing from {names:?}");
         }
 
-        // Signatures only. An outline carrying bodies is the wall of text it replaces.
         let rendered: usize = o
             .items
             .iter()
             .map(|i| i.signature.len() + i.name.len())
             .sum();
         assert!(
-            rendered < src.len() / 10,
+            rendered < SAMPLE.len() / 3,
             "{rendered} of {} bytes",
-            src.len()
+            SAMPLE.len()
         );
         assert!(
             !o.items.iter().any(|i| i.signature.contains('\n')),
@@ -700,18 +825,14 @@ pub type Line = u32;
         );
     }
 
-    /// The headline comes from the file's own module doc. Anything inferred would be
-    /// a guess competing with a statement its author already made.
     #[test]
     fn the_headline_is_the_files_own_first_words() {
         let src = "//! `Thing` — what it is.\n//! more\n\nuse a::b;\npub fn f() {}\n";
-        let o = RustItems.outline(src);
+        let o = RustItemFinder.outline(src);
         assert_eq!(o.headline.as_deref(), Some("`Thing` — what it is."));
         assert_eq!(o.imports, vec!["a::b".to_string()]);
     }
 
-    /// Methods of an `impl` are listed; things nested deeper are not. Listing every
-    /// inner binding turns the outline back into the file.
     #[test]
     fn methods_are_listed_but_their_innards_are_not() {
         let src = "\
@@ -723,7 +844,7 @@ impl T {
     }
 }
 ";
-        let names: Vec<String> = RustItems
+        let names: Vec<String> = RustItemFinder
             .outline(src)
             .items
             .iter()
@@ -736,21 +857,19 @@ impl T {
         assert!(!names.contains(&"helper".to_string()), "nested: {names:?}");
         assert!(names.contains(&"impl T".to_string()), "{names:?}");
 
-        let o = RustItems.outline(src);
+        let o = RustItemFinder.outline(src);
         let method = o.items.iter().find(|i| i.name == "T::method").unwrap();
         assert!(method.exported, "`pub fn` is visible outside: {method:?}");
     }
 
-    /// A file with nothing in it outlines to nothing, rather than to a guess.
     #[test]
     fn an_empty_file_outlines_to_nothing() {
-        let o = RustItems.outline("");
+        let o = RustItemFinder.outline("");
         assert!(o.headline.is_none());
         assert!(o.items.is_empty());
         assert_eq!(o.lines, 0);
     }
-    /// The distinction a bare grep cannot make. "What breaks if I change this" needs
-    /// the definition kept OUT of the list of things to fix, and the imports kept in.
+
     #[test]
     fn references_are_classified_not_just_located() {
         let src = "\
@@ -765,43 +884,168 @@ fn caller() {
 /// see blame for details
 struct Holder { f: fn() -> u32 }
 ";
-        let refs = RustItems.refs(src, "blame");
-        let kinds: Vec<RefKind> = refs.iter().map(|r| r.kind).collect();
-        assert!(kinds.contains(&RefKind::Import), "{refs:#?}");
-        assert!(kinds.contains(&RefKind::Definition), "{refs:#?}");
-        assert!(kinds.contains(&RefKind::Call), "{refs:#?}");
-        // The doc comment mentions it and is neither — reported as itself, not guessed.
-        assert!(kinds.contains(&RefKind::Mention), "{refs:#?}");
+        let refs = RustItemFinder.refs(src, "blame");
+        let kinds: Vec<OccurrenceKind> = refs.iter().map(|r| r.kind).collect();
+        assert!(kinds.contains(&OccurrenceKind::Import), "{refs:#?}");
+        assert!(kinds.contains(&OccurrenceKind::Definition), "{refs:#?}");
+        assert!(kinds.contains(&OccurrenceKind::Call), "{refs:#?}");
+        assert!(kinds.contains(&OccurrenceKind::Mention), "{refs:#?}");
     }
 
-    /// Whole-token, so changing `blame` does not report every `blame_range` as a site
-    /// that breaks.
     #[test]
     fn a_longer_name_is_not_reported_as_a_reference() {
         let src = "fn blame_range() {}\nlet y = blame_range();\n";
         assert!(
-            RustItems.refs(src, "blame").is_empty(),
+            RustItemFinder.refs(src, "blame").is_empty(),
             "{:?}",
-            RustItems.refs(src, "blame")
+            RustItemFinder.refs(src, "blame")
         );
-        assert_eq!(RustItems.refs(src, "blame_range").len(), 2);
+        assert_eq!(RustItemFinder.refs(src, "blame_range").len(), 2);
     }
 
-    /// Real file, real question: where is `blame` used, and is its definition kept
-    /// out of the list?
     #[test]
-    fn references_in_a_real_file_separate_the_definition_from_the_uses() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../tars-git/src/repo.rs");
-        let Ok(src) = std::fs::read_to_string(path) else {
-            return;
-        };
-
-        let refs = RustItems.refs(&src, "blame");
-        let defs: Vec<&Ref> = refs
+    fn references_separate_the_definition_from_the_uses() {
+        let refs = RustItemFinder.refs(SAMPLE, "blame");
+        let defs: Vec<&Occurrence> = refs
             .iter()
-            .filter(|r| r.kind == RefKind::Definition)
+            .filter(|r| r.kind == OccurrenceKind::Definition)
             .collect();
         assert_eq!(defs.len(), 1, "one definition: {defs:#?}");
         assert!(refs.len() > 1, "and uses besides it: {}", refs.len());
+    }
+
+    fn end_of(src: &str) -> Option<usize> {
+        let lines: Vec<&str> = src.lines().collect();
+        balance_from(&lines, 0)
+    }
+
+    #[test]
+    fn a_brace_char_literal_does_not_count() {
+        assert_eq!(end_of("fn f() {\n    let c = '}';\n}\n"), Some(2));
+        assert_eq!(end_of("fn f() {\n    let c = 'x';\n}\n"), Some(2));
+    }
+
+    #[test]
+    fn an_escaped_quote_char_literal_does_not_open_a_string() {
+        assert_eq!(
+            end_of("fn f() {\n    let c = '\\'';\n    let d = '}';\n}\n"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_lifetime_is_not_a_char_literal() {
+        assert_eq!(end_of("fn f<'a>(x: &'a str) {\n    g('}');\n}\n"), Some(2));
+    }
+
+    #[test]
+    fn a_brace_in_a_raw_string_does_not_count() {
+        assert_eq!(end_of("fn f() {\n    let s = r#\"}\"#;\n}\n"), Some(2));
+        assert_eq!(end_of("fn f() {\n    let s = br\"}\";\n}\n"), Some(2));
+    }
+
+    #[test]
+    fn a_string_spanning_lines_hides_its_braces() {
+        assert_eq!(end_of("fn f() {\n    let s = \"a\n}\n\";\n}\n"), Some(4));
+    }
+
+    #[test]
+    fn a_brace_in_a_comment_does_not_count() {
+        assert_eq!(end_of("fn f() {\n    // }\n}\n"), Some(2));
+        assert_eq!(end_of("fn f() {\n    /* } /* } */ } */\n}\n"), Some(2));
+    }
+
+    #[test]
+    fn an_identifier_ending_in_r_is_not_a_raw_string() {
+        assert_eq!(
+            end_of("fn f() {\n    let br = 1; let r = \"}\";\n}\n"),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn an_array_type_in_a_signature_does_not_end_the_item() {
+        let src = "pub fn digest(x: &[u8]) -> [u8; 32] {\n    let mut out = [0u8; 32];\n    out[0] = x[0];\n    out\n}\n";
+        assert_eq!(end_of(src), Some(4));
+    }
+
+    #[test]
+    fn an_array_type_in_an_impl_header_does_not_end_the_impl() {
+        let src = "impl<const N: usize> From<[u8; N]> for W {\n    fn from(_: [u8; N]) -> Self { W }\n}\n";
+        assert_eq!(end_of(src), Some(2));
+    }
+
+    #[test]
+    fn a_semicolon_outside_brackets_still_ends_a_blockless_item() {
+        assert_eq!(end_of("struct S([u8; 4]);\nfn g() {}\n"), Some(0));
+        assert_eq!(end_of("type A = [u8; 4];\nfn g() {}\n"), Some(0));
+    }
+
+    #[test]
+    fn an_impl_names_the_type_it_implements_for() {
+        assert_eq!(impl_target("impl Ty {"), Some("Ty"));
+        assert_eq!(impl_target("impl<T> Trait for Ty<T> {"), Some("Ty"));
+        assert_eq!(impl_target("impl<F: Fn() -> u8> Ty<F> {"), Some("Ty"));
+        assert_eq!(
+            impl_target("impl<const N: usize> From<[u8; N]> for W {"),
+            Some("W")
+        );
+        assert_eq!(impl_target("implement {"), None);
+    }
+
+    #[test]
+    fn an_impl_with_a_space_before_its_generics_still_names_its_type() {
+        assert_eq!(impl_target("impl <T> Ty<T> {"), Some("Ty"));
+    }
+
+    #[test]
+    fn an_impl_for_a_type_without_a_name_gives_none() {
+        assert_eq!(impl_target("impl<T> Tr for [T; 3] {"), None);
+        assert_eq!(impl_target("impl<A, B> Tr for (A, B) {"), None);
+        assert_eq!(impl_target("impl<'a, T> Tr for &'a T {"), None);
+    }
+
+    #[test]
+    fn an_impl_for_an_array_adds_no_broken_names_to_the_outline() {
+        let src = "trait Tr { fn b(); }\nimpl<T> Tr for [T; 3] {\n    fn b() {}\n}\n";
+        let outline = RustItemFinder.outline(src);
+        assert!(
+            outline.items.iter().all(|i| !i.name.contains('[')),
+            "{:?}",
+            outline.items.iter().map(|i| &i.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn an_impl_with_a_const_generic_array_is_outlined_whole() {
+        let src = "struct W;\nimpl<const N: usize> From<[u8; N]> for W {\n    fn from(_: [u8; N]) -> Self { W }\n}\n";
+        let outline = RustItemFinder.outline(src);
+        let names: Vec<&str> = outline.items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["W", "impl W", "W::from"]);
+    }
+
+    #[test]
+    fn a_const_whose_name_starts_with_fn_is_a_const() {
+        let outline = RustItemFinder.outline("pub const fn_count: usize = 3;\n");
+        assert_eq!(outline.items.len(), 1, "{:?}", outline.items);
+        assert_eq!(outline.items[0].kind, ItemKind::Const);
+        assert_eq!(outline.items[0].name, "fn_count");
+    }
+
+    #[test]
+    fn an_extern_c_fn_is_a_fn() {
+        let src = "pub extern \"C\" fn callback(x: i32) -> i32 {\n    x\n}\n";
+        let outline = RustItemFinder.outline(src);
+        assert_eq!(outline.items.len(), 1, "{:?}", outline.items);
+        assert_eq!(outline.items[0].kind, ItemKind::Fn);
+        assert_eq!(outline.items[0].name, "callback");
+        assert!(RustItemFinder.find(src, "callback").is_some());
+    }
+
+    #[test]
+    fn a_const_fn_is_a_fn() {
+        let outline = RustItemFinder.outline("pub const fn zero() -> u8 {\n    0\n}\n");
+        assert_eq!(outline.items[0].kind, ItemKind::Fn);
+        assert_eq!(outline.items[0].name, "zero");
     }
 }

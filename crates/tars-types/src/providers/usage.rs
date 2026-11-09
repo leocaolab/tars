@@ -1,38 +1,29 @@
-//! Token + cost accounting.
+//! Counts the tokens a call used ([`Usage`]) and prices them ([`Pricing`], [`CostUsd`]).
 
 use serde::{Deserialize, Serialize};
 
-/// Token usage for a single request. All fields are cumulative for the
-/// entire response (input + all output, including tool calls and
-/// thinking tokens).
+/// The tokens one request used, each field counted over the whole response. A field a
+/// record does not carry reads as zero, so a partial record still reports what it has.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Usage {
-    /// Input tokens billed at full rate.
+    /// The whole prompt's tokens, including `cached_input_tokens` and `cache_creation_tokens`.
     pub input_tokens: u64,
-    /// Output tokens (completion + tool args + thinking, depending on provider).
+    /// Output tokens: completion and tool arguments, and thinking when the provider bundles it.
     pub output_tokens: u64,
-    /// Tokens served from prefix cache. **Discount accounting only**:
-    /// the canonical contract for this struct is OpenAI-style — the
-    /// figure in `input_tokens` is the *total* prompt size and includes
-    /// `cached_input_tokens` and `cache_creation_tokens`. Provider
-    /// adapters whose wire format reports them disjointly (e.g.
-    /// Anthropic) must normalize at parse time so `cost_for` can apply
-    /// rates uniformly. The `cached_input_tokens` figure represents the
-    /// portion that was billed at the discounted rate.
+    /// The part of `input_tokens` served from the prefix cache at the discounted rate. As in
+    /// OpenAI's form it is a subset of `input_tokens`; an adapter whose wire reports them
+    /// disjointly (Anthropic) adds them up when parsing, so [`Pricing::cost_for`] applies one rule.
     pub cached_input_tokens: u64,
-    /// Tokens spent on cache *creation* (Anthropic only). Like
-    /// `cached_input_tokens` above, this is treated as a subset of
-    /// `input_tokens` (provider adapters normalize to that convention).
-    /// Billed at the cache-creation rate (≥ standard input rate).
+    /// The part of `input_tokens` spent creating a cache entry (Anthropic only), billed at the
+    /// cache-creation rate.
     pub cache_creation_tokens: u64,
-    /// Provider-side internal "thinking" tokens, when the provider
-    /// distinguishes them from output. Not all providers expose this.
+    /// Thinking tokens, when the provider reports them apart from output.
     pub thinking_tokens: u64,
 }
 
 impl Usage {
-    /// Sum two usage records — useful for accumulating across retries
-    /// or chained calls. Saturating to prevent overflow surprises.
+    /// Returns the field-wise sum of two usages, saturating at `u64::MAX`.
     pub fn merge(self, other: Self) -> Self {
         Self {
             input_tokens: self.input_tokens.saturating_add(other.input_tokens),
@@ -47,8 +38,18 @@ impl Usage {
         }
     }
 
-    /// Sum of input + output + thinking. Used for context-window budget
-    /// validation.
+    /// Returns the larger of each figure of two usage reports of one response.
+    pub(crate) fn max_each(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.max(other.input_tokens),
+            output_tokens: self.output_tokens.max(other.output_tokens),
+            cached_input_tokens: self.cached_input_tokens.max(other.cached_input_tokens),
+            cache_creation_tokens: self.cache_creation_tokens.max(other.cache_creation_tokens),
+            thinking_tokens: self.thinking_tokens.max(other.thinking_tokens),
+        }
+    }
+
+    /// Returns input + output + thinking tokens, saturating.
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens
             .saturating_add(self.output_tokens)
@@ -56,9 +57,8 @@ impl Usage {
     }
 }
 
-/// Cost in USD as a fixed-point value. `f64` would suffice for
-/// display, but we use a wrapper so accidental arithmetic with raw
-/// floats is rejected at compile time.
+/// A cost in US dollars, held as an `f64` in a wrapper so it does not mix with raw floats by
+/// accident.
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CostUsd(pub f64);
@@ -75,11 +75,8 @@ impl CostUsd {
 
 impl std::ops::Add for CostUsd {
     type Output = Self;
-    /// Sum two costs. Both operands are expected to be finite and
-    /// non-negative (the only way to *build* a `CostUsd` in-crate is
-    /// [`Pricing::cost_for`], which guarantees that). A `debug_assert`
-    /// catches a NaN/Inf that slipped in via the public tuple field in
-    /// CI; release builds add as-is (no silent clamp on a pure operator).
+    /// Adds two costs. [`Pricing::cost_for`] only makes finite, non-negative ones, but the field
+    /// is public: a non-finite operand fails a `debug_assert` and is added as is in release.
     fn add(self, rhs: Self) -> Self {
         debug_assert!(
             self.0.is_finite() && rhs.0.is_finite(),
@@ -92,7 +89,7 @@ impl std::ops::Add for CostUsd {
 }
 
 impl std::iter::Sum for CostUsd {
-    /// See [`Add`](CostUsd::add) for the finiteness expectation.
+    /// Sums costs; a non-finite total fails a `debug_assert`, as `add` does.
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         let total: f64 = iter.map(|c| c.0).sum();
         debug_assert!(
@@ -103,112 +100,130 @@ impl std::iter::Sum for CostUsd {
     }
 }
 
-/// Per-model pricing. All units are USD per 1M tokens. We deliberately
-/// keep this in the type layer so the provider doesn't need to know
-/// the table; the registry / config layer computes prices.
+/// A price in US dollars per million tokens. It is finite, not negative and at most
+/// [`Rate::MAX`], so any token count priced at it costs a finite, non-negative amount.
+#[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "f64", into = "f64")]
+pub struct Rate(f64);
+
+/// A number that is not a [`Rate`]: NaN, infinite, negative or above [`Rate::MAX`].
+#[derive(Clone, Copy, Debug, PartialEq, thiserror::Error)]
+#[error(
+    "a rate is US dollars per million tokens from 0 to {}, got {0}",
+    Rate::MAX
+)]
+pub struct InvalidRateError(pub f64);
+
+impl Rate {
+    pub const ZERO: Rate = Rate(0.0);
+    /// One dollar per token, far above any real price; a cap keeps `u64::MAX` tokens at the
+    /// highest rate a finite cost.
+    pub const MAX: f64 = 1_000_000.0;
+
+    /// Returns `usd_per_million` as a rate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRateError`] for NaN, an infinity, a negative number or one above
+    /// [`Rate::MAX`].
+    pub fn new(usd_per_million: f64) -> Result<Self, InvalidRateError> {
+        if (0.0..=Self::MAX).contains(&usd_per_million) {
+            Ok(Self(usd_per_million))
+        } else {
+            Err(InvalidRateError(usd_per_million))
+        }
+    }
+
+    pub fn usd_per_million(self) -> f64 {
+        self.0
+    }
+
+    /// Returns what `tokens` cost at this rate.
+    fn cost_of(self, tokens: f64) -> f64 {
+        tokens * self.0 / 1_000_000.0
+    }
+}
+
+impl TryFrom<f64> for Rate {
+    type Error = InvalidRateError;
+    fn try_from(v: f64) -> Result<Self, Self::Error> {
+        Self::new(v)
+    }
+}
+
+impl From<Rate> for f64 {
+    fn from(r: Rate) -> f64 {
+        r.0
+    }
+}
+
+impl std::fmt::Display for Rate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A model's prices. Config fills it in; providers carry it and do not know the price table.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct Pricing {
-    pub input_per_million: f64,
-    pub output_per_million: f64,
-    /// Discount rate for cached input tokens — typical 25-50% of standard.
-    pub cached_input_per_million: f64,
-    /// Cache *creation* surcharge (Anthropic) — typical 125% of standard.
-    pub cache_creation_per_million: f64,
-    /// Rate for thinking / reasoning tokens when the provider distinguishes
-    /// them from output. Defaults to 0 — set explicitly per provider.
-    /// Anthropic bundles thinking into `output_tokens` (use 0). Gemini
-    /// reports `thoughts_token_count` separately and bills at the output
-    /// rate (set equal to `output_per_million`). Audit findings
-    /// `tars-types-src-usage-{4,5,7}`: thinking was previously missing
-    /// from cost altogether for providers that report it separately.
-    pub thinking_per_million: f64,
+    pub input_per_million: Rate,
+    pub output_per_million: Rate,
+    /// The rate of cached input tokens, typically 25-50% of the input rate.
+    pub cached_input_per_million: Rate,
+    /// The rate of cache-creation tokens (Anthropic), typically 125% of the input rate.
+    pub cache_creation_per_million: Rate,
+    /// The rate of thinking tokens a provider reports apart from output; 0 by default. Anthropic
+    /// bundles thinking into `output_tokens` (0 here); Gemini reports `thoughts_token_count`
+    /// separately and bills it at the output rate.
+    pub thinking_per_million: Rate,
 }
 
 impl Pricing {
-    /// True iff this provider is on a flat-rate / subscription /
-    /// local-server plan where per-call dollar cost is meaningless.
-    /// Budget middleware short-circuits to "no cap" on these — same
-    /// rule used by both `PerCallBudgetService` and
-    /// `TenantBudgetService` (formerly two copies of this check).
+    /// Returns whether every rate is zero, as on a flat-rate, subscription or local plan where a
+    /// per-call dollar cost means nothing; the budget middleware puts no cap on such a provider.
     pub fn is_zero(&self) -> bool {
-        // Must check ALL five rates: a provider that bills $0 on
-        // input/output but charges for cached / cache-creation /
-        // thinking tokens is NOT free, and short-circuiting budget on
-        // input+output alone would let real spend through uncapped.
-        self.input_per_million == 0.0
-            && self.output_per_million == 0.0
-            && self.cached_input_per_million == 0.0
-            && self.cache_creation_per_million == 0.0
-            && self.thinking_per_million == 0.0
+        // A provider free on input and output can still charge for cache or thinking tokens.
+        [
+            self.input_per_million,
+            self.output_per_million,
+            self.cached_input_per_million,
+            self.cache_creation_per_million,
+            self.thinking_per_million,
+        ]
+        .iter()
+        .all(|r| *r == Rate::ZERO)
     }
 
-    /// Best-effort *pre-call* USD estimate for `req`: chars/4 input
-    /// tokens + the request's `max_output_tokens` (or
-    /// `default_max_output` when unset). Not a strict upper bound —
-    /// chars/4 underestimates CJK / multi-byte scripts; image content
-    /// isn't counted. Budget middleware uses this for soft caps and
-    /// reconciles against the real `Usage` post-call via
-    /// [`Self::cost_for`].
-    ///
-    /// Extracted from the previously-duplicated `estimate_cost_usd`
-    /// methods on `PerCallBudgetService` and `TenantBudgetService`
-    /// (the explicit "kept duplicated" comment on the latter was the
-    /// `arc scan --judge` finding for this clone).
+    /// Returns a rough pre-call cost of `req` in US dollars: text bytes / 4 as input tokens, plus
+    /// the request's `max_output_tokens` (or `default_max_output`) at the output rate. It is not
+    /// an upper bound: bytes / 4 misjudges multi-byte scripts and images are not counted.
     pub fn estimate_chat_cost(&self, req: &crate::ChatRequest, default_max_output: u32) -> f64 {
-        let mut input_chars: usize = req.system.as_deref().map(str::len).unwrap_or(0);
+        let mut input_bytes: usize = req.system.as_deref().map(str::len).unwrap_or(0);
         for m in &req.messages {
             for block in m.content() {
                 if let crate::ContentBlock::Text { text } = block {
-                    input_chars = input_chars.saturating_add(text.len());
+                    input_bytes = input_bytes.saturating_add(text.len());
                 }
-                // Image blocks: no char-based proxy. Vision token counts
-                // are model-specific (Anthropic ~1.6k/image, OpenAI
-                // scales by tile count). V1 punts and treats
-                // image-bearing messages as char-only.
+                // Images are not counted: their token cost is model-specific (Anthropic ~1.6k
+                // per image, OpenAI by tile count).
             }
         }
-        let estimated_input_tokens = (input_chars as f64) / 4.0;
-        let max_output_tokens = req
-            .max_output_tokens
-            .map(|t| t as f64)
-            .unwrap_or(default_max_output as f64);
-
-        let estimate = estimated_input_tokens * self.input_per_million / 1_000_000.0
-            + max_output_tokens * self.output_per_million / 1_000_000.0;
-        // Same finiteness/non-negativity guard as `cost_for`: a budget
-        // soft-cap that compares against a NaN/negative estimate would
-        // misbehave. Loud in CI, clamped to 0 in release.
-        debug_assert!(
-            estimate.is_finite() && estimate >= 0.0,
-            "estimate_chat_cost produced non-finite/negative cost: {estimate}"
-        );
-        if estimate.is_finite() && estimate >= 0.0 {
-            estimate
-        } else {
-            0.0
-        }
+        let max_output_tokens = req.max_output_tokens.unwrap_or(default_max_output);
+        self.input_per_million.cost_of(input_bytes as f64 / 4.0)
+            + self
+                .output_per_million
+                .cost_of(f64::from(max_output_tokens))
     }
 
+    /// Returns what `usage` costs, billing the cached and cache-creation parts of `input_tokens`
+    /// at their own rates and the rest at the input rate.
+    ///
+    /// When cached + creation exceed `input_tokens` (an adapter normalization bug) it warns,
+    /// since the result under-bills, and does not panic: the counts are the provider's.
     pub fn cost_for(&self, usage: &Usage) -> CostUsd {
-        // `cached_input_tokens` and `cache_creation_tokens` are subsets
-        // of `input_tokens` per the documented convention on `Usage`;
-        // subtract before applying the full input rate.
-        //
-        // Audit `tars-types-src-usage-{1,2}`: the original code only
-        // had `debug_assert!`, which is compiled out in release.
-        // For a cost-correctness invariant that's "silent under-bill
-        // in production" — exactly the failure mode that doesn't
-        // get noticed for months. Now we still `debug_assert` for
-        // CI loudness, AND emit a `tracing::warn` in release so the
-        // saturation event is observable in production logs.
         let cached_plus_creation = usage
             .cached_input_tokens
             .saturating_add(usage.cache_creation_tokens);
-        debug_assert!(
-            cached_plus_creation <= usage.input_tokens,
-            "Usage invariant: cached + creation ({cached_plus_creation}) > input ({})",
-            usage.input_tokens,
-        );
         if cached_plus_creation > usage.input_tokens {
             tracing::warn!(
                 input_tokens = usage.input_tokens,
@@ -219,30 +234,75 @@ impl Pricing {
             );
         }
         let billable_input = usage.input_tokens.saturating_sub(cached_plus_creation);
-        let total = (billable_input as f64) * self.input_per_million / 1_000_000.0
-            + (usage.output_tokens as f64) * self.output_per_million / 1_000_000.0
-            + (usage.cached_input_tokens as f64) * self.cached_input_per_million / 1_000_000.0
-            + (usage.cache_creation_tokens as f64) * self.cache_creation_per_million / 1_000_000.0
-            + (usage.thinking_tokens as f64) * self.thinking_per_million / 1_000_000.0;
-        // Cost must be a finite, non-negative dollar amount. A NaN /
-        // negative here means a corrupt pricing table (e.g. a negative
-        // per-million rate) — loud in CI, and clamped to 0 in release
-        // so a budget gate never under-counts into the negatives.
-        debug_assert!(
-            total.is_finite() && total >= 0.0,
-            "cost_for produced non-finite/negative cost: {total} (check pricing table)"
-        );
-        CostUsd(if total.is_finite() && total >= 0.0 {
-            total
-        } else {
-            0.0
-        })
+        CostUsd(
+            self.input_per_million.cost_of(billable_input as f64)
+                + self.output_per_million.cost_of(usage.output_tokens as f64)
+                + self
+                    .cached_input_per_million
+                    .cost_of(usage.cached_input_tokens as f64)
+                + self
+                    .cache_creation_per_million
+                    .cost_of(usage.cache_creation_tokens as f64)
+                + self
+                    .thinking_per_million
+                    .cost_of(usage.thinking_tokens as f64),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rate(v: f64) -> Rate {
+        Rate::new(v).unwrap()
+    }
+
+    #[test]
+    fn a_rate_is_a_finite_non_negative_number_up_to_the_cap() {
+        assert!(Rate::new(0.0).is_ok());
+        assert!(Rate::new(Rate::MAX).is_ok());
+        for bad in [-0.01, f64::NAN, f64::INFINITY, Rate::MAX * 1.000_001] {
+            assert!(Rate::new(bad).is_err(), "{bad}");
+        }
+        assert!(serde_json::from_str::<Rate>("-1.0").is_err());
+        assert_eq!(serde_json::from_str::<Rate>("2.5").unwrap(), rate(2.5));
+    }
+
+    #[test]
+    fn provider_usage_with_more_cached_than_input_is_priced_without_a_panic() {
+        let p = Pricing {
+            input_per_million: rate(1.0),
+            cached_input_per_million: rate(1.0),
+            ..Pricing::default()
+        };
+        let u = Usage {
+            input_tokens: 10,
+            cached_input_tokens: 20,
+            ..Usage::default()
+        };
+        let cost = std::panic::catch_unwind(|| p.cost_for(&u)).expect("cost_for panicked");
+        assert!((cost.0 - 20.0 / 1_000_000.0).abs() < 1e-12, "{cost:?}");
+    }
+
+    #[test]
+    fn the_largest_usage_at_the_highest_rate_costs_a_finite_amount() {
+        let p = Pricing {
+            input_per_million: rate(Rate::MAX),
+            output_per_million: rate(Rate::MAX),
+            cached_input_per_million: rate(Rate::MAX),
+            cache_creation_per_million: rate(Rate::MAX),
+            thinking_per_million: rate(Rate::MAX),
+        };
+        let u = Usage {
+            input_tokens: u64::MAX,
+            output_tokens: u64::MAX,
+            cached_input_tokens: 0,
+            cache_creation_tokens: 0,
+            thinking_tokens: u64::MAX,
+        };
+        assert!(p.cost_for(&u).as_f64().is_finite());
+    }
 
     #[test]
     fn merge_saturates() {
@@ -259,15 +319,9 @@ mod tests {
 
     #[test]
     fn pricing_includes_thinking_tokens_when_priced() {
-        // Audit `tars-types-src-usage-{4,5,7}`: thinking was previously
-        // omitted from cost. Gemini reports thoughts_token_count
-        // separately and bills it at the output rate.
         let p = Pricing {
-            input_per_million: 0.0,
-            output_per_million: 0.0,
-            cached_input_per_million: 0.0,
-            cache_creation_per_million: 0.0,
-            thinking_per_million: 30.0,
+            thinking_per_million: rate(30.0),
+            ..Default::default()
         };
         let u = Usage {
             input_tokens: 0,
@@ -283,11 +337,11 @@ mod tests {
     #[test]
     fn pricing_subtracts_cached_from_billable_input() {
         let p = Pricing {
-            input_per_million: 10.0,
-            output_per_million: 30.0,
-            cached_input_per_million: 1.0,
-            cache_creation_per_million: 12.5,
-            thinking_per_million: 0.0,
+            input_per_million: rate(10.0),
+            output_per_million: rate(30.0),
+            cached_input_per_million: rate(1.0),
+            cache_creation_per_million: rate(12.5),
+            thinking_per_million: Rate::ZERO,
         };
         // 1000 input total, 200 of which were cached.
         let u = Usage {

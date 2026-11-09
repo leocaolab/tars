@@ -1,17 +1,15 @@
-//! `tars-tools` — Tool trait + ToolRegistry + built-in tools.
+//! Runs the tool calls a model emits: the [`Tool`] trait, a [`ToolRegistry`] that turns a call
+//! into the tool message the next turn sees, and the built-in tools.
 //!
-//! The executable side of tool calling. The [`Tool`] trait defines what a
-//! callable tool looks like; the [`ToolRegistry`] holds a name-keyed table of
-//! them and dispatches tool calls.
-//!
-//! This crate does NOT own the agent loop. It provides the execution primitives
-//! (`tools.dispatch(call) → Message`) for the agent to use.
+//! It does not run the agent loop and does not decide when a call is made.
+
+#![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod registry;
 mod tool;
 
 pub mod builtins;
 
-pub use registry::{ToolRegistry, ToolRegistryError};
-pub use tars_sandbox::{SandboxMode, SandboxPolicy};
-pub use tool::{Tool, ToolContext, ToolError, ToolResult};
+pub use registry::{DuplicateToolError, ToolRegistry};
+pub use tars_sandbox::{ResolveRootError, SandboxMode, SandboxPolicy};
+pub use tool::{FsOp, Tool, ToolEnv, ToolError, ToolOutput};

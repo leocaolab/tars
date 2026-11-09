@@ -1,10 +1,6 @@
-//! Caller identity. See `docs/architecture/10-security-model.md` §4.
-//!
-//! Provider layer doesn't enforce these — that's the Pipeline IAM
-//! middleware's job. We carry them through so layers
-//! that need them (cache key construction, audit) have access.
-
-use std::collections::HashSet;
+//! Describes who a call is made for. Providers carry a principal and never enforce it: the
+//! pipeline's IAM middleware does, and the audit reads it. The model is in
+//! `docs/architecture/10-security-model.md` §4.
 
 use serde::{Deserialize, Serialize};
 
@@ -34,25 +30,17 @@ pub enum PrincipalKind {
     },
 }
 
-/// A grant of permission. The *exact* shape of a Scope is intentionally
-/// open: different IAM backends (RBAC / ABAC / OPA) project their rules
-/// onto this representation. The Provider layer never inspects scope
-/// bodies — it only forwards them so the Cache layer can mix them into
-/// the cache key.
+/// A grant of permission, the shape each IAM backend (RBAC / ABAC / OPA) projects its rules
+/// onto. Providers never read a scope's body.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Scope {
     pub resource: String,
-    /// Sorted for stable hashing.
+    /// Sorted and deduplicated when built through [`Scope::new`], so it hashes stably.
     pub actions: Vec<String>,
 }
 
 impl Scope {
-    /// **An empty `actions` vec produces zero
-    /// [`scope_keys`](Principal::scope_keys) entries** — a scope that
-    /// grants no action contributes nothing to the per-IAM-view cache
-    /// bucket. That is a caller bug (a grant of nothing is meaningless);
-    /// use [`is_empty`](Self::is_empty) to assert non-emptiness at the
-    /// IAM boundary if you build scopes from untrusted input.
+    /// Builds a scope with its actions sorted and deduplicated.
     pub fn new(resource: impl Into<String>, actions: Vec<String>) -> Self {
         let mut actions = actions;
         actions.sort();
@@ -69,83 +57,12 @@ impl Scope {
 }
 
 impl Principal {
-    /// For a [`PrincipalKind::DelegatedSubprocess`] the effective set is
-    /// the reduced `scope_subset` — the whole point of delegation is
-    /// that the child acts with *fewer* permissions than the parent.
+    /// Returns the scopes this principal acts with; a delegated subprocess acts with its
+    /// `scope_subset`, not its parent's `scopes`.
     pub fn effective_scopes(&self) -> &[Scope] {
         match &self.kind {
             PrincipalKind::DelegatedSubprocess { scope_subset, .. } => scope_subset,
             _ => &self.scopes,
         }
-    }
-
-    /// Used by the cache key factory to make hash buckets per-IAM-view.
-    ///
-    /// Uses [`effective_scopes`](Self::effective_scopes), so a delegated
-    /// subprocess hashes against its *reduced* `scope_subset` rather
-    /// than the parent's full `scopes`. Reading `self.scopes` directly
-    /// here was a scope-reduction bypass: a subprocess would have shared
-    /// a cache bucket with the broadly-scoped parent.
-    pub fn scope_keys(&self) -> Vec<String> {
-        let mut set: HashSet<String> = HashSet::new();
-        for s in self.effective_scopes() {
-            for a in &s.actions {
-                set.insert(format!("{}:{}", s.resource, a));
-            }
-        }
-        let mut v: Vec<String> = set.into_iter().collect();
-        v.sort();
-        v
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scope_keys_are_sorted_and_deduped() {
-        let p = Principal {
-            id: PrincipalId::new("u1"),
-            tenant: TenantId::new("t"),
-            display_name: "alice".into(),
-            kind: PrincipalKind::HumanUser { email: None },
-            scopes: vec![
-                Scope::new("repo:foo", vec!["read".into(), "write".into()]),
-                Scope::new("repo:bar", vec!["read".into()]),
-                // Duplicate — should collapse.
-                Scope::new("repo:foo", vec!["read".into()]),
-            ],
-        };
-        assert_eq!(
-            p.scope_keys(),
-            vec![
-                "repo:bar:read".to_string(),
-                "repo:foo:read".to_string(),
-                "repo:foo:write".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn delegated_subprocess_hashes_reduced_subset_not_parent_scopes() {
-        // The parent's `scopes` are broad, but the subprocess was
-        // delegated only a read on repo:foo. scope_keys() must reflect
-        // the reduced subset, not the parent's full grant.
-        let p = Principal {
-            id: PrincipalId::new("child"),
-            tenant: TenantId::new("t"),
-            display_name: "child".into(),
-            kind: PrincipalKind::DelegatedSubprocess {
-                parent: PrincipalId::new("parent"),
-                scope_subset: vec![Scope::new("repo:foo", vec!["read".into()])],
-            },
-            // Broad parent scopes that must NOT leak into the cache key.
-            scopes: vec![
-                Scope::new("repo:foo", vec!["read".into(), "write".into()]),
-                Scope::new("repo:bar", vec!["admin".into()]),
-            ],
-        };
-        assert_eq!(p.scope_keys(), vec!["repo:foo:read".to_string()]);
     }
 }

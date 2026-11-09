@@ -4,71 +4,66 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Telemetry init (tracing subscriber + format + future OTel) — Doc 08."
+description = "The event log: the call, wire and journal tables, their ports, and the Parquet adapter."
 
 [lints]
 workspace = true
 
 [dependencies]
-# tars-types brings only the `env::` module here — see lib.rs's
-# `from_verbosity` for the single use site. We accept the edge
-# because tars-types is the workspace's universal-foundation crate;
-# centralising every env-var read (ARC-L5-COH-18) is worth it.
 tars-types = { path = "../tars-types" }
-# `run_report` reads the trajectory event log (`AgentEventLog` /
-# `EventRecord`) to roll a trajectory up into a `RunReport`. tars-storage
-# does NOT depend on tars-melt, so this stays acyclic.
-tars-storage = { path = "../tars-storage" }
+tars-utils = { path = "../tars-utils" }
+# `ParquetTrajectoryLog` implements its durable store journal port. Optional, so a writer that
+# needs only the log ports links no SQLite.
+tars-storage = { path = "../tars-storage", optional = true }
 
 tracing.workspace = true
-tracing-subscriber.workspace = true
 thiserror.workspace = true
-# `event.rs` derives Serialize/Deserialize on the AgentEvent model.
 serde.workspace = true
-# `event.rs` hashes the idempotency key + system prompt (SHA256);
-# `event/content_ref.rs` hashes record content into a `ContentRef`.
 sha2.workspace = true
-# `event/pipeline_events.rs` — `PipelineEvent`/`LlmCallFinished` event IDs.
 uuid.workspace = true
 
-# `event/` module — the read-able E-pillar stores (PipelineEventLog +
-# LlmRecordStore), moved here from tars-storage (Doc 17 §7). These deps
-# back the SQLite impls; mirror tars-storage's non-optional usage.
 tokio.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
-# sqlx — both E-pillar stores (LlmRecordStore + PipelineEventLog) are on
-# the async-pool path now (one SqlitePool per DB file, embedded sqlx
-# migrations). The one driver; rusqlite and refinery are gone from the tree.
-sqlx.workspace = true
-# The one pool primitive (Db::open) — stores take an injected pool (connection 下沉).
-# Record bytes for LlmRecordStore.
 bytes.workspace = true
 
-# OTLP trace export (B-8 / M5 observability). Opt-in: the `otlp` feature
-# pulls a heavy tonic/grpc/prost stack, so it's OFF by default — only
-# builds that actually export traces pay for it. Enabling the feature +
-# setting `OTEL_EXPORTER_OTLP_ENDPOINT` turns export on at runtime.
-opentelemetry = { version = "0.27", optional = true }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"], optional = true }
-tracing-opentelemetry = { version = "0.28", optional = true }
+# The Parquet log adapter; opt-in because arrow and parquet are heavy. fs4 is the partition
+# `flock`, because std's `File::lock` is newer than the workspace MSRV.
+parquet = { version = "59.2", default-features = false, features = ["arrow", "zstd"], optional = true }
+arrow-array = { version = "59.2", optional = true }
+arrow-schema = { version = "59.2", optional = true }
+fs4 = { version = "1.1", optional = true }
+# Tenant ids become `tenant=<t>` path segments.
+percent-encoding = { version = "2", optional = true }
+# A `date=<YYYY-MM-DD>` directory name read back as the partition's day.
+chrono = { workspace = true, optional = true }
+# A merge streams its sorted inputs through `kmerge_by`.
+itertools = { version = "0.14", optional = true }
+# Frozen past-day files are uploaded to the deployment's bucket. Without `object-store-cloud` only
+# the local file system and in-memory stores are built in.
+object_store = { version = "0.14", optional = true }
+url = { workspace = true, optional = true }
 
 [features]
 default = []
-# Compile the OpenTelemetry OTLP span exporter + tracing→OTel bridge.
-otlp = [
-    "dep:opentelemetry",
-    "dep:opentelemetry_sdk",
-    "dep:opentelemetry-otlp",
-    "dep:tracing-opentelemetry",
+parquet = [
+    "dep:tars-storage",
+    "dep:parquet",
+    "dep:arrow-array",
+    "dep:arrow-schema",
+    "dep:fs4",
+    "dep:percent-encoding",
+    "dep:chrono",
+    "dep:itertools",
+    "dep:object_store",
+    "dep:url",
 ]
+# The S3 (and S3-compatible), GCS and Azure clients a bucket URL may name.
+object-store-cloud = ["parquet", "object_store/aws", "object_store/gcp", "object_store/azure"]
 
 [dev-dependencies]
-# `run_report` tests build a real SqliteAgentEventLog in a temp dir.
+futures.workspace = true
 tempfile = "3"
-# The in-memory span/metric exporters used by the otlp bridge tests.
-# Only pulled when the `otlp` feature is active (tests are
-# `#[cfg(feature = "otlp")]`). tokio drives the metrics PeriodicReader.
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "testing"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# The durable store file's tests read it on a read-only connection of their own, as the debugger does.
+sqlx.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

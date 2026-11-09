@@ -1,16 +1,6 @@
-//! Cache directives + Provider-side cache handles.
-//!
-//! Two distinct concerns live here:
-//!
-//! 1. [`CacheDirective`] — what the *caller* asks the Provider to do
-//!    about caching for *this request* (auto / mark boundary / use
-//!    pre-created handle).
-//! 2. [`ProviderCacheHandle`] — opaque reference to a Provider-side
-//!    cache object (Gemini cachedContent, Anthropic cache_control
-//!    block, …). Strict invariants:
-//!      - never serialized to clients
-//!      - tenant_namespace is mandatory
-//!      - validated by the Provider on use
+//! Says how a request asks the provider to cache ([`CacheDirective`]) and names a cache object
+//! the provider holds ([`ProviderCacheHandle`]). A handle always carries its tenant, and
+//! [`ProviderCacheHandle::validate_for_use`] checks it against the tenant about to use it.
 
 use std::time::{Duration, SystemTime};
 
@@ -18,44 +8,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{ProviderId, TenantId};
 
-/// Directs how the Provider should treat caching for this request.
+/// How the provider should cache for this request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum CacheDirective {
-    /// Let the provider auto-cache (OpenAI's implicit prefix mode).
+    /// Lets the provider cache on its own (OpenAI's implicit prefix mode).
     Auto,
-    /// Mark a cache boundary at this point in the messages stream
-    /// (Anthropic `cache_control` markers).
+    /// Marks a cache boundary at this point in the messages (Anthropic `cache_control`).
     MarkBoundary {
         #[serde(with = "duration_secs")]
         ttl: Duration,
     },
-    /// Reference an already-created Provider-side cache object
-    /// (Gemini `cachedContent`).
+    /// Uses a cache object already created on the provider (Gemini `cachedContent`).
     UseExplicit { handle: ProviderCacheHandle },
 }
 
-/// Opaque handle to a Provider-side cache object.
+/// A handle to a cache object the provider holds.
 ///
-/// **Security**: `external_id` is a bearer-style "claim ticket"
-/// §10.4) — handed back to the provider it grants access to whatever
-/// content it wraps. Never expose to clients/logs in plaintext.
-///
-/// `Debug` is implemented manually to redact `external_id`. The default
-/// derive would print it via `{:?}`, defeating the "treat as secret"
-/// invariant. Audit findings `tars-types-src-cache-2..4`.
+/// `external_id` is a bearer ticket: handed back to the provider, it grants access to the content
+/// it wraps, so `Debug` redacts it. `Serialize` writes it in plaintext.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderCacheHandle {
     pub provider: ProviderId,
-    /// Provider-side ID (e.g. `cachedContents/abc123`). Treat as secret.
+    /// The provider's id for the object (`cachedContents/abc123`); a secret.
     pub external_id: String,
-    /// Mandatory — used by Provider to reject cross-tenant use.
+    /// The tenant the object belongs to; [`Self::validate_for_use`] refuses any other.
     pub tenant_namespace: TenantId,
-    /// Audit `tars-types-src-cache-1`: serialized as epoch-millis (i64
-    /// `ms_since_epoch`) so the on-disk / on-wire format is portable
-    /// across platforms and Rust versions. Bare `SystemTime` serde uses
-    /// a tagged `(secs, nanos)` struct that is *not* a stable wire
-    /// format — pre-Unix-epoch times even error out on some platforms.
+    /// Serialized as epoch milliseconds (see [`systemtime_millis`]).
     #[serde(with = "systemtime_millis")]
     pub created_at: SystemTime,
     #[serde(with = "systemtime_millis")]
@@ -64,30 +43,41 @@ pub struct ProviderCacheHandle {
 }
 
 impl ProviderCacheHandle {
-    /// Reject a handle that's expired, malformed, or from a different
-    /// tenant. Provider adapters should call this before using the
-    /// `external_id` to fetch / reference cached content. Audit
-    /// `tars-types-src-cache-9` (encapsulation of security invariants).
+    /// Checks that the handle may be used for `expected_tenant` now, before a provider sends its
+    /// `external_id`. It reads the system clock.
     ///
-    /// **Forward-compat** — kept `pub` so
-    /// implementers can import + call without re-deriving the
-    /// four security checks (cross-tenant rejection, expiry, time
-    /// skew, empty external_id).
-    pub fn validate_for_use(&self, expected_tenant: &TenantId) -> Result<(), &'static str> {
+    /// # Errors
+    ///
+    /// Returns why the handle is refused: the tenant differs, the handle has expired,
+    /// `created_at` is after `expires_at`, or `external_id` is empty.
+    pub fn validate_for_use(&self, expected_tenant: &TenantId) -> Result<(), CacheHandleError> {
         if self.tenant_namespace != *expected_tenant {
-            return Err("ProviderCacheHandle: cross-tenant use rejected");
+            return Err(CacheHandleError::CrossTenant);
         }
         if self.expires_at <= SystemTime::now() {
-            return Err("ProviderCacheHandle: expired");
+            return Err(CacheHandleError::Expired);
         }
         if self.created_at > self.expires_at {
-            return Err("ProviderCacheHandle: created_at > expires_at");
+            return Err(CacheHandleError::CreatedAfterExpiry);
         }
         if self.external_id.is_empty() {
-            return Err("ProviderCacheHandle: external_id is empty");
+            return Err(CacheHandleError::EmptyExternalId);
         }
         Ok(())
     }
+}
+
+/// Why a [`ProviderCacheHandle`] may not be used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CacheHandleError {
+    #[error("ProviderCacheHandle: cross-tenant use rejected")]
+    CrossTenant,
+    #[error("ProviderCacheHandle: expired")]
+    Expired,
+    #[error("ProviderCacheHandle: created_at > expires_at")]
+    CreatedAfterExpiry,
+    #[error("ProviderCacheHandle: external_id is empty")]
+    EmptyExternalId,
 }
 
 impl std::fmt::Debug for ProviderCacheHandle {
@@ -106,29 +96,21 @@ impl std::fmt::Debug for ProviderCacheHandle {
     }
 }
 
-/// Diagnostic info about a cache hit, surfaced through [`crate::providers::events::ChatEvent::Started`].
+/// What the cache contributed to a response, carried by
+/// [`crate::providers::events::ChatEvent::Started`].
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CacheHitInfo {
-    /// Tokens served from prefix cache (Provider-implicit or explicit).
+    /// Input tokens the provider served from its prefix cache, implicit or explicit.
     pub cached_input_tokens: u64,
-    /// Whether an explicit handle was used (L3 / `cachedContent`).
+    /// Whether an explicit handle (`cachedContent`) was used.
     pub used_explicit_handle: bool,
-    /// True when the *response* was served entirely from L1/L2 cache —
-    /// no provider call happened. Distinct from `cached_input_tokens`,
-    /// which only marks L3 / provider-implicit prefix discounts.
-    /// cache middleware sets this on full L1 replay.
-    #[serde(default)]
-    pub replayed_from_cache: bool,
 }
 
-/// Portable epoch-millis serde for `SystemTime`. Stored as `i64` so the
-/// pre-1970 case (rare but possible on time-skewed test fixtures) is
-/// representable instead of erroring out the way the default
-/// `SystemTime` serde does on negative durations.
-///
-/// Public so other crates that persist `SystemTime` (cache L2,
-/// future event store) can reuse the same wire format via
+/// Serializes a `SystemTime` as `i64` epoch milliseconds, for
 /// `#[serde(with = "tars_types::systemtime_millis")]`.
+///
+/// serde's own `SystemTime` form is a `(secs, nanos)` struct that is not a stable wire format and
+/// refuses times before 1970; this one represents them as negative numbers.
 pub mod systemtime_millis {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -137,9 +119,7 @@ pub mod systemtime_millis {
     pub fn serialize<S: Serializer>(t: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::Error as _;
         let millis = match t.duration_since(UNIX_EPOCH) {
-            // `as_millis` returns u128; reject values that don't fit in
-            // i64 rather than silently wrapping into a negative (which
-            // deserialize would read back as a pre-1970 time).
+            // A u128 that does not fit is refused: wrapped, it would read back as a pre-1970 time.
             Ok(d) => i64::try_from(d.as_millis())
                 .map_err(|_| S::Error::custom("SystemTime too far in the future for i64 millis"))?,
             Err(e) => {
@@ -164,7 +144,7 @@ pub mod systemtime_millis {
     }
 }
 
-/// Custom serde for `Duration` as integer seconds — TOML / JSON friendly.
+/// Serializes a `Duration` as whole seconds, dropping any fraction.
 mod duration_secs {
     use std::time::Duration;
 
@@ -197,10 +177,6 @@ mod tests {
         }
     }
 
-    /// Audit `tars-types-src-cache-7`: only MarkBoundary was previously
-    /// covered. Auto and UseExplicit need to round-trip too — the
-    /// latter especially since it transports `ProviderCacheHandle`
-    /// with non-trivial `SystemTime` fields.
     #[test]
     fn auto_directive_round_trips() {
         let d = CacheDirective::Auto;
@@ -225,15 +201,13 @@ mod tests {
             handle: handle.clone(),
         };
         let v = serde_json::to_value(&d).unwrap();
-        // Portable epoch-millis on the wire — not a tagged secs/nanos struct.
         assert!(v["handle"]["created_at"].is_i64());
         let back: CacheDirective = serde_json::from_value(v).unwrap();
         if let CacheDirective::UseExplicit { handle: h } = back {
             assert_eq!(h.external_id, "cachedContents/abc123");
             assert_eq!(h.tenant_namespace, handle.tenant_namespace);
             assert_eq!(h.size_estimate_bytes, Some(2048));
-            // Round-trip preserves the absolute time to ms precision;
-            // we accept the truncation from sub-ms loss.
+            // The round trip keeps the time to the millisecond.
             let original_ms = now
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

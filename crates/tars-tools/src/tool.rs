@@ -1,196 +1,214 @@
-//! [`Tool`] trait + supporting types.
+//! Defines what a tool is, what it is given per call, and how it reports success and failure.
 
+use std::io;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+use tars_sandbox::{FindGitDirError, ResolveRootError, SandboxError};
 use tars_types::JsonSchema;
 
 use crate::SandboxPolicy;
 
-/// Per-call environment a [`Tool`] receives. Everything here defaults to
-/// inert, so a `ToolContext::default()` is unrestricted.
-#[derive(Clone, Default)]
-pub struct ToolContext {
-    /// Cooperative cancellation. Tools that do anything expensive
-    /// (file I/O, network, subprocess) should `select!` against
-    /// `cancel.cancelled()` so an upstream Drop / SIGINT propagates.
-    pub cancel: CancellationToken,
-    /// Working directory hint. Tools that touch the filesystem
-    /// (`fs.read_file`, future `git.*`) MAY use this to resolve
-    /// relative paths. `None` falls back to whatever the tool
-    /// considers the default (usually `std::env::current_dir`).
+/// The environment a [`Tool`] runs in, fixed when the tool is put together and the same for
+/// every call. `ToolEnv::default()` confines nothing.
+#[derive(Clone, Debug, Default)]
+pub struct ToolEnv {
+    /// Resolves relative paths for the filesystem tools, and bounds a confined read, list or
+    /// search when the tool has no root of its own.
     pub cwd: Option<PathBuf>,
-    /// OS-confinement policy a sandboxed tool reads. Default = unrestricted
-    /// (seam only today; the lift is T2).
+    /// Confines the call: `bash.run` runs under it, the read and list tools then read only under
+    /// their root, else `cwd`, the readable roots and the writable roots, and the write tools
+    /// refuse paths it does not allow, the protected git directories of the workdir and the
+    /// writable roots among them (the workdir is `cwd`, else the tool's root). With no root on
+    /// the tool and `DangerFullAccess` here, the read tools read and the write tools write
+    /// anywhere the process can; `fs.grep` and `fs.glob` stay confined. `web.fetch` and
+    /// `web.search` refuse when it cuts the network.
     pub sandbox: SandboxPolicy,
-    /// Extra READ-ONLY roots a search/read tool may reach in addition to
-    /// `cwd`. Empty = reads are confined to `cwd` (the default). A coding
-    /// agent sets this to its project's dependency-source dirs so `fs.grep`
-    /// / `fs.glob` can inspect a dependency type (READ-only) without escaping
-    /// to the whole disk — "deps read-only, workspace read-write". Write
-    /// tools ignore this; they stay confined to `cwd`.
+    /// Lists roots outside the confining root that the search and read tools may also read, such
+    /// as a project's dependency sources. Write tools ignore it.
     pub readable_roots: Vec<PathBuf>,
 }
 
-// Hand-written: `Arc<dyn Trait>` fields can't derive `Debug`. Render the trait
-// objects as presence markers; the concrete impls aren't interesting in a log.
-impl std::fmt::Debug for ToolContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolContext")
-            .field("cancel", &self.cancel)
-            .field("cwd", &self.cwd)
-            .field("sandbox", &self.sandbox)
-            .field("readable_roots", &self.readable_roots)
-            .finish()
-    }
-}
-
-/// What a [`Tool::execute`] returns on success. The `content` is what
-/// the next LLM turn sees inside [`tars_types::Message::Tool::content`];
-/// `is_error=true` flips the same flag on the assembled message so
-/// the model knows the tool failed (vs. returned an empty result).
-///
-/// `title` is a short human-readable summary of what the tool did
-/// (`"Read foo.rs"`, `"Listed src/ (23 entries)"`, `"hello.txt not
-/// found"`). It is **not** sent to the LLM — that's `content`'s job.
-/// Title is for trajectory-log readability + future TUI consumers
-/// who need a one-line "what just happened" without parsing the
-/// content blob. Empty string means "no title; consumers should fall
-/// back to the content head".
-///
-/// We model failure two ways:
-/// - [`ToolError`] — execution couldn't be attempted (bad args, tool
-///   not found, cancelled). Surfaces as `Err(_)`; the registry's
-///   dispatch helper still produces an `is_error=true` message so
-///   the LLM gets a clean signal.
-/// - `Ok(ToolResult { is_error: true, content: "explanation" })` —
-///   execution ran but produced a logical failure (file not found,
-///   git command exited non-zero, HTTP 4xx). The tool itself decides
-///   whether to surface this as `Err` or as an `is_error` Ok depending
-///   on whether the LLM is expected to recover.
+/// The output of a tool that ran. A failed operation the model can recover from, such as a
+/// missing file or an HTTP 4xx, is `is_error: true` here; [`ToolError`] is for a call that has
+/// no output for the model.
 #[derive(Clone, Debug)]
-pub struct ToolResult {
-    pub title: String,
+pub struct ToolOutput {
+    /// A one-line summary for logs (`"Read foo.rs"`); it is not sent to the model.
+    pub title: Option<String>,
+    /// The text the model sees as the tool message.
     pub content: String,
     pub is_error: bool,
 }
 
-impl ToolResult {
-    /// Build a successful (`is_error=false`) result with no title.
-    /// Prefer [`Self::titled_success`] when the tool can produce a
-    /// useful one-line summary.
+impl ToolOutput {
+    /// Returns a successful output with no title.
     pub fn success(content: impl Into<String>) -> Self {
         Self {
-            title: String::new(),
+            title: None,
             content: content.into(),
             is_error: false,
         }
     }
 
-    /// Build a successful result with a short human-readable title
-    /// (`"Read foo.rs"`, etc.). The title is for trajectory log /
-    /// TUI readability; it is NOT sent to the LLM.
+    /// Returns a successful output with a title.
     pub fn titled_success(title: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
-            title: title.into(),
+            title: Some(title.into()),
             content: content.into(),
             is_error: false,
         }
     }
 
-    /// Build a logical-failure (`is_error=true`) result with no title.
-    /// Use when the tool ran successfully but the *operation* didn't
-    /// (the LLM should adapt — e.g. file not found, retry with a
-    /// different path). Prefer [`Self::titled_error`] when a one-line
-    /// summary is available.
+    /// Returns a failed operation with no title.
     pub fn error(content: impl Into<String>) -> Self {
         Self {
-            title: String::new(),
+            title: None,
             content: content.into(),
             is_error: true,
         }
     }
 
-    /// Build a logical-failure result with a short human-readable
-    /// title (`"hello.txt not found"`, etc.).
+    /// Returns a failed operation with a title.
     pub fn titled_error(title: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
-            title: title.into(),
+            title: Some(title.into()),
             content: content.into(),
             is_error: true,
         }
     }
 }
 
-/// Errors a Tool can surface to the dispatcher. Distinct from
-/// `ToolResult { is_error: true }`: a [`ToolError`] means the tool
-/// couldn't even attempt its work; an `is_error` result means it ran
-/// and the *operation* failed (the LLM should adapt).
+/// The filesystem operation that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FsOp {
+    Open,
+    CreateParent,
+    Inspect,
+    Read,
+    Write,
+    List,
+    Delete,
+    Rename,
+}
+
+impl std::fmt::Display for FsOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            FsOp::Open => "open",
+            FsOp::CreateParent => "create parent of",
+            FsOp::Inspect => "inspect",
+            FsOp::Read => "read",
+            FsOp::Write => "write",
+            FsOp::List => "list",
+            FsOp::Delete => "delete",
+            FsOp::Rename => "rename",
+        })
+    }
+}
+
+/// Says why a call has no output for the model: it was not attempted (bad arguments, no sandbox,
+/// no such tool), it failed in a way only the host can mend (the filesystem, a lost task), or it
+/// was cancelled, which may come after a write already landed. [`ToolRegistry::dispatch`](crate::ToolRegistry::dispatch)
+/// still turns it into an `is_error` tool message for the model.
 #[derive(Debug, Error)]
 pub enum ToolError {
-    /// Caller cancelled mid-execution.
     #[error("cancelled")]
     Cancelled,
-    /// Provided arguments don't fit the tool's input schema. Carry a
-    /// human-readable reason; the dispatcher renders it back to the
-    /// LLM so the next turn can retry with corrected args.
-    #[error("invalid arguments: {0}")]
-    InvalidArguments(String),
-    /// Tool-internal failure (filesystem permission, subprocess
-    /// spawn, network unreachable, etc.). Distinct from `Cancelled`
-    /// + `InvalidArguments` so callers can class-by-error.
-    #[error("execute: {0}")]
-    Execute(String),
+    /// The arguments do not fit the tool's input; the model sees why and can retry.
+    #[error("invalid arguments")]
+    InvalidArguments(#[source] serde_json::Error),
+    /// The filesystem failed in a way the model cannot route around by choosing another path.
+    #[error("{op} `{}`", .path.display())]
+    Io {
+        op: FsOp,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    /// `sh` could not be started. `WouldBlock` is how a `fork` refused for want of processes
+    /// (`EAGAIN`) arrives; then nothing ran, and another try may pass
+    /// ([`ToolError::is_transient`]).
+    #[error("spawn `sh -c`")]
+    Spawn(#[source] io::Error),
+    /// The sandbox the command must run under could not be built, so it did not run.
+    #[error("exec sandbox")]
+    Sandbox(#[source] SandboxError),
+    /// The workdir of a confined write cannot be resolved, so what to protect cannot be told.
+    #[error("write sandbox workdir")]
+    WriteWorkdir(#[source] ResolveRootError),
+    /// A `.git` a confined write may need to protect cannot be read.
+    #[error("write sandbox")]
+    WriteGitDir(#[source] FindGitDirError),
+    /// The blocking task a tool ran its work on panicked, or was cancelled with the runtime, so
+    /// the call has no result; the source carries the panic's message.
+    #[error("the {tool} task did not return")]
+    TaskLost {
+        tool: &'static str,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    /// The model called a tool no one registered under that name.
+    #[error("no tool registered with name `{name}`")]
+    UnknownTool { name: String },
+    /// A tool implemented outside Rust failed; `message` is what it reported, the only account
+    /// of the failure there is.
+    #[error("{message}")]
+    Foreign { message: String },
 }
 
 impl ToolError {
-    /// One-word classification for logs / metrics. Mirrors the
-    /// pattern `tars_runtime::StepError::classification` uses.
+    /// Returns whether the call had no effect and may pass on another try.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Spawn(e) if e.kind() == io::ErrorKind::WouldBlock)
+    }
+
+    /// Returns the kind of failure as one word for logs and metrics.
     pub fn classification(&self) -> &'static str {
         match self {
             Self::Cancelled => "cancelled",
             Self::InvalidArguments(_) => "invalid_arguments",
-            Self::Execute(_) => "execute",
+            Self::UnknownTool { .. } => "unknown_tool",
+            e if e.is_transient() => "execute_transient",
+            Self::Io { .. }
+            | Self::Spawn(_)
+            | Self::Sandbox(_)
+            | Self::WriteWorkdir(_)
+            | Self::WriteGitDir(_)
+            | Self::TaskLost { .. }
+            | Self::Foreign { .. } => "execute",
         }
     }
 }
 
-/// The tool contract. Implementations are stateless wrt one
-/// `execute` call: any per-invocation state belongs in the args, any
-/// per-tool config belongs on the impl struct. `Arc<dyn Tool>` is the
-/// canonical handle (registry + caller share one instance).
+/// A tool the model can call. An implementation keeps no state between calls: what varies per
+/// call is in the arguments, configuration is on the implementing struct.
 #[async_trait]
 pub trait Tool: Send + Sync + 'static {
-    /// Stable name. The LLM emits this in `ToolCall.name`; the
-    /// registry uses it for lookup. Convention: snake_case with a
-    /// `category.action` shape (`fs.read_file`, `git.fetch_pr_diff`,
-    /// `web.fetch`) so models grouping tools by category get an
-    /// implicit hint.
+    /// Returns the name the model calls the tool by, shaped `category.action` (`fs.read_file`,
+    /// `web.fetch`) so the category groups related tools for the model.
     fn name(&self) -> &str;
 
-    /// What the tool does — the model uses this to decide *when* to
-    /// call it. §3.3: explain when to use, not just what.
-    /// Aim for one or two sentences.
+    /// Returns the one or two sentences the model reads to decide when to call the tool, so it
+    /// says when to use it, not only what it does.
     fn description(&self) -> &str;
 
-    /// JSON schema for the input arguments object. The LLM sees this
-    /// when picking arguments; the dispatcher does NOT validate
-    /// against it today (cost vs. value at first cut — providers'
-    /// `strict` mode usually handles it). Tools that care about
-    /// invalid args should validate inside `execute` and return
-    /// [`ToolError::InvalidArguments`].
+    /// Returns the JSON schema the model fills the arguments from. The registry does not validate
+    /// arguments against it; `execute` checks them and returns [`ToolError::InvalidArguments`].
     fn input_schema(&self) -> &JsonSchema;
 
-    /// Execute. `args` is always a parsed JSON object (the
-    /// `ToolCall::new` constructor enforces this invariant).
+    /// Runs one call in `env`. `args` is a JSON object whenever the call was built by
+    /// `ToolCall::new` or deserialized; a tool doing file, network or subprocess work selects on
+    /// `cancel`.
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: ToolContext,
-    ) -> Result<ToolResult, ToolError>;
+        env: &ToolEnv,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput, ToolError>;
 }
 
 #[cfg(test)]
@@ -211,17 +229,19 @@ mod tests {
             "no-op test tool"
         }
         fn input_schema(&self) -> &JsonSchema {
-            // Static so we can return a borrow.
             use std::sync::OnceLock;
             static S: OnceLock<JsonSchema> = OnceLock::new();
-            S.get_or_init(|| JsonSchema::strict("StubArgs", json!({"type": "object"})))
+            S.get_or_init(|| {
+                JsonSchema::strict("StubArgs", tars_types::json_object! {"type": "object"})
+            })
         }
         async fn execute(
             &self,
             args: serde_json::Value,
-            _ctx: ToolContext,
-        ) -> Result<ToolResult, ToolError> {
-            Ok(ToolResult::success(format!("got: {args}")))
+            _env: &ToolEnv,
+            _cancel: CancellationToken,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(format!("got: {args}")))
         }
     }
 
@@ -231,7 +251,11 @@ mod tests {
         assert_eq!(t.name(), "stub");
         assert!(t.description().contains("test tool"));
         let r = t
-            .execute(json!({"k": "v"}), ToolContext::default())
+            .execute(
+                json!({"k": "v"}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         assert!(!r.is_error);
@@ -240,26 +264,23 @@ mod tests {
 
     #[test]
     fn tool_result_constructors() {
-        let s = ToolResult::success("ok");
+        let s = ToolOutput::success("ok");
         assert!(!s.is_error);
-        assert!(
-            s.title.is_empty(),
-            "untitled success defaults to empty title"
-        );
-        let e = ToolResult::error("nope");
+        assert!(s.title.is_none(), "untitled success has no title");
+        let e = ToolOutput::error("nope");
         assert!(e.is_error);
         assert_eq!(e.content, "nope");
-        assert!(e.title.is_empty());
+        assert!(e.title.is_none());
     }
 
     #[test]
     fn titled_constructors_carry_the_title_string() {
-        let s = ToolResult::titled_success("Read foo.rs", "fn main() {}");
-        assert_eq!(s.title, "Read foo.rs");
+        let s = ToolOutput::titled_success("Read foo.rs", "fn main() {}");
+        assert_eq!(s.title.as_deref(), Some("Read foo.rs"));
         assert_eq!(s.content, "fn main() {}");
         assert!(!s.is_error);
-        let e = ToolResult::titled_error("foo.rs not found", "no such file");
-        assert_eq!(e.title, "foo.rs not found");
+        let e = ToolOutput::titled_error("foo.rs not found", "no such file");
+        assert_eq!(e.title.as_deref(), Some("foo.rs not found"));
         assert!(e.is_error);
     }
 
@@ -267,9 +288,24 @@ mod tests {
     fn tool_error_classification_is_stable() {
         assert_eq!(ToolError::Cancelled.classification(), "cancelled");
         assert_eq!(
-            ToolError::InvalidArguments("x".into()).classification(),
+            ToolError::InvalidArguments(serde_json::from_str::<u8>("x").unwrap_err())
+                .classification(),
             "invalid_arguments"
         );
-        assert_eq!(ToolError::Execute("x".into()).classification(), "execute");
+        assert_eq!(
+            ToolError::Foreign {
+                message: "x".into()
+            }
+            .classification(),
+            "execute"
+        );
+        assert_eq!(
+            ToolError::UnknownTool { name: "x".into() }.classification(),
+            "unknown_tool"
+        );
+        assert_eq!(
+            ToolError::Spawn(io::Error::from(io::ErrorKind::WouldBlock)).classification(),
+            "execute_transient"
+        );
     }
 }

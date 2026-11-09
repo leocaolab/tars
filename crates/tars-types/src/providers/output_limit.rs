@@ -1,12 +1,10 @@
-//! [`OutputLimit`] — the most output tokens a bound `provider + model` will
-//! produce, and where that number came from.
+//! Records the most output tokens a bound `provider + model` will produce, and where that number
+//! came from.
 //!
-//! A request that sets no `max_output_tokens` does NOT mean "no limit": every
-//! wire protocol then applies the provider's own default (DeepSeek: 8K in
-//! non-thinking mode, against a 384K ceiling). So the service fills an unset
-//! request with the model's real ceiling, and records WHICH ceiling it used —
-//! the number alone can't say whether it was configured, measured from the
-//! provider's API, or transcribed from the shipped model table.
+//! A request with no `max_output_tokens` is not unlimited: the provider applies its own default
+//! (DeepSeek: 8K in non-thinking mode, against a 384K ceiling). So the service fills an unset
+//! request with the model's ceiling and records which ceiling it used, since the number alone
+//! does not say whether it was configured, queried from the provider or shipped in the table.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,19 +13,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutputLimit {
-    /// The provider's config pins it (`max_output_tokens` under the
-    /// provider block) — the user's number wins over any model table.
+    /// Set by `max_output_tokens` in the provider's config block, which wins over any model table.
     Configured { tokens: u32 },
-    /// The model's own ceiling, from the model catalog.
+    /// The model's own ceiling from the model catalog.
     Model { tokens: u32, source: CatalogSource },
-    /// Nothing tars knows states this model's ceiling (a local model, a model
-    /// the catalog has no row for, a provider built outside config). The
-    /// request goes out without one and the provider's default applies.
+    /// Nothing tars knows states the ceiling (a local model, a model with no catalog row, a
+    /// provider built outside config), so the request goes out without one and the provider's
+    /// default applies.
     Unknown,
 }
 
 impl OutputLimit {
-    /// The ceiling in tokens, when one is known.
+    /// Returns the ceiling in tokens, when one is known.
     pub fn tokens(&self) -> Option<u32> {
         match self {
             Self::Configured { tokens } | Self::Model { tokens, .. } => Some(*tokens),

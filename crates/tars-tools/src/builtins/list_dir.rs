@@ -1,60 +1,48 @@
-//! `fs.list_dir` — list the entries of a directory.
-//!
-//! ## Why this is the second builtin
-//!
-//! Pairs naturally with [`super::ReadFileTool`]: the LLM can't read a
-//! file it hasn't located. With only `fs.read_file`, the user prompt
-//! has to spell out exact paths; adding `fs.list_dir` lets prompts
-//! like "summarise the README in this repo" work without prompts
-//! containing literal paths.
-//!
-//! Same safety posture as `fs.read_file`: optional path-jail
-//! (canonicalize-then-starts_with), cancel-aware, hard cap on entry
-//! count to avoid blowing up the LLM context on a directory with
-//! 50 000 files.
-//!
-//! Output format: one entry per line, `<type><indent><name>[ → target]
-//! [bytes]`, sorted lexicographically. Compact enough that a typical
-//! source tree listing stays under a few KiB; structured enough that
-//! the LLM doesn't have to guess what's a directory vs. a file.
+//! `fs.list_dir`: lists a directory one entry per line as `<f|d|l|?> <name>[ -> target]
+//! [ [bytes]]`, so the model can find a file before it reads it. The entries shown are sorted by
+//! name. Past the cap, which entries are kept follows the order the directory yields them, not
+//! the alphabet, and the listing says it is truncated. Where it may list is the read jail's
+//! decision (see `read_jail`); a confined directory is then opened without following a symlink
+//! at any component, and its entries are read and looked at through that handle, so one on the
+//! way swapped for a symlink after the check refuses the listing instead of showing names from
+//! outside the roots.
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, OnceLock};
+use tokio_util::sync::CancellationToken;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::json;
 
 use tars_types::JsonSchema;
 
-use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
+use super::fs_open::{self, Entry, EntryKind};
+use super::model_can_fix;
+use super::read_jail::{OpenError, Reach, ReadJail, ReadPath};
+use crate::tool::{FsOp, Tool, ToolEnv, ToolError, ToolOutput};
+use tars_sandbox::{ResolveRootError, canonical_root};
 
-/// Default cap on entries returned per call.
-pub const DEFAULT_MAX_ENTRIES: usize = 256;
+/// Caps the entries one call returns.
+pub const DEFAULT_MAX_ENTRIES: NonZeroUsize = NonZeroUsize::new(256).expect("256 is not zero");
 
-/// Description prompt — externalized to `list_dir.txt`.
-/// See `read_file.rs::DESCRIPTION_TRIMMED` for the security rationale
-/// (compile-time embed, NOT runtime file load).
 static DESCRIPTION_TRIMMED: LazyLock<String> =
     LazyLock::new(|| include_str!("list_dir.txt").trim_end().to_string());
 
 pub struct ListDirTool {
-    /// Optional jail root. Same semantics as `ReadFileTool::with_root`.
+    /// Holds the directory a resolved path must sit inside, when set.
     root: Option<PathBuf>,
-    /// Cap on entries per call. Truncated entries are flagged in the
-    /// result text so the LLM knows the listing is incomplete.
-    max_entries: usize,
+    max_entries: NonZeroUsize,
 }
 
 #[derive(Debug, Deserialize)]
 struct ListDirArgs {
-    /// Directory path. Absolute or relative to [`ToolContext::cwd`]
-    /// (or the process cwd when context's cwd is unset).
     path: String,
 }
 
 impl ListDirTool {
-    /// Construct without a jail. Use only in trusted contexts.
+    /// Returns a tool with no root of its own; it lists anywhere the process can unless
+    /// [`ToolEnv::sandbox`] confines it to `cwd` and the readable roots.
     pub fn new() -> Self {
         Self {
             root: None,
@@ -62,54 +50,22 @@ impl ListDirTool {
         }
     }
 
-    /// Constrain listings to `root`. Mirrors
-    /// [`super::ReadFileTool::with_root`]. Returns `None` if `root`
-    /// can't be canonicalized.
-    pub fn with_root(root: impl AsRef<Path>) -> Option<Self> {
-        let canonical_root = std::fs::canonicalize(root.as_ref()).ok()?;
-        Some(Self {
-            root: Some(canonical_root),
+    /// Confines listings to `root` and the call's readable roots.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `root` cannot be canonicalized.
+    pub fn with_root(root: impl AsRef<Path>) -> Result<Self, ResolveRootError> {
+        Ok(Self {
+            root: Some(canonical_root(root.as_ref())?),
             max_entries: DEFAULT_MAX_ENTRIES,
         })
     }
 
-    /// Override the entry-count cap (default 256). Chainable.
-    pub fn max_entries(mut self, n: usize) -> Self {
+    /// Sets the entry cap; the default is 256.
+    pub fn max_entries(mut self, n: NonZeroUsize) -> Self {
         self.max_entries = n;
         self
-    }
-
-    fn resolve(&self, input: &str, cwd: Option<&Path>) -> Result<PathBuf, ToolResult> {
-        let raw = Path::new(input);
-        let combined = if raw.is_absolute() {
-            raw.to_path_buf()
-        } else if let Some(cwd) = cwd {
-            cwd.join(raw)
-        } else if let Some(root) = &self.root {
-            // With a jail and no per-call cwd, the jail IS the frame of reference. It
-            // used to fall through to the process's working directory, so a relative
-            // path was resolved against one directory and then checked against a
-            // different one. Best case that is a guaranteed "outside the allowed root"
-            // on every relative path; worst case — a jail that happens to contain the
-            // process cwd — it silently reads and writes the wrong tree.
-            root.join(raw)
-        } else {
-            raw.to_path_buf()
-        };
-        let Some(root) = &self.root else {
-            return Ok(combined);
-        };
-        let canonical = std::fs::canonicalize(&combined).map_err(|e| {
-            ToolResult::error(format!("cannot resolve path `{}`: {e}", combined.display(),))
-        })?;
-        if !canonical.starts_with(root) {
-            return Err(ToolResult::error(format!(
-                "path `{}` resolves outside the allowed root `{}`",
-                canonical.display(),
-                root.display(),
-            )));
-        }
-        Ok(canonical)
     }
 }
 
@@ -126,7 +82,6 @@ impl Tool for ListDirTool {
     }
 
     fn description(&self) -> &str {
-        // Externalized to a sibling .txt file (see DESCRIPTION_TRIMMED above).
         DESCRIPTION_TRIMMED.as_str()
     }
 
@@ -135,7 +90,7 @@ impl Tool for ListDirTool {
         S.get_or_init(|| {
             JsonSchema::strict(
                 "ListDirArgs",
-                json!({
+                tars_types::json_object! {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
@@ -145,7 +100,7 @@ impl Tool for ListDirTool {
                         }
                     },
                     "required": ["path"]
-                }),
+                },
             )
         })
     }
@@ -153,33 +108,44 @@ impl Tool for ListDirTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+        env: &ToolEnv,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
         let parsed: ListDirArgs =
-            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+            serde_json::from_value(args).map_err(ToolError::InvalidArguments)?;
 
-        let resolved = match self.resolve(&parsed.path, ctx.cwd.as_deref()) {
+        let admitted = match ReadJail::of(self.root.as_deref(), env, Reach::Path)
+            .admit(Path::new(&parsed.path))
+        {
             Ok(p) => p,
-            Err(result) => return Ok(result),
+            Err(refusal) => return Ok(ToolOutput::error(refusal.to_string())),
         };
+        let resolved = admitted.path().to_path_buf();
 
+        let cap = self.max_entries.get();
+        let list = tokio::task::spawn_blocking(move || list(&admitted, cap));
         let listing = tokio::select! {
             biased;
-            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
-            r = read_dir_capped(&resolved, self.max_entries) => r,
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+            r = list => match r {
+                Ok(r) => r,
+                Err(source) => return Err(ToolError::TaskLost {
+                tool: "fs.list_dir",
+                source,
+            }),
+            },
         };
 
-        // Title uses the basename when present (root listings use the
-        // full path because the basename would be empty / `.`).
+        // `/` has no basename, so its title uses the full path.
         let display_path = resolved
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| resolved.display().to_string());
 
         match listing {
-            Ok(ListOutcome::Ok { entries, truncated }) => {
+            Ok(Listing { entries, truncated }) => {
                 let count = entries.len();
-                let body = render_listing(&entries, truncated, self.max_entries);
+                let body = render_listing(&entries, truncated, self.max_entries.get());
                 let title = if truncated {
                     format!("Listed {display_path}/ ({count}+ entries, truncated)")
                 } else if count == 0 {
@@ -187,121 +153,75 @@ impl Tool for ListDirTool {
                 } else {
                     format!("Listed {display_path}/ ({count} entries)")
                 };
-                Ok(ToolResult::titled_success(title, body))
+                Ok(ToolOutput::titled_success(title, body))
             }
-            Ok(ListOutcome::NotFound) => Ok(ToolResult::titled_error(
+            Err(ListDirError::Open(OpenError::NotFound)) => Ok(ToolOutput::titled_error(
                 format!("{display_path} not found"),
                 format!("path `{}` not found", resolved.display()),
             )),
-            Ok(ListOutcome::NotDirectory) => Ok(ToolResult::titled_error(
+            Err(ListDirError::Open(OpenError::Symlink)) => Ok(ToolOutput::titled_error(
+                format!("{display_path} is a symbolic link"),
+                format!(
+                    "`{}`, or a directory on the way to it, became a symbolic link after it was \
+                     checked; a confined listing does not follow it",
+                    resolved.display(),
+                ),
+            )),
+            Err(ListDirError::Open(OpenError::WrongKind)) => Ok(ToolOutput::titled_error(
                 format!("{display_path} is not a directory"),
                 format!(
                     "path `{}` is not a directory; use fs.read_file for files",
                     resolved.display(),
                 ),
             )),
-            Err(e) => Err(ToolError::Execute(format!(
-                "listing `{}`: {e}",
-                resolved.display(),
-            ))),
+            Err(ListDirError::Open(OpenError::Io(e)) | ListDirError::Io(e))
+                if model_can_fix(e.kind()) =>
+            {
+                Ok(ToolOutput::titled_error(
+                    format!("{display_path} cannot be listed"),
+                    format!("listing `{}`: {e}", resolved.display()),
+                ))
+            }
+            Err(ListDirError::Open(OpenError::Io(source)) | ListDirError::Io(source)) => {
+                Err(ToolError::Io {
+                    op: FsOp::List,
+                    path: resolved,
+                    source,
+                })
+            }
         }
     }
 }
 
-#[derive(Debug)]
-struct Entry {
-    name: String,
-    kind: EntryKind,
-    /// Size in bytes for files; None for directories / symlinks.
-    size: Option<u64>,
-    /// Symlink target, if applicable.
-    target: Option<String>,
-}
-
-#[derive(Debug)]
-enum EntryKind {
-    File,
-    Dir,
-    Symlink,
-    Other,
-}
-
-impl EntryKind {
-    fn glyph(&self) -> char {
-        match self {
-            Self::File => 'f',
-            Self::Dir => 'd',
-            Self::Symlink => 'l',
-            Self::Other => '?',
-        }
+/// Returns the one-letter type an entry is shown with.
+fn glyph(kind: &EntryKind) -> char {
+    match kind {
+        EntryKind::File { .. } => 'f',
+        EntryKind::Dir => 'd',
+        EntryKind::Symlink { .. } => 'l',
+        EntryKind::Other => '?',
     }
 }
 
-enum ListOutcome {
-    Ok {
-        entries: Vec<Entry>,
-        truncated: bool,
-    },
-    NotFound,
-    NotDirectory,
+/// The entries of one directory, up to the cap.
+struct Listing {
+    entries: Vec<Entry>,
+    truncated: bool,
 }
 
-async fn read_dir_capped(path: &Path, cap: usize) -> std::io::Result<ListOutcome> {
-    use tokio::fs;
+/// Says why a directory was not listed. Anything but a directory is the wrong kind.
+enum ListDirError {
+    Open(OpenError),
+    Io(std::io::Error),
+}
 
-    // Follow symlinks so that a symlink-to-directory is correctly recognized as
-    // a directory rather than reported as NotDirectory.
-    let meta = match fs::metadata(path).await {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ListOutcome::NotFound),
-        Err(e) => return Err(e),
-    };
-    if !meta.is_dir() {
-        return Ok(ListOutcome::NotDirectory);
-    }
-
-    let mut rd = fs::read_dir(path).await?;
-    let mut entries: Vec<Entry> = Vec::new();
-    let mut truncated = false;
-    while let Some(child) = rd.next_entry().await? {
-        if entries.len() >= cap {
-            truncated = true;
-            break;
-        }
-        let name = child.file_name().to_string_lossy().to_string();
-        let child_meta = match child.metadata().await {
-            Ok(m) => m,
-            // Race: entry vanished between read_dir and metadata. Skip.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        };
-        let symlink_meta = fs::symlink_metadata(child.path()).await.ok();
-        let (kind, target) = if symlink_meta
-            .as_ref()
-            .is_some_and(|m| m.file_type().is_symlink())
-        {
-            let t = fs::read_link(child.path())
-                .await
-                .ok()
-                .map(|p| p.display().to_string());
-            (EntryKind::Symlink, t)
-        } else if child_meta.is_dir() {
-            (EntryKind::Dir, None)
-        } else if child_meta.is_file() {
-            (EntryKind::File, None)
-        } else {
-            (EntryKind::Other, None)
-        };
-        let size = matches!(kind, EntryKind::File).then_some(child_meta.len());
-        entries.push(Entry {
-            name,
-            kind,
-            size,
-            target,
-        });
-    }
+/// Opens the admitted directory and reads up to `cap` of its entries, sorted by name. It
+/// blocks on the filesystem, so it runs on the blocking pool.
+fn list(path: &ReadPath, cap: usize) -> Result<Listing, ListDirError> {
+    let dir = path.open_dir().map_err(ListDirError::Open)?;
+    let (mut entries, truncated) = fs_open::entries(&dir, cap).map_err(ListDirError::Io)?;
     entries.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(ListOutcome::Ok { entries, truncated })
+    Ok(Listing { entries, truncated })
 }
 
 fn render_listing(entries: &[Entry], truncated: bool, cap: usize) -> String {
@@ -310,15 +230,16 @@ fn render_listing(entries: &[Entry], truncated: bool, cap: usize) -> String {
     }
     let mut out = String::with_capacity(entries.len() * 32);
     for e in entries {
-        out.push(e.kind.glyph());
+        out.push(glyph(&e.kind));
         out.push(' ');
-        out.push_str(&e.name);
-        if let Some(target) = &e.target {
-            out.push_str(" -> ");
-            out.push_str(target);
-        }
-        if let Some(size) = e.size {
-            out.push_str(&format!(" [{size}]"));
+        out.push_str(&e.name.to_string_lossy());
+        match &e.kind {
+            EntryKind::Symlink { target } => {
+                out.push_str(" -> ");
+                out.push_str(&target.display().to_string());
+            }
+            EntryKind::File { size } => out.push_str(&format!(" [{size}]")),
+            EntryKind::Dir | EntryKind::Other => {}
         }
         out.push('\n');
     }
@@ -333,6 +254,7 @@ fn render_listing(entries: &[Entry], truncated: bool, cap: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
@@ -343,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn name_and_description_pin_to_doc_05_convention() {
+    fn the_tool_is_named_fs_list_dir() {
         let t = ListDirTool::new();
         assert_eq!(t.name(), "fs.list_dir");
         assert!(t.description().to_lowercase().contains("director"));
@@ -354,14 +276,14 @@ mod tests {
         let t = ListDirTool::new();
         let schema = t.input_schema();
         assert!(schema.strict);
-        let required: Vec<&str> = schema.schema["required"]
+        let required: Vec<&str> = schema.schema()["required"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(required, vec!["path"]);
-        assert_eq!(schema.schema["additionalProperties"], json!(false));
+        assert_eq!(schema.schema()["additionalProperties"], json!(false));
     }
 
     #[tokio::test]
@@ -377,24 +299,26 @@ mod tests {
         let r = tool
             .execute(
                 json!({"path": dir.path().to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
         assert!(!r.is_error);
-        // Sorted: alpha.rs first, subdir, then zeta.txt.
         let lines: Vec<&str> = r.content.lines().collect();
         assert_eq!(lines[0], "f alpha.rs [12]");
         assert_eq!(lines[1], "d subdir");
         assert_eq!(lines[2], "f zeta.txt [2]");
-        // L-3: trajectory-readable title with basename + count.
         let basename = dir
             .path()
             .file_name()
             .unwrap()
             .to_string_lossy()
             .to_string();
-        assert_eq!(r.title, format!("Listed {basename}/ (3 entries)"));
+        assert_eq!(
+            r.title.as_deref(),
+            Some(&*format!("Listed {basename}/ (3 entries)"))
+        );
     }
 
     #[tokio::test]
@@ -404,7 +328,8 @@ mod tests {
         let r = tool
             .execute(
                 json!({"path": dir.path().to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -416,7 +341,11 @@ mod tests {
     async fn missing_path_yields_is_error_not_hard_error() {
         let tool: Arc<dyn Tool> = Arc::new(ListDirTool::new());
         let r = tool
-            .execute(json!({"path": "/nonexistent/dir"}), ToolContext::default())
+            .execute(
+                json!({"path": "/nonexistent/dir"}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         assert!(r.is_error);
@@ -433,7 +362,8 @@ mod tests {
         let r = tool
             .execute(
                 json!({"path": path.to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -453,11 +383,13 @@ mod tests {
             write(&dir.path().join(format!("f{i:02}.txt")), b"x").await;
         }
 
-        let tool: Arc<dyn Tool> = Arc::new(ListDirTool::new().max_entries(3));
+        let tool: Arc<dyn Tool> =
+            Arc::new(ListDirTool::new().max_entries(NonZeroUsize::new(3).unwrap()));
         let r = tool
             .execute(
                 json!({"path": dir.path().to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -476,7 +408,8 @@ mod tests {
         let r = tool
             .execute(
                 json!({"path": outside_dir.path().to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -488,7 +421,11 @@ mod tests {
     async fn invalid_args_yield_typed_invalid_arguments_error() {
         let tool: Arc<dyn Tool> = Arc::new(ListDirTool::new());
         let err = tool
-            .execute(json!({"not_path": "x"}), ToolContext::default())
+            .execute(
+                json!({"not_path": "x"}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
             .await
             .expect_err("should reject malformed args");
         assert!(matches!(err, ToolError::InvalidArguments(_)));
@@ -499,17 +436,52 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let ctx = ToolContext {
-            cancel,
+        let ctx = ToolEnv {
             cwd: None,
             ..Default::default()
         };
 
         let tool: Arc<dyn Tool> = Arc::new(ListDirTool::new());
         let err = tool
-            .execute(json!({"path": dir.path().to_str().unwrap()}), ctx)
+            .execute(json!({"path": dir.path().to_str().unwrap()}), &ctx, cancel)
             .await
             .expect_err("pre-cancelled should fast-fail");
         assert!(matches!(err, ToolError::Cancelled));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_is_shown_with_its_target_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("out")).unwrap();
+        let r = ListDirTool::with_root(dir.path())
+            .unwrap()
+            .execute(
+                json!({"path": "."}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(
+            r.content.trim(),
+            format!("l out -> {}", outside.path().display())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_became_a_symlink_after_the_check_is_not_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("d")).unwrap();
+        assert!(matches!(
+            list(&ReadPath::Canonical(root.join("d")), 10),
+            Err(ListDirError::Open(OpenError::Symlink))
+        ));
     }
 }

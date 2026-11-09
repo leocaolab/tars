@@ -1,6 +1,5 @@
-//! tars-node — Node.js bindings for tars.
-//!
-//! The TS-facing entry point is:
+//! Node.js bindings for tars: a [`Pipeline`] or [`Provider`] handle whose async `complete()` makes
+//! one non-streaming chat call.
 //!
 //! ```ts
 //! import { Pipeline } from '@leocaolab/tars-node';
@@ -20,184 +19,97 @@
 //! console.log(resp.usage.inputTokens, resp.usage.outputTokens);
 //! ```
 //!
-//! Internals mirror `tars-py` one-for-one:
-//!
-//!   - **Process-wide tokio runtime** (`TOKIO` `OnceLock`). Each
-//!     `complete()` runs on this single multi-thread runtime so a
-//!     Node process never spawns one per call. napi-rs's `tokio_rt`
-//!     feature dispatches our `async fn` onto it transparently.
-//!   - **`Pipeline.from*` constructors** mirror tars-py
-//!     (`from_config_path` / `from_str`). They run
-//!     `ConfigManager::load_*` → `ProviderRegistry::from_config` →
-//!     `LlmService::default_chain` and store a concrete `LlmService`.
-//!   - **Role spine** (`init` / `provider(role)` / `pipeline(role)`)
-//!     resolves a role against the process-global config + registry with a
-//!     single `[roles]` lookup, mirroring tars-py's free functions.
-//!   - **`complete(opts)`** maps the napi-friendly camelCase
-//!     `CompleteOptions` → `tars_types::ChatRequest`, drives the
-//!     held `LlmService`, drains the event stream into a
-//!     `ChatResponse`, projects to `CompleteResult`.
-//!   - **Errors** map `ConfigError` / `ProviderError` / inner async
-//!     failures to `napi::Error`, which surfaces in JS as a rejected
-//!     Promise.
-//!
-//! Not yet covered by the Node surface: streaming AsyncIterator,
-//! `run_task(...)` over the DAG executor, tool-calling marshalling,
-//! per-call cancellation tokens, validator chains, event-store wiring.
-//! Each is additive on top of this surface.
+//! The async functions run on napi's own tokio runtime. Streaming, tool calls, cancellation and
+//! the DAG executor are not exposed.
+
+#![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod ctx;
 mod errors;
 mod handle;
 
-// Re-export the handle-based surface at the crate root so `rlib` consumers get
-// the full API and the free `#[napi]` functions read as reachable (they are —
-// napi exports them; a private-module free fn otherwise trips `dead_code` in
-// the rlib-test build, unlike the `#[napi]` structs which their impls keep
-// live). The `#[napi]` registration is unaffected — it fires at the definition
-// site, not this re-export.
+// Re-exported so the rlib test build sees the free `#[napi]` functions as used; napi registers
+// them at their definitions, not here.
 pub use ctx::JsContext;
-pub use handle::{Provider, init, is_initialized, pipeline, provider, tars_home};
-
-use std::sync::Arc;
-use std::sync::OnceLock;
-
-use futures::StreamExt;
-use napi::bindgen_prelude::*;
-use napi_derive::napi;
-use tokio::runtime::Runtime;
-
-use crate::ctx::default_context;
-use crate::errors::provider_reason;
-
-use tars_config::ConfigManager;
-use tars_pipeline::{ChainOpts, LlmService};
-use tars_provider::{LlmProvider, registry::ProviderRegistry};
-use tars_types::{
-    ChatRequest, ChatResponseBuilder, ContentBlock, JsonSchema, Message, ProviderId, RUN_CONTEXT,
-    RequestContext, ThinkingMode,
+pub use handle::{
+    Provider, init, is_initialized, pipeline, provider, role_model, role_provider, tars_home,
 };
 
-/// Process-wide tokio runtime shared by all `complete()` calls. Lazy
-/// `OnceLock` so we pay the runtime-startup cost on the first call,
-/// not at `require()` / `import` time — Node processes that load
-/// `@leocaolab/tars-node` but never invoke a Pipeline stay light.
-/// Multi-thread because providers may issue parallel HTTP requests
-/// (batch APIs, fan-out routing in higher milestones).
-static TOKIO: OnceLock<Runtime> = OnceLock::new();
+use std::sync::Arc;
 
-fn tokio_rt() -> Result<&'static Runtime> {
-    TOKIO.get_or_init(|| {
-        Runtime::new().expect("tars-node: failed to build the shared tokio runtime")
-    });
-    // `get_or_init` returned `()` (we threw the runtime away on the
-    // first race); `get` reads the actual handle. Both fast paths
-    // hit `Some`.
-    TOKIO
-        .get()
-        .ok_or_else(|| Error::from_reason("tars-node: tokio runtime not initialised"))
-}
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
 
-/// Smoke-test export — `import { hello } from '@leocaolab/tars-node'`
-/// and `hello('world')` returns `'tars-node says hi, world'`. Pure
-/// scaffolding sanity, kept for the Node-side smoke test.
+use crate::ctx::build_context;
+use crate::errors::{REGISTRY_ERROR, config_to_js, llm_reason, registry_to_js};
+
+use tars_config::Config;
+use tars_llm::{ChainOptions, LlmService};
+use tars_llm::{LlmProvider, ProviderRegistry};
+use tars_types::{
+    Caller, ChatRequest, ContentBlock, JsonSchema, Message, ParseProviderIdError, ProviderId,
+    RUN_CONTEXT, ThinkingMode,
+};
+
+/// Returns a greeting; the Node smoke test calls it to check that the addon loads.
 #[napi]
 pub fn hello(name: String) -> String {
     format!("tars-node says hi, {name}")
 }
 
-/// One failed bless assertion. `expected`/`actual` are JSON-encoded
-/// strings so any value shape survives the FFI boundary.
-#[napi(object)]
-pub struct BlessDrift {
-    pub selector: String,
-    pub expected: String,
-    pub actual: Option<String>,
-    pub reason: String,
-}
-
-/// Result of [`blessCheck`]. `passed` is true when `drifts` is empty.
-#[napi(object)]
-pub struct BlessResult {
-    pub passed: bool,
-    pub drifts: Vec<BlessDrift>,
-}
-
-/// Load a committed bless file and check a completion's text against it
-///. `text` is decoded as JSON (chatty-tolerant), then each blessed
-/// field is asserted. Mirrors `tars-py`'s `bless_check`.
+/// Kills every subprocess tars started in this process that is still running, with the processes
+/// they started in turn. The addon installs no signal handler, since a listener would replace
+/// Node's default exit on SIGINT and SIGTERM. The host calls this from its own signal handlers;
+/// a `process.on('exit')` listener covers a normal exit, but a default signal exit skips it.
 #[napi]
-pub fn bless_check(path: String, text: String) -> Result<BlessResult> {
-    let value: serde_json::Value =
-        tars_utils::decode_json(&text, tars_types::StructuredOutputMode::None)
-            .map_err(|e| Error::from_reason(format!("bless decode: {e}")))?;
-    let bless = tars_harness::Bless::load(std::path::Path::new(&path))
-        .map_err(|e| Error::from_reason(format!("bless load: {e}")))?;
-    let outcome = bless
-        .check(&value)
-        .map_err(|e| Error::from_reason(format!("bless check: {e}")))?;
-    Ok(BlessResult {
-        passed: outcome.is_pass(),
-        drifts: outcome
-            .drifts
-            .iter()
-            .map(|d| BlessDrift {
-                selector: d.selector.clone(),
-                expected: d.expected.to_string(),
-                actual: d.actual.as_ref().map(|v| v.to_string()),
-                reason: d.reason.clone(),
-            })
-            .collect(),
-    })
+pub fn kill_spawned_children() {
+    tars_llm::kill_all_spawned();
 }
 
 // ── TS-facing shapes ─────────────────────────────────────────────────
 
-/// Options for [`LlmService::complete`]. Mirrors `tars-py`'s
-/// `Pipeline.complete(**kwargs)` in camelCase.
+/// The options of one `complete()` call: tars-py's `Pipeline.complete(**kwargs)` in camelCase.
 #[napi(object)]
 pub struct CompleteOptions {
-    /// Model id (e.g. "gemini-3.1-pro-preview"). Required.
     pub model: String,
-    /// User-turn text. Mutually exclusive with `messages`.
+    /// The user turn; exactly one of this and `messages` is given.
     pub user: Option<String>,
-    /// System prompt.
     pub system: Option<String>,
-    /// Pre-built message list as opaque JSON (`[{ role, content }, ...]`).
-    /// Mutually exclusive with `user`. Kept permissive as `Value` so
-    /// a Node caller with an existing OpenAI-shape message list can drop it in.
+    /// An OpenAI-style `[{ role, content }]` list, so a caller that already has one passes it
+    /// as is.
     pub messages: Option<serde_json::Value>,
-    /// Cap on output tokens. Unset → provider default.
+    /// Unset leaves the provider's default.
     pub max_output_tokens: Option<u32>,
-    /// Sampling temperature. Unset → provider default.
+    /// Unset leaves the provider's default.
     pub temperature: Option<f64>,
-    /// Enable thinking / extended reasoning (provider-specific).
+    /// `true` lets the provider choose the thinking depth, `false` turns thinking off.
     pub thinking: Option<bool>,
-    /// JSON Schema the model MUST conform to. Triggers the provider's
-    /// strict structured-output mode.
+    /// A JSON Schema the reply must conform to; its root must be an object.
     pub response_schema: Option<serde_json::Value>,
-    /// When `response_schema` is set, require strict conformance
-    /// (default true). False → schema is a hint, not enforced.
+    /// Whether the provider enforces `response_schema` (default) or takes it as a hint.
     pub response_schema_strict: Option<bool>,
-    /// Free-form cohort tags surfaced in trajectory + event logs.
+    /// Added to the context's tags, which the pipeline's events carry; a raw `Provider` emits
+    /// no events.
     pub tags: Option<Vec<String>>,
 }
 
-/// Result shape from [`LlmService::complete`].
+/// What `complete()` resolves to.
 #[napi(object)]
 pub struct CompleteResult {
-    /// Aggregated assistant text.
     pub text: String,
-    /// Token usage.
     pub usage: UsageJs,
-    /// Model id the provider actually used (post-routing).
+    /// The model the provider reports having used, which routing can make differ from the one
+    /// asked for.
     pub model: Option<String>,
-    /// Snake-case stop reason — "end_turn" / "max_tokens" /
-    /// "content_filter" / "tool_use" / "other".
+    /// One of `end_turn`, `max_tokens`, `stop_sequence`, `tool_use`, `content_filter`,
+    /// `cancelled`, `other`.
     pub stop_reason: Option<String>,
+    /// The parts of the request the provider served it without (`structured_output`,
+    /// `chat_template_thinking`); empty when it served all of it.
+    pub degraded: Vec<String>,
 }
 
-/// Mirrors `tars_types::Usage` — per-call token counters.
+/// The token counts of one call: `tars_types::Usage`, each count cast to `u32` for JS.
 #[napi(object)]
 pub struct UsageJs {
     pub input_tokens: u32,
@@ -207,114 +119,117 @@ pub struct UsageJs {
     pub thinking_tokens: u32,
 }
 
-/// Pipeline handle. One per provider per Node process is the
-/// expected pattern (cheap to clone via `Arc` but expensive to build
-/// — `from_config_path` reads + parses TOML and constructs the
-/// middleware chain). Construct once at startup and hold the handle
-/// for the process's lifetime.
+/// Builds the chain for the model each `complete({ model })` names, for factory- and role-built
+/// pipelines alike. The model is part of every cassette key, so any other model (the
+/// provider's default, the role's) would key the call to a model the caller did not ask for.
+struct ProviderHandle {
+    provider: Arc<dyn LlmProvider>,
+}
+
+impl ProviderHandle {
+    fn for_model(&self, model: &str) -> LlmService {
+        LlmService::default_chain(Arc::clone(&self.provider), model, ChainOptions::default())
+    }
+}
+
+/// One provider behind the default middleware chain. The factories read and parse the config and
+/// build the provider, so a process builds one per provider at startup and keeps it.
 #[napi]
 pub struct Pipeline {
-    /// Provider id this pipeline was built for. Surfaced via the
-    /// `id` getter so callers can introspect which provider a
-    /// handle wraps.
     id: String,
-    /// The assembled middleware-stack-wrapped service. `LlmService` is a
-    /// concrete, cheaply-cloneable struct, so `complete()` clones it and
-    /// drives the clone on the tokio runtime without moving `self`.
-    inner: LlmService,
-    /// The explicit call context re-scoped onto `RUN_CONTEXT` at the binding
-    /// boundary for each `complete()`. The `from_*` factories set a
-    /// fresh single-user default; the role path
-    /// ([`handle::pipeline`]) threads an explicit ctx.
-    ctx: RequestContext,
+    service: ProviderHandle,
+    /// The caller's context, taken from JS by every constructor and kept for the pipeline's life.
+    /// No call runs under it: each `complete()` runs under its own copy from
+    /// [`Caller::for_call`].
+    ctx: Caller,
 }
 
 #[napi]
 impl Pipeline {
-    /// Errors:
-    ///   - file missing / unreadable / not valid TOML → ConfigError
-    ///   - provider id absent from the config → ConfigError
-    ///   - provider construction fails (e.g. bad API key shape) → ProviderError
-    #[napi(factory)]
-    pub fn from_config_path(path: String, provider_id: String) -> Result<Pipeline> {
-        let cfg = ConfigManager::load_from_file(&path)
-            .map_err(|e| Error::from_reason(format!("load config {path:?}: {e}")))?;
+    /// Builds a pipeline over `providerId` from the config file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with code `InvalidArg` when `ctx` is missing or holds an empty id or when
+    /// `providerId` is empty, with `TarsConfigError` when the file does not load, and with
+    /// `TarsRegistryError` when the provider is not in it or any provider in it cannot be built.
+    #[napi(
+        factory,
+        ts_args_type = "path: string, providerId: string, ctx: JsContext"
+    )]
+    pub fn from_config_path(
+        path: String,
+        provider_id: String,
+        ctx: Option<JsContext>,
+    ) -> Result<Pipeline, String> {
+        let ctx = factory_context(ctx)?;
+        let cfg = Config::load_file(&path).map_err(config_to_js)?;
         let provider = build_provider_from_cfg(&cfg, &provider_id)?;
-        Ok(Self::from_provider(provider_id, provider.0, provider.1))
+        Ok(Self::from_provider(provider_id, provider, ctx))
     }
 
-    /// Construct from inline TOML — same shape as a `.arc/config.toml`
-    /// file. Useful for tests + programmatic configs without a tmpfile
-    /// round-trip.
-    #[napi(factory)]
-    pub fn from_str(toml_text: String, provider_id: String) -> Result<Pipeline> {
-        let cfg = ConfigManager::load_from_str(&toml_text)
-            .map_err(|e| Error::from_reason(format!("parse inline TOML: {e}")))?;
+    /// Builds a pipeline from inline TOML shaped like a config file; it fails as
+    /// [`Self::from_config_path`] does.
+    #[napi(
+        factory,
+        ts_args_type = "tomlText: string, providerId: string, ctx: JsContext"
+    )]
+    pub fn from_str(
+        toml_text: String,
+        provider_id: String,
+        ctx: Option<JsContext>,
+    ) -> Result<Pipeline, String> {
+        let ctx = factory_context(ctx)?;
+        let cfg = Config::from_toml(&toml_text).map_err(config_to_js)?;
         let provider = build_provider_from_cfg(&cfg, &provider_id)?;
-        Ok(Self::from_provider(provider_id, provider.0, provider.1))
+        Ok(Self::from_provider(provider_id, provider, ctx))
     }
 
-    /// Provider id this pipeline wraps.
+    /// Returns the id of the provider this pipeline was built over.
     #[napi(getter)]
     pub fn id(&self) -> String {
         self.id.clone()
     }
 
-    /// Single non-streaming chat-completion call.
-    /// napi-rs marshals this as a `Promise<CompleteResult>` to JS callers.
+    /// Makes one non-streaming chat call through the default chain for `opts.model`.
     #[napi]
     pub async fn complete(&self, opts: CompleteOptions) -> Result<CompleteResult> {
-        drive_complete(self.inner.clone(), self.ctx.clone(), opts).await
+        let service = self.service.for_model(&opts.model);
+        drive_complete(service, &self.ctx, opts).await
     }
 }
 
 impl Pipeline {
-    /// Cache, retry, telemetry, and the rest are all active by construction.
-    fn from_provider(id: String, provider: Arc<dyn LlmProvider>, model: String) -> Self {
-        let opts = ChainOpts::new(ProviderId::new(id.clone()));
-        let inner = LlmService::default_chain(provider, model, opts);
-        Self {
-            id,
-            inner,
-            ctx: default_context(),
-        }
-    }
-
-    /// Wrap an already-assembled `LlmService` (the role path: the default
-    /// chain for a role) with an explicit call context. Shared by
-    /// [`handle::pipeline`].
-    pub(crate) fn from_service(id: String, inner: LlmService, ctx: RequestContext) -> Self {
-        Self { id, inner, ctx }
+    /// Puts `provider` behind the default chain (retry, telemetry and the rest).
+    pub(crate) fn from_provider(id: String, provider: Arc<dyn LlmProvider>, ctx: Caller) -> Self {
+        let service = ProviderHandle { provider };
+        Self { id, service, ctx }
     }
 }
 
-/// Drive one non-streaming completion through `svc`, re-establishing the
-/// explicit call context on `RUN_CONTEXT` at the binding boundary (§9:
-/// the `task_local` never crosses the FFI hop, so we re-scope it per call).
-/// Shared by [`LlmService::complete`] and [`handle::Provider::complete`].
+/// Refuses a factory's ctx with its message and the code `InvalidArg`.
+fn factory_context(js: Option<JsContext>) -> Result<Caller, String> {
+    build_context(js).map_err(|e| Error::new(INVALID_ARG.to_string(), e.reason))
+}
+
+/// The `.code` a factory refuses an argument with, napi's own word for it.
+const INVALID_ARG: &str = "InvalidArg";
+
+/// Runs one non-streaming completion through `svc` under a new call of `caller`, which is also
+/// `RUN_CONTEXT` for the call's duration so code reading the task-local sees the same
+/// accumulators.
 pub(crate) async fn drive_complete(
     svc: LlmService,
-    mut ctx: RequestContext,
+    caller: &Caller,
     opts: CompleteOptions,
 ) -> Result<CompleteResult> {
-    // Pull cohort tags before consuming opts into the request builder, then
-    // merge them onto the context's tags (union with any set via `context()`).
-    if let Some(tags) = opts.tags.clone() {
-        ctx.tags.extend(tags);
-    }
+    let ctx = call_context(caller, opts.tags.clone());
     let req = build_request(opts)?;
-    // napi-rs's `tokio_rt` feature already dispatched us onto our shared
-    // runtime; this is the defensive membership check.
-    let _rt = tokio_rt()?;
     RUN_CONTEXT
         .scope(ctx.clone(), async move {
-            let mut stream = svc.call(req, ctx).await.map_err(provider_reason)?;
-            let mut builder = ChatResponseBuilder::new();
-            while let Some(ev) = stream.next().await {
-                let ev = ev.map_err(|e| Error::from_reason(format!("stream event: {e}")))?;
-                builder.apply(ev);
-            }
-            let resp = builder.finish();
+            let resp = tars_llm::complete_async(svc, req, ctx)
+                .await
+                .map_err(llm_reason)?;
             Ok(CompleteResult {
                 text: resp.text,
                 usage: UsageJs {
@@ -326,45 +241,54 @@ pub(crate) async fn drive_complete(
                 },
                 model: Some(resp.actual_model),
                 stop_reason: resp.stop_reason.map(|r| stop_reason_str(&r).to_string()),
+                degraded: resp.degraded.iter().map(|d| d.kind().to_string()).collect(),
             })
         })
         .await
 }
 
+/// Returns the context for one call of `caller`, with `tags` added to the caller's and no call
+/// stamp of the caller's.
+fn call_context(caller: &Caller, tags: Option<Vec<String>>) -> Caller {
+    let mut ctx = caller.for_call();
+    ctx.tags.extend(tags.into_iter().flatten());
+    ctx
+}
+
 // ── Builder helpers ──────────────────────────────────────────────────
 
-/// Shared body of `from_config_path` / `from_str`: resolve a provider
-/// out of the loaded Config and surface a uniform napi error.
+/// Builds the registry from `cfg` and takes `provider_id` out of it; a missing id lists the
+/// configured ones.
 fn build_provider_from_cfg(
     cfg: &tars_config::Config,
     provider_id: &str,
-) -> Result<(Arc<dyn LlmProvider>, String)> {
-    let registry = ProviderRegistry::from_config_default(&cfg.providers)
-        .map_err(|e| Error::from_reason(format!("build provider registry: {e}")))?;
-    let pid = ProviderId::new(provider_id.to_string());
-    let provider = registry.get(&pid).ok_or_else(|| {
-        let configured: Vec<String> = cfg.providers.iter().map(|(id, _)| id.to_string()).collect();
-        Error::from_reason(format!(
-            "provider {provider_id:?} not in config. Configured: [{}]",
-            configured.join(", "),
-        ))
+) -> Result<Arc<dyn LlmProvider>, String> {
+    let pid: ProviderId = provider_id.parse().map_err(|e: ParseProviderIdError| {
+        Error::new(INVALID_ARG.to_string(), format!("providerId: {e}"))
     })?;
-    // The model is bound on the service now (the request is model-agnostic),
-    // so a provider without a `default_model` can't yield a callable pipeline.
-    let model = registry
-        .default_model(&pid)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            Error::from_reason(format!(
-                "provider {provider_id:?} has no `default_model` — set one in config"
-            ))
-        })?;
-    Ok((provider, model))
+    let registry =
+        ProviderRegistry::from_config_default(cfg.providers(), tars_config::catalog(), None)
+            .map_err(registry_to_js)?;
+    let provider = registry.get(&pid).map_err(|e| match e {
+        tars_llm::RegistryError::UnknownProvider(_) => {
+            let configured: Vec<String> = cfg
+                .providers()
+                .iter()
+                .map(|(id, _)| id.to_string())
+                .collect();
+            Error::new(
+                REGISTRY_ERROR.to_string(),
+                format!(
+                    "provider {provider_id:?} not in config. Configured: [{}]",
+                    configured.join(", "),
+                ),
+            )
+        }
+        other => registry_to_js(other),
+    })?;
+    Ok(provider)
 }
 
-/// Map a snake_case stop reason out of `tars_types::StopReason`.
-/// Matches the wire form documented in CompleteResult.stop_reason
-/// so JS callers can switch on it.
 fn stop_reason_str(r: &tars_types::StopReason) -> &'static str {
     use tars_types::StopReason::*;
     match r {
@@ -374,11 +298,7 @@ fn stop_reason_str(r: &tars_types::StopReason) -> &'static str {
         ToolUse => "tool_use",
         ContentFilter => "content_filter",
         Cancelled => "cancelled",
-        // Forward-compat: tars_types::StopReason may grow new variants
-        // in future releases. `_` keeps the binding non-exhaustively
-        // matchable so an upstream addition doesn't break this crate
-        // until we extend the table.
-        _ => "other",
+        Other => "other",
     }
 }
 
@@ -388,10 +308,8 @@ fn build_request(opts: CompleteOptions) -> Result<ChatRequest> {
             "pass either `user` (single-turn) or `messages` (multi-turn), not both",
         ));
     }
-    // NOTE: the model is bound on the `Pipeline`'s `LlmService` at
-    // construction (from the provider's `default_model`); the request is
-    // model-agnostic content. `opts.model` is not re-applied per call
-    // here — a per-call override would require rebinding the service.
+    // The request is model-agnostic content; `opts.model` binds the service
+    // (`ProviderHandle::for_model`), not the request.
     let mut req = ChatRequest {
         system: opts.system,
         messages: Vec::new(),
@@ -416,18 +334,16 @@ fn build_request(opts: CompleteOptions) -> Result<ChatRequest> {
         ));
     }
     if let Some(schema) = opts.response_schema {
-        req.structured_output = Some(JsonSchema {
-            name: None,
-            schema,
-            strict: opts.response_schema_strict.unwrap_or(true),
-        });
+        let mut schema = JsonSchema::loose(
+            tars_types::schema_root(schema)
+                .map_err(|e| Error::from_reason(format!("`responseSchema`: {e}")))?,
+        );
+        schema.strict = opts.response_schema_strict.unwrap_or(true);
+        req.structured_output = Some(schema);
     }
     Ok(req)
 }
 
-/// Map the boolean `thinking` flag onto the typed
-/// [`tars_types::ThinkingMode`]. `true` → Auto (provider picks the
-/// depth); `false` → Off.
 fn map_thinking(enabled: bool) -> ThinkingMode {
     if enabled {
         ThinkingMode::Auto
@@ -436,10 +352,8 @@ fn map_thinking(enabled: bool) -> ThinkingMode {
     }
 }
 
-/// Parse the opaque `messages` JSON into typed `Message`s. Accepts
-/// the canonical OpenAI-style `[{role: "user|assistant|system|tool",
-/// content: "..."}, ...]` shape. Kept permissive so existing
-/// OpenAI-shape callers can drop in.
+/// Parses an OpenAI-style `[{ role, content }]` list whose roles are `user`, `assistant` or
+/// `system` and whose contents are strings; anything else is refused naming the entry.
 fn parse_messages_json(v: serde_json::Value) -> Result<Vec<Message>> {
     let arr = v
         .as_array()
@@ -468,4 +382,138 @@ fn parse_messages_json(v: serde_json::Value) -> Result<Vec<Message>> {
         out.push(msg);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MOCK_CONFIG: &str = r#"
+[providers.demo]
+type = "mock"
+canned_response = "ok"
+"#;
+
+    #[test]
+    fn a_factory_built_pipeline_is_bound_to_the_callers_tenant() {
+        let ctx = JsContext {
+            tenant: "acme".to_string(),
+            session: None,
+            trace: None,
+            tags: None,
+        };
+        let pipeline =
+            Pipeline::from_str(MOCK_CONFIG.to_string(), "demo".to_string(), Some(ctx)).unwrap();
+        assert_eq!(pipeline.ctx.tenant_id, tars_types::TenantId::new("acme"));
+    }
+
+    /// Starts a reply and cuts the stream before it finishes.
+    struct CutProvider {
+        id: ProviderId,
+        profile: tars_types::ProviderProfile,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CutProvider {
+        fn id(&self) -> &ProviderId {
+            &self.id
+        }
+
+        fn capabilities(&self) -> &tars_types::ProviderProfile {
+            &self.profile
+        }
+
+        async fn stream(
+            self: Arc<Self>,
+            _req: ChatRequest,
+            _model: &str,
+            _ctx: Caller,
+        ) -> std::result::Result<tars_llm::LlmEventStream, tars_llm::ProviderError> {
+            let events = vec![
+                Ok(tars_types::ChatEvent::started("m")),
+                Err(tars_llm::ProviderError::StreamCut { open_call: None }),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_cut_mid_reply_reaches_js_under_its_kind() {
+        let provider = Arc::new(CutProvider {
+            id: ProviderId::new("cut"),
+            profile: tars_types::ProviderProfile::text_only_baseline(Default::default()),
+        });
+        let svc = LlmService::default_chain(provider, "m", ChainOptions::default());
+        let caller = Caller::new(
+            tars_types::TenantId::new("acme"),
+            tars_types::TraceId::new("t"),
+        );
+        let opts = CompleteOptions {
+            response_schema: None,
+            ..options_with_schema(serde_json::Value::Null)
+        };
+
+        let Err(err) = drive_complete(svc, &caller, opts).await else {
+            panic!("a cut stream completed");
+        };
+        assert!(err.reason.starts_with("stream_cut: "), "{}", err.reason);
+    }
+
+    #[test]
+    fn an_empty_provider_id_is_an_invalid_argument_not_a_panic() {
+        let ctx = JsContext {
+            tenant: "acme".to_string(),
+            session: None,
+            trace: None,
+            tags: None,
+        };
+        let Err(err) = Pipeline::from_str(MOCK_CONFIG.to_string(), String::new(), Some(ctx)) else {
+            panic!("an empty provider id built a pipeline");
+        };
+        assert_eq!(err.status, INVALID_ARG);
+        assert!(err.reason.starts_with("providerId: "), "{}", err.reason);
+    }
+
+    #[test]
+    fn a_calls_tags_are_added_to_the_callers_and_not_kept_for_the_next_call() {
+        let caller = Caller::new(
+            tars_types::TenantId::new("acme"),
+            tars_types::TraceId::new("t"),
+        )
+        .with_tags(["cohort"]);
+
+        let tagged = call_context(&caller, Some(vec!["run-1".to_string()]));
+        let untagged = call_context(&caller, None);
+
+        assert_eq!(tagged.tags, ["cohort", "run-1"]);
+        assert_eq!(untagged.tags, ["cohort"]);
+    }
+
+    fn options_with_schema(schema: serde_json::Value) -> CompleteOptions {
+        CompleteOptions {
+            model: "m".to_string(),
+            user: Some("hi".to_string()),
+            system: None,
+            messages: None,
+            max_output_tokens: None,
+            temperature: None,
+            thinking: None,
+            response_schema: Some(schema),
+            response_schema_strict: None,
+            tags: None,
+        }
+    }
+
+    #[test]
+    fn a_response_schema_whose_root_is_not_an_object_is_refused() {
+        let err = build_request(options_with_schema(serde_json::json!(["x"]))).unwrap_err();
+        assert!(err.reason.contains("responseSchema"), "{}", err.reason);
+    }
+
+    #[test]
+    fn a_response_schema_whose_root_is_an_object_is_sent() {
+        let req =
+            build_request(options_with_schema(serde_json::json!({"type": "object"}))).unwrap();
+        assert!(req.structured_output.is_some());
+    }
 }

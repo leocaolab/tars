@@ -11,9 +11,7 @@ its own internal turns. tars wraps that whole process in the OS sandbox
 so its side effects stay inside the worktree.
 
 This is a **local/dev "bring your own agent CLI"** path, not a
-production default. The spec is
-`architecture/32-cli-delegates.md`;
-this is the user-facing walkthrough.
+production default; this is the user-facing walkthrough.
 
 ---
 
@@ -41,7 +39,7 @@ spawned through the shared `tars-sandbox` OS-jail primitive
 (`build_sandboxed_command`): it is **write-jailed to the request's
 worktree**, which is also set as its cwd (opencode picks up the project
 from `process.cwd()`). This is the same jail every CLI delegate runs
-in (Doc 32 CUJ-3).
+in.
 
 Practically, opencode sits **behind routing fallback**: it's a
 best-effort delegate you reach for when you want a real coding agent
@@ -65,7 +63,21 @@ tars requires the model to be explicit before the request reaches the
 CLI provider — a tier hint (`ModelTier::Default`) that never got
 resolved to a concrete id is rejected with `InvalidRequest` rather than
 guessed at. Whatever you put in `default_model` (or an explicit
-per-request model) is what opencode receives.
+per-request model) is what opencode receives
+(`crates/tars-llm/src/provider/backends/cli/dialects/opencode.rs:81-91`,
+`build_opencode_argv`).
+
+> ⚠️ **Gotcha — the `provider/model` must be one opencode can resolve a
+> credential for.** The `provider` half (e.g. `anthropic`, `openai`,
+> `google`) must be a provider you have authenticated in opencode
+> (`opencode auth login <provider>`, §3). If it isn't, opencode dies with
+> its own `missing api key` error, which tars carries out verbatim inside
+> a typed `CliSubprocessDied` — no sentinel substituted (`opencode.rs:228-239`;
+> the `ProviderAuthError` → `"missing api key"` path is pinned in the
+> `parse_line_error_event_surfaces_raw_carrying_error` test at
+> `opencode.rs:420-434`). Setting `default_model` to a `provider/model`
+> whose provider has no credential is the single most common first-run
+> failure.
 
 ---
 
@@ -79,9 +91,18 @@ however you configured it on its own side:
 
 The dialect's env-strip table is **empty** — tars neither injects nor
 strips auth env for opencode, it just spawns the binary and lets
-opencode resolve its own credentials. There is no `auth` field on the
-`opencode` config block; if opencode can't authenticate, the failure
-surfaces as opencode's own error (see §5), carried out verbatim.
+opencode resolve its own credentials
+(`crates/tars-llm/src/provider/backends/cli/dialects/opencode.rs:115-127`,
+empty strip set). There is no `auth` field on the `opencode` config
+block — the provider is wired with `Auth::Delegate`, which resolves to
+`ResolvedAuth::None` ("the spawned tool/CLI carries its own credential;
+tars injects nothing", `crates/tars-llm/src/provider/auth.rs:137-139`;
+`Auth::Delegate` doc at `crates/tars-types/src/providers/auth.rs:17-20`).
+opencode's own state dirs (`~/.local/share/opencode`, `~/.config/opencode`,
+`~/.cache/opencode`) are granted into the write-jail so its login/config
+survives the sandbox (`opencode.rs:145-159`). If opencode can't
+authenticate, the failure surfaces as opencode's own error (see §5),
+carried out verbatim.
 
 ---
 
@@ -154,13 +175,10 @@ clean `InvalidRequest` rather than letting `execve` fail with `E2BIG`.
 
 ## 6. See also
 
-- `architecture/32-cli-delegates.md` —
-  the `AgentCliBackend` + `CliDialect` spec that opencode is an impl of
-  (F4); the shared spawn / stream / sandbox machinery
 - [`antigravity.md`](./antigravity.md) — the sibling delegate, in
   plain-text output mode
 - [`claude-cli.md`](./claude-cli.md) — the other subprocess provider,
   which *can* be reduced to a pure inference channel (opencode can't)
-- Implementation: `crates/tars-provider/src/backends/cli/dialects/opencode.rs`;
+- Implementation: `crates/tars-llm/src/provider/backends/cli/dialects/opencode.rs`;
   config variant `ProviderConfig::Opencode` in
   `crates/tars-config/src/providers.rs`

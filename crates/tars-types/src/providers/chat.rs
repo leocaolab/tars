@@ -1,32 +1,26 @@
-//! Canonical request shape — what every Provider accepts.
+//! Defines the request every provider accepts, and checks a request or a caller's declared needs
+//! against a provider's profile.
 
 use serde::{Deserialize, Serialize};
 
 use crate::providers::cache::CacheDirective;
 use crate::providers::model::ThinkingMode;
-use crate::providers::provider_profile::{ProviderProfile, StructuredOutputMode};
+use crate::providers::provider_profile::{ProviderProfile, Support};
 use crate::providers::schema::JsonSchema;
 use crate::providers::tools::{ToolChoice, ToolSpec};
 
-/// A complete chat request. Provider-agnostic **and model-agnostic**:
-/// the concrete model is provider-specific, so it does NOT live on the
-/// request. The model is bound at service construction (the leaf
-/// `LlmService` carries `provider + model`) and passed to
-/// `LlmProvider::stream` as an explicit argument. A `ChatRequest` is
-/// pure content, reusable across providers/models.
-///
-/// All fields except `messages` are optional / defaulted so callers pay
-/// only for what they use.
+/// A chat request, independent of provider and model, so one request can go to any of them. The
+/// model is not on it: the leaf `LlmService` binds `provider + model` and passes the model to
+/// `LlmProvider::stream`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatRequest {
-    /// Hardcoded model behavior. Goes into `system` for OpenAI/Anthropic,
-    /// `system_instruction` for Gemini.
+    /// The system prompt, sent as `system` to OpenAI and Anthropic and as `system_instruction` to
+    /// Gemini.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
 
-    /// Chronological message list. Strictly alternating user/assistant
-    /// is *not* enforced here (Provider adapter is responsible) but is
-    /// the recommended layout.
+    /// The messages in order. Alternating user and assistant turns is not enforced here; an
+    /// adapter whose vendor requires it does that.
     pub messages: Vec<Message>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -53,18 +47,18 @@ pub struct ChatRequest {
     #[serde(default, skip_serializing_if = "ThinkingMode::is_off")]
     pub thinking: ThinkingMode,
 
-    /// Per-request override for the OpenAI-compat `chat_template_kwargs.
-    /// enable_thinking` boolean (Qwen3 / mlx_lm.server / vLLM with a
-    /// Qwen-family chat template). `None` = don't send the field, server
-    /// uses its default. Distinct from [`ThinkingMode`] because that
-    /// enum's `Off` doubles as "caller didn't specify"; this field needs
-    /// to distinguish "explicitly off" from "no preference" so we don't
-    /// silently force `enable_thinking=false` on every call.
+    /// The OpenAI-compat `chat_template_kwargs.enable_thinking` flag (Qwen3, mlx_lm.server, vLLM
+    /// with a Qwen-family template); `None` leaves the server's default. It is apart from
+    /// [`ThinkingMode`] because `ThinkingMode::Off` also means "not specified", and sending
+    /// `enable_thinking=false` on every call would override the server. A provider whose profile
+    /// has no `supports_chat_template_thinking` is not sent it, and
+    /// [`ChatRequest::compatibility_check`] answers [`Degradation::ChatTemplateThinkingNotSent`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_chat_template_thinking: Option<bool>,
 }
 
 impl ChatRequest {
+    /// Returns a request of one user message, every other field unset.
     pub fn user(prompt: impl Into<String>) -> Self {
         Self {
             system: None,
@@ -89,74 +83,52 @@ impl ChatRequest {
         self
     }
 
-    /// Avoids wasting a wire round-trip on a candidate that would silently drop
-    /// features or 400 at the provider. Returns a typed reason list so callers
-    /// can downgrade gracefully, swap providers, or reject hard.
+    /// Checks the request against a provider's profile before it is sent: whether the provider
+    /// cannot serve it, or serves it without some fields.
     ///
-    /// **Conservative philosophy**: when in doubt (e.g., a feature
-    /// is set but `caps` doesn't explicitly forbid it), return
-    /// [`Compatible`]. False-positive incompatibility would cause
-    /// the routing layer to skip a candidate that *would* have
-    /// worked, which is worse than letting the provider return its
-    /// own permanent error.
+    /// Only what the profile knows the provider lacks makes it unservable: a capability it has no
+    /// data on ([`Support::Unknown`]) and a ceiling it does not state are not findings, and the
+    /// provider answers for itself.
     pub fn compatibility_check(&self, caps: &ProviderProfile) -> CompatibilityCheck {
         let mut reasons = Vec::new();
+        let mut unsent = Vec::new();
 
-        // Tools — non-empty tool list requires tool_use support.
-        // We deliberately don't check `tool_choice` independently:
-        // callers who set tool_choice without tools are misusing the
-        // API and the provider will tell them so.
-        if !self.tools.is_empty() && !caps.supports_tool_use {
+        // `tool_choice` without tools is left for the provider to refuse.
+        if !self.tools.is_empty() && caps.supports_tool_use == Support::Unsupported {
             reasons.push(CompatibilityReason::ToolUseUnsupported {
                 tool_count: self.tools.len(),
             });
         }
 
-        // Structured output — schema enforcement of any kind requires
-        // a non-None mode. ToolUseEmulation also implicitly needs
-        // tool_use; that constraint is enforced by ProviderProfile::validate
-        // at construction time, so we don't double-check here.
-        if self.structured_output.is_some()
-            && matches!(caps.supports_structured_output, StructuredOutputMode::None)
-        {
-            reasons.push(CompatibilityReason::StructuredOutputNotEnforced);
+        if self.structured_output.is_some() && caps.schema_enforcement() == Support::Unsupported {
+            unsent.push(Degradation::StructuredOutputNotEnforced);
         }
 
-        // Thinking / reasoning — Auto + Budget both demand provider
-        // support; Off is the no-op default. The OpenAI-compat
-        // `enable_chat_template_thinking` field is a per-server
-        // chat-template hint (Qwen3 / mlx_lm), separate from
-        // ThinkingMode — providers ignore unknown fields, so we
-        // don't gate on it.
-        if !matches!(self.thinking, ThinkingMode::Off) && !caps.supports_thinking {
+        if self.enable_chat_template_thinking.is_some() && !caps.supports_chat_template_thinking {
+            unsent.push(Degradation::ChatTemplateThinkingNotSent);
+        }
+        if !matches!(self.thinking, ThinkingMode::Off)
+            && caps.supports_thinking == Support::Unsupported
+        {
             reasons.push(CompatibilityReason::ThinkingUnsupported {
                 mode: self.thinking,
             });
         }
 
-        // Vision — any Image content block in any message requires
-        // vision support. We scan all roles (user/assistant/system/tool)
-        // because images can land anywhere in the history.
         let has_image = self.messages.iter().any(|m| {
             m.content()
                 .iter()
                 .any(|c| matches!(c, ContentBlock::Image { .. }))
         });
-        if has_image && !caps.supports_vision {
+        if has_image && caps.supports_vision == Support::Unsupported {
             reasons.push(CompatibilityReason::VisionUnsupported);
         }
 
-        // Context window chars/4 heuristic (typical English BPE ratio).
-        // The estimate is conservative-friendly: real provider tokenizers
-        // might pack tighter for languages they're trained on but NOT looser,
-        // so saying "estimated > max" is a real overflow signal.
-        // False-negative tolerated (we let borderline requests through to the
-        // provider, which catches them via wire-level 400 ContextTooLong);
-        // only flag the obvious-overflow case to keep false-positive rate low.
-        let prompt_chars = estimate_prompt_chars(self);
-        let estimated_tokens = u32::try_from(prompt_chars / 4).unwrap_or(u32::MAX);
-        // `None` context cap = no ceiling to enforce (local model, unknown
-        // limit) — skip the check entirely.
+        // Bytes / 4 (the English BPE ratio) mostly underestimates the token count, so only an
+        // obvious overflow is flagged; a borderline request goes through and the provider refuses
+        // it with ContextTooLong.
+        let prompt_bytes = prompt_bytes(self);
+        let estimated_tokens = u32::try_from(prompt_bytes / 4).unwrap_or(u32::MAX);
         if let Some(max_ctx) = caps.max_context_tokens {
             if estimated_tokens > max_ctx {
                 reasons.push(CompatibilityReason::ContextWindowExceeded {
@@ -166,9 +138,6 @@ impl ChatRequest {
             }
         }
 
-        // Max output tokens — caller asks for more output than the
-        // provider supports. Both the request cap and the provider cap must
-        // be present for there to be anything to exceed.
         if let (Some(req_max), Some(max_out)) = (self.max_output_tokens, caps.max_output_tokens) {
             if req_max > max_out {
                 reasons.push(CompatibilityReason::MaxOutputTokensExceeded {
@@ -178,17 +147,12 @@ impl ChatRequest {
             }
         }
 
-        if reasons.is_empty() {
-            CompatibilityCheck::Compatible
-        } else {
-            CompatibilityCheck::Incompatible { reasons }
-        }
+        CompatibilityCheck::from_findings(reasons, unsent)
     }
 }
 
-/// System prompt is included; the system prompt isn't in
-/// `messages` but is sent on every call.
-fn estimate_prompt_chars(req: &ChatRequest) -> usize {
+/// Returns the byte length of the request's text, the system prompt included.
+fn prompt_bytes(req: &ChatRequest) -> usize {
     let mut total = req.system.as_ref().map(|s| s.len()).unwrap_or(0);
     for m in &req.messages {
         for c in m.content() {
@@ -200,73 +164,103 @@ fn estimate_prompt_chars(req: &ChatRequest) -> usize {
     total
 }
 
-/// Result of [`ChatRequest::compatibility_check`]. Tells the routing
-/// layer whether a particular provider can honour the request as-is.
-///
-/// We deliberately use a 2-state enum rather than 3-state
-/// (Compatible / Skip / Reject):
-/// per-candidate compatibility doesn't tell us whether *all*
-/// candidates will fail. The routing layer collects reasons across
-/// skipped candidates and surfaces "no compatible candidate"
-/// after the loop ends — that's where the global "reject this
-/// request shape" verdict belongs, not in this per-candidate helper.
-///
-/// `#[non_exhaustive]` so we can add e.g. `MaybeWithCaveat` later
-/// (provider supports tools but with restricted schema, etc.) without
-/// breaking the enum's SemVer contract — match arms must use `_ => …`.
+/// Whether one provider can serve a request, and what it leaves out. It says nothing of other
+/// providers: a caller bound to this one provider refuses on `Incompatible`, a router tries the
+/// next candidate.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum CompatibilityCheck {
-    /// This provider can serve the request as-is.
+    /// This provider can serve the request as it is.
     Compatible,
-    /// This provider can't serve the request — list the missing
-    /// features. Routing layer typically logs and tries the next
-    /// candidate; if all candidates return Incompatible, the layer
-    /// surfaces the reasons as the final error.
+    /// This provider serves the request without what `unsent` names; never empty.
+    Degraded { unsent: Vec<Degradation> },
+    /// This provider cannot serve the request, for every one of `reasons`; never empty. What it
+    /// would also have left out is not listed, since the request is not sent.
     Incompatible { reasons: Vec<CompatibilityReason> },
 }
 
-/// Specific reason a provider's [`ProviderProfile`] don't cover a
-/// [`ChatRequest`]'s feature requirements. Each variant is
-/// independently match-able so callers can branch programmatically
-/// (e.g., "drop tools and retry" vs "fail hard on context overflow")
-/// without parsing strings.
+impl CompatibilityCheck {
+    fn from_findings(reasons: Vec<CompatibilityReason>, unsent: Vec<Degradation>) -> Self {
+        if !reasons.is_empty() {
+            Self::Incompatible { reasons }
+        } else if !unsent.is_empty() {
+            Self::Degraded { unsent }
+        } else {
+            Self::Compatible
+        }
+    }
+}
+
+/// A part of a [`ChatRequest`] a provider can serve the request without; the adapter leaves it
+/// out, as the profile says, and the call goes ahead.
 ///
-/// `#[non_exhaustive]` because new capability axes will be added
-/// (streaming required / specific quant / etc.) — match arms must
-/// use `_ => …`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The serde names are a storage format: the call log stores them, so a variant's name is never
+/// changed and a variant is never removed, or every file holding it stops decoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Degradation {
+    /// The request carries a `structured_output` schema the provider will not enforce. The
+    /// adapter sends JSON mode or nothing, and the prompt has to elicit the shape.
+    #[serde(rename = "structured_output")]
+    StructuredOutputNotEnforced,
+    /// The request sets `enable_chat_template_thinking` and the server has no chat template
+    /// that reads it, so the switch is not sent and the model thinks as it would by default.
+    #[serde(rename = "chat_template_thinking")]
+    ChatTemplateThinkingNotSent,
+}
+
+impl Degradation {
+    /// Returns the snake_case tag for telemetry and tars-py, the word serde writes.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::StructuredOutputNotEnforced => "structured_output",
+            Self::ChatTemplateThinkingNotSent => "chat_template_thinking",
+        }
+    }
+}
+
+impl std::fmt::Display for Degradation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::StructuredOutputNotEnforced => {
+                "request carries a structured_output schema the provider does not enforce; the \
+                 prompt has to elicit the shape"
+            }
+            Self::ChatTemplateThinkingNotSent => {
+                "request sets enable_chat_template_thinking but the provider has no chat template \
+                 that reads it; the switch is not sent"
+            }
+        })
+    }
+}
+
+/// One way a provider's [`ProviderProfile`] cannot serve what a [`ChatRequest`] needs, for a
+/// caller to branch on (drop the tools and retry, or fail on a context overflow).
+///
+/// The serde form is a storage format: the call log stores a refused call's reasons, so a
+/// variant's `kind` tag and its field names are never changed and a variant is never removed, or
+/// every file holding it stops decoding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
 #[non_exhaustive]
 pub enum CompatibilityReason {
-    /// Request has tool specs but provider's `supports_tool_use=false`.
+    /// The request has tools and the provider has no tool use. `tool_count` is 0 when it comes
+    /// from [`ProviderProfile::check_requirements`].
+    #[serde(rename = "tool_use")]
     ToolUseUnsupported { tool_count: usize },
-    /// Request carries a `structured_output` schema, but the provider's
-    /// `supports_structured_output` is `None` — so the provider will NOT
-    /// enforce it. This is advisory, not a rejection: the request is still
-    /// built and sent unchanged. The schema is transmitted (and typically
-    /// dropped by the provider's adapter, e.g. `claude_cli` / `gemini_cli` /
-    /// `codex_cli`), and the caller is relying on the PROMPT to elicit the
-    /// shape — the one-request-shape-for-every-provider contract. The name is
-    /// "NotEnforced", not "Unsupported": nothing is broken by sending it.
-    StructuredOutputNotEnforced,
-    /// Request has `thinking != Off` but provider's
-    /// `supports_thinking=false`.
+    /// The request asks for thinking and the provider has none.
+    #[serde(rename = "thinking")]
     ThinkingUnsupported { mode: ThinkingMode },
-    /// Request contains an Image content block but provider's
-    /// `supports_vision=false`.
+    /// The request contains an image and the provider has no vision.
+    #[serde(rename = "vision")]
     VisionUnsupported,
-    /// Estimated prompt size exceeds provider's `max_context_tokens`.
-    /// Estimate uses a `chars/4` heuristic. The estimate is conservative-toward-passing:
-    /// flagged only when overflow is obvious.
+    /// The estimated prompt size exceeds the provider's `max_context_tokens`.
+    #[serde(rename = "context_window")]
     ContextWindowExceeded {
-        /// Our estimate of the prompt's token count via chars/4.
+        /// The prompt's byte length / 4, or the caller's declared estimate.
         estimated_prompt_tokens: u32,
-        /// Provider's declared cap.
         max_context_tokens: u32,
     },
-    /// Caller's requested `max_output_tokens` exceeds provider's
-    /// `max_output_tokens`. Set the request field smaller, or pick
-    /// a model with bigger output cap.
+    /// The requested `max_output_tokens` exceeds the provider's.
+    #[serde(rename = "max_output_tokens")]
     MaxOutputTokensExceeded { requested: u32, max: u32 },
 }
 
@@ -276,10 +270,6 @@ impl std::fmt::Display for CompatibilityReason {
             Self::ToolUseUnsupported { tool_count } => write!(
                 f,
                 "request has {tool_count} tool(s) but provider does not support tool_use"
-            ),
-            Self::StructuredOutputNotEnforced => write!(
-                f,
-                "request carries a structured_output schema but the provider will not enforce it (the schema is sent and likely dropped by the adapter; the caller relies on the prompt)"
             ),
             Self::ThinkingUnsupported { mode } => write!(
                 f,
@@ -294,7 +284,7 @@ impl std::fmt::Display for CompatibilityReason {
                 max_context_tokens,
             } => write!(
                 f,
-                "estimated prompt size {estimated_prompt_tokens} tokens (chars/4 heuristic) exceeds provider max_context_tokens={max_context_tokens}"
+                "estimated prompt size {estimated_prompt_tokens} tokens (bytes/4 heuristic) exceeds provider max_context_tokens={max_context_tokens}"
             ),
             Self::MaxOutputTokensExceeded { requested, max } => write!(
                 f,
@@ -305,14 +295,10 @@ impl std::fmt::Display for CompatibilityReason {
 }
 
 impl CompatibilityReason {
-    /// Stable snake_case kind tag for telemetry / metric tags / Python
-    /// callers that want to branch by string. Keeps enum variant names
-    /// flexible (we may rename `ToolUseUnsupported` → `ToolsUnsupported`
-    /// internally) while telemetry / dashboards stay stable.
+    /// Returns the reason's snake_case tag for telemetry and tars-py, the `kind` serde writes.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::ToolUseUnsupported { .. } => "tool_use",
-            Self::StructuredOutputNotEnforced => "structured_output",
             Self::ThinkingUnsupported { .. } => "thinking",
             Self::VisionUnsupported => "vision",
             Self::ContextWindowExceeded { .. } => "context_window",
@@ -321,74 +307,41 @@ impl CompatibilityReason {
     }
 }
 
-/// Declarative requirements describing what features a caller needs
-/// from a provider. Used by [`ProviderProfile::check_requirements`] for
-/// **config-time** capability checks — e.g. "at startup, before any
-/// request is built, verify that the provider configured for the
-/// `critic` role supports tools + thinking".
-///
-/// Compared to [`ChatRequest::compatibility_check`]: this lets the
-/// caller declare requirements without inventing a placeholder
-/// `ChatRequest` (no fake messages, no prompt-content estimate). All
-/// fields default to "I don't need this", so callers only set the
-/// axes they actually care about.
+/// What a caller will need from a provider, declared at startup before any request exists, for
+/// [`ProviderProfile::check_requirements`]. Every field defaults to "not needed".
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CapabilityRequirements {
-    /// Caller will issue requests with `tools` set.
+pub struct ProviderNeeds {
     pub requires_tools: bool,
-    /// Caller will issue requests with image content blocks.
     pub requires_vision: bool,
-    /// Caller will set `thinking != Off` on at least some requests.
     pub requires_thinking: bool,
-    /// Caller will set `structured_output` on at least some requests.
     pub requires_structured_output: bool,
-    /// Estimated upper bound on prompt size in tokens. `0` = no
-    /// constraint to check. Useful for "I'll send up to 8k token
-    /// prompts; does this provider's context window cover that?".
+    /// The largest prompt the caller will send, in tokens; 0 means not checked.
     pub estimated_max_prompt_tokens: u32,
-    /// Largest `max_output_tokens` the caller will request. `0` = no
-    /// constraint. Useful for "I'll ask for up to 4k output tokens
-    /// sometimes; can the provider deliver?".
+    /// The largest `max_output_tokens` the caller will request; 0 means not checked.
     pub estimated_max_output_tokens: u32,
 }
 
 impl ProviderProfile {
-    /// Check whether these capabilities satisfy a set of caller-declared
-    /// [`CapabilityRequirements`]. Returns the same
-    /// [`CompatibilityCheck`] verdict as
-    /// [`ChatRequest::compatibility_check`] so both API call-sites
-    /// share the same downstream branching code.
-    ///
-    /// **Use this at config time** — before building any real request,
-    /// to verify a configured provider can satisfy a role's needs.
-    /// Avoids the "configure, send a real request, fail, fall back"
-    /// loop in production.
-    ///
-    /// Aggregates ALL incompatibilities (no early-exit on first
-    /// failure), same as `compatibility_check`.
-    pub fn check_requirements(&self, req: &CapabilityRequirements) -> CompatibilityCheck {
+    /// Checks the profile against a caller's declared needs at startup, returning every unmet
+    /// one in the same verdict [`ChatRequest::compatibility_check`] gives.
+    pub fn check_requirements(&self, req: &ProviderNeeds) -> CompatibilityCheck {
         let mut reasons = Vec::new();
+        let mut unsent = Vec::new();
 
-        if req.requires_tools && !self.supports_tool_use {
-            // tool_count is unknown at config time — encode as 0 to
-            // signal "user said they need tools, count not specified
-            // yet". The Display message glosses over this.
+        if req.requires_tools && self.supports_tool_use == Support::Unsupported {
             reasons.push(CompatibilityReason::ToolUseUnsupported { tool_count: 0 });
         }
-        if req.requires_vision && !self.supports_vision {
+        if req.requires_vision && self.supports_vision == Support::Unsupported {
             reasons.push(CompatibilityReason::VisionUnsupported);
         }
-        if req.requires_thinking && !self.supports_thinking {
-            // ThinkingMode::Auto is the conservative "caller wants any
-            // thinking support" placeholder.
+        if req.requires_thinking && self.supports_thinking == Support::Unsupported {
+            // The caller declared no mode; `Auto` stands for "any thinking".
             reasons.push(CompatibilityReason::ThinkingUnsupported {
                 mode: ThinkingMode::Auto,
             });
         }
-        if req.requires_structured_output
-            && matches!(self.supports_structured_output, StructuredOutputMode::None)
-        {
-            reasons.push(CompatibilityReason::StructuredOutputNotEnforced);
+        if req.requires_structured_output && self.schema_enforcement() == Support::Unsupported {
+            unsent.push(Degradation::StructuredOutputNotEnforced);
         }
         if let Some(max_ctx) = self.max_context_tokens {
             if req.estimated_max_prompt_tokens > 0 && req.estimated_max_prompt_tokens > max_ctx {
@@ -407,19 +360,12 @@ impl ProviderProfile {
             }
         }
 
-        if reasons.is_empty() {
-            CompatibilityCheck::Compatible
-        } else {
-            CompatibilityCheck::Incompatible { reasons }
-        }
+        CompatibilityCheck::from_findings(reasons, unsent)
     }
 }
 
-/// Mirrors the OpenAI/Anthropic role model.
-///
-/// **Note on `tool_calls`**: only present on `Assistant` messages. The
-/// model emits tool calls; we send back the result as a `Tool` message
-/// referencing the same `tool_call_id`.
+/// One message of a conversation, by role as OpenAI and Anthropic model it. A tool call's result
+/// goes back as a `Tool` message naming the call's id.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
@@ -427,10 +373,7 @@ pub enum Message {
         content: Vec<ContentBlock>,
     },
     Assistant {
-        // OpenAI omits `content` entirely on assistant messages that
-        // are pure tool-call invocations. Without `default` here our
-        // Deserialize fails on those messages. Audit
-        // `tars-types-src-chat-13`.
+        // OpenAI omits `content` on an assistant message that only calls tools.
         #[serde(default)]
         content: Vec<ContentBlock>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -442,9 +385,8 @@ pub enum Message {
         #[serde(default)]
         is_error: bool,
     },
-    /// System messages are normally promoted out to `request.system`,
-    /// but the variant exists for adapters that prefer to keep them
-    /// inline (e.g. a long history replay).
+    /// A system message kept inline, as in a replayed history; the system prompt usually goes in
+    /// `request.system`.
     System {
         content: Vec<ContentBlock>,
     },
@@ -474,7 +416,7 @@ impl Message {
     }
 }
 
-/// Wire format mirrors OpenAI/Anthropic:
+/// One block of a message's content, serialized as OpenAI and Anthropic write it:
 /// `{"type": "text", "text": "..."}` / `{"type": "image", ...}`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -497,40 +439,19 @@ impl ContentBlock {
     }
 }
 
-/// We never send raw `Vec<u8>` over the wire to the LLM; provider
-/// adapters base64-encode at the boundary.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+/// An image as a URL or as base64 text; raw bytes are never carried. The serde form is a storage
+/// format, since transcripts and the call log store messages: `{"url":"..."}` / `{"base64":"..."}`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ImageData {
     Url(String),
     Base64(String),
 }
 
-impl ImageData {
-    /// SHA-256 hex digest of the *descriptor* — the URL string for
-    /// `Url` or the encoded form for `Base64`. **Does not** fetch the
-    /// remote bytes for `Url`, so two different images served from the
-    /// same URL hash identically.
-    pub fn descriptor_hash(&self) -> String {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        match self {
-            Self::Url(u) => h.update(u.as_bytes()),
-            Self::Base64(b) => h.update(b.as_bytes()),
-        }
-        let bytes = h.finalize();
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::TenantId;
-
-    fn fake_tenant() -> TenantId {
-        TenantId::new("test")
-    }
+    use crate::providers::provider_profile::StructuredOutputMode;
 
     #[test]
     fn user_builder_creates_minimal_request() {
@@ -548,12 +469,18 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_hash_is_stable_and_only_descriptor() {
-        let _ = fake_tenant();
-        let a = ImageData::Url("https://x/y".into()).descriptor_hash();
-        let b = ImageData::Url("https://x/y".into()).descriptor_hash();
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 64);
+    fn every_image_is_written_under_its_kind_and_reads_back() {
+        let stored = [
+            (
+                ImageData::Url("https://x/y.png".into()),
+                r#"{"url":"https://x/y.png"}"#,
+            ),
+            (ImageData::Base64("AA==".into()), r#"{"base64":"AA=="}"#),
+        ];
+        for (image, json) in stored {
+            assert_eq!(serde_json::to_string(&image).unwrap(), json, "{image:?}");
+            assert_eq!(serde_json::from_str::<ImageData>(json).unwrap(), image);
+        }
     }
 
     // ── compatibility_check tests ───────────────────────────────────────────
@@ -564,46 +491,90 @@ mod tests {
     use std::collections::HashSet;
 
     fn caps_minimal() -> ProviderProfile {
-        let mut text_only = HashSet::new();
-        text_only.insert(Modality::Text);
         ProviderProfile {
-            interface: crate::InterfaceKind::Http,
             max_context_tokens: Some(32_768),
             max_output_tokens: Some(4096),
-            supports_tool_use: false,
-            supports_parallel_tool_calls: false,
-            supports_structured_output: StructuredOutputMode::None,
-            supports_vision: false,
-            supports_thinking: false,
             supports_cancel: true,
-            prompt_cache: PromptCacheKind::None,
             streaming: true,
-            modalities_in: text_only.clone(),
-            modalities_out: text_only,
-            pricing: Pricing::default(),
+            ..ProviderProfile::nothing_claimed(crate::InterfaceKind::Http)
         }
     }
 
     fn caps_full() -> ProviderProfile {
-        let mut both = HashSet::new();
-        both.insert(Modality::Text);
-        both.insert(Modality::Image);
+        let both = HashSet::from([Modality::Text, Modality::Image]);
         ProviderProfile {
-            interface: crate::InterfaceKind::Http,
             max_context_tokens: Some(200_000),
             max_output_tokens: Some(8192),
-            supports_tool_use: true,
+            supports_tool_use: Support::Supported,
             supports_parallel_tool_calls: true,
-            supports_structured_output: StructuredOutputMode::StrictSchema,
-            supports_vision: true,
-            supports_thinking: true,
+            supports_structured_output: Some(StructuredOutputMode::StrictSchema),
+            supports_vision: Support::Supported,
+            supports_thinking: Support::Supported,
+            supports_chat_template_thinking: true,
             supports_cancel: true,
             prompt_cache: PromptCacheKind::ImplicitPrefix { min_tokens: 1024 },
             streaming: true,
             modalities_in: both.clone(),
             modalities_out: both,
-            pricing: Pricing::default(),
+            ..ProviderProfile::nothing_claimed(crate::InterfaceKind::Http)
         }
+    }
+
+    #[test]
+    fn a_chat_template_switch_the_server_cannot_read_degrades_the_call_and_does_not_refuse_it() {
+        let mut req = ChatRequest::user("hi");
+        req.enable_chat_template_thinking = Some(false);
+        assert_eq!(
+            req.compatibility_check(&caps_minimal()),
+            CompatibilityCheck::Degraded {
+                unsent: vec![Degradation::ChatTemplateThinkingNotSent]
+            }
+        );
+        assert_eq!(
+            req.compatibility_check(&caps_full()),
+            CompatibilityCheck::Compatible
+        );
+        req.enable_chat_template_thinking = None;
+        assert_eq!(
+            req.compatibility_check(&caps_minimal()),
+            CompatibilityCheck::Compatible
+        );
+    }
+
+    #[test]
+    fn a_schema_json_mode_does_not_enforce_degrades_the_call() {
+        let mut req = ChatRequest::user("hi");
+        req.structured_output = Some(crate::JsonSchema::strict(
+            "R",
+            crate::json_object! {"type": "object"},
+        ));
+        let mut json_mode = caps_full();
+        json_mode.supports_structured_output = Some(StructuredOutputMode::JsonObjectMode);
+        assert_eq!(
+            req.compatibility_check(&json_mode),
+            CompatibilityCheck::Degraded {
+                unsent: vec![Degradation::StructuredOutputNotEnforced]
+            }
+        );
+        assert_eq!(
+            req.compatibility_check(&caps_full()),
+            CompatibilityCheck::Compatible
+        );
+    }
+
+    #[test]
+    fn a_request_that_is_both_degraded_and_unservable_is_incompatible() {
+        let mut req = ChatRequest::user("hi");
+        req.enable_chat_template_thinking = Some(true);
+        req.thinking = ThinkingMode::Auto;
+        assert_eq!(
+            req.compatibility_check(&caps_minimal()),
+            CompatibilityCheck::Incompatible {
+                reasons: vec![CompatibilityReason::ThinkingUnsupported {
+                    mode: ThinkingMode::Auto
+                }]
+            }
+        );
     }
 
     #[test]
@@ -622,7 +593,7 @@ mod tests {
         req.tools.push(ToolSpec {
             name: "x".into(),
             description: "x".into(),
-            input_schema: JsonSchema::loose(serde_json::json!({"type":"object"})),
+            input_schema: JsonSchema::loose(crate::json_object! {"type":"object"}),
         });
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
@@ -637,6 +608,69 @@ mod tests {
         }
     }
 
+    fn every_capability_and_a_long_prompt() -> ChatRequest {
+        use crate::providers::tools::ToolSpec;
+        let mut req = ChatRequest::user("x".repeat(150_000));
+        req.tools.push(ToolSpec {
+            name: "x".into(),
+            description: "x".into(),
+            input_schema: JsonSchema::loose(crate::json_object! {"type": "object"}),
+        });
+        req.thinking = ThinkingMode::Auto;
+        req.structured_output = Some(JsonSchema::strict(
+            "R",
+            crate::json_object! {"type": "object"},
+        ));
+        req.messages.push(Message::User {
+            content: vec![ContentBlock::Image {
+                mime: "image/png".into(),
+                data: ImageData::Url("https://x/y.png".into()),
+            }],
+        });
+        req
+    }
+
+    #[test]
+    fn a_provider_with_no_data_on_a_capability_is_sent_the_request() {
+        assert_eq!(
+            every_capability_and_a_long_prompt()
+                .compatibility_check(&ProviderProfile::undescribed_http()),
+            CompatibilityCheck::Compatible
+        );
+    }
+
+    #[test]
+    fn a_provider_known_to_lack_each_capability_is_refused_for_each() {
+        let mut caps = ProviderProfile::undescribed_http();
+        caps.supports_tool_use = Support::Unsupported;
+        caps.supports_thinking = Support::Unsupported;
+        caps.supports_vision = Support::Unsupported;
+        caps.max_context_tokens = Some(32_000);
+        let CompatibilityCheck::Incompatible { reasons } =
+            every_capability_and_a_long_prompt().compatibility_check(&caps)
+        else {
+            panic!("expected Incompatible");
+        };
+        let kinds: Vec<_> = reasons.iter().map(CompatibilityReason::kind).collect();
+        assert_eq!(kinds, ["tool_use", "thinking", "vision", "context_window"]);
+    }
+
+    #[test]
+    fn declared_needs_a_provider_has_no_data_on_pass_at_startup() {
+        let needs = ProviderNeeds {
+            requires_tools: true,
+            requires_vision: true,
+            requires_thinking: true,
+            requires_structured_output: true,
+            estimated_max_prompt_tokens: 1_000_000,
+            estimated_max_output_tokens: 1_000_000,
+        };
+        assert_eq!(
+            ProviderProfile::undescribed_http().check_requirements(&needs),
+            CompatibilityCheck::Compatible
+        );
+    }
+
     #[test]
     fn compat_tools_pass_when_provider_supports() {
         use crate::providers::tools::ToolSpec;
@@ -644,7 +678,7 @@ mod tests {
         req.tools.push(ToolSpec {
             name: "x".into(),
             description: "x".into(),
-            input_schema: JsonSchema::loose(serde_json::json!({"type":"object"})),
+            input_schema: JsonSchema::loose(crate::json_object! {"type":"object"}),
         });
         assert!(matches!(
             req.compatibility_check(&caps_full()),
@@ -680,28 +714,14 @@ mod tests {
     }
 
     #[test]
-    fn compat_structured_output_not_enforced_is_advisory_not_a_rejection() {
+    fn a_schema_the_provider_does_not_enforce_degrades_the_call_and_does_not_refuse_it() {
         let mut req = ChatRequest::user("hi");
-        req.structured_output = Some(JsonSchema::loose(serde_json::json!({"type":"object"})));
-        // A schema against a None-mode provider yields the NotEnforced reason —
-        // an advisory. It must NOT be a hard error: the schema is still sent (the
-        // provider/adapter decides), and the caller relies on the prompt. This is
-        // the deliberate behaviour the critic depends on over `claude_cli`.
-        match req.compatibility_check(&caps_minimal()) {
-            CompatibilityCheck::Incompatible { reasons } => {
-                assert!(
-                    reasons
-                        .iter()
-                        .any(|r| matches!(r, CompatibilityReason::StructuredOutputNotEnforced))
-                );
+        req.structured_output = Some(JsonSchema::loose(crate::json_object! {"type":"object"}));
+        assert_eq!(
+            req.compatibility_check(&caps_minimal()),
+            CompatibilityCheck::Degraded {
+                unsent: vec![Degradation::StructuredOutputNotEnforced]
             }
-            _ => panic!("expected the NotEnforced advisory reason"),
-        }
-        // compatibility_check takes &self and mutates nothing: the request still
-        // carries its schema — nothing was dropped or rejected.
-        assert!(
-            req.structured_output.is_some(),
-            "the schema must survive the advisory check unchanged",
         );
     }
 
@@ -752,7 +772,7 @@ mod tests {
             }],
             tools: Vec::new(),
             tool_choice: ToolChoice::default(),
-            structured_output: Some(JsonSchema::loose(serde_json::json!({}))),
+            structured_output: Some(JsonSchema::loose(crate::json_object! {})),
             max_output_tokens: None,
             temperature: None,
             stop_sequences: Vec::new(),
@@ -764,23 +784,21 @@ mod tests {
         req.tools.push(ToolSpec {
             name: "x".into(),
             description: "x".into(),
-            input_schema: JsonSchema::loose(serde_json::json!({})),
+            input_schema: JsonSchema::loose(crate::json_object! {}),
         });
         match req.compatibility_check(&caps_minimal()) {
             CompatibilityCheck::Incompatible { reasons } => {
                 assert_eq!(
                     reasons.len(),
-                    4,
-                    "expected all 4 reasons collected, got: {reasons:?}"
+                    3,
+                    "expected all 3 reasons collected, got: {reasons:?}"
                 );
                 // verify each kind shows up exactly once
                 let kinds: std::collections::HashSet<_> =
                     reasons.iter().map(|r| r.kind()).collect();
                 assert_eq!(
                     kinds,
-                    ["tool_use", "structured_output", "thinking", "vision"]
-                        .into_iter()
-                        .collect()
+                    ["tool_use", "thinking", "vision"].into_iter().collect()
                 );
             }
             _ => panic!("expected Incompatible"),
@@ -845,42 +863,32 @@ mod tests {
 
     // ── Boundary cases ─────────────────────────────────────────────
 
-    /// All-zeroed capabilities for boundary testing — represents
-    /// "the most-restricted possible provider". ProviderProfile itself
-    /// doesn't impl `Default` (would let invalid configs through), so
-    /// build via `text_only_baseline` then zero out supports_* fields.
+    /// Returns the most restricted profile: no features, zero context and output.
     fn caps_zero() -> ProviderProfile {
         let mut c = ProviderProfile::text_only_baseline(Pricing::default());
         c.max_context_tokens = Some(0);
         c.max_output_tokens = Some(0);
-        c.supports_tool_use = false;
+        c.supports_tool_use = Support::Unsupported;
         c.supports_parallel_tool_calls = false;
-        c.supports_structured_output = StructuredOutputMode::None;
-        c.supports_vision = false;
-        c.supports_thinking = false;
+        c.supports_structured_output = Some(StructuredOutputMode::None);
+        c.supports_vision = Support::Unsupported;
+        c.supports_thinking = Support::Unsupported;
         c.streaming = false;
         c
     }
 
     #[test]
     fn compat_baseline_capabilities_text_only_request_passes() {
-        // `text_only_baseline()` provides 32k context + 4k output +
-        // text-only modalities. A trivial text request should pass.
         let caps = ProviderProfile::text_only_baseline(Pricing::default());
         let req = ChatRequest::user("hi");
         match req.compatibility_check(&caps) {
             CompatibilityCheck::Compatible => {}
-            CompatibilityCheck::Incompatible { reasons } => {
-                panic!("expected Compatible, got: {reasons:?}");
-            }
+            other => panic!("expected Compatible, got: {other:?}"),
         }
     }
 
     #[test]
     fn compat_zero_capability_provider_with_full_feature_request_aggregates_all() {
-        // Hard adversarial case: provider with everything OFF, request
-        // with everything ON. Want: ALL reasons aggregated, no early-
-        // exit on first failure. Use 6 features simultaneously.
         use crate::providers::tools::ToolSpec;
         let zero_caps = caps_zero(); // everything off, max_*_tokens = 0
         let req = ChatRequest {
@@ -894,10 +902,10 @@ mod tests {
             tools: vec![ToolSpec {
                 name: "x".into(),
                 description: "x".into(),
-                input_schema: JsonSchema::loose(serde_json::json!({})),
+                input_schema: JsonSchema::loose(crate::json_object! {}),
             }],
             tool_choice: ToolChoice::default(),
-            structured_output: Some(JsonSchema::loose(serde_json::json!({}))),
+            structured_output: Some(JsonSchema::loose(crate::json_object! {})),
             max_output_tokens: Some(99_999), // exceeds default max=0
             temperature: None,
             stop_sequences: Vec::new(),
@@ -910,16 +918,14 @@ mod tests {
             CompatibilityCheck::Incompatible { reasons } => {
                 let kinds: std::collections::HashSet<_> =
                     reasons.iter().map(|r| r.kind()).collect();
-                // Expect all 6 reason kinds present
                 assert!(kinds.contains("tool_use"));
-                assert!(kinds.contains("structured_output"));
                 assert!(kinds.contains("thinking"));
                 assert!(kinds.contains("vision"));
                 assert!(kinds.contains("context_window"));
                 assert!(kinds.contains("max_output_tokens"));
-                assert_eq!(kinds.len(), 6, "expected all 6 axes flagged: {kinds:?}");
+                assert_eq!(kinds.len(), 5, "expected all 5 axes flagged: {kinds:?}");
             }
-            _ => panic!("expected Incompatible with all 6 reasons"),
+            _ => panic!("expected Incompatible with all 5 reasons"),
         }
     }
 
@@ -927,7 +933,7 @@ mod tests {
 
     #[test]
     fn requirements_default_is_empty_and_passes_minimal_caps() {
-        let reqs = CapabilityRequirements::default();
+        let reqs = ProviderNeeds::default();
         assert!(matches!(
             caps_minimal().check_requirements(&reqs),
             CompatibilityCheck::Compatible
@@ -936,7 +942,7 @@ mod tests {
 
     #[test]
     fn requirements_tools_blocked_by_no_tool_caps() {
-        let reqs = CapabilityRequirements {
+        let reqs = ProviderNeeds {
             requires_tools: true,
             ..Default::default()
         };
@@ -954,7 +960,7 @@ mod tests {
 
     #[test]
     fn requirements_full_feature_set_aggregates_all_reasons() {
-        let reqs = CapabilityRequirements {
+        let reqs = ProviderNeeds {
             requires_tools: true,
             requires_vision: true,
             requires_thinking: true,
@@ -966,7 +972,7 @@ mod tests {
             CompatibilityCheck::Incompatible { reasons } => {
                 let kinds: std::collections::HashSet<_> =
                     reasons.iter().map(|r| r.kind()).collect();
-                assert_eq!(kinds.len(), 6, "expected all 6 axes flagged: {kinds:?}");
+                assert_eq!(kinds.len(), 5, "expected all 5 axes flagged: {kinds:?}");
             }
             _ => panic!("expected Incompatible"),
         }
@@ -974,9 +980,7 @@ mod tests {
 
     #[test]
     fn requirements_zero_estimated_tokens_means_no_check() {
-        // estimated_max_prompt_tokens=0 = "I'll worry about size later".
-        // Should NOT flag context overflow even when max_context_tokens=0.
-        let reqs = CapabilityRequirements {
+        let reqs = ProviderNeeds {
             estimated_max_prompt_tokens: 0,
             estimated_max_output_tokens: 0,
             ..Default::default()
@@ -984,7 +988,6 @@ mod tests {
         let mut caps = caps_minimal();
         caps.max_context_tokens = Some(0);
         caps.max_output_tokens = Some(0);
-        // Default everything else — still Compatible.
         assert!(matches!(
             caps.check_requirements(&reqs),
             CompatibilityCheck::Compatible
@@ -993,7 +996,7 @@ mod tests {
 
     #[test]
     fn requirements_full_caps_passes_demanding_requirements() {
-        let reqs = CapabilityRequirements {
+        let reqs = ProviderNeeds {
             requires_tools: true,
             requires_vision: true,
             requires_thinking: true,
@@ -1020,6 +1023,54 @@ mod tests {
         let s = r.to_string();
         assert!(s.contains("50000"));
         assert!(s.contains("32768"));
-        assert!(s.contains("chars/4"));
+        assert!(s.contains("bytes/4"));
+    }
+
+    #[test]
+    fn every_compatibility_reason_is_stored_under_its_kind_and_reads_back() {
+        let stored = [
+            (
+                CompatibilityReason::ToolUseUnsupported { tool_count: 2 },
+                r#"{"kind":"tool_use","tool_count":2}"#,
+            ),
+            (
+                CompatibilityReason::ThinkingUnsupported {
+                    mode: ThinkingMode::Auto,
+                },
+                r#"{"kind":"thinking","mode":{"mode":"auto"}}"#,
+            ),
+            (
+                CompatibilityReason::ThinkingUnsupported {
+                    mode: ThinkingMode::Budget(2048),
+                },
+                r#"{"kind":"thinking","mode":{"mode":"budget","tokens":2048}}"#,
+            ),
+            (
+                CompatibilityReason::VisionUnsupported,
+                r#"{"kind":"vision"}"#,
+            ),
+            (
+                CompatibilityReason::ContextWindowExceeded {
+                    estimated_prompt_tokens: 9,
+                    max_context_tokens: 8,
+                },
+                r#"{"kind":"context_window","estimated_prompt_tokens":9,"max_context_tokens":8}"#,
+            ),
+            (
+                CompatibilityReason::MaxOutputTokensExceeded {
+                    requested: 5,
+                    max: 4,
+                },
+                r#"{"kind":"max_output_tokens","requested":5,"max":4}"#,
+            ),
+        ];
+        for (reason, json) in stored {
+            assert_eq!(serde_json::to_string(&reason).unwrap(), json);
+            assert!(json.contains(&format!(r#""kind":"{}""#, reason.kind())));
+            assert_eq!(
+                serde_json::from_str::<CompatibilityReason>(json).unwrap(),
+                reason
+            );
+        }
     }
 }

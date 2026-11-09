@@ -1,9 +1,10 @@
-OS exec-confinement mechanism (macOS Seatbelt / Linux bubblewrap) as a pure policy→argv builder — it never spawns; it sits below both spawners (tars-tools and tars-provider) so neither owns the other's confinement.
+OS exec-confinement mechanism (macOS Seatbelt / Linux bubblewrap) as a pure policy→argv builder — it never spawns; it sits below both spawners (tars-tools and tars-llm) so neither owns the other's confinement.
 
-- Role (hex): core (pure mechanism; deliberately zero deps)
-- Effect budget: none (builds `(program, argv)` / profile strings; the CALLER spawns; fail-closed on unbuildable policy)
-- Deps: may depend on []; MUST NOT import [anything — zero-dep is the design; std::process::Command spawning → the callers (tars-tools BashTool, tars-provider claude_cli); tars-types → this crate sits BELOW tars-types (tars-types depends on it)]
-- Owns concepts: [SandboxMode (ReadOnly / WorkspaceWrite / DangerFullAccess), SandboxPolicy, SandboxPolicy::wrap, seatbelt_profile, bwrap_argv, default_tmp_writable_roots]
+- Role (hex): mechanism below both spawners; it reads the filesystem but never spawns, and has no deps by design
+- Effect budget: reads the filesystem only (canonicalizes the workdir and roots, looks up the jail program, reads each `.git` from the workdir and the writable roots up to `/`); builds the program, argv and profile strings; the CALLER spawns; fail-closed on unbuildable policy
+- Deps: may depend on []; MUST NOT import [anything — zero-dep is the design; std::process::Command spawning → the callers (tars-tools BashTool, tars-llm claude_cli); tars-types → this crate sits BELOW tars-types (tars-types depends on it)]
+- Owns concepts: [SandboxMode (ReadOnly / WorkspaceWrite / DangerFullAccess), SandboxPolicy, SandboxPolicy::wrap / CommandLine, protected_dirs (the git directories a write never reaches: every `.git` from the workdir and each writable root up to `/`, and where each points) / FindGitDirError, ResolveRootError / canonical_root, seatbelt_profile, bwrap_argv, default_tmp_writable_roots]
 - Reason to change (the ONE): the confinement model changes (a new OS backend, a new jail dimension)
 - Belongs here: a Landlock/Linux-namespace profile builder; a new writable-root rule; profile-string generation tests
-- Does NOT belong: actually spawning a process → tars-tools (BashTool) or tars-provider (CLI backends); sandbox *configuration* schema / TOML → tars-config (`SandboxConfig`, `resolve_policy`); deciding WHEN to sandbox → the calling tool/provider policy
+- Relied on by delegates: a write outside the granted roots is refused, and that is what keeps a delegated claude run from saving the user's global `~/.claude.json` (it sits outside the granted `~/.claude` state dir). The refusal is harmless: the run and its reply go on, only that config is not saved. Which roots a delegate gets is the caller's policy (tars-llm; Doc 32 §6, `docs/providers/claude-cli.md`), and any jail that replaces Seatbelt or bubblewrap keeps it
+- Does NOT belong: actually spawning a process → tars-tools (BashTool) or tars-llm (CLI backends); sandbox *configuration* schema / TOML → tars-config (`SandboxConfig`, `resolve_policy`); deciding WHEN to sandbox → the calling tool/provider policy

@@ -1,56 +1,30 @@
-//! `web.fetch` + `web.search` — the web capability, backed by `sisurf-core`.
+//! `web.fetch` and `web.search`: adapters over [`sisurf_core::fetch`] and
+//! [`sisurf_core::search`]. They parse the arguments, make the one call and turn sisurf's result
+//! into a [`ToolOutput`].
 //!
-//! Two thin adapters over sisurf's typed public API:
-//!
-//!   * [`WebFetchTool`] (`web.fetch`) — URL → clean Markdown + provenance
-//!     (final URL, which tier served it), via [`sisurf_core::fetch`]. sisurf
-//!     hides the reqwest→Chromium escalation; the tool never picks a tier.
-//!   * [`WebSearchTool`] (`web.search`) — query → a structured
-//!     title/url/snippet list, via [`sisurf_core::search`].
-//!
-//! ## No web logic here
-//!
-//! All fetching, escalation, distillation, and result parsing lives in
-//! `sisurf-core`. These tools only (a) validate/parse the JSON args, (b) call
-//! the one sisurf primitive, and (c) adapt sisurf's typed result / typed
-//! [`WebError`] into the tars [`ToolResult`] contract.
-//!
-//! ## Network op → gated
-//!
-//! Both are `web.*` (network, long-running). The dispatch gate
-//! ([`crate::ToolRegistry::dispatch`]) enforces permission/approval by tool
-//! name before `execute` is ever reached, so a policy that marks `web.fetch` /
-//! `web.search` as `Ask`/`Deny` routes them through the human-approval sink
-//! exactly like `bash.run` — no per-tool plumbing needed here.
-//!
-//! ## Typed errors, not stringified blobs
-//!
-//! sisurf returns a typed [`WebError`]. We **branch on the variant** (see
-//! [`web_error_result`]) rather than collapsing it to one string, so
-//! [`WebError::NoBrowser`] surfaces as its own legible, actionable message
-//! ("needs a headless browser — install Chrome, or it fell back to static")
-//! that the calling agent can read and adapt to. A `WebError` means the op ran
-//! but failed, so it becomes an `is_error` [`ToolResult`] (the LLM should
-//! adapt: fix the URL, install a browser, retry a query) — not a hard
-//! [`ToolError`], which is reserved for "couldn't even attempt" (bad args,
-//! cancelled).
+//! They do not fetch, escalate to a browser, distill or parse results themselves, and they do
+//! not decide whether a call is allowed; a sandbox that cuts the network refuses them, as it
+//! does `bash.run`'s egress. A [`WebError`] means the call ran and failed, so it is
+//! an `is_error` result with its own message per variant (a missing browser says to install one);
+//! [`ToolError`] is only for bad arguments and cancellation.
 
 use std::sync::OnceLock;
+use tokio_util::sync::CancellationToken;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::json;
 
 use sisurf_core::{FetchOpts, Page, SearchConfig, SearchOpts, SearchResult, Tier, WebError};
 use tars_types::JsonSchema;
 
-use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
+use crate::tool::{Tool, ToolEnv, ToolError, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // web.fetch
 // ---------------------------------------------------------------------------
 
-/// `web.fetch` — fetch a URL and return its clean Markdown + metadata.
+/// Fetches a URL and returns its main content as Markdown, with the final URL and the tier that
+/// served it.
 #[derive(Debug, Default)]
 pub struct WebFetchTool;
 
@@ -62,7 +36,6 @@ impl WebFetchTool {
 
 #[derive(Debug, Deserialize)]
 struct WebFetchArgs {
-    /// The http(s) URL to fetch.
     url: String,
 }
 
@@ -84,7 +57,7 @@ impl Tool for WebFetchTool {
         S.get_or_init(|| {
             JsonSchema::strict(
                 "WebFetchArgs",
-                json!({
+                tars_types::json_object! {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
@@ -94,7 +67,7 @@ impl Tool for WebFetchTool {
                         }
                     },
                     "required": ["url"]
-                }),
+                },
             )
         })
     }
@@ -102,16 +75,18 @@ impl Tool for WebFetchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+        env: &ToolEnv,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
         let parsed: WebFetchArgs =
-            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+            serde_json::from_value(args).map_err(ToolError::InvalidArguments)?;
+        if !env.sandbox.network() {
+            return Ok(network_denied("web.fetch"));
+        }
 
-        // Race the network op against cooperative cancel so an upstream Drop /
-        // SIGINT aborts the await rather than waiting out the fetch.
         let outcome = tokio::select! {
             biased;
-            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
             r = sisurf_core::fetch(&parsed.url, FetchOpts::default()) => r,
         };
 
@@ -122,10 +97,16 @@ impl Tool for WebFetchTool {
     }
 }
 
-/// Format a fetched [`Page`] into the tool's success result: clean Markdown
-/// body, with the final URL + serving tier as a small provenance header so the
-/// model knows what it's reading (and whether a browser was needed).
-fn render_page(page: Page) -> ToolResult {
+/// Returns the refusal of a web call under a sandbox that cuts the network.
+fn network_denied(tool: &str) -> ToolOutput {
+    ToolOutput::titled_error(
+        format!("{tool}: network denied"),
+        format!("{tool} reaches the network, and this session's sandbox does not allow it"),
+    )
+}
+
+/// Returns the page's Markdown under a header naming its final URL and serving tier.
+fn render_page(page: Page) -> ToolOutput {
     let tier = tier_label(page.tier);
     let title = format!(
         "Fetched {} ({tier}, {} chars)",
@@ -136,7 +117,7 @@ fn render_page(page: Page) -> ToolResult {
         "# {heading}\nURL: {}\nTier: {tier}\n\n{}",
         page.url, page.content
     );
-    ToolResult::titled_success(title, content)
+    ToolOutput::titled_success(title, content)
 }
 
 fn tier_label(tier: Tier) -> &'static str {
@@ -146,46 +127,27 @@ fn tier_label(tier: Tier) -> &'static str {
     }
 }
 
-/// Human hint naming the env var the consumer resolves a backend's API key
-/// from. Kept as a legible message aid only — the authoritative env-var name
-/// lives in `tars-config` (the crate that actually resolves + injects the key);
-/// tars-tools stays a leaf and never reads the environment itself.
-fn api_key_env_hint(backend: &str) -> &'static str {
-    match backend {
-        "google_cse" => "e.g. GOOGLE_CSE_KEY",
-        "brave" => "e.g. BRAVE_API_KEY",
-        _ => "the backend's API key env var",
-    }
-}
-
 // ---------------------------------------------------------------------------
 // web.search
 // ---------------------------------------------------------------------------
 
-/// `web.search` — search the web and return a structured result list.
+/// Searches the web and returns a numbered list of title, URL and snippet.
 ///
-/// Holds a sisurf [`SearchConfig`] (which backend + its parameters). The
-/// **key is already injected by the consumer** (tars-config resolves an env
-/// var and writes it into the config) — sisurf never reads the environment.
-/// The runnable backend is produced by [`SearchConfig::build`] at call time so
-/// a missing key / misconfigured backend surfaces as a legible tool error the
-/// agent can read, rather than failing tool construction opaquely.
+/// Its [`SearchConfig`] already carries the API key; the backend is built from it on each call,
+/// so a missing key or a misconfigured backend is an `is_error` result the agent reads, not a
+/// failure to build the tool.
 #[derive(Debug, Default)]
 pub struct WebSearchTool {
-    /// The (key-injected) search backend config. `Default` = DuckDuckGo scrape,
-    /// which needs no key and works out of the box.
     config: SearchConfig,
 }
 
 impl WebSearchTool {
-    /// Default DuckDuckGo backend (no API key required).
+    /// Returns a tool on the DuckDuckGo backend, which needs no API key.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Use a specific, already-key-injected [`SearchConfig`] (Google CSE /
-    /// Brave / DDG). The consumer resolves any API key from the environment and
-    /// injects it into `config` before constructing the tool.
+    /// Returns a tool on `config`, whose API key the caller has already filled in.
     pub fn with_config(config: SearchConfig) -> Self {
         Self { config }
     }
@@ -193,7 +155,6 @@ impl WebSearchTool {
 
 #[derive(Debug, Deserialize)]
 struct WebSearchArgs {
-    /// The search query.
     query: String,
 }
 
@@ -214,7 +175,7 @@ impl Tool for WebSearchTool {
         S.get_or_init(|| {
             JsonSchema::strict(
                 "WebSearchArgs",
-                json!({
+                tars_types::json_object! {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
@@ -224,7 +185,7 @@ impl Tool for WebSearchTool {
                         }
                     },
                     "required": ["query"]
-                }),
+                },
             )
         })
     }
@@ -232,14 +193,16 @@ impl Tool for WebSearchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+        env: &ToolEnv,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
         let parsed: WebSearchArgs =
-            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+            serde_json::from_value(args).map_err(ToolError::InvalidArguments)?;
+        if !env.sandbox.network() {
+            return Ok(network_denied("web.search"));
+        }
 
-        // Resolve the configured backend. A missing key / misconfigured backend
-        // is a typed `WebError` (MissingApiKey / BackendConfig) — surface it as
-        // a legible tool error, don't silently fall back to another backend.
+        // A backend that does not build is reported; there is no fallback to another backend.
         let backend = match self.config.build() {
             Ok(b) => b,
             Err(e) => return Ok(web_error_result("web.search", e)),
@@ -251,7 +214,7 @@ impl Tool for WebSearchTool {
 
         let outcome = tokio::select! {
             biased;
-            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
             r = sisurf_core::search(&parsed.query, opts) => r,
         };
 
@@ -262,7 +225,7 @@ impl Tool for WebSearchTool {
     }
 }
 
-fn render_results(query: &str, results: Vec<SearchResult>) -> ToolResult {
+fn render_results(query: &str, results: Vec<SearchResult>) -> ToolOutput {
     let title = format!("Searched {query:?} ({} results)", results.len());
     let mut body = format!("Results for {query:?}:\n");
     for (i, r) in results.iter().enumerate() {
@@ -271,17 +234,16 @@ fn render_results(query: &str, results: Vec<SearchResult>) -> ToolResult {
             body.push_str(&format!("   {}\n", r.snippet));
         }
     }
-    ToolResult::titled_success(title, body)
+    ToolOutput::titled_success(title, body)
 }
 
 // ---------------------------------------------------------------------------
 // Typed error → legible tool result
 // ---------------------------------------------------------------------------
 
-/// Converts [`WebError`] into an `is_error` [`ToolResult`].
-/// Branches on the variant so each failure mode gets its own legible, actionable message.
-/// `NoBrowser` stays a first-class case so the agent can adapt (ask user to install Chrome).
-fn web_error_result(tool: &str, err: WebError) -> ToolResult {
+/// Returns the `is_error` result for a [`WebError`], with a message per variant that says what
+/// to do next.
+fn web_error_result(tool: &str, err: WebError) -> ToolOutput {
     let (title, body) = match err {
         WebError::NoBrowser { hint } => (
             format!("{tool}: no browser available"),
@@ -320,10 +282,10 @@ fn web_error_result(tool: &str, err: WebError) -> ToolResult {
         WebError::MissingApiKey(backend) => (
             format!("{tool}: {backend} API key missing"),
             format!(
-                "Search backend `{backend}` is selected but its API key is empty. Set the \
-                 backend's API key environment variable ({}) in your tars secrets config, or \
-                 switch `[web_search] backend` to `ddg` (no key required).",
-                api_key_env_hint(&backend),
+                "Search backend `{backend}` is selected but its API key is empty, so this tool \
+                 cannot search until the program that built it fills the key into its \
+                 `SearchConfig`, or builds it on `ddg`, which needs no key. No argument to this \
+                 call changes that."
             ),
         ),
         WebError::BackendConfig { backend, detail } => (
@@ -335,12 +297,13 @@ fn web_error_result(tool: &str, err: WebError) -> ToolResult {
             format!("The selected search backend is not available: {detail}"),
         ),
     };
-    ToolResult::titled_error(title, body)
+    ToolOutput::titled_error(title, body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
@@ -355,14 +318,14 @@ mod tests {
         assert!(t.description().to_lowercase().contains("fetch"));
         let schema = t.input_schema();
         assert!(schema.strict);
-        let required: Vec<&str> = schema.schema["required"]
+        let required: Vec<&str> = schema.schema()["required"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(required, vec!["url"]);
-        assert_eq!(schema.schema["additionalProperties"], json!(false));
+        assert_eq!(schema.schema()["additionalProperties"], json!(false));
     }
 
     #[test]
@@ -372,14 +335,14 @@ mod tests {
         assert!(t.description().to_lowercase().contains("search"));
         let schema = t.input_schema();
         assert!(schema.strict);
-        let required: Vec<&str> = schema.schema["required"]
+        let required: Vec<&str> = schema.schema()["required"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(required, vec!["query"]);
-        assert_eq!(schema.schema["additionalProperties"], json!(false));
+        assert_eq!(schema.schema()["additionalProperties"], json!(false));
     }
 
     // ── result mapping (hermetic — no network) ───────────────────────
@@ -398,7 +361,7 @@ mod tests {
         assert!(r.content.contains("Body text."));
         assert!(r.content.contains("URL: https://example.com/doc"));
         assert!(r.content.contains("Tier: static"), "content: {}", r.content);
-        assert!(r.title.contains("static"));
+        assert!(r.title.as_deref().unwrap_or_default().contains("static"));
     }
 
     #[test]
@@ -421,15 +384,13 @@ mod tests {
         assert!(r.content.contains("https://a.com"));
         assert!(r.content.contains("the first hit"));
         assert!(r.content.contains("2. Second"));
-        // The keyless second hit renders its number/title/url but no snippet line.
+        // The second hit has no snippet, so it gets no snippet line.
         assert!(!r.content.contains("Second\n   https://b.com\n   \n"));
-        assert!(r.title.contains("2 results"));
+        assert!(r.title.as_deref().unwrap_or_default().contains("2 results"));
     }
 
     #[test]
     fn untitled_page_falls_back_to_placeholder_heading() {
-        // `Page.title == None` (the site had no <title>) must render a stable
-        // placeholder heading, not an empty `# ` or a panic.
         let page = Page {
             url: "https://example.com/raw".to_string(),
             title: None,
@@ -440,20 +401,16 @@ mod tests {
         let r = render_page(page);
         assert!(!r.is_error);
         assert!(r.content.contains("# (untitled)"), "content: {}", r.content);
-        // Browser tier is surfaced in both title + provenance header.
-        assert!(r.title.contains("browser"));
+        assert!(r.title.as_deref().unwrap_or_default().contains("browser"));
         assert!(r.content.contains("Tier: browser"));
     }
 
     #[test]
     fn empty_result_list_renders_a_zero_result_success_not_an_error() {
-        // A backend that legitimately returned zero hits (as opposed to the
-        // `EmptyResults` typed error) still maps to a non-error result: an empty
-        // numbered list with a "0 results" header. render_results must not panic
-        // on an empty Vec.
+        // Zero hits from a backend, unlike `WebError::EmptyResults`, is a success.
         let r = render_results("no such thing", Vec::new());
         assert!(!r.is_error);
-        assert!(r.title.contains("0 results"));
+        assert!(r.title.as_deref().unwrap_or_default().contains("0 results"));
         assert!(r.content.contains("Results for"));
     }
 
@@ -466,19 +423,20 @@ mod tests {
         };
         let r = web_error_result("web.fetch", err);
         assert!(r.is_error);
-        // Legible + actionable: names the cause and the remedy.
         assert!(r.content.to_lowercase().contains("browser"));
         assert!(r.content.contains("Install Chrome"));
         assert!(r.content.contains("no chromium on PATH"), "hint preserved");
-        // NOT a Debug blob of the enum.
         assert!(!r.content.contains("NoBrowser"));
-        assert!(r.title.contains("no browser available"));
+        assert!(
+            r.title
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no browser available")
+        );
     }
 
     #[test]
     fn error_mapping_branches_per_variant() {
-        // Distinct variants ⇒ distinct legible messages (we branch on the
-        // typed variant, we don't stringify one blob).
         let no_browser = web_error_result("web.fetch", WebError::NoBrowser { hint: "x".into() });
         let http = web_error_result(
             "web.fetch",
@@ -488,10 +446,21 @@ mod tests {
             },
         );
         let invalid = web_error_result("web.fetch", WebError::InvalidUrl { url: "nope".into() });
-        assert!(no_browser.title.contains("no browser"));
-        assert!(http.title.contains("404"));
-        assert!(invalid.title.contains("invalid URL"));
-        // All three are error results, all with different titles.
+        assert!(
+            no_browser
+                .title
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no browser")
+        );
+        assert!(http.title.as_deref().unwrap_or_default().contains("404"));
+        assert!(
+            invalid
+                .title
+                .as_deref()
+                .unwrap_or_default()
+                .contains("invalid URL")
+        );
         for r in [&no_browser, &http, &invalid] {
             assert!(r.is_error);
         }
@@ -501,8 +470,6 @@ mod tests {
 
     #[test]
     fn fetch_source_error_renders_the_real_reason_not_a_sentinel() {
-        // A typed transport source is carried through as its own Display —
-        // the real reason, not `parse_failed`/`unknown`.
         let err = WebError::Fetch(FetchError::Status(503));
         let r = web_error_result("web.fetch", err);
         assert!(r.is_error);
@@ -516,8 +483,6 @@ mod tests {
 
     #[test]
     fn browser_source_error_renders_the_real_reason_not_a_sentinel() {
-        // The `Browser` arm carries a typed `#[source]` too — render *its* own
-        // Display (the real CDP-level reason), not a Debug blob or a sentinel.
         use sisurf_core::BrowserError;
         let err = WebError::Browser(BrowserError::Crashed("cdp websocket dropped".into()));
         let r = web_error_result("web.fetch", err);
@@ -533,8 +498,6 @@ mod tests {
 
     #[test]
     fn search_parse_error_names_the_backend_and_carries_the_detail() {
-        // A fetched-but-unparseable search page: the message names WHICH backend
-        // and carries the parser's real detail — never a `parse_failed` token.
         let r = web_error_result(
             "web.search",
             WebError::SearchParse {
@@ -543,7 +506,7 @@ mod tests {
             },
         );
         assert!(r.is_error);
-        assert!(r.title.contains("ddg"));
+        assert!(r.title.as_deref().unwrap_or_default().contains("ddg"));
         assert!(r.content.contains("expected <a class=result__a> nodes"));
         assert!(!r.content.contains("SearchParse"), "no Debug blob");
     }
@@ -566,8 +529,13 @@ mod tests {
         assert!(missing.content.contains("google_cse"));
         assert!(missing.content.contains("API key is empty"));
         assert!(
-            missing.content.contains("GOOGLE_CSE_KEY"),
-            "names the env var: {}",
+            missing.content.contains("SearchConfig") && missing.content.contains("ddg"),
+            "says who fills the key in: {}",
+            missing.content
+        );
+        assert!(
+            !missing.content.contains("[web_search]"),
+            "{}",
             missing.content
         );
         assert!(!missing.content.contains("MissingApiKey"), "no debug blob");
@@ -586,21 +554,23 @@ mod tests {
 
     #[tokio::test]
     async fn google_cse_without_key_surfaces_legible_tool_error_before_network() {
-        // A google_cse backend with no injected key must fail at `.build()`
-        // (MissingApiKey) and surface as a legible is_error tool result — never
-        // a silent fall-through to DDG, and never a network call.
+        // `build()` fails before any network call, so this test needs no network.
         use sisurf_core::{BackendKind, GoogleCseConfig};
         let config = SearchConfig {
             backend: BackendKind::GoogleCse,
             google_cse: Some(GoogleCseConfig {
                 cx: "some-cx".into(),
-                api_key: String::new(), // consumer resolved no key
+                api_key: String::new(),
             }),
             brave: None,
         };
         let tool: Arc<dyn Tool> = Arc::new(WebSearchTool::with_config(config));
         let r = tool
-            .execute(json!({"query": "anything"}), ToolContext::default())
+            .execute(
+                json!({"query": "anything"}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         assert!(r.is_error);
@@ -610,7 +580,6 @@ mod tests {
 
     #[test]
     fn default_search_tool_builds_ddg_backend() {
-        // Out-of-the-box (no config) must resolve to the keyless DDG backend.
         let tool = WebSearchTool::new();
         assert!(matches!(
             tool.config.build(),
@@ -637,7 +606,11 @@ mod tests {
     async fn fetch_invalid_args_is_typed_invalid_arguments() {
         let tool: Arc<dyn Tool> = Arc::new(WebFetchTool::new());
         let err = tool
-            .execute(json!({"not_url": "x"}), ToolContext::default())
+            .execute(
+                json!({"not_url": "x"}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
             .await
             .expect_err("missing url must reject");
         assert!(matches!(err, ToolError::InvalidArguments(_)));
@@ -647,7 +620,11 @@ mod tests {
     async fn search_invalid_args_is_typed_invalid_arguments() {
         let tool: Arc<dyn Tool> = Arc::new(WebSearchTool::new());
         let err = tool
-            .execute(json!({"q": "x"}), ToolContext::default())
+            .execute(
+                json!({"q": "x"}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
             .await
             .expect_err("missing query must reject");
         assert!(matches!(err, ToolError::InvalidArguments(_)));
@@ -657,13 +634,12 @@ mod tests {
     async fn fetch_cancelled_before_work_is_typed_cancelled() {
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let ctx = ToolContext {
-            cancel,
+        let ctx = ToolEnv {
             ..Default::default()
         };
         let tool: Arc<dyn Tool> = Arc::new(WebFetchTool::new());
         let err = tool
-            .execute(json!({"url": "https://example.com"}), ctx)
+            .execute(json!({"url": "https://example.com"}), &ctx, cancel)
             .await
             .expect_err("pre-cancelled should fast-fail");
         assert!(matches!(err, ToolError::Cancelled));
@@ -673,13 +649,12 @@ mod tests {
     async fn search_cancelled_before_work_is_typed_cancelled() {
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let ctx = ToolContext {
-            cancel,
+        let ctx = ToolEnv {
             ..Default::default()
         };
         let tool: Arc<dyn Tool> = Arc::new(WebSearchTool::new());
         let err = tool
-            .execute(json!({"query": "anything"}), ctx)
+            .execute(json!({"query": "anything"}), &ctx, cancel)
             .await
             .expect_err("pre-cancelled should fast-fail");
         assert!(matches!(err, ToolError::Cancelled));
@@ -695,13 +670,57 @@ mod tests {
         reg.register(Arc::new(WebFetchTool::new())).unwrap();
         reg.register(Arc::new(WebSearchTool::new())).unwrap();
 
-        // to_tool_specs() surfaces BOTH web tools by name — an agent's model
-        // sees them in its tool set.
         let names: Vec<String> = reg.to_tool_specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"web.fetch".to_string()), "specs: {names:?}");
         assert!(
             names.contains(&"web.search".to_string()),
             "specs: {names:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_without_network_keeps_web_fetch_off_the_wire() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let env = ToolEnv {
+            sandbox: crate::SandboxPolicy::read_only(false),
+            ..Default::default()
+        };
+        let r = WebFetchTool::new()
+            .execute(
+                serde_json::json!({ "url": format!("http://127.0.0.1:{port}/") }),
+                &env,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let connected = AtomicBool::new(listener.accept().is_ok());
+        assert!(
+            !connected.load(Ordering::SeqCst),
+            "web.fetch connected: {}",
+            r.content
+        );
+        assert!(r.is_error, "{}", r.content);
+        assert!(r.content.contains("does not allow it"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_without_network_refuses_web_search() {
+        let env = ToolEnv {
+            sandbox: crate::SandboxPolicy::read_only(false),
+            ..Default::default()
+        };
+        let r = WebSearchTool::new()
+            .execute(
+                serde_json::json!({ "query": "rust" }),
+                &env,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error);
+        assert_eq!(r.title.as_deref(), Some("web.search: network denied"));
     }
 }

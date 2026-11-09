@@ -1,3 +1,0 @@
-tars-melt: RUST_LOG is set but invalid (environment variable not found) — falling back to derived level "warn"
-error in `tars bench`: config file not found at /Users/hucao/Library/Application Support/tars/config.toml
-create one or pass --config <PATH>

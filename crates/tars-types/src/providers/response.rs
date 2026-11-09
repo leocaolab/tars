@@ -1,9 +1,10 @@
-//! Aggregated response — what `Provider::complete` returns by default
-//! after consuming the streaming `ChatEvent`s.
+//! Folds a provider's [`ChatEvent`] stream into one [`ChatResponse`], and unfolds a response
+//! back into events for a layer that replays it.
 
 use serde::{Deserialize, Serialize};
 
 use crate::providers::cache::CacheHitInfo;
+use crate::providers::chat::Degradation;
 use crate::providers::events::{ChatEvent, StopReason};
 use crate::providers::tools::ToolCall;
 use crate::providers::usage::Usage;
@@ -11,30 +12,27 @@ use crate::validation::ValidationSummary;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChatResponse {
-    /// Resolved model that actually answered.
+    /// The model that actually answered.
     pub actual_model: String,
-    /// Concatenated text content (excluding thinking).
+    /// The concatenated text, without thinking.
     pub text: String,
-    /// Concatenated thinking content, if any.
+    /// The concatenated thinking; empty when there was none.
     pub thinking: String,
-    /// Tool calls the model emitted in this turn.
     pub tool_calls: Vec<ToolCall>,
     pub stop_reason: Option<StopReason>,
     pub usage: Usage,
     pub cache_hit: CacheHitInfo,
-    /// Per-call validator outcomes. Empty when the pipeline
-    /// didn't include `ValidationMiddleware`. `#[serde(default)]` so
-    /// pre-validation AgentEventLog dumps still deserialize cleanly.
+    /// What the provider served the request without, from the dispatch check; empty when it
+    /// served all of it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<Degradation>,
+    /// Empty when the pipeline has no `ValidationMiddleware`; event-log dumps written without it
+    /// still load.
     #[serde(default, skip_serializing_if = "is_empty_validation_summary")]
     pub validation_summary: ValidationSummary,
-    /// Unix-seconds wall-clock when this response was finalized — i.e. when
-    /// the stream completed and the model's answer was in hand. Set once by
-    /// [`ChatResponseBuilder::finish`] / `finish_checked`, so EVERY response
-    /// self-reports "when did the model answer" regardless of provider. This
-    /// is the call's DISCOVERY time: observability/debugging, and the honest
-    /// `at` for anything a consumer derives from this response (decoupled from
-    /// when that consumer later persists it). `#[serde(default)]` so older
-    /// AgentEventLog dumps (no `created`) still deserialize.
+    /// When the stream ended and the answer was in hand, in Unix seconds (negative before 1970),
+    /// stamped by [`ChatResponseBuilder::finish`]. Anything derived from this response is dated by
+    /// it, not by when a consumer later stores it. Dumps written without it read it as 0.
     #[serde(default)]
     pub created: i64,
 }
@@ -43,32 +41,26 @@ fn is_empty_validation_summary(s: &ValidationSummary) -> bool {
     s.outcomes.is_empty() && s.validators_run.is_empty() && s.total_wall_ms == 0
 }
 
-/// Unix-seconds wall-clock now, as a SIGNED offset from the epoch — total, no
-/// information lost: a clock set before 1970 yields a negative value (honest)
-/// rather than being clamped to a fake `0` or panicking. Stamped onto every
-/// [`ChatResponse`] at finalize.
+/// Returns the wall-clock time in Unix seconds, negative for a clock set before 1970.
 fn now_unix_secs() -> i64 {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs() as i64,
-        // `now` is before the epoch: `e.duration()` is how far before.
         Err(e) => -(e.duration().as_secs() as i64),
     }
 }
 
 impl ChatResponse {
+    /// Returns whether the stream reached its terminal event.
     pub fn is_finished(&self) -> bool {
         self.stop_reason.is_some()
     }
 
-    /// Replay this response as a sequence of [`ChatEvent`]s. Used by
-    /// the cache layer to short-circuit a hit back into the streaming
-    /// contract — middleware above the cache can't tell the difference
-    /// between a fresh response and a replayed one.
-    ///
-    /// `cache_hit` is overwritten on the emitted Started event so
-    /// observers can flag the replay; the rest of the fields are
-    /// reconstituted in their original order:
-    /// Started → ThinkingDelta? → Delta? → tool calls → Finished.
+    /// Returns the response as the events of a stream, so a replayed response reads like a fresh
+    /// call to the middleware above: `Started` (carrying the given `cache_hit`), thinking and text
+    /// when not empty, each tool call's start and end, and the end [`ChatEvent::stream_end`] makes:
+    /// `Finished`, or only the usage for a response whose stream never said why the turn stopped.
+    /// The validation summary, `degraded` and `created` are dropped; each is made again when the
+    /// replayed stream passes the dispatch check and finishes.
     pub fn into_events(self, cache_hit: CacheHitInfo) -> Vec<ChatEvent> {
         let Self {
             actual_model,
@@ -77,9 +69,10 @@ impl ChatResponse {
             tool_calls,
             stop_reason,
             usage,
-            cache_hit: _,          // overridden by argument
-            validation_summary: _, // discard: validators rerun on hit
-            created: _,            // re-stamped when the replayed stream re-finishes
+            cache_hit: _,
+            degraded: _,
+            validation_summary: _,
+            created: _,
         } = self;
 
         let mut out = Vec::with_capacity(3 + tool_calls.len() * 2);
@@ -106,26 +99,12 @@ impl ChatResponse {
                 thought_signature: tc.thought_signature,
             });
         }
-        // A cached response that lacks a stop_reason is incoherent (we
-        // refuse to cache mid-stream failures). Enforce that invariant
-        // loudly in CI; in release, fall back to EndTurn so consumers
-        // still see a terminal event rather than a truncated stream.
-        debug_assert!(
-            stop_reason.is_some(),
-            "into_events called on a response with no stop_reason — \
-             a mid-stream/incomplete response must never reach the cache-replay path",
-        );
-        out.push(ChatEvent::Finished {
-            stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
-            usage,
-        });
+        out.extend(ChatEvent::stream_end(stop_reason, Some(usage)));
         out
     }
 }
 
-/// Stateful builder that consumes [`ChatEvent`]s and produces a
-/// [`ChatResponse`]. Adapters use this both for `complete()`'s default
-/// implementation and for tests.
+/// Accumulates [`ChatEvent`]s into a [`ChatResponse`].
 #[derive(Debug, Default)]
 pub struct ChatResponseBuilder {
     inner: ChatResponse,
@@ -144,10 +123,14 @@ impl ChatResponseBuilder {
         Self::default()
     }
 
-    /// Apply one event. Borrows by reference so callers don't have to
-    /// move the event out of their own state.
+    /// Folds one event into the response. A protocol violation (a second start for one tool
+    /// index, arguments or an end with no start, an end whose id differs from its start) is logged
+    /// and does not fail.
     pub fn apply(&mut self, event: ChatEvent) {
         match event {
+            ChatEvent::Degraded { unsent } => {
+                self.inner.degraded = unsent;
+            }
             ChatEvent::Started {
                 actual_model,
                 cache_hit,
@@ -162,10 +145,6 @@ impl ChatResponseBuilder {
                 self.inner.thinking.push_str(&text);
             }
             ChatEvent::ToolCallStart { index, id, name } => {
-                // A second Start for the same index is a provider
-                // protocol violation — the first call's accumulated
-                // args would be silently dropped. Log it rather than
-                // overwrite blindly.
                 if self.tool_args_buffer.contains_key(&index) {
                     tracing::warn!(
                         index,
@@ -179,9 +158,7 @@ impl ChatResponseBuilder {
                 entry.args.clear();
             }
             ChatEvent::ToolCallArgsDelta { index, args_delta } => {
-                // An args delta for an index we never saw a Start for
-                // would create an entry with an empty id/name — a
-                // malformed tool call. Skip it and log; don't fabricate.
+                // An entry made here would be a tool call with no id or name.
                 match self.tool_args_buffer.get_mut(&index) {
                     Some(entry) => entry.args.push_str(&args_delta),
                     None => tracing::warn!(
@@ -196,10 +173,6 @@ impl ChatResponseBuilder {
                 parsed_args,
                 thought_signature,
             } => {
-                // Prefer the provider's parsed value. Correlate against
-                // the buffered Start: a missing Start or an id mismatch
-                // is a protocol violation we surface rather than paper
-                // over with an empty name / wrong id.
                 let started = self.tool_args_buffer.remove(&index);
                 let name = match &started {
                     Some(a) => {
@@ -226,13 +199,15 @@ impl ChatResponseBuilder {
                     ToolCall::new(id, name, parsed_args).with_thought_signature(thought_signature),
                 );
             }
-            ChatEvent::UsageProgress { partial } => {
-                // Don't overwrite — we'll get the authoritative figure
-                // in Finished. Just track high-water.
-                self.inner.usage.input_tokens =
-                    self.inner.usage.input_tokens.max(partial.input_tokens);
-                self.inner.usage.output_tokens =
-                    self.inner.usage.output_tokens.max(partial.output_tokens);
+            ChatEvent::UsageProgress { usage } => {
+                // `Finished` carries the authoritative figure; until then keep the high-water mark.
+                self.inner.usage = self.inner.usage.max_each(usage);
+            }
+            // A measurement is the call's, not the response's; a caller that wants it folds it
+            // apart.
+            ChatEvent::Measured { .. } => {}
+            ChatEvent::Validated { summary } => {
+                self.inner.validation_summary = summary;
             }
             ChatEvent::Finished { stop_reason, usage } => {
                 self.inner.stop_reason = Some(stop_reason);
@@ -241,16 +216,8 @@ impl ChatResponseBuilder {
         }
     }
 
-    /// Finalize the response. After this you get the accumulated
-    /// `ChatResponse`. If the stream was terminated abnormally
-    /// (`stop_reason == None`), the caller decides whether to treat
-    /// it as an error.
-    ///
-    /// Logs a warning when the stream looks incomplete — no terminal
-    /// `Finished` event (`stop_reason == None`) and/or tool-call Starts
-    /// that never got a matching End (their buffered args are dropped).
-    /// Use [`finish_checked`](Self::finish_checked) when you want that
-    /// surfaced as a hard error instead of a log line.
+    /// Returns the accumulated response stamped with the current time. An incomplete stream (no
+    /// `Finished`, or tool calls started and never ended, which are dropped) only logs a warning.
     pub fn finish(mut self) -> ChatResponse {
         self.inner.created = now_unix_secs();
         if self.inner.stop_reason.is_none() {
@@ -266,61 +233,42 @@ impl ChatResponseBuilder {
         }
         self.inner
     }
-
-    /// Like [`finish`](Self::finish) but rejects an incomplete stream:
-    /// `Err` carries the partially-built response so the caller can
-    /// still inspect/log it. Incomplete means either no terminal
-    /// `Finished` event, or one or more tool-call Starts that never
-    /// received a matching End (whose buffered args would be lost).
-    pub fn finish_checked(mut self) -> Result<ChatResponse, Box<IncompleteStream>> {
-        self.inner.created = now_unix_secs();
-        // `IncompleteStream` embeds a full `ChatResponse`, so the Err
-        // variant is large; box it to keep `Result` cheap to move on the
-        // (common) Ok path — the allocation only happens on the rare
-        // incomplete-stream error. Satisfies `clippy::result_large_err`.
-        let no_terminal = self.inner.stop_reason.is_none();
-        let unfinished_tool_calls = self.tool_args_buffer.len();
-        if no_terminal || unfinished_tool_calls > 0 {
-            Err(Box::new(IncompleteStream {
-                no_terminal,
-                unfinished_tool_calls,
-                partial: self.inner,
-            }))
-        } else {
-            Ok(self.inner)
-        }
-    }
 }
-
-/// Returned by [`ChatResponseBuilder::finish_checked`] when the event
-/// stream ended in a non-terminal state.
-#[derive(Debug)]
-pub struct IncompleteStream {
-    /// True iff no `Finished` event was applied (`stop_reason == None`).
-    pub no_terminal: bool,
-    /// Count of tool-call Starts left in the buffer with no matching End.
-    pub unfinished_tool_calls: usize,
-    /// The partially-accumulated response, so callers can still inspect
-    /// or log what arrived before the stream broke.
-    pub partial: ChatResponse,
-}
-
-impl std::fmt::Display for IncompleteStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "incomplete chat stream (no_terminal={}, unfinished_tool_calls={})",
-            self.no_terminal, self.unfinished_tool_calls
-        )
-    }
-}
-
-impl std::error::Error for IncompleteStream {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn args(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        match v {
+            serde_json::Value::Object(m) => m,
+            other => panic!("test arguments must be an object, got {other}"),
+        }
+    }
+
+    #[test]
+    fn a_degraded_event_lands_on_the_response_and_its_absence_leaves_it_empty() {
+        let finished = ChatEvent::Finished {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        let mut b = ChatResponseBuilder::new();
+        b.apply(ChatEvent::Degraded {
+            unsent: vec![Degradation::StructuredOutputNotEnforced],
+        });
+        b.apply(ChatEvent::started("m"));
+        b.apply(finished.clone());
+        assert_eq!(
+            b.finish().degraded,
+            [Degradation::StructuredOutputNotEnforced]
+        );
+
+        let mut b = ChatResponseBuilder::new();
+        b.apply(ChatEvent::started("m"));
+        b.apply(finished);
+        assert!(b.finish().degraded.is_empty());
+    }
 
     #[test]
     fn builder_concatenates_deltas() {
@@ -343,13 +291,15 @@ mod tests {
 
     #[test]
     fn into_events_round_trips_through_the_builder() {
-        // A response → events → builder → response cycle should be
-        // structurally lossless for everything cache replay needs.
         let original = ChatResponse {
             actual_model: "gpt-4o".into(),
             text: "hello world".into(),
             thinking: "ponder".into(),
-            tool_calls: vec![ToolCall::new("call_1", "search", json!({"q": "rust"}))],
+            tool_calls: vec![ToolCall::new(
+                "call_1",
+                "search",
+                args(json!({"q": "rust"})),
+            )],
             stop_reason: Some(StopReason::ToolUse),
             usage: Usage {
                 input_tokens: 10,
@@ -357,13 +307,13 @@ mod tests {
                 ..Default::default()
             },
             cache_hit: CacheHitInfo::default(),
+            degraded: Vec::new(),
             validation_summary: Default::default(),
             created: 0,
         };
         let events = original.clone().into_events(CacheHitInfo {
             cached_input_tokens: 8,
             used_explicit_handle: false,
-            replayed_from_cache: true,
         });
         let mut b = ChatResponseBuilder::new();
         for ev in events {
@@ -373,10 +323,9 @@ mod tests {
         assert_eq!(back.text, original.text);
         assert_eq!(back.thinking, original.thinking);
         assert_eq!(back.tool_calls.len(), 1);
-        assert_eq!(back.tool_calls[0].arguments, json!({"q": "rust"}));
+        assert_eq!(back.tool_calls[0].arguments, args(json!({"q": "rust"})));
         assert_eq!(back.stop_reason, original.stop_reason);
         assert_eq!(back.usage.input_tokens, 10);
-        // cache_hit was overwritten — verify it carried through.
         assert_eq!(back.cache_hit.cached_input_tokens, 8);
     }
 
@@ -390,14 +339,74 @@ mod tests {
             stop_reason: Some(StopReason::EndTurn),
             usage: Usage::default(),
             cache_hit: CacheHitInfo::default(),
+            degraded: Vec::new(),
             validation_summary: Default::default(),
             created: 0,
         };
         let events = r.into_events(CacheHitInfo::default());
-        // Just Started + Finished — no empty Delta to confuse consumers.
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], ChatEvent::Started { .. }));
         assert!(matches!(events[1], ChatEvent::Finished { .. }));
+    }
+
+    #[test]
+    fn a_response_with_no_stop_reason_replays_its_usage_without_finished() {
+        let r = ChatResponse {
+            actual_model: "m".into(),
+            text: "partial".into(),
+            thinking: String::new(),
+            tool_calls: vec![],
+            stop_reason: None,
+            usage: Usage {
+                input_tokens: 1000,
+                output_tokens: 500,
+                ..Default::default()
+            },
+            cache_hit: CacheHitInfo::default(),
+            degraded: Vec::new(),
+            validation_summary: Default::default(),
+            created: 0,
+        };
+        let events = r.into_events(CacheHitInfo::default());
+        assert!(!events.iter().any(ChatEvent::is_terminal), "{events:?}");
+        let mut b = ChatResponseBuilder::new();
+        for ev in events {
+            b.apply(ev);
+        }
+        let back = b.finish();
+        assert_eq!(back.stop_reason, None);
+        assert_eq!(
+            (back.usage.input_tokens, back.usage.output_tokens),
+            (1000, 500)
+        );
+    }
+
+    #[test]
+    fn usage_progress_keeps_each_figures_highest_until_finished_replaces_them() {
+        let report = |input_tokens, cached_input_tokens| ChatEvent::UsageProgress {
+            usage: Usage {
+                input_tokens,
+                cached_input_tokens,
+                ..Default::default()
+            },
+        };
+        let mut b = ChatResponseBuilder::new();
+        b.apply(report(100, 80));
+        b.apply(report(90, 0));
+        let progress = b.inner.usage;
+        assert_eq!(
+            (progress.input_tokens, progress.cached_input_tokens),
+            (100, 80)
+        );
+        b.apply(ChatEvent::Finished {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens: 50,
+                ..Default::default()
+            },
+        });
+        let done = b.finish().usage;
+        assert_eq!((done.input_tokens, done.cached_input_tokens), (50, 0));
     }
 
     #[test]
@@ -412,19 +421,10 @@ mod tests {
             usage: Usage::default(),
         });
         let r = b.finish();
-        // The whole point: a finalized response carries its DISCOVERY time —
-        // common infra, every consumer can read it instead of guessing.
         assert!(
             r.created > 0,
             "finish() must stamp `created` with the finalize wall-clock"
         );
-        // finish_checked takes the same path.
-        let mut b2 = ChatResponseBuilder::new();
-        b2.apply(ChatEvent::Finished {
-            stop_reason: StopReason::EndTurn,
-            usage: Usage::default(),
-        });
-        assert!(b2.finish_checked().unwrap().created > 0);
     }
 
     #[test]
@@ -446,7 +446,7 @@ mod tests {
         b.apply(ChatEvent::ToolCallEnd {
             index: 0,
             id: "c1".into(),
-            parsed_args: json!({"q": "rust"}),
+            parsed_args: args(json!({"q": "rust"})),
             thought_signature: None,
         });
         b.apply(ChatEvent::Finished {
@@ -456,6 +456,6 @@ mod tests {
         let r = b.finish();
         assert_eq!(r.tool_calls.len(), 1);
         assert_eq!(r.tool_calls[0].name, "search");
-        assert_eq!(r.tool_calls[0].arguments, json!({"q": "rust"}));
+        assert_eq!(r.tool_calls[0].arguments, args(json!({"q": "rust"})));
     }
 }

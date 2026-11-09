@@ -1,30 +1,24 @@
-//! Built-in provider defaults — common providers preconfigured so user
-//! TOML can stay minimal.
+//! Preconfigures the common providers so a user's TOML can stay small.
 //!
-//! User config **extends** the built-in set rather than replacing it.
-//! See [`merge_builtin_with_user`] for the merge semantics: by default
-//! a user-declared provider overrides a built-in of the same id. (We
-//! deliberately don't lock built-ins; each provider has only one
-//! sensible default config, and users may need to adjust e.g. `base_url`
-//! for proxied environments.)
-//!
-//! This is **not** a model catalog — only "how to talk to the provider"
-//! defaults. Model picking belongs to the routing layer.
+//! The user's providers extend this set, and a user entry replaces the built-in of the same id
+//! whole (see [`merge_builtin_with_user`]). Built-ins are not locked, because a user may need to
+//! change one, such as its `base_url` behind a proxy. They say how to reach each provider; which
+//! models exist is the model knowledge base's.
 
 use std::collections::HashMap;
 
-use tars_types::{Auth, HttpProviderExtras, ProviderId};
+use tars_types::{Auth, HttpOverrides, ProviderId};
 
 use crate::model_kb::MODEL_KB;
 use crate::providers::ProviderConfig;
 
-/// The built-in default model spec for an API provider from the model KB
-/// (`data/provider.toml`) — the single source of truth for defaults. It may be
-/// a `<series>@latest` spec; the provider registry resolves it when it binds.
+/// Returns the default model spec `data/provider.toml` gives a hosted provider, possibly a
+/// `<series>@latest` spec that the provider registry resolves when it binds.
 ///
-/// Fail-loud: a built-in provider MUST have a KB default. A missing one
-/// is an authoring bug in `provider.toml`, caught by the KB unit test and
-/// panicked here rather than shipping a silently-empty default_model.
+/// # Panics
+///
+/// Panics when the provider has no default in `data/provider.toml`, an authoring bug, rather
+/// than shipping an empty `default_model`.
 fn kb_default(provider: &str) -> String {
     MODEL_KB
         .default_model(provider)
@@ -37,14 +31,9 @@ fn kb_default(provider: &str) -> String {
         .to_string()
 }
 
-/// Returns provider configs for the well-known LLM backends. Each
-/// entry uses an env-var auth reference so users only need to export
-/// the appropriate env var (no inline secrets in defaults).
-///
-/// `default_model` for each API provider comes from the model KB
-/// (`data/provider.toml`, via [`kb_default`]) — the single source of truth,
-/// so bumping a default is a data edit, not a code change. Users override
-/// per-provider in their config.
+/// Returns the built-in provider configs. Keys come from environment variables, and an API
+/// provider's `default_model` comes from `data/provider.toml`, so changing a default is a data
+/// edit.
 pub fn built_in_provider_defaults() -> HashMap<ProviderId, ProviderConfig> {
     [
         (ProviderId::new("openai"), default_openai()),
@@ -60,15 +49,22 @@ pub fn built_in_provider_defaults() -> HashMap<ProviderId, ProviderConfig> {
     .collect()
 }
 
-/// Default OpenAI: `OPENAI_API_KEY`, KB default (`gpt-5.4`), plus the standard
-/// `OpenAI-Organization` / `OpenAI-Project` env-headers (set if
-/// exported, ignored otherwise).
+/// Returns the ids of the built-in providers, sorted: the ones every config has without
+/// declaring them.
+pub fn built_in_provider_ids() -> Vec<ProviderId> {
+    let mut ids: Vec<ProviderId> = built_in_provider_defaults().into_keys().collect();
+    ids.sort();
+    ids
+}
+
+/// Returns OpenAI keyed by `OPENAI_API_KEY`, sending the `OpenAI-Organization` and
+/// `OpenAI-Project` headers when `OPENAI_ORGANIZATION` and `OPENAI_PROJECT` are set.
 pub fn default_openai() -> ProviderConfig {
     ProviderConfig::Openai {
         base_url: None,
         auth: Auth::env("OPENAI_API_KEY"),
         default_model: kb_default("openai"),
-        extras: HttpProviderExtras {
+        extras: HttpOverrides {
             env_http_headers: [
                 ("OpenAI-Organization".into(), "OPENAI_ORGANIZATION".into()),
                 ("OpenAI-Project".into(), "OPENAI_PROJECT".into()),
@@ -80,65 +76,54 @@ pub fn default_openai() -> ProviderConfig {
     }
 }
 
-/// Default Anthropic: `ANTHROPIC_API_KEY`, KB default (`claude-opus-4-8`), default
-/// API version. `anthropic-version` header is supplied by the adapter.
+/// Returns Anthropic keyed by `ANTHROPIC_API_KEY`; the adapter supplies the `anthropic-version`
+/// header.
 pub fn default_anthropic() -> ProviderConfig {
     ProviderConfig::Anthropic {
         base_url: None,
         api_version: None,
         auth: Auth::env("ANTHROPIC_API_KEY"),
         default_model: kb_default("anthropic"),
-        extras: HttpProviderExtras::default(),
+        extras: HttpOverrides::default(),
     }
 }
 
-/// Default Gemini: `GEMINI_API_KEY`, KB default (`flash@latest` — the newest
-/// Gemini flash, resolved against the live model list when one was refreshed).
+/// Returns Gemini keyed by `GEMINI_API_KEY`.
 pub fn default_gemini() -> ProviderConfig {
     ProviderConfig::Gemini {
         base_url: None,
         auth: Auth::env("GEMINI_API_KEY"),
         default_model: kb_default("gemini"),
-        extras: HttpProviderExtras::default(),
+        extras: HttpOverrides::default(),
     }
 }
 
-/// Default DeepSeek: `DEEPSEEK_API_KEY`, KB default (`deepseek-flash`).
-///
-/// DeepSeek ships an OpenAI-compatible API, so this is just an
-/// `openai_compat` pointed at `api.deepseek.com` — no dedicated backend.
-/// The OpenAI adapter already surfaces DeepSeek's reasoning channel
-/// (`delta.reasoning_content`) as [`tars_types::ChatEvent::ThinkingDelta`],
-/// so `deepseek-v4-pro` / thinking mode works out of the box. `deepseek-flash`
-/// is the cheaper default; request `deepseek-v4-pro` per call for the
-/// reasoning model.
+/// Returns DeepSeek keyed by `DEEPSEEK_API_KEY`, as `openai_compat` on `api.deepseek.com`: its
+/// API is OpenAI-compatible, and the OpenAI adapter turns its `delta.reasoning_content` into
+/// [`tars_types::ChatEvent::ThinkingDelta`].
 pub fn default_deepseek() -> ProviderConfig {
     ProviderConfig::OpenaiCompat {
         base_url: "https://api.deepseek.com".into(),
         auth: Auth::env("DEEPSEEK_API_KEY"),
         default_model: kb_default("deepseek"),
-        extras: HttpProviderExtras::default(),
+        gen_ai_provider_name: "deepseek".into(),
+        extras: HttpOverrides::default(),
         capabilities: Default::default(),
     }
 }
 
-/// Default Claude Code CLI: `claude` binary, 5-min timeout, opus model.
+/// Returns the Claude Code CLI: the `claude` binary with a 300 s timeout.
 ///
-/// Default flag posture is **subscription-friendly**:
-/// - `tools = disabled` — kills the CLI's internal agent loop (the
-///   real fix for the 270 s / 14k-token-output behavior we saw before
-///   tuning), without affecting auth.
-/// - `bare = false` — preserves OAuth + keychain auth for users who
-///   logged in via `claude login`. `--bare` would force
-///   `ANTHROPIC_API_KEY`-only auth and break subscription users.
-/// - `exclude_dynamic_sections = true` — strips per-machine sections
-///   from the system prompt so the prompt cache can be reused across
-///   tenants. See `docs/providers/claude-cli.md §3` for the rationale.
+/// `tools = disabled` turns off the CLI's own agent loop, which otherwise runs for minutes on a
+/// single call. `bare = false` keeps the OAuth and keychain login of `claude login`, which
+/// `--bare` replaces with `ANTHROPIC_API_KEY` alone. `exclude_dynamic_sections = true` drops the
+/// per-machine sections of the system prompt so the prompt cache is shared across tenants.
+/// `docs/providers/claude-cli.md` has the measurements.
 pub fn default_claude_cli() -> ProviderConfig {
     ProviderConfig::ClaudeCli {
         executable: "claude".into(),
         timeout_secs: 300,
-        default_model: "claude-opus-4-7".into(),
+        default_model: kb_default("claude_cli"),
         tools: crate::providers::ClaudeCliToolsConfig::default(),
         bare: false,
         effort: None,
@@ -147,60 +132,47 @@ pub fn default_claude_cli() -> ProviderConfig {
     }
 }
 
-/// Default MLX: `mlx_lm.server` on `localhost:8080`, no auth, a Qwen
-/// 32B 4-bit MLX-converted Coder model. Override `default_model` to
-/// match whatever you've actually loaded into mlx-lm.server.
+/// Returns `mlx_lm.server` on the adapter's default address with no auth; the user overrides
+/// `default_model` with the model actually loaded.
 pub fn default_mlx() -> ProviderConfig {
     ProviderConfig::Mlx {
         base_url: None,
         auth: Auth::None,
         default_model: "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit".into(),
-        extras: HttpProviderExtras::default(),
+        extras: HttpOverrides::default(),
         capabilities: Default::default(),
     }
 }
 
-/// Default vLLM: `localhost:8000`, no auth, a 32B coder. vLLM ships an
-/// OpenAI-compatible server, but the dedicated `Vllm` variant lets us
-/// distinguish "running on a vLLM cluster" from generic openai-compat
-/// in logs / capability defaults. Override `default_model` to match
-/// whatever you served with `--model`.
+/// Returns vLLM on the adapter's default address with no auth; the user overrides
+/// `default_model` with the model served by `--model`. Its API is OpenAI-compatible, and the
+/// separate variant tells vLLM apart from other compatible servers in logs and capability
+/// defaults.
 pub fn default_vllm() -> ProviderConfig {
     ProviderConfig::Vllm {
         base_url: None,
         auth: Auth::None,
         default_model: "Qwen/Qwen2.5-Coder-32B-Instruct".into(),
-        extras: HttpProviderExtras::default(),
+        extras: HttpOverrides::default(),
         capabilities: Default::default(),
     }
 }
 
-/// Default llama.cpp: `llama-server` on `localhost:8080`, no auth, a
-/// 7B coder GGUF. Override `default_model` to match the file you
-/// loaded with `-m`.
+/// Returns `llama-server` on the adapter's default address with no auth; the user overrides
+/// `default_model` with the file loaded by `-m`.
 pub fn default_llamacpp() -> ProviderConfig {
     ProviderConfig::Llamacpp {
         base_url: None,
         auth: Auth::None,
         default_model: "Qwen2.5-Coder-7B-Q5_K_M".into(),
-        extras: HttpProviderExtras::default(),
+        extras: HttpOverrides::default(),
         capabilities: Default::default(),
     }
 }
 
-/// Merge user-declared providers on top of built-in defaults.
-///
-/// Semantics:
-/// - Built-ins start as base
-/// - User entry with a known id **overrides** the built-in entirely
-///   (we don't try to deep-merge — too magical, surprising in production)
-/// - User entries with new ids extend the set
-///
-/// To exclude a built-in from the effective config, the user can set
-/// e.g. `[providers.claude_cli]` with no body — but that violates serde,
-/// so the practical pattern is to use distinct ids for everything you
-/// configure (e.g. `openai_main` instead of `openai`) and ignore the
-/// built-ins you don't need.
+/// Returns the built-ins with the user's providers laid over them. A user entry replaces the
+/// built-in of the same id whole, without a field-by-field merge. A built-in cannot be removed;
+/// a user who does not want one gives their own providers other ids (`openai_main`).
 pub fn merge_builtin_with_user(
     user: HashMap<ProviderId, ProviderConfig>,
 ) -> HashMap<ProviderId, ProviderConfig> {
@@ -215,12 +187,8 @@ pub fn merge_builtin_with_user(
 mod tests {
     use super::*;
 
-    /// Drift guard (design §8 new invariant): for every built-in provider that
-    /// ALSO has a definition block in `data/provider.toml`, the block's
-    /// declared `interface` MUST equal the variant's total-function
-    /// `ProviderConfig::interface()`. The provider id is the definition key
-    /// (deepseek's `OpenaiCompat` variant keys the "deepseek" block). This is
-    /// the one line that keeps the file and the projection from drifting.
+    /// The provider id is the `data/provider.toml` key, so deepseek's `OpenaiCompat` is checked
+    /// against the "deepseek" block.
     #[test]
     fn toml_interface_matches_config_interface_for_builtins() {
         let db = &*MODEL_KB;
@@ -228,11 +196,11 @@ mod tests {
             if let Some(def) = db.providers.get(id.as_str()) {
                 assert_eq!(
                     def.interface,
-                    cfg.interface(),
+                    cfg.kind().interface(),
                     "provider `{id}`: data/provider.toml interface {:?} disagrees with \
-                     ProviderConfig::interface() {:?}",
+                     ProviderKind::interface() {:?}",
                     def.interface,
-                    cfg.interface(),
+                    cfg.kind().interface(),
                 );
             }
         }
@@ -290,13 +258,12 @@ mod tests {
                 base_url: Some("https://my.proxy/v1".into()),
                 auth: Auth::env("MY_OPENAI_KEY"),
                 default_model: "gpt-4o-mini".into(),
-                extras: HttpProviderExtras::default(),
+                extras: HttpOverrides::default(),
             },
         )]
         .into_iter()
         .collect();
         let merged = merge_builtin_with_user(user);
-        // Now `openai` is the user version, not the default.
         let cfg = merged
             .get(&ProviderId::new("openai"))
             .expect("merged config should contain 'openai' provider");
@@ -311,7 +278,6 @@ mod tests {
             }
             other => panic!("expected Openai variant after override, got: {other:?}"),
         }
-        // Other built-ins unchanged.
         assert!(merged.contains_key(&ProviderId::new("anthropic")));
     }
 
@@ -323,15 +289,15 @@ mod tests {
                 base_url: "http://localhost:8000/v1".into(),
                 auth: Auth::None,
                 default_model: "Qwen/Qwen2.5-Coder-32B-Instruct".into(),
-                extras: HttpProviderExtras::default(),
+                gen_ai_provider_name: "local".into(),
+                extras: HttpOverrides::default(),
                 capabilities: Default::default(),
             },
         )]
         .into_iter()
         .collect();
         let merged = merge_builtin_with_user(user);
-        // 8 built-ins (openai, anthropic, gemini, deepseek, claude_cli,
-        // mlx, llamacpp, vllm) + 1 user-added.
+        // Eight built-ins and the user's one.
         assert_eq!(merged.len(), 9);
         assert!(merged.contains_key(&ProviderId::new("local_qwen")));
     }
@@ -351,6 +317,15 @@ mod tests {
             }
             other => panic!("expected OpenaiCompat variant, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_claude_cli_default_model_is_the_one_the_data_file_names() {
+        assert_eq!(
+            MODEL_KB.default_model("claude_cli"),
+            Some("claude-opus-4-7")
+        );
+        assert_eq!(default_claude_cli().default_model(), "claude-opus-4-7");
     }
 
     #[test]
@@ -376,7 +351,6 @@ mod tests {
         let cfg = default_llamacpp();
         match &cfg {
             ProviderConfig::Llamacpp { default_model, .. } => {
-                // GGUF naming convention: <model>-<size>-<quant>
                 assert!(default_model.contains("Q5_K_M") || default_model.contains("Q4"));
             }
             other => panic!("expected Llamacpp variant, got: {other:?}"),

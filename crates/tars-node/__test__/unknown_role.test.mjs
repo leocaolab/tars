@@ -2,7 +2,7 @@
 // NO `default` tier — otherwise the sole-provider fallback (rule 5) or the
 // default-tier fallback (rule 4) would absorb an unmapped role and mask it.
 //
-// `init` / `ProviderRegistry::global` are process-global OnceLocks; Node's test
+// The config and the registry `init` builds are process-global OnceLocks; Node's test
 // runner isolates each *file* in its own process, so this file installs its own
 // two-provider config independently of `handle.test.mjs` (whose single-provider
 // config would make sole-provider fallback swallow every role).
@@ -17,6 +17,9 @@ import { join } from 'node:path';
 
 import { init, provider, pipeline } from '../index.js';
 
+// The tenant every handle in this file is bound to.
+const CTX = { tenant: 'test-tenant' };
+
 const HOME = mkdtempSync(join(tmpdir(), 'tars-node-unknown-home-'));
 writeFileSync(
   join(HOME, 'config.toml'),
@@ -29,8 +32,9 @@ canned_response = "ok"
 type = "mock"
 canned_response = "ok"
 
-[roles]
-critic = "mock1"
+[roles.critic]
+provider = "mock1"
+model = "mock-model"
 `,
 );
 
@@ -38,12 +42,12 @@ test('an unmapped role throws with a discriminable .code = TarsUnknownRole', () 
   init(HOME);
 
   // Mapped role still resolves through the flat [roles] map.
-  assert.equal(provider('critic').role, 'critic');
+  assert.equal(provider('critic', CTX).role, 'critic');
 
   // Unmapped: not in [roles], not a tier, not a literal provider id, no
   // `default` tier, and >1 provider so no sole-provider fallback → typed error.
   try {
-    pipeline('no_such_role');
+    pipeline('no_such_role', CTX);
     assert.fail('expected pipeline() to throw for an unmapped role');
   } catch (e) {
     assert.equal(e.code, 'TarsUnknownRole');

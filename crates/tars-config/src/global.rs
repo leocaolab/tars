@@ -1,70 +1,91 @@
-//! Process-global immutable [`Config`] singleton.
+//! Holds the process-global [`Config`], installed once and never replaced.
 //!
-//! One tenant per process, so a single global immutable config is *correct*:
-//! [`init_tars`] once at the composition root, [`Config::get`] everywhere,
-//! no hot-reload. "Multi-tenant" = N single-tenant processes, each with its own
-//! singleton — never a shared-process registry keyed by tenant.
-//!
-//! Two doors, both **fail on a second call**:
-//!
-//! - [`init_tars`] — read `<home>/config.toml` off disk and install it. This is
-//!   the only initialization tars has: everything downstream (the provider
-//!   registry, and any future global) is *derived* from this config, not an
-//!   independent fact.
-//! - [`Config::set`] — install a [`Config`] the caller already built (an
-//!   embedding app that owns its own config discovery, a test).
-//!
-//! Neither is idempotent-by-silence. A second installer gets
-//! [`ConfigError::AlreadyInitialized`] rather than `Ok(())` over a config it
-//! never provided — the failure mode where a library, a test, or a second entry
-//! point wins the race and everyone else runs against a config they cannot see.
+//! A process serves one tenant, so one immutable config is enough; several tenants are several
+//! processes. Both ways in, [`init_tars`] (read `<home>/config.toml`) and [`Config::set`] (take a
+//! config the caller built), fail on a second call with [`ConfigError::AlreadyInitialized`]:
+//! succeeding silently would leave the second installer running against a config it cannot see.
+//! The provider registry is built from this config by the composition root that installed it,
+//! which keeps it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use thiserror::Error;
+
+use crate::config::Config;
 use crate::error::ConfigError;
-use crate::manager::{Config, ConfigManager};
+use crate::model_catalog::{ModelCatalog, install_catalog, load_catalog};
+use crate::paths::resolve_home;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
-/// Initialize tars: read `<home>/config.toml` and install it as the
-/// process-global [`Config`], and install the model catalog with that home's
-/// refreshed `models.json` laid over the shipped provider data.
+/// The config and model catalog of one tars home, read but not installed.
+#[derive(Debug)]
+pub struct LoadedHome {
+    pub config: Config,
+    pub catalog: ModelCatalog<'static>,
+}
+
+/// Reads `<home>/config.toml` and the model catalog with that home's `models.json` laid over the
+/// shipped provider data, installing neither: a composition root builds what it needs from them
+/// first and calls [`install`] only once all of it succeeded, so a failed start can be retried.
 ///
-/// `home` is the explicit `--tars_home` override; otherwise `$TARS_HOME`;
-/// otherwise `~/.tars` (see [`resolve_home`]).
+/// `home` is the caller's explicit home; without it [`resolve_home`] supplies one.
 ///
-/// This is the composition root. It installs the *primary* state — the config
-/// value that cannot be reconstructed. Derived state (the provider registry)
-/// is built by its own layer's `init`, reading [`Config::get`].
+/// # Errors
 ///
-/// Errors with [`ConfigError::AlreadyInitialized`] if a config is already
-/// installed; the freshly-parsed one is dropped and the caller is told.
+/// Returns [`ConfigError::NoHome`] when no home resolves, and the load, validation or catalog
+/// error otherwise.
+pub fn load_tars(home: Option<PathBuf>) -> Result<LoadedHome, ConfigError> {
+    let dir = resolve_home(home).ok_or(ConfigError::NoHome)?;
+    let config = Config::load_file(dir.join("config.toml"))?;
+    let catalog = load_catalog(&dir)?;
+    Ok(LoadedHome { config, catalog })
+}
+
+/// Installs a loaded home's catalog and config as the process globals.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::AlreadyInitialized`] when a config is already installed, before
+/// installing anything.
+pub fn install(loaded: LoadedHome) -> Result<(), ConfigError> {
+    if CONFIG.get().is_some() {
+        return Err(ConfigError::AlreadyInitialized);
+    }
+    install_catalog(loaded.catalog)?;
+    CONFIG
+        .set(loaded.config)
+        .map_err(|_| ConfigError::AlreadyInitialized)
+}
+
+/// Loads `<home>` as [`load_tars`] does and installs it, for a root with nothing to build from
+/// it that can fail.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::AlreadyInitialized`] when a config is already installed, before
+/// reading anything, and the errors of [`load_tars`] and [`install`] otherwise.
 pub fn init_tars(home: Option<PathBuf>) -> Result<(), ConfigError> {
     if CONFIG.get().is_some() {
         return Err(ConfigError::AlreadyInitialized);
     }
-    let dir = resolve_home(home).ok_or(ConfigError::NoHome)?;
-    let cfg = ConfigManager::load_from_file(dir.join("config.toml"))?;
-    crate::model_catalog::install_catalog(&dir)?;
-    CONFIG.set(cfg).map_err(|_| ConfigError::AlreadyInitialized)
+    install(load_tars(home)?)
 }
 
 impl Config {
-    /// The process-global config.
+    /// Returns the process-global config.
     ///
-    /// Panics if [`init_tars`] / [`Config::set`] has not run — a startup-contract
-    /// violation (a programming error, not a runtime condition). The composition
-    /// root must install before anything calls `get`. This is the one sanctioned
-    /// panic in the config layer.
+    /// # Panics
+    ///
+    /// Panics when neither [`init_tars`] nor [`Config::set`] has run, which is a startup bug.
     pub fn get() -> &'static Config {
         CONFIG
             .get()
             .expect("init_tars() must run at startup before Config::get()")
     }
 
-    /// The process-global config if installed — non-panicking, for callers that
-    /// must report "the composition root never ran" as a typed error.
+    /// Returns the process-global config, or `None` before it is installed.
     pub fn try_get() -> Option<&'static Config> {
         CONFIG.get()
     }
@@ -73,107 +94,81 @@ impl Config {
         CONFIG.get().is_some()
     }
 
-    /// Install an already-constructed config as the process global — the DI
-    /// entry point.
+    /// Installs a config the caller built as the process global.
     ///
-    /// Where [`init_tars`] reads `<home>/config.toml` off disk, `set` takes a
-    /// [`Config`] the caller already built. Same once-only contract: a second
-    /// call errors with [`ConfigError::AlreadyInitialized`] rather than
-    /// silently dropping `cfg`.
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::AlreadyInitialized`] when a config is already installed.
     pub fn set(cfg: Config) -> Result<(), ConfigError> {
         CONFIG.set(cfg).map_err(|_| ConfigError::AlreadyInitialized)
     }
 }
 
-/// Resolve the tars home directory: `--tars_home` flag > `$TARS_HOME` > `~/.tars`.
+/// Why a store path cannot be named.
+#[derive(Debug, Error)]
+pub enum ResolveStoreDirError {
+    #[error(
+        "no tars config is installed; run init_tars or Config::set before asking for a store path"
+    )]
+    ConfigNotInstalled,
+    #[error(
+        "the installed config has no store_dir; the consumer sets it with Config::with_store_dir"
+    )]
+    StoreDirUnset,
+}
+
+/// Returns the store directory of `config`, the installed config or `None` before one is.
+fn store_dir_of(config: Option<&Config>) -> Result<&Path, ResolveStoreDirError> {
+    config
+        .ok_or(ResolveStoreDirError::ConfigNotInstalled)?
+        .store_dir()
+        .ok_or(ResolveStoreDirError::StoreDirUnset)
+}
+
+// Each store opens its own pool on the paths below; these only name files. A name is listed
+// whether or not this repo ships the store that reads it: the layout is the contract a
+// consumer's store relies on.
+
+/// Returns `<store_dir>/<file>` of the installed config.
+fn store_path(file: &str) -> Result<PathBuf, ResolveStoreDirError> {
+    store_dir_of(Config::try_get()).map(|dir| dir.join(file))
+}
+
+/// Returns `<store_dir>/events.sqlite`, the agent event log.
 ///
-/// Deliberately **not** XDG — matches [`crate::default_config_path`] and the
-/// OpenClaw/Hermes `~/.<tool>` convention. Returns `None` only when there is no
-/// flag, no `$TARS_HOME`, and no discoverable home directory.
-pub fn resolve_home(flag: Option<PathBuf>) -> Option<PathBuf> {
-    flag.or_else(|| std::env::var_os("TARS_HOME").map(PathBuf::from))
-        .or_else(|| dirs::home_dir().map(|h| h.join(".tars")))
+/// # Errors
+///
+/// [`ResolveStoreDirError`] when no config is installed or its `store_dir` is unset; so do the
+/// other `get_*db_path` functions.
+pub fn get_eventdb_path() -> Result<PathBuf, ResolveStoreDirError> {
+    store_path("events.sqlite")
 }
-
-// ─── per-db path accessors ─────────────────────────────────────────────────
-//
-// The db location is the CONSUMER's: it resolves its workspace store dir and
-// sets it on [`Config::store_dir`](crate::Config) before install. Each store
-// reads its own db path here + opens its OWN pool (SQLite WAL is fine with a
-// pool per connection — no shared-connection registry). config stays pure:
-// these return `PathBuf`, no backend. A name appears here whether or not this
-// repo ships the store that reads it; the layout is the contract, and a
-// consumer that has the store needs the same name this one would use.
-
-/// The consumer-set workspace store dir. Panics if the consumer never set
-/// `Config.store_dir` before install (a startup-contract violation, like
-/// [`Config::get`]).
-fn store_dir() -> &'static std::path::Path {
-    Config::get()
-        .store_dir
-        .as_deref()
-        .expect("Config.store_dir must be set by the consumer before a db path is requested")
+/// Returns `<store_dir>/llm_records.db`, the raw LLM request and response bodies.
+pub fn get_bodydb_path() -> Result<PathBuf, ResolveStoreDirError> {
+    store_path("llm_records.db")
 }
-
-/// `<store_dir>/events.sqlite` — the trajectory / agent event log.
-pub fn get_eventdb_path() -> PathBuf {
-    store_dir().join("events.sqlite")
+/// Returns `<store_dir>/pipeline_events.db`, the pipeline events.
+pub fn get_pipelinedb_path() -> Result<PathBuf, ResolveStoreDirError> {
+    store_path("pipeline_events.db")
 }
-/// `<store_dir>/llm_records.db` — raw LLM request/response bodies.
-pub fn get_bodydb_path() -> PathBuf {
-    store_dir().join("llm_records.db")
-}
-/// `<store_dir>/pipeline_events.db` — pipeline observability events.
-pub fn get_pipelinedb_path() -> PathBuf {
-    store_dir().join("pipeline_events.db")
-}
-/// `<store_dir>/cache.sqlite` — the LLM response cache.
-pub fn get_cachedb_path() -> PathBuf {
-    store_dir().join("cache.sqlite")
-}
-/// `<store_dir>/durable.sqlite` — durable job/step store + blackboard.
-pub fn get_durabledb_path() -> PathBuf {
-    store_dir().join("durable.sqlite")
-}
-/// `<store_dir>/board.sqlite` — task queue + trajectory board.
-pub fn get_boarddb_path() -> PathBuf {
-    store_dir().join("board.sqlite")
+/// Returns `<store_dir>/durable.sqlite`, the task queue and trajectory durable store.
+pub fn durable_store_path() -> Result<PathBuf, ResolveStoreDirError> {
+    store_path("durable.sqlite")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn resolve_home_flag_wins_over_everything() {
-        let explicit = PathBuf::from("/custom/tars/home");
-        assert_eq!(resolve_home(Some(explicit.clone())), Some(explicit));
+    fn empty_config() -> Config {
+        Config::from_toml("").expect("an empty config with the built-ins validates")
     }
 
-    #[test]
-    fn resolve_home_falls_back_to_dot_tars() {
-        // Only meaningful when the test env leaves $TARS_HOME unset — otherwise
-        // the env layer (correctly) takes precedence and this assertion is moot.
-        if std::env::var_os("TARS_HOME").is_none() {
-            let home = resolve_home(None).expect("HOME should resolve in test env");
-            assert!(
-                home.ends_with(".tars"),
-                "default home should end with .tars, got {home:?}"
-            );
-        }
-    }
-
-    /// A second install reports rather than silently dropping the caller's
-    /// config. Both doors share the one cell, so whichever runs first wins and
-    /// the loser is *told* — the property `Config::set(..) -> ()` could not
-    /// express.
     #[test]
     fn second_install_is_reported_not_swallowed() {
-        // This test owns the global for the whole process; the first call may
-        // lose to another test's install, which is itself the condition under
-        // test. Assert on the invariant, not on who won.
-        let first = Config::set(Config::default());
-        let second = Config::set(Config::default());
+        // Another test may install first, so this asserts only that the second call loses.
+        let first = Config::set(empty_config());
+        let second = Config::set(empty_config());
         assert!(
             matches!(second, Err(ConfigError::AlreadyInitialized)),
             "a second install must error, got {second:?}"
@@ -181,5 +176,19 @@ mod tests {
         if first.is_ok() {
             assert!(Config::is_loaded(), "the winning install is visible");
         }
+    }
+
+    #[test]
+    fn a_store_path_needs_an_installed_config_with_a_store_dir() {
+        assert!(matches!(
+            store_dir_of(None),
+            Err(ResolveStoreDirError::ConfigNotInstalled)
+        ));
+        assert!(matches!(
+            store_dir_of(Some(&empty_config())),
+            Err(ResolveStoreDirError::StoreDirUnset)
+        ));
+        let config = empty_config().with_store_dir(PathBuf::from("/s"));
+        assert_eq!(store_dir_of(Some(&config)).ok(), Some(Path::new("/s")));
     }
 }

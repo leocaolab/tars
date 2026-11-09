@@ -15,15 +15,17 @@ workspace = true
 # surface of its own (see the empty `src/lib.rs`).
 [dependencies]
 tars-types = { path = "../crates/tars-types" }
-tars-storage = { path = "../crates/tars-storage" }
-tars-pipeline = { path = "../crates/tars-pipeline" }
-tars-provider = { path = "../crates/tars-provider" }
+tars-llm = { path = "../crates/tars-llm" }
 tars-tools = { path = "../crates/tars-tools" }
+tars-config = { path = "../crates/tars-config" }
+# `display_chain` renders a demo's error with its causes.
+tars-utils = { path = "../crates/tars-utils" }
 
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-util.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 serde_json.workspace = true
-anyhow = "1"
+thiserror.workspace = true
 tempfile = "3"
+dirs.workspace = true

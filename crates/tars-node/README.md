@@ -2,9 +2,9 @@
 
 Rust-backed multi-provider LLM runtime exposed as a Node.js native addon.
 
-The Node binding for [TARS](https://github.com/leocaolab/tars). Same shape as
-[`tars-py`](../tars-py): a compiled extension wrapping TARS's middleware
-pipeline (cache, retry, telemetry, validation) so TypeScript / Node code can
+The Node binding for [TARS](https://github.com/leocaolab/tars): a compiled
+extension wrapping TARS's middleware
+pipeline (retry, telemetry, validation) so TypeScript / Node code can
 use one Rust-backed handle for any provider — `claude` / `openai` / `gemini` /
 `vllm` / `mlx` / `llamacpp` / `claude_cli` / `gemini_cli` / `claude_sdk` /
 `codex_cli`.
@@ -43,9 +43,10 @@ that mirror every `#[napi]` annotation in `src/lib.rs`.
 ```ts
 import { Pipeline } from '@leocaolab/tars-node';
 
-// Construct from a .arc/config.toml-shaped file. Same TOML schema
-// `tars-py` reads; share one config across both bindings.
-const pipeline = Pipeline.fromConfigPath('.arc/config.toml', 'gemini_pro');
+// Construct from a file in the tars config schema (`<tars home>/config.toml`
+// shape). The ctx names
+// whose calls these are — `tenant` is required, there is no default.
+const pipeline = Pipeline.fromConfigPath('tars.toml', 'gemini_pro', { tenant: 'acme' });
 
 const resp = await pipeline.complete({
     model: 'gemini-3.1-pro-preview',
@@ -69,6 +70,28 @@ console.log(resp.usage.outputTokens);
 console.log(resp.stopReason);        // "end_turn" / "max_tokens" / ...
 ```
 
+### Roles
+
+`init()` installs the process-global config (`<tars home>/config.toml`); a
+role then names a `[roles.<name>]` entry. A role handle binds only the role's
+provider — the model is still the caller's, per call. `roleModel(role)` /
+`roleProvider(role)` read the mapping:
+
+```ts
+import { init, pipeline, roleModel, roleProvider } from '@leocaolab/tars-node';
+
+init();
+roleProvider('critic');          // the [roles.critic] provider id
+const model = roleModel('critic'); // its model; `<series>@latest` resolved to today's id
+const p = pipeline('critic', { tenant: 'acme', session: 'sess-abc' });
+await p.complete({ model, user: 'review this' });
+```
+
+A role not in `[roles]` throws with `.code === 'TarsUnknownRole'`. In the ctx,
+`tenant` is required and `session` / `trace` optional; an empty string in any
+of them is refused, not treated as absent: `.code` is `TarsInvalidTenant` /
+`TarsInvalidSession` / `TarsInvalidTrace` and the message names the field.
+
 ### Validating against a JSON Schema
 
 The Rust `decode::<T>` seam is Rust-only; from Node the schema-valid path is:
@@ -78,7 +101,7 @@ The Rust `decode::<T>` seam is Rust-only; from Node the schema-valid path is:
    (Gemini / OpenAI / Anthropic) is *forced* to emit conforming JSON, so
    `result.text` parses cleanly. (A local LM Studio model may reject
    `response_format` — fall back to a JSON-forcing prompt.)
-2. **Parse + shape-check in your code.** Unlike `tars-py`, the Node binding
+2. **Parse + shape-check in your code.** The Node binding
    has **no in-pipeline validators** yet — run `JSON.parse(result.text)`
    then validate the shape yourself (plain JS, or zod / ajv):
 
@@ -98,8 +121,8 @@ no live model needed):
 `(request → events)` to a JSON file, then replays it forever (VCR pattern) —
 so tests/examples run with no live model. A request the recording doesn't
 cover is a hard **MISS error**, never a silent re-call. Record and replay
-compute the *same* request fingerprint across bindings, so a cassette
-recorded from `tars-py` replays byte-identically through `tars-node`.
+compute the *same* request fingerprint in Rust and Node, so a cassette
+recorded from Rust replays byte-identically through `tars-node`.
 
 ```
 TARS_CASSETTE_RECORD=1 node examples/node/schema-validation.mjs  # record (live)
@@ -108,7 +131,7 @@ node examples/node/schema-validation.mjs                          # replay (offl
 
 ## Why a separate binding?
 
-Same answer as `tars-py`: every layer above the provider — cache, retry,
+Every layer above the provider — retry,
 telemetry, validation, circuit breaker, budget — is
 Rust code we don't want to re-implement in TypeScript. The binding
 hands a single handle (`Pipeline`) across the FFI boundary; the Node
@@ -118,22 +141,17 @@ caller never sees the middleware chain, just `complete(opts) → Promise<result>
 
 | Milestone | What lands |
 |-----------|------------|
-| ✅ done | scaffold + build pipeline, real `complete()` through the middleware chain, role spine (`init` / `provider` / `pipeline`) |
+| ✅ done | scaffold + build pipeline, real `complete()` through the middleware chain, role spine (`init` / `provider` / `pipeline` / `roleModel` / `roleProvider`) |
 | next | `npm publish` of platform-tagged tarballs (darwin x64/arm64, linux gnu x64/arm64) |
 | later | streaming (`stream()` → AsyncIterator over ChatEvent) |
-| later | `run_task(...)` over the DAG executor (Doc 04 §4) |
 | later | tool calling, tool_choice, structured tool results |
 | later | per-call cancellation token |
 
-Out of scope for the napi binding: spawning agents (use the Rust
-runtime in-process); training / fine-tuning (not in TARS scope at all).
+Out of scope for the napi binding: spawning agents; training / fine-tuning (not in TARS scope at all).
 
 ## Internals
 
-`src/lib.rs` mirrors `crates/tars-py/src/lib.rs` one-for-one:
-
-- Process-wide tokio runtime, lazy `OnceLock<Runtime>` — same pattern
-  as `tars-py::TOKIO`. Each `complete()` blocks on this runtime via
+- Process-wide tokio runtime, lazy `OnceLock<Runtime>`. Each `complete()` blocks on this runtime via
   `napi-rs`'s async glue; the JS caller's event loop is never
   serialised.
 - `Pipeline` napi class holds a concrete `LlmService` once `from_config_path`

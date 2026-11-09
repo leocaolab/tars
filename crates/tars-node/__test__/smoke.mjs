@@ -6,7 +6,7 @@
 // Coverage:
 //   1. The native addon loads (no "module did not self-register").
 //   2. `hello()` round-trips a string through napi.
-//   3. `Pipeline.fromStr(toml, providerId)` constructs over the inline
+//   3. `Pipeline.fromStr(toml, providerId, ctx)` constructs over the inline
 //      TOML — proves the real config-load + provider-registry +
 //      pipeline-builder chain works end-to-end without an external
 //      config file.
@@ -14,13 +14,16 @@
 //      a `{ text, usage, model, stopReason }` shape — proves async +
 //      struct marshalling + the LlmService drive loop work.
 //
-// The provider is `mock` — `tars_provider::backends::mock::MockProvider`
+// The provider is `mock` — `tars_llm::backends::mock::MockProvider`
 // returns a canned response without touching the network. To exercise
 // a real provider, swap the `type` + add the auth block.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { hello, Pipeline } from '../index.js';
+
+// The tenant every pipeline in this file is bound to.
+const CTX = { tenant: 'test-tenant' };
 
 const MOCK_CONFIG = `
 [providers.demo]
@@ -32,13 +35,13 @@ test('hello() round-trips a string through napi', () => {
     assert.equal(hello('world'), 'tars-node says hi, world');
 });
 
-test('Pipeline.fromStr(toml, providerId) builds against the mock provider', () => {
-    const p = Pipeline.fromStr(MOCK_CONFIG, 'demo');
+test('Pipeline.fromStr(toml, providerId, ctx) builds against the mock provider', () => {
+    const p = Pipeline.fromStr(MOCK_CONFIG, 'demo', CTX);
     assert.equal(p.id, 'demo');
 });
 
 test('Pipeline.complete() drives through the LlmService and returns the result shape', async () => {
-    const p = Pipeline.fromStr(MOCK_CONFIG, 'demo');
+    const p = Pipeline.fromStr(MOCK_CONFIG, 'demo', CTX);
     const r = await p.complete({
         model: 'mock-model',
         user: 'hello world',
@@ -55,7 +58,7 @@ test('Pipeline.complete() drives through the LlmService and returns the result s
 });
 
 test('Pipeline.complete() rejects on both `user` and `messages` set', async () => {
-    const p = Pipeline.fromStr(MOCK_CONFIG, 'demo');
+    const p = Pipeline.fromStr(MOCK_CONFIG, 'demo', CTX);
     await assert.rejects(
         () =>
             p.complete({
@@ -65,4 +68,12 @@ test('Pipeline.complete() rejects on both `user` and `messages` set', async () =
             }),
         /either `user`.*or `messages`/,
     );
+});
+
+// b/122: a pipeline has no tenant of its own — building one without the
+// caller's is refused, naming what is missing.
+test('Pipeline.fromStr refuses a ctx without a tenant', () => {
+    assert.throws(() => Pipeline.fromStr(MOCK_CONFIG, 'demo'), /no tenant/);
+    assert.throws(() => Pipeline.fromStr(MOCK_CONFIG, 'demo', {}), /tenant/);
+    assert.throws(() => Pipeline.fromStr(MOCK_CONFIG, 'demo', { tenant: '' }), /ctx\.tenant/);
 });

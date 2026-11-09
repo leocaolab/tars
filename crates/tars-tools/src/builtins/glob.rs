@@ -1,48 +1,46 @@
-//! `fs.glob` — find files BY NAME across the work tree (the `fd`
-//! equivalent), using ripgrep/fd's `.gitignore`-respecting walker
-//! (`ignore`) + fast glob matching (`globset`), linked in.
-//!
-//! Pairs with [`super::GrepTool`]: grep searches file *contents*, glob
-//! locates files by *path pattern*. Same wins as grep — the capability is
-//! named in the tool list (so the model uses it instead of `bash.run` +
-//! `find`), it is rooted at the jail / cwd and cannot escape, and it skips
-//! `.gitignore`d + hidden + binary-heavy noise by default. An empty result
-//! is a SUCCESS (`is_error=false`), not a failure.
+//! `fs.glob`: finds files by name under the search root with fd's walker, skipping ignored and
+//! hidden files. Where it may search is the read jail's decision (see `read_jail`), as for
+//! `fs.grep`. The walker lists directories by path, so a directory swapped for a symlink during
+//! the walk can make it list names from outside the root; a name is reported only once it is
+//! found to be a regular file below the root, looked up from the root without following a
+//! symlink. An entry it cannot read or confirm is skipped, and the result names the first few with
+//! why. No match is a success, not an `is_error` result.
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use tars_types::JsonSchema;
 
-use crate::tool::{Tool, ToolContext, ToolError, ToolResult};
+use super::SkipList;
+use super::read_jail::{Reach, ReadJail, ReadPath};
+use crate::tool::{Tool, ToolEnv, ToolError, ToolOutput};
+use tars_sandbox::{ResolveRootError, canonical_root};
 
-/// Default cap on paths returned per call.
-pub const DEFAULT_MAX_RESULTS: usize = 256;
+/// Caps the paths one call returns.
+pub const DEFAULT_MAX_RESULTS: NonZeroUsize = NonZeroUsize::new(256).expect("256 is not zero");
 
 pub struct GlobTool {
     root: Option<PathBuf>,
-    max_results: usize,
+    max_results: NonZeroUsize,
 }
 
 #[derive(Debug, Deserialize)]
 struct GlobArgs {
-    /// Glob pattern matched against each file's path relative to the
-    /// search root (e.g. `*.rs`, `**/*.test.ts`, `src/**/mod.rs`).
     pattern: String,
-    /// Directory to search under. Absolute or relative to the working
-    /// directory. Defaults to the working directory.
     #[serde(default)]
     path: Option<String>,
 }
 
 struct GlobOutcome {
     paths: Vec<String>,
+    /// Says whether a file past the cap was found, so more files match than are returned.
     truncated: bool,
+    skipped: SkipList,
 }
 
 impl GlobTool {
@@ -53,71 +51,21 @@ impl GlobTool {
         }
     }
 
-    /// Constrain the search to `root`. Returns `None` if `root` can't be
-    /// canonicalized.
-    pub fn with_root(root: impl AsRef<Path>) -> Option<Self> {
-        let canonical_root = std::fs::canonicalize(root.as_ref()).ok()?;
-        Some(Self {
-            root: Some(canonical_root),
+    /// Confines the search to `root`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `root` cannot be canonicalized.
+    pub fn with_root(root: impl AsRef<Path>) -> Result<Self, ResolveRootError> {
+        Ok(Self {
+            root: Some(canonical_root(root.as_ref())?),
             max_results: DEFAULT_MAX_RESULTS,
         })
     }
 
-    pub fn max_results(mut self, n: usize) -> Self {
+    pub fn max_results(mut self, n: NonZeroUsize) -> Self {
         self.max_results = n;
         self
-    }
-
-    /// Effective jail root = explicit `with_root`, else the per-call
-    /// `ctx.cwd` (see [`super::grep`]'s resolve for the rationale — the
-    /// structural fix for unbounded `find /` walks).
-    fn resolve(
-        &self,
-        input: Option<&str>,
-        cwd: Option<&Path>,
-        readable_roots: &[PathBuf],
-    ) -> Result<PathBuf, ToolResult> {
-        let raw = Path::new(input.unwrap_or("."));
-        let combined = if raw.is_absolute() {
-            raw.to_path_buf()
-        } else if let Some(cwd) = cwd {
-            cwd.join(raw)
-        } else if let Some(root) = &self.root {
-            // With a jail and no per-call cwd, the jail IS the frame of reference. It
-            // used to fall through to the process's working directory, so a relative
-            // path was resolved against one directory and then checked against a
-            // different one. Best case that is a guaranteed "outside the allowed root"
-            // on every relative path; worst case — a jail that happens to contain the
-            // process cwd — it silently reads and writes the wrong tree.
-            root.join(raw)
-        } else {
-            raw.to_path_buf()
-        };
-        let jail = match (&self.root, cwd) {
-            (Some(r), _) => r.clone(),
-            (None, Some(c)) => std::fs::canonicalize(c).map_err(|e| {
-                ToolResult::error(format!("cannot resolve cwd `{}`: {e}", c.display()))
-            })?,
-            (None, None) => return Ok(combined),
-        };
-        let canonical = std::fs::canonicalize(&combined).map_err(|e| {
-            ToolResult::error(format!("cannot resolve path `{}`: {e}", combined.display()))
-        })?;
-        // Allowed under the (cwd / explicit-root) jail OR an extra READ-ONLY root
-        // (a dependency-source dir) — same rationale as grep's resolve.
-        let in_read_root = readable_roots.iter().any(|r| {
-            std::fs::canonicalize(r)
-                .map(|cr| canonical.starts_with(&cr))
-                .unwrap_or(false)
-        });
-        if !canonical.starts_with(&jail) && !in_read_root {
-            return Err(ToolResult::error(format!(
-                "path `{}` resolves outside the allowed root `{}`",
-                canonical.display(),
-                jail.display(),
-            )));
-        }
-        Ok(canonical)
     }
 }
 
@@ -146,7 +94,7 @@ impl Tool for GlobTool {
         S.get_or_init(|| {
             JsonSchema::strict(
                 "GlobArgs",
-                json!({
+                tars_types::json_object! {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
@@ -154,7 +102,7 @@ impl Tool for GlobTool {
                         "path": { "type": "string", "description": "Directory to search under. Relative to the working directory. Defaults to the working directory." }
                     },
                     "required": ["pattern"]
-                }),
+                },
             )
         })
     }
@@ -162,51 +110,59 @@ impl Tool for GlobTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        let parsed: GlobArgs =
-            serde_json::from_value(args).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
+        env: &ToolEnv,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
+        let parsed: GlobArgs = serde_json::from_value(args).map_err(ToolError::InvalidArguments)?;
 
-        let search_root = match self.resolve(
-            parsed.path.as_deref(),
-            ctx.cwd.as_deref(),
-            &ctx.readable_roots,
-        ) {
+        let search_root = match ReadJail::of(self.root.as_deref(), env, Reach::Walk)
+            .admit(Path::new(parsed.path.as_deref().unwrap_or(".")))
+        {
             Ok(p) => p,
-            Err(result) => return Ok(result),
+            Err(refusal) => return Ok(ToolOutput::error(refusal.to_string())),
         };
 
         let pattern = parsed.pattern.clone();
-        let cap = self.max_results;
-        let cancel = ctx.cancel.clone();
-        let root_for_blocking = search_root.clone();
+        let cap = self.max_results.get();
+        let walk_cancel = cancel.clone();
 
         let handle = tokio::task::spawn_blocking(move || {
-            run_glob(root_for_blocking, &pattern, cap, &cancel)
+            run_glob(&search_root, &pattern, cap, &walk_cancel)
         });
         let joined = tokio::select! {
             biased;
-            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            _ = cancel.cancelled() => return Err(ToolError::Cancelled),
             r = handle => r,
         };
 
         let outcome = match joined {
             Ok(Ok(o)) => o,
             Ok(Err(GlobError::Cancelled)) => return Err(ToolError::Cancelled),
-            Ok(Err(GlobError::BadInput(msg))) => {
-                return Ok(ToolResult::titled_error("invalid glob", msg));
+            Ok(Err(GlobError::BadGlob { pattern, source })) => {
+                return Ok(ToolOutput::titled_error(
+                    "invalid glob",
+                    format!("invalid glob `{pattern}`: {source}"),
+                ));
+            }
+            Ok(Err(GlobError::Root { path, source })) => {
+                return Ok(ToolOutput::titled_error(
+                    "cannot open the search root",
+                    format!("opening `{}`: {source}", path.display()),
+                ));
             }
             Err(join_err) => {
-                return Err(ToolError::Execute(format!(
-                    "glob task panicked: {join_err}"
-                )));
+                return Err(ToolError::TaskLost {
+                    tool: "fs.glob",
+                    source: join_err,
+                });
             }
         };
 
+        let skipped = outcome.skipped.note("that could not be read");
         if outcome.paths.is_empty() {
-            return Ok(ToolResult::titled_success(
+            return Ok(ToolOutput::titled_success(
                 format!("no files match `{}`", parsed.pattern),
-                "(no files)".to_string(),
+                format!("(no files){skipped}"),
             ));
         }
         let n = outcome.paths.len();
@@ -219,17 +175,26 @@ impl Tool for GlobTool {
         } else {
             format!("{n} file{}", if n == 1 { "" } else { "s" })
         };
-        Ok(ToolResult::titled_success(title, body))
+        body.push_str(&skipped);
+        Ok(ToolOutput::titled_success(title, body))
     }
 }
 
 enum GlobError {
     Cancelled,
-    BadInput(String),
+    BadGlob {
+        pattern: String,
+        source: globset::Error,
+    },
+    /// The search root could not be opened to walk from.
+    Root {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 fn run_glob(
-    search_root: PathBuf,
+    search_root: &ReadPath,
     pattern: &str,
     max_results: usize,
     cancel: &CancellationToken,
@@ -237,53 +202,100 @@ fn run_glob(
     let glob = globset::GlobBuilder::new(pattern)
         .literal_separator(false)
         .build()
-        .map_err(|e| GlobError::BadInput(format!("invalid glob `{pattern}`: {e}")))?
+        .map_err(|source| GlobError::BadGlob {
+            pattern: pattern.to_owned(),
+            source,
+        })?
         .compile_matcher();
 
+    let root = search_root.path();
+    let opener = search_root.walk().map_err(|source| GlobError::Root {
+        path: root.to_path_buf(),
+        source,
+    })?;
     let mut paths: Vec<String> = Vec::new();
     let mut truncated = false;
+    let mut skipped = SkipList::default();
 
-    // require_git(false): honor .gitignore even when the search root isn't
-    // itself a git repo (matches GrepTool + ripgrep/fd behaviour).
-    let walker = ignore::WalkBuilder::new(&search_root)
+    // `.gitignore` applies even when the search root is not a git repository. Ignore files above
+    // the search root are not read, as for `fs.grep`: a worktree under a parent `.gitignore`
+    // that lists it would otherwise match nothing.
+    let walker = ignore::WalkBuilder::new(root)
         .require_git(false)
+        .parents(false)
         .build();
     for result in walker {
         if cancel.is_cancelled() {
             return Err(GlobError::Cancelled);
         }
+        // An entry the walk cannot read (a directory without permission, a broken link) is
+        // skipped and named, so the model knows the paths cover only what could be read.
         let entry = match result {
-            Ok(e) => e,
-            Err(_) => continue,
+            Ok(entry) => entry,
+            Err(e) => {
+                skipped.push(e.to_string());
+                continue;
+            }
         };
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
         let path = entry.path();
-        let rel = path.strip_prefix(&search_root).unwrap_or(path);
-        // Match against the relative path AND the bare file name, so both
-        // `**/*.rs` (path) and `*.rs` (name) do what the model expects.
+        let rel = path.strip_prefix(root).unwrap_or(path);
+        // The bare name is matched as well as the relative path, so a pattern with no wildcard
+        // for the directories (`Cargo.toml`, `a*.rs`) also finds the files of that name below
+        // the root.
         let matches_path = glob.is_match(rel);
         let matches_name = path
             .file_name()
             .map(|n| glob.is_match(Path::new(n)))
             .unwrap_or(false);
         if matches_path || matches_name {
-            paths.push(rel.display().to_string());
-            if paths.len() >= max_results {
+            // A name that is not, or cannot be confirmed as, a regular file below the root is
+            // skipped and named, as an entry the walk cannot read is.
+            match opener.is_file(path) {
+                Ok(true) => {}
+                Ok(false) => {
+                    skipped.push(format!(
+                        "`{}`: not a regular file below the search root",
+                        rel.display()
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    skipped.push(format!("`{}`: {e}", rel.display()));
+                    continue;
+                }
+            }
+            // A file past the cap is found, not kept: it is what says the result is cut short.
+            if paths.len() == max_results {
                 truncated = true;
                 break;
             }
+            paths.push(rel.display().to_string());
         }
     }
     paths.sort();
-    Ok(GlobOutcome { paths, truncated })
+    Ok(GlobOutcome {
+        paths,
+        truncated,
+        skipped,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::Arc;
+
+    /// Returns a context whose `cwd` is `dir`, the confinement a rootless tool needs.
+    fn in_dir(dir: &Path) -> ToolEnv {
+        ToolEnv {
+            cwd: Some(dir.to_path_buf()),
+            ..Default::default()
+        }
+    }
 
     fn write(dir: &Path, name: &str, content: &str) {
         let p = dir.join(name);
@@ -310,7 +322,8 @@ mod tests {
         let r = tool
             .execute(
                 json!({"pattern": "**/*.rs", "path": dir.path().to_str().unwrap()}),
-                ToolContext::default(),
+                &in_dir(dir.path()),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -328,7 +341,8 @@ mod tests {
         let r = tool
             .execute(
                 json!({"pattern": "*.toml", "path": dir.path().to_str().unwrap()}),
-                ToolContext::default(),
+                &in_dir(dir.path()),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -343,7 +357,8 @@ mod tests {
         let r = tool
             .execute(
                 json!({"pattern": "*.zzz", "path": dir.path().to_str().unwrap()}),
-                ToolContext::default(),
+                &in_dir(dir.path()),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -361,7 +376,8 @@ mod tests {
         let r = tool
             .execute(
                 json!({"pattern": "**/*.rs", "path": dir.path().to_str().unwrap()}),
-                ToolContext::default(),
+                &in_dir(dir.path()),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
@@ -381,11 +397,102 @@ mod tests {
         let r = tool
             .execute(
                 json!({"pattern": "*", "path": outside.path().to_str().unwrap()}),
-                ToolContext::default(),
+                &ToolEnv::default(),
+                CancellationToken::new(),
             )
             .await
             .unwrap();
         assert!(r.is_error);
         assert!(r.content.contains("outside the allowed root"));
+    }
+
+    #[tokio::test]
+    async fn a_rootless_search_without_a_cwd_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.rs", "x");
+        let r = GlobTool::new()
+            .execute(
+                json!({"pattern": "*.rs", "path": dir.path().to_str().unwrap()}),
+                &ToolEnv::default(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error, "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn searches_a_root_that_a_parent_gitignore_marks_ignored() {
+        let repo = tempfile::tempdir().unwrap();
+        write(repo.path(), ".gitignore", ".arc/\n");
+        let worktree = repo.path().join(".arc/worktrees/fix-X");
+        write(&worktree, "src/lib.rs", "x");
+        let r = GlobTool::new()
+            .execute(
+                json!({"pattern": "**/*.rs", "path": worktree.to_str().unwrap()}),
+                &in_dir(&worktree),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(r.content.contains("src/lib.rs"), "got: {}", r.content);
+    }
+
+    #[tokio::test]
+    async fn a_bare_name_finds_the_files_of_that_name_below_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "crates/one/Cargo.toml", "x");
+        let r = GlobTool::new()
+            .execute(
+                json!({"pattern": "Cargo.toml", "path": dir.path().to_str().unwrap()}),
+                &in_dir(dir.path()),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            r.content.contains("crates/one/Cargo.toml"),
+            "got: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn exactly_cap_files_are_all_there_is_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "only.rs", "");
+        let r = GlobTool::new()
+            .max_results(NonZeroUsize::new(1).unwrap())
+            .execute(
+                json!({"pattern": "*.rs"}),
+                &in_dir(dir.path()),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.title.as_deref(), Some("1 file"), "{}", r.content);
+        assert!(!r.content.contains("truncated"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn a_file_past_the_cap_says_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.rs", "");
+        write(dir.path(), "b.rs", "");
+        let r = GlobTool::new()
+            .max_results(NonZeroUsize::new(1).unwrap())
+            .execute(
+                json!({"pattern": "*.rs"}),
+                &in_dir(dir.path()),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            r.title.as_deref(),
+            Some("1+ files (truncated)"),
+            "{}",
+            r.content
+        );
     }
 }

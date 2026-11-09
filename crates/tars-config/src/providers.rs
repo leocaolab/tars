@@ -1,24 +1,18 @@
-//! Provider declarations. The schema is **mirrored** from the concrete
-//! backends in `tars-provider` — adding a new provider type means
-//! adding a variant here AND a builder in `tars-provider`. We keep
-//! them in lockstep manually rather than via macros for now (one new
-//! provider per quarter at most; macro overhead not worth it).
+//! Declares the config schema of each provider type and checks each entry on its own.
+//!
+//! Every variant has a builder in `tars-llm`'s registry, kept in step by hand: a new provider
+//! type is a variant here and a builder there.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use tars_types::{Auth, HttpProviderExtras, ProviderId};
+use tars_types::{Auth, HttpOverrides, ProviderId};
 
-use crate::error::ValidationError;
+use crate::error::{ValidationError, ValidationProblem};
 
-/// Deserialize a `String` field, trimming surrounding whitespace.
-///
-/// Normalising at the parse boundary keeps the stored value identical to
-/// what `validate()`'s `trim().is_empty()` checks against and to what the
-/// runtime (e.g. the HTTP client `base_url`, the CLI `executable`) actually
-/// uses — otherwise a value like `"  claude  "` would pass validation yet
-/// reach the runtime with its whitespace intact.
+/// Deserializes a `String` with surrounding whitespace trimmed, so the value `validate` checks is
+/// the one the runtime uses; `"  claude  "` would otherwise pass and reach the spawn as is.
 fn de_trimmed_string<'de, D>(de: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
@@ -27,9 +21,8 @@ where
     Ok(s.trim().to_owned())
 }
 
-/// `Option<String>` counterpart of [`de_trimmed_string`]. A present value is
-/// trimmed; absence stays `None`. An all-whitespace value trims to `Some("")`
-/// and is then rejected by `validate()` (the "empty when set" contract).
+/// Deserializes an optional `String` trimmed; an all-whitespace value becomes `Some("")`, which
+/// `validate` rejects.
 fn de_trimmed_opt_string<'de, D>(de: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -38,13 +31,12 @@ where
     Ok(opt.map(|s| s.trim().to_owned()))
 }
 
-/// Top-level providers section.
+/// The `[providers]` table, keyed by provider id.
 ///
-/// `default_model` takes a concrete model id, or `<series>@latest` for the
-/// newest model of a series the provider defines in `data/provider.toml`
-/// (Gemini: `flash`, `flash-lite`, `pro`) — see [`crate::model_spec`].
+/// `default_model` takes a concrete model id, or `<series>@latest` for the newest model of a
+/// series the provider defines in `data/provider.toml` (Gemini: `flash`, `flash-lite`, `pro`);
+/// see [`crate::model_spec`].
 ///
-/// TOML shape:
 /// ```toml
 /// [providers.openai_main]
 /// type = "openai"
@@ -58,6 +50,7 @@ where
 ///
 /// [providers.local_qwen]
 /// type = "openai_compat"
+/// gen_ai_provider_name = "vllm"
 /// base_url = "http://localhost:8000/v1"
 /// auth = { kind = "none" }
 /// default_model = "Qwen/Qwen2.5-Coder-32B-Instruct"
@@ -92,17 +85,13 @@ impl ProvidersConfig {
     }
 }
 
-/// One declarative provider entry. The serde tag is `type` to match the
-/// TOML idiom (`type = "openai"`) — yes, "type" is a reserved word in
-/// Rust source, but as a serde tag it's just a string.
+/// One `[providers.<id>]` entry, its `type` key naming the variant.
 ///
-/// HTTP-shape variants accept user-supplied `http_headers /
-/// env_http_headers / query_params` fields (flattened into the variant
-/// body). See [`HttpProviderExtras`] for semantics.
+/// The HTTP variants also take the [`HttpOverrides`] keys (`http_headers`,
+/// `env_http_headers`, `query_params`) inline.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderConfig {
-    /// Direct OpenAI HTTP API.
     Openai {
         #[serde(
             default,
@@ -114,26 +103,28 @@ pub enum ProviderConfig {
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
-        extras: HttpProviderExtras,
+        extras: HttpOverrides,
     },
 
-    /// OpenAI-compatible HTTP server (Groq, Together, DeepSeek,
-    /// llama.cpp server, LM Studio …). Distinguished from `Openai` only
-    /// because `base_url` is mandatory here — keeps configs honest.
+    /// Is any OpenAI-compatible HTTP server (Groq, Together, DeepSeek, LM Studio, …); it differs
+    /// from `Openai` in requiring `base_url` and allowing no key.
     OpenaiCompat {
         #[serde(deserialize_with = "de_trimmed_string")]
         base_url: String,
-        #[serde(default = "Auth::none")]
+        #[serde(default = "auth_none")]
         auth: Auth,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
+        /// Names who serves the API, in OpenTelemetry GenAI's words where it has one (`groq`,
+        /// `mistral`, `deepseek`); the server behind the URL could be anyone's, so the block says.
+        #[serde(deserialize_with = "de_trimmed_string")]
+        gen_ai_provider_name: String,
         #[serde(flatten)]
-        extras: HttpProviderExtras,
+        extras: HttpOverrides,
         #[serde(flatten)]
         capabilities: CapabilitiesOverrides,
     },
 
-    /// Anthropic HTTP API.
     Anthropic {
         #[serde(
             default,
@@ -151,10 +142,9 @@ pub enum ProviderConfig {
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
-        extras: HttpProviderExtras,
+        extras: HttpOverrides,
     },
 
-    /// Google Gemini HTTP API.
     Gemini {
         #[serde(
             default,
@@ -166,33 +156,9 @@ pub enum ProviderConfig {
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
-        extras: HttpProviderExtras,
+        extras: HttpOverrides,
     },
 
-    /// AWS Bedrock via the unified Converse API. **Keyless** —
-    /// there is intentionally NO `auth` field: credential resolution is
-    /// delegated wholesale to the AWS SDK's default chain (env / profile /
-    /// SSO / ECS / EC2 IMDS) and every request is SigV4-signed by the SDK.
-    /// `region` + `model` are required; `profile` is the laptop-only knob
-    /// (omit on AWS, where the ambient workload role wins).
-    ///
-    /// Only built when tars-provider is compiled with the `bedrock`
-    /// feature (which pulls in the heavy AWS SDK); otherwise the registry
-    /// returns a clear "rebuild with --features bedrock" error.
-    Bedrock {
-        #[serde(deserialize_with = "de_trimmed_string")]
-        region: String,
-        #[serde(deserialize_with = "de_trimmed_string")]
-        model: String,
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "de_trimmed_opt_string"
-        )]
-        profile: Option<String>,
-    },
-
-    /// vLLM local server (sub-case of openai_compat with sensible defaults).
     Vllm {
         #[serde(
             default,
@@ -200,20 +166,18 @@ pub enum ProviderConfig {
             deserialize_with = "de_trimmed_opt_string"
         )]
         base_url: Option<String>,
-        #[serde(default = "Auth::none")]
+        #[serde(default = "auth_none")]
         auth: Auth,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
-        extras: HttpProviderExtras,
+        extras: HttpOverrides,
         #[serde(flatten)]
         capabilities: CapabilitiesOverrides,
     },
 
-    /// Apple Silicon native runner (`mlx_lm.server`). Same wire format
-    /// as vLLM/llama.cpp/OpenAI-compat — the dedicated variant exists
-    /// so logs and routing can identify "this is the unified-memory
-    /// box" at a glance and apply Mac-specific capability defaults.
+    /// Is `mlx_lm.server` on Apple Silicon. Its wire format is OpenAI-compatible; the variant
+    /// tells it apart in logs and capability defaults.
     Mlx {
         #[serde(
             default,
@@ -221,19 +185,17 @@ pub enum ProviderConfig {
             deserialize_with = "de_trimmed_opt_string"
         )]
         base_url: Option<String>,
-        #[serde(default = "Auth::none")]
+        #[serde(default = "auth_none")]
         auth: Auth,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
-        extras: HttpProviderExtras,
+        extras: HttpOverrides,
         #[serde(flatten)]
         capabilities: CapabilitiesOverrides,
     },
 
-    /// llama.cpp `llama-server` (GGUF + Vulkan/Metal). Use this for
-    /// Ryzen iGPU clusters or any host where `llama.cpp` is the
-    /// preferred runner. Same wire format as the other local backends.
+    /// Is llama.cpp's `llama-server`, OpenAI-compatible like the other local backends.
     Llamacpp {
         #[serde(
             default,
@@ -241,17 +203,17 @@ pub enum ProviderConfig {
             deserialize_with = "de_trimmed_opt_string"
         )]
         base_url: Option<String>,
-        #[serde(default = "Auth::none")]
+        #[serde(default = "auth_none")]
         auth: Auth,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
         #[serde(flatten)]
-        extras: HttpProviderExtras,
+        extras: HttpOverrides,
         #[serde(flatten)]
         capabilities: CapabilitiesOverrides,
     },
 
-    /// Claude Code CLI subscription path.
+    /// Is the Claude Code CLI on the user's subscription.
     ClaudeCli {
         #[serde(
             default = "default_claude_executable",
@@ -262,110 +224,78 @@ pub enum ProviderConfig {
         timeout_secs: u64,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
-        /// `--tools` knob. `"disabled"` (default) kills the CLI's
-        /// internal agent loop while staying auth-neutral; `"default"`
-        /// preserves full agent behavior; an array names specific
-        /// allowed tools. See `docs/providers/claude-cli.md §3`.
+        /// Sets `--tools`: `"disabled"` (the default) turns off the CLI's own agent loop without
+        /// touching auth, `"default"` keeps it, and a list allows just those tools.
         #[serde(default)]
         tools: ClaudeCliToolsConfig,
-        /// `--bare`. **Default `false`** — setting `true` skips
-        /// auto-memory / CLAUDE.md auto-discovery **and disables
-        /// OAuth/keychain auth**, requiring `ANTHROPIC_API_KEY`.
-        /// Most `claude_cli` users log in via `claude login` and would
-        /// break with `bare=true`. See `docs/providers/claude-cli.md §3`.
+        /// Sets `--bare`, which skips auto-memory and CLAUDE.md discovery but also turns off
+        /// OAuth and keychain auth, requiring `ANTHROPIC_API_KEY`; a user of `claude login`
+        /// breaks with it on.
         #[serde(default)]
         bare: bool,
-        /// `--effort` level. `None` (default) omits the flag.
+        /// Sets `--effort`; `None` omits the flag.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effort: Option<ClaudeCliEffortConfig>,
-        /// `--exclude-dynamic-system-prompt-sections`. Default `true`
-        /// (improves prompt-cache reuse).
+        /// Sets `--exclude-dynamic-system-prompt-sections`, on by default for prompt-cache reuse.
         #[serde(default = "default_true")]
         exclude_dynamic_sections: bool,
-        /// Escape hatch — raw argv tokens appended to every call.
-        /// Use sparingly; the Builder methods cover the common cases.
+        /// Lists raw argv tokens appended to every call.
         #[serde(default)]
         extra_args: Vec<String>,
     },
 
-    /// Claude SDK child process — tars spawns a long-lived
-    /// `@anthropic-ai/claude-agent-sdk` Node process and multiplexes
-    /// requests over its stdin / stdout (NDJSON, one JSON object per
-    /// line). The child owns subscription OAuth and prompt-cache
-    /// lifetime; tars owns the pipe.
-    ///
-    /// Eliminates the per-call cold start of [`Self::ClaudeCli`]
-    /// (which spawns a fresh `claude` subprocess per request) while
-    /// avoiding the operator burden of [`Self::ClaudeCli`]'s
-    /// alternative — a long-running HTTP daemon — by tying child
-    /// lifetime to tars's. See
-    /// `crates/tars-provider/src/backends/claude_sdk.rs` for the
-    /// transport, and `tools/claude-daemon/server.mjs --stdio` for
-    /// the reference child script.
+    /// Is a long-lived `@anthropic-ai/claude-agent-sdk` Node child that serves requests as NDJSON
+    /// over its stdin and stdout. The child holds the subscription login and the prompt cache;
+    /// it lives as long as tars, so calls skip the cold start of a fresh `claude` per request.
+    /// The child script is `tools/claude-daemon/server.mjs --stdio`.
     ClaudeSdk {
-        /// Node-compatible runtime that hosts the SDK script. Default
-        /// `node`. Override e.g. to `bun` or a pinned path.
+        /// Names the Node-compatible runtime that hosts the script (`node`, `bun`, a pinned path).
         #[serde(
             default = "default_node_executable",
             deserialize_with = "de_trimmed_string"
         )]
         executable: String,
-        /// Path to `server.mjs --stdio`. **Optional** — when unset
-        /// (the common case), the backend searches in order:
-        /// 1. `TARS_CLAUDE_SDK_SCRIPT` env var
-        /// 2. `tools/claude-daemon/server.mjs` walking up from the CWD
-        ///    (works inside the tars checkout)
-        /// 3. `~/.tars/claude-daemon/server.mjs` (standard install)
-        ///
-        /// Set this explicitly to pin a specific copy or to use a
-        /// non-standard layout.
+        /// Points at `server.mjs`. When unset the backend tries `$TARS_CLAUDE_SDK_SCRIPT`, then
+        /// `tools/claude-daemon/server.mjs` in the working directory or an ancestor, then
+        /// `~/.tars/claude-daemon/server.mjs`.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "de_trimmed_opt_string"
         )]
         script_path: Option<String>,
-        /// Round-trip cap on a single LLM call. The child stays warm
-        /// across calls; this is only how long we wait for any one
-        /// reply before declaring it lost. Default 300s parallels
-        /// other CLI-shaped backends.
+        /// Bounds the wait for one reply, in seconds; the child itself stays up across calls.
         #[serde(default = "default_cli_timeout_secs")]
         timeout_secs: u64,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
     },
 
-    /// OpenAI Codex CLI subscription path (ChatGPT Plus/Pro).
+    /// Is the OpenAI Codex CLI on a ChatGPT subscription.
     CodexCli {
         #[serde(
             default = "default_codex_executable",
             deserialize_with = "de_trimmed_string"
         )]
         executable: String,
-        /// Per-call timeout. codex `exec` runs a full agent loop;
-        /// default is more generous than other CLIs (10 min vs 5).
+        /// Bounds one call, in seconds; it defaults to 600 rather than 300 because `codex exec`
+        /// runs a full agent loop.
         #[serde(default = "default_codex_timeout_secs")]
         timeout_secs: u64,
-        /// Sandbox mode for codex's INTERNAL tools (its sandbox-shell,
-        /// apply-patch, etc. — not TARS's tool registry). Default
-        /// `read-only` keeps the principle of least surprise: a TARS
-        /// Worker shouldn't get unexpected file mutations.
+        /// Confines codex's own tools (its shell, apply-patch), not tars's; it defaults to
+        /// `read-only` so a call does not change files unexpectedly.
         #[serde(default)]
         sandbox: CodexSandboxConfig,
-        /// Pass `--skip-git-repo-check` (default true). TARS Workers
-        /// often run outside a git repo (tempdir tests, scratch
-        /// files); codex's git-repo gate would reject them with
-        /// confusing wording.
+        /// Passes `--skip-git-repo-check`, on by default because tars often runs codex outside a
+        /// git repository, which codex otherwise refuses.
         #[serde(default = "default_true")]
         skip_git_repo_check: bool,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
     },
 
-    /// opencode CLI delegate. Shells out to
-    /// `opencode run --format json --model <provider/model> <prompt>`.
-    /// `default_model` is opencode's `provider/model` form
-    /// (e.g. `anthropic/claude-sonnet-4-5`).
+    /// Is the opencode CLI, run as `opencode run --format json --model <provider/model> <prompt>`;
+    /// `default_model` is in opencode's `provider/model` form (`anthropic/claude-sonnet-4-5`).
     Opencode {
         #[serde(
             default = "default_opencode_executable",
@@ -378,9 +308,9 @@ pub enum ProviderConfig {
         default_model: String,
     },
 
-    /// Antigravity (`agy`) CLI delegate. Shells out to
-    /// `agy -p "<prompt>" --model <model> --dangerously-skip-permissions
-    /// --add-dir <cwd>` and reads the plain-text answer from stdout.
+    /// Is the Antigravity CLI, run as
+    /// `agy -p "<prompt>" --model <model> --dangerously-skip-permissions --add-dir <cwd>`, whose
+    /// stdout is the plain-text answer.
     Antigravity {
         #[serde(
             default = "default_antigravity_executable",
@@ -391,34 +321,28 @@ pub enum ProviderConfig {
         timeout_secs: u64,
         #[serde(deserialize_with = "de_trimmed_string")]
         default_model: String,
-        /// `agy --effort` level. `gemini-3.1-pro` requires it; agy takes
-        /// `low` / `high`. Defaults to `high`.
+        /// Sets `agy --effort`, which `gemini-3.1-pro` requires.
         #[serde(default = "default_antigravity_effort")]
         effort: AntigravityEffortConfig,
     },
 
-    /// In-process mock — for tests and dry-run config validation.
+    /// Is an in-process provider that answers every call with `canned_response`.
     Mock {
-        /// What the mock should reply with.
         #[serde(default = "default_mock_response")]
         canned_response: String,
     },
 
-    /// Cassette — deterministic LLM replay for A/B / regression testing
-    /// (record-once, replay-forever; VCR pattern). If `path` exists it is
-    /// loaded and REPLAYED (a request the recording doesn't cover is an
-    /// error — a signal a prompt changed). If `path` is absent and
-    /// `record_from` names another provider, that provider is wrapped and
-    /// its responses captured, flushed to `path` when the run ends.
-    /// Internal testing only — never a user-facing provider.
+    /// Replays recorded LLM responses, for tests. If `path` exists it is replayed, and a request
+    /// the recording does not cover is an error, since it means a prompt changed. If it does not
+    /// and `record_from` names another provider, that provider's responses are recorded and
+    /// written to `path` when the run ends.
     Cassette {
-        /// Cassette file (`{request_fingerprint: response_text}` JSON).
+        /// Points at a JSON object from request fingerprint to response text.
         #[serde(deserialize_with = "de_trimmed_string")]
         path: String,
-        /// Provider id to wrap+record when `path` doesn't exist yet.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        record_from: Option<String>,
-        /// Model label reported for tier resolution.
+        record_from: Option<ProviderId>,
+        /// Is the default model the registry records for this provider.
         #[serde(default = "default_cassette_model")]
         default_model: String,
     },
@@ -460,10 +384,7 @@ fn default_true() -> bool {
     true
 }
 
-/// TOML-friendly mirror of [`tars_provider::backends::codex_cli::SandboxMode`].
-/// Lives here (not in provider) because config is the canonical wire shape;
-/// the provider crate's enum is the runtime equivalent and the registry
-/// builder bridges between them.
+/// The TOML spelling of `tars_llm`'s codex `SandboxMode`; the registry converts it.
 #[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodexSandboxConfig {
@@ -473,11 +394,7 @@ pub enum CodexSandboxConfig {
     DangerFullAccess,
 }
 
-/// TOML-friendly mirror of [`tars_provider::ClaudeCliTools`].
-///
-/// The two string variants (`"disabled"` / `"default"`) cover the
-/// common cases; the list form lets users hand-pick a tool whitelist.
-/// `#[serde(untagged)]` so users can write either shape:
+/// The TOML spelling of `tars_llm::ClaudeToolAccess`, a keyword or an allow-list:
 ///
 /// ```toml
 /// tools = "disabled"
@@ -487,9 +404,7 @@ pub enum CodexSandboxConfig {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ClaudeCliToolsConfig {
-    /// `"disabled"` or `"default"`.
     Named(ClaudeCliToolsKeyword),
-    /// Explicit allow-list, e.g. `["Read", "Bash"]`.
     Allow(Vec<String>),
 }
 
@@ -506,7 +421,7 @@ impl Default for ClaudeCliToolsConfig {
     }
 }
 
-/// TOML-friendly mirror of [`tars_provider::ClaudeCliEffort`].
+/// The TOML spelling of `tars_llm::ClaudeCliEffort`.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ClaudeCliEffortConfig {
@@ -517,8 +432,7 @@ pub enum ClaudeCliEffortConfig {
     Max,
 }
 
-/// TOML-friendly mirror of [`tars_provider::AntigravityEffort`]. `agy` REQUIRES
-/// `--effort` for `gemini-3.1-pro` and exposes only `low` / `high`.
+/// The TOML spelling of `tars_llm::AntigravityEffort`; `agy` takes only `low` and `high`.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AntigravityEffortConfig {
@@ -534,123 +448,282 @@ fn default_mock_response() -> String {
     "LGTM — no issues found.".into()
 }
 
-/// Optional per-provider overrides for the backend's hardcoded
-/// [`tars_types::ProviderProfile`]. Today fields are limited to the
-/// two numbers users actually need to tune (context + output cap);
-/// the boolean `supports_*` flags can be added later when a real
-/// consumer needs to flip them via TOML (e.g. "this self-hosted
-/// vLLM lies about strict-output support").
-///
-/// Empty struct means "use backend defaults". Apply at registry
-/// build time:
+/// What the user declares of a local or compatible server in its provider block, for a model
+/// the data file does not describe. A capability left out stays as the data file has it, which
+/// for a local model is unknown: the request is sent and the server answers for itself. A
+/// declared `false` makes tars refuse a request that needs it before sending. Every such server
+/// speaks OpenAI's protocol, so the structured-output mechanisms it can be declared to have are
+/// the ones that protocol sends.
 ///
 /// ```toml
 /// [providers.mlx_local]
 /// type = "mlx"
 /// default_model = "..."
-/// max_context_tokens = 262144   # Qwen3 supports 256K — bump from 32K default
-/// max_output_tokens = 32768     # bump from 4K default
+/// max_context_tokens = 262144   # Qwen3's 256K window
+/// max_output_tokens = 32768
+/// supports_thinking = true
+/// supports_vision = false
+/// supports_structured_output = "json_object"   # or "strict_schema", "none"
+/// supports_chat_template_thinking = true        # send chat_template_kwargs.enable_thinking
 /// ```
-///
-/// Thaws D-6 (`capabilities_override` config field — the
-/// trigger fired the first time a user with a heterogeneous local
-/// deployment hit our default 4K output cap).
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CapabilitiesOverrides {
-    /// Override the maximum prompt-context-window the model accepts.
-    /// `None` = keep backend default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_context_tokens: Option<u32>,
-    /// Override the maximum tokens the caller may request as output.
-    /// `None` = keep backend default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_tool_use: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_structured_output: Option<OpenAiStructuredOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_chat_template_thinking: Option<bool>,
+}
+
+/// A structured-output mechanism a server reached over OpenAI's protocol can have: the protocol
+/// has `response_format` and nothing that stands a forced tool call in for it.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiStructuredOutput {
+    /// The server holds output to no schema.
+    #[serde(rename = "none")]
+    NoMechanism,
+    /// `{"type":"json_object"}`: JSON of any shape.
+    JsonObject,
+    /// `{"type":"json_schema"}`: the schema is enforced while decoding.
+    StrictSchema,
+}
+
+impl From<OpenAiStructuredOutput> for tars_types::StructuredOutputMode {
+    fn from(mode: OpenAiStructuredOutput) -> Self {
+        match mode {
+            OpenAiStructuredOutput::NoMechanism => Self::None,
+            OpenAiStructuredOutput::JsonObject => Self::JsonObjectMode,
+            OpenAiStructuredOutput::StrictSchema => Self::StrictSchema,
+        }
+    }
 }
 
 impl CapabilitiesOverrides {
-    /// True iff every override field is `None` (no overrides supplied).
+    /// Returns whether no override is set.
     pub fn is_empty(&self) -> bool {
-        self.max_context_tokens.is_none() && self.max_output_tokens.is_none()
+        self == &Self::default()
     }
 
-    /// Apply overrides onto an assembled backend default. A set override wins
-    /// over whatever the data file / baseline produced (including `None` = no
-    /// ceiling — a user correcting a local model's real window).
-    pub fn apply_to(&self, base: &mut tars_types::ProviderProfile) {
+    /// Returns `base` with each set override written in, replacing whatever the data file gave;
+    /// an unset one leaves it alone. Parallel tool calls and tool-use emulation are made of tool
+    /// calls, so `supports_tool_use = false` turns both off. A consistent `base` stays
+    /// consistent: no declaration can contradict another or the data file.
+    pub fn apply_to(&self, mut base: tars_types::ProviderProfile) -> tars_types::ProviderProfile {
         if let Some(n) = self.max_context_tokens {
             base.max_context_tokens = Some(n);
         }
         if let Some(n) = self.max_output_tokens {
             base.max_output_tokens = Some(n);
         }
+        if let Some(b) = self.supports_tool_use {
+            base.supports_tool_use = b.into();
+            if !b {
+                base.supports_parallel_tool_calls = false;
+                if base.supports_structured_output
+                    == Some(tars_types::StructuredOutputMode::ToolUseEmulation)
+                {
+                    base.supports_structured_output = Some(tars_types::StructuredOutputMode::None);
+                }
+            }
+        }
+        if let Some(b) = self.supports_thinking {
+            base.supports_thinking = b.into();
+        }
+        if let Some(b) = self.supports_vision {
+            base.supports_vision = b.into();
+        }
+        if let Some(mode) = self.supports_structured_output {
+            base.supports_structured_output = Some(mode.into());
+        }
+        if let Some(b) = self.supports_chat_template_thinking {
+            base.supports_chat_template_thinking = b;
+        }
+        base
     }
 }
 
-trait AuthDefaults {
-    fn none() -> Auth;
+fn auth_none() -> Auth {
+    Auth::None
 }
-impl AuthDefaults for Auth {
-    fn none() -> Auth {
-        Auth::None
+
+/// Names which kind of provider a `[providers.<id>]` block declares: its `type` key. The kind
+/// alone fixes how tars reaches the provider, whether the operator runs its server, and which
+/// data-file block describes its models.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    Openai,
+    OpenaiCompat,
+    Anthropic,
+    Gemini,
+    Vllm,
+    Mlx,
+    Llamacpp,
+    ClaudeCli,
+    ClaudeSdk,
+    CodexCli,
+    Opencode,
+    Antigravity,
+    Mock,
+    Cassette,
+}
+
+impl ProviderKind {
+    /// Returns the `type` word that declares this kind in TOML.
+    pub fn as_str(self) -> &'static str {
+        use ProviderKind::*;
+        match self {
+            Openai => "openai",
+            OpenaiCompat => "openai_compat",
+            Anthropic => "anthropic",
+            Gemini => "gemini",
+            Vllm => "vllm",
+            Mlx => "mlx",
+            Llamacpp => "llamacpp",
+            ClaudeCli => "claude_cli",
+            ClaudeSdk => "claude_sdk",
+            CodexCli => "codex_cli",
+            Opencode => "opencode",
+            Antigravity => "antigravity",
+            Mock => "mock",
+            Cassette => "cassette",
+        }
+    }
+
+    /// Returns the `data/provider.toml` block that describes this kind's models, or `None` for
+    /// `openai_compat`, whose block is named after the provider id (`deepseek`).
+    pub fn catalog_block(self) -> Option<&'static str> {
+        match self {
+            ProviderKind::OpenaiCompat => None,
+            kind => Some(kind.as_str()),
+        }
+    }
+
+    /// Returns how tars reaches a provider of this kind. `data/provider.toml` also states an
+    /// `interface` per block; a test in `builtin.rs` checks that the built-ins agree with it.
+    pub fn interface(self) -> tars_types::InterfaceKind {
+        use ProviderKind::*;
+        use tars_types::InterfaceKind as Ik;
+        match self {
+            ClaudeCli | CodexCli | Opencode | Antigravity => Ik::Cli,
+            Openai | OpenaiCompat | Anthropic | Gemini | Vllm | Mlx | Llamacpp => Ik::Http,
+            ClaudeSdk => Ik::Api,
+            Mock | Cassette => Ik::Mock,
+        }
+    }
+
+    /// Returns whether the operator runs this kind's server on their own machine (vllm, mlx,
+    /// llama.cpp), so that a refused connection means the server is not started.
+    pub fn self_hosted(self) -> bool {
+        use ProviderKind::*;
+        match self {
+            Vllm | Mlx | Llamacpp => true,
+            Openai | OpenaiCompat | Anthropic | Gemini | ClaudeCli | ClaudeSdk | CodexCli
+            | Opencode | Antigravity | Mock | Cassette => false,
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
 impl ProviderConfig {
-    /// The `data/provider.toml` block that describes the models of the
-    /// provider declared as `id`: the variant's own block for a typed
-    /// provider (`gemini_flash` of type `gemini` → `gemini`), and the
-    /// declared id itself for `openai_compat`, whose block — if the DB names
-    /// one (`deepseek`) — is keyed by the id. A block that doesn't exist is
-    /// fine: lookups against it find no rows and no series.
-    pub fn catalog_name<'a>(&'a self, id: &'a str) -> &'a str {
+    /// Returns the kind this block declares.
+    pub fn kind(&self) -> ProviderKind {
         use ProviderConfig::*;
         match self {
-            Openai { .. } => "openai",
-            OpenaiCompat { .. } => id,
-            Anthropic { .. } => "anthropic",
-            Gemini { .. } => "gemini",
-            Bedrock { .. } => "bedrock",
-            Vllm { .. } => "vllm",
-            Mlx { .. } => "mlx",
-            Llamacpp { .. } => "llamacpp",
-            ClaudeCli { .. } => "claude_cli",
-            ClaudeSdk { .. } => "claude_sdk",
-            CodexCli { .. } => "codex_cli",
-            Opencode { .. } => "opencode",
-            Antigravity { .. } => "antigravity",
-            Mock { .. } => "mock",
-            Cassette { .. } => "cassette",
+            Openai { .. } => ProviderKind::Openai,
+            OpenaiCompat { .. } => ProviderKind::OpenaiCompat,
+            Anthropic { .. } => ProviderKind::Anthropic,
+            Gemini { .. } => ProviderKind::Gemini,
+            Vllm { .. } => ProviderKind::Vllm,
+            Mlx { .. } => ProviderKind::Mlx,
+            Llamacpp { .. } => ProviderKind::Llamacpp,
+            ClaudeCli { .. } => ProviderKind::ClaudeCli,
+            ClaudeSdk { .. } => ProviderKind::ClaudeSdk,
+            CodexCli { .. } => ProviderKind::CodexCli,
+            Opencode { .. } => ProviderKind::Opencode,
+            Antigravity { .. } => ProviderKind::Antigravity,
+            Mock { .. } => ProviderKind::Mock,
+            Cassette { .. } => ProviderKind::Cassette,
         }
     }
 
-    /// How tars reaches and drives this provider — a total function of the
-    /// variant, so it can never disagree with the variant. The provider DB
-    /// (`data/provider.toml`) also *carries* `interface` for the definition
-    /// blocks; a build-time drift guard (see `builtin.rs` tests) asserts the
-    /// two agree for every provider that has both a variant and a block.
-    ///
-    /// **No catch-all.** A new `ProviderConfig` variant fails to compile here
-    /// until its interface is declared (contrast arc's deleted
-    /// `ProviderType::from_wire` `_ => Other`).
-    pub fn interface(&self) -> tars_types::InterfaceKind {
+    /// Returns the `data/provider.toml` block that describes the models of the provider declared
+    /// as `id`: the kind's block for a typed provider (`gemini_flash` of type `gemini` reads
+    /// `gemini`), and `id` itself for `openai_compat` (`deepseek`). The block need not exist; a
+    /// missing one has no rows and no series.
+    pub fn catalog_name<'a>(&self, id: &'a str) -> &'a str {
+        self.kind().catalog_block().unwrap_or(id)
+    }
+
+    /// Returns the catalog block a live model list from the provider declared as `id` stands
+    /// for. A hosted vendor's list stands for the vendor's block only when it came from the
+    /// vendor's own endpoint; one from a custom `base_url` (a gateway, a proxy) stands for `id`
+    /// alone, so it never decides the vendor's `@latest` or limits.
+    pub fn listing_catalog<'a>(&self, id: &'a str) -> &'a str {
         use ProviderConfig::*;
-        use tars_types::InterfaceKind as Ik;
         match self {
-            ClaudeCli { .. } | CodexCli { .. } | Opencode { .. } | Antigravity { .. } => Ik::Cli,
-            Openai { .. }
+            Openai {
+                base_url: Some(_), ..
+            }
+            | Anthropic {
+                base_url: Some(_), ..
+            }
+            | Gemini {
+                base_url: Some(_), ..
+            } => id,
+            Openai { base_url: None, .. }
+            | Anthropic { base_url: None, .. }
+            | Gemini { base_url: None, .. }
             | OpenaiCompat { .. }
-            | Anthropic { .. }
-            | Gemini { .. }
             | Vllm { .. }
             | Mlx { .. }
-            | Llamacpp { .. } => Ik::Http,
-            ClaudeSdk { .. } | Bedrock { .. } => Ik::Api,
-            Mock { .. } | Cassette { .. } => Ik::Mock,
+            | Llamacpp { .. }
+            | ClaudeCli { .. }
+            | ClaudeSdk { .. }
+            | CodexCli { .. }
+            | Opencode { .. }
+            | Antigravity { .. }
+            | Mock { .. }
+            | Cassette { .. } => self.catalog_name(id),
         }
     }
 
-    /// What model the provider defaults to. CLI providers and Mock
-    /// always have one; Mock returns "mock-model".
+    /// Returns where the credential of the provider's calls comes from.
+    pub fn auth(&self) -> AuthSetting<'_> {
+        use ProviderConfig::*;
+        match self {
+            Openai { auth, .. }
+            | OpenaiCompat { auth, .. }
+            | Anthropic { auth, .. }
+            | Gemini { auth, .. }
+            | Vllm { auth, .. }
+            | Mlx { auth, .. }
+            | Llamacpp { auth, .. } => AuthSetting::Configured(auth),
+            ClaudeCli { .. }
+            | ClaudeSdk { .. }
+            | CodexCli { .. }
+            | Opencode { .. }
+            | Antigravity { .. } => AuthSetting::OwnLogin,
+            Mock { .. } | Cassette { .. } => AuthSetting::NoCall,
+        }
+    }
+
+    /// Returns the configured default model spec (`"mock-model"` for Mock).
     pub fn default_model(&self) -> &str {
         use ProviderConfig::*;
         match self {
@@ -667,23 +740,13 @@ impl ProviderConfig {
             | Opencode { default_model, .. }
             | Antigravity { default_model, .. }
             | Cassette { default_model, .. } => default_model,
-            // Bedrock names its model field `model`, not
-            // `default_model` — its own arm.
-            Bedrock { model, .. } => model,
             Mock { .. } => "mock-model",
         }
     }
 
-    /// Return a copy with the per-subprocess `timeout_secs` overridden, for the
-    /// CLI/SDK-shaped backends that carry one. A consumer that needs a bigger
-    /// wall-clock budget for one call (e.g. a long merge/reconcile turn) builds
-    /// a *fresh* provider from the patched config rather than re-timing the warm
-    /// shared one, since the timeout is baked in at provider construction.
-    ///
-    /// Exhaustive on purpose: every variant that carries a `timeout_secs` MUST
-    /// be handled here, and the no-timeout variants are listed explicitly (no
-    /// `_ => {}`) so that adding a new CLI-shaped backend breaks this build
-    /// instead of silently dropping the override.
+    /// Returns this config with `timeout_secs` replaced, for the CLI and SDK backends that carry
+    /// one; the others come back unchanged. A provider fixes its timeout when built, so a caller
+    /// that needs a longer one for a single call builds a fresh provider from the result.
     #[must_use]
     pub fn with_timeout_secs(mut self, secs: u64) -> Self {
         use ProviderConfig::*;
@@ -693,15 +756,13 @@ impl ProviderConfig {
             | CodexCli { timeout_secs, .. }
             | Opencode { timeout_secs, .. }
             | Antigravity { timeout_secs, .. } => *timeout_secs = secs,
-            // HTTP-shape providers carry no per-call `timeout_secs` (their
-            // timeout lives in `HttpProviderBase`); `Bedrock` likewise (SDK/HTTP
-            // layer); `Mock` has none; `Cassette` wraps another provider whose
-            // timeout lives on the wrapped config. Nothing to override.
+            // Listed by name, not `_`, so a new backend with a timeout does not compile until it
+            // is handled here. The HTTP backends time out in their HTTP layer; a
+            // cassette's timeout is the wrapped provider's.
             Openai { .. }
             | OpenaiCompat { .. }
             | Anthropic { .. }
             | Gemini { .. }
-            | Bedrock { .. }
             | Vllm { .. }
             | Mlx { .. }
             | Llamacpp { .. }
@@ -711,60 +772,51 @@ impl ProviderConfig {
         self
     }
 
-    /// In-place validation that doesn't need any external state.
-    /// Cross-provider checks (uniqueness, etc.) live on [`ProvidersConfig`].
+    /// Reports into `sink` what is wrong with this entry by itself: empty required strings, a
+    /// missing key where the provider needs one, zero token caps, an out-of-range timeout.
     pub fn validate_self(&self, id: &ProviderId, sink: &mut Vec<ValidationError>) {
         let key = |k: &str| format!("providers.{id}.{k}");
 
-        // Helpers — every provider needs these checks, so factor them out
-        // rather than open-code each variant arm.
         let check_default_model = |dm: &str, sink: &mut Vec<ValidationError>| {
-            // `trim()` so a whitespace-only value (`"   "`) is rejected too —
-            // it would pass a bare `is_empty()` check but fail at runtime
-            // when the provider tries to use it. Matches the base_url checks.
-            if dm.trim().is_empty() {
-                sink.push(ValidationError::new(
-                    key("default_model"),
-                    "must not be empty",
-                ));
+            if let Some(problem) = model_spec_problem(dm, ValidationProblem::Empty) {
+                sink.push(ValidationError::new(key("default_model"), problem));
             }
         };
         let check_opt_base_url = |opt: &Option<String>, sink: &mut Vec<ValidationError>| {
             if matches!(opt, Some(s) if s.trim().is_empty()) {
                 sink.push(ValidationError::new(
                     key("base_url"),
-                    "must not be empty when set (omit the field to use the default)",
+                    ValidationProblem::EmptyWhenSet,
                 ));
             }
         };
-        // Reject explicitly-set zero token caps: a model can't have a
-        // zero context window or zero output budget, and a `Some(0)`
-        // would silently corrupt the runtime `ProviderProfile` via
-        // `apply_to`. `None` (no override) stays valid.
+        // `apply_to` would write a zero cap into the profile.
         let check_capabilities = |caps: &CapabilitiesOverrides, sink: &mut Vec<ValidationError>| {
             if matches!(caps.max_context_tokens, Some(0)) {
                 sink.push(ValidationError::new(
                     key("max_context_tokens"),
-                    "must be > 0 when set",
+                    ValidationProblem::ZeroWhenSet,
                 ));
             }
             if matches!(caps.max_output_tokens, Some(0)) {
                 sink.push(ValidationError::new(
                     key("max_output_tokens"),
-                    "must be > 0 when set",
+                    ValidationProblem::ZeroWhenSet,
                 ));
             }
         };
         let check_timeout = |secs: u64, sink: &mut Vec<ValidationError>| {
             if secs == 0 {
-                sink.push(ValidationError::new(key("timeout_secs"), "must be > 0"));
+                sink.push(ValidationError::new(
+                    key("timeout_secs"),
+                    ValidationProblem::Zero,
+                ));
             } else if secs > MAX_CLI_TIMEOUT_SECS {
                 sink.push(ValidationError::new(
                     key("timeout_secs"),
-                    format!(
-                        "must be <= {MAX_CLI_TIMEOUT_SECS} (24h); larger values are almost \
-                         certainly a typo — a per-call timeout beyond a day is never intended"
-                    ),
+                    ValidationProblem::TimeoutTooLong {
+                        max: MAX_CLI_TIMEOUT_SECS,
+                    },
                 ));
             }
         };
@@ -777,11 +829,12 @@ impl ProviderConfig {
                 ..
             } => {
                 check_opt_base_url(base_url, sink);
-                if matches!(auth, Auth::None) {
+                if !sends_a_key(auth) {
                     sink.push(ValidationError::new(
                         key("auth"),
-                        "OpenAI requires an api key — Auth::None is invalid \
-                         (use openai_compat for keyless local/proxy endpoints)",
+                        ValidationProblem::KeyRequired {
+                            kind: ProviderKind::Openai,
+                        },
                     ));
                 }
                 check_default_model(default_model, sink);
@@ -789,13 +842,20 @@ impl ProviderConfig {
             ProviderConfig::OpenaiCompat {
                 base_url,
                 default_model,
+                gen_ai_provider_name,
                 capabilities,
                 ..
             } => {
                 if base_url.trim().is_empty() {
                     sink.push(ValidationError::new(
                         key("base_url"),
-                        "must be set for openai_compat (this distinguishes it from openai)",
+                        ValidationProblem::CompatBaseUrlRequired,
+                    ));
+                }
+                if gen_ai_provider_name.is_empty() {
+                    sink.push(ValidationError::new(
+                        key("gen_ai_provider_name"),
+                        ValidationProblem::ServerNameRequired,
                     ));
                 }
                 check_default_model(default_model, sink);
@@ -809,19 +869,18 @@ impl ProviderConfig {
                 ..
             } => {
                 check_opt_base_url(base_url, sink);
-                // Same empty-when-set contract as base_url: a `Some("")`
-                // or `Some("   ")` would pass an unchecked `..` and then
-                // surface as a confusing wire error against the backend.
                 if matches!(api_version, Some(s) if s.trim().is_empty()) {
                     sink.push(ValidationError::new(
                         key("api_version"),
-                        "must not be empty when set (omit the field to use the default)",
+                        ValidationProblem::EmptyWhenSet,
                     ));
                 }
-                if matches!(auth, Auth::None) {
+                if !sends_a_key(auth) {
                     sink.push(ValidationError::new(
                         key("auth"),
-                        "Anthropic requires an api key — Auth::None is invalid",
+                        ValidationProblem::KeyRequired {
+                            kind: ProviderKind::Anthropic,
+                        },
                     ));
                 }
                 check_default_model(default_model, sink);
@@ -833,27 +892,15 @@ impl ProviderConfig {
                 ..
             } => {
                 check_opt_base_url(base_url, sink);
-                if matches!(auth, Auth::None) {
+                if !sends_a_key(auth) {
                     sink.push(ValidationError::new(
                         key("auth"),
-                        "Gemini requires an api key — Auth::None is invalid",
+                        ValidationProblem::KeyRequired {
+                            kind: ProviderKind::Gemini,
+                        },
                     ));
                 }
                 check_default_model(default_model, sink);
-            }
-            ProviderConfig::Bedrock { region, model, .. } => {
-                // Keyless by design: unlike Anthropic/OpenAI/
-                // Gemini above, we deliberately do NOT reject a missing
-                // auth field — Bedrock has none. The only config-time
-                // checks are the two non-empty strings the SDK needs.
-                if region.trim().is_empty() {
-                    sink.push(ValidationError::new(key("region"), "must not be empty"));
-                }
-                // Bedrock's model field is `model`, so key the error there
-                // rather than reuse the `default_model`-keyed helper.
-                if model.trim().is_empty() {
-                    sink.push(ValidationError::new(key("model"), "must not be empty"));
-                }
             }
             ProviderConfig::Vllm {
                 base_url,
@@ -895,7 +942,10 @@ impl ProviderConfig {
                 ..
             } => {
                 if executable.trim().is_empty() {
-                    sink.push(ValidationError::new(key("executable"), "must not be empty"));
+                    sink.push(ValidationError::new(
+                        key("executable"),
+                        ValidationProblem::Empty,
+                    ));
                 }
                 check_timeout(*timeout_secs, sink);
                 check_default_model(default_model, sink);
@@ -907,7 +957,10 @@ impl ProviderConfig {
                 ..
             } => {
                 if executable.trim().is_empty() {
-                    sink.push(ValidationError::new(key("executable"), "must not be empty"));
+                    sink.push(ValidationError::new(
+                        key("executable"),
+                        ValidationProblem::Empty,
+                    ));
                 }
                 check_timeout(*timeout_secs, sink);
                 check_default_model(default_model, sink);
@@ -919,18 +972,17 @@ impl ProviderConfig {
                 default_model,
             } => {
                 if executable.trim().is_empty() {
-                    sink.push(ValidationError::new(key("executable"), "must not be empty"));
+                    sink.push(ValidationError::new(
+                        key("executable"),
+                        ValidationProblem::Empty,
+                    ));
                 }
-                // script_path is optional — when None, the backend
-                // searches CWD ancestors and ~/.tars/. We only reject
-                // an *empty* string here (someone wrote `""` instead of
-                // omitting the field), which would otherwise short-
-                // circuit the fallback search at runtime.
+                // An empty path would stop the backend's search for the script.
                 if let Some(sp) = script_path {
                     if sp.trim().is_empty() {
                         sink.push(ValidationError::new(
                             key("script_path"),
-                            "must not be empty — omit the field to use the default search instead",
+                            ValidationProblem::EmptyScriptPath,
                         ));
                     }
                 }
@@ -938,36 +990,94 @@ impl ProviderConfig {
                 check_default_model(default_model, sink);
             }
             ProviderConfig::Mock { .. } => {}
-            ProviderConfig::Cassette { path, .. } => {
+            ProviderConfig::Cassette {
+                path,
+                default_model,
+                ..
+            } => {
                 if path.trim().is_empty() {
-                    sink.push(ValidationError::new(key("path"), "must not be empty"));
+                    sink.push(ValidationError::new(key("path"), ValidationProblem::Empty));
+                }
+                check_default_model(default_model, sink);
+            }
+        }
+    }
+}
+
+/// Returns whether `auth` puts a key on an HTTP request: `None` sends nothing, and so does
+/// `Delegate`, which only a spawned CLI that holds its own login can use.
+fn sends_a_key(auth: &Auth) -> bool {
+    match auth {
+        Auth::Secret { .. } => true,
+        Auth::None | Auth::Delegate => false,
+    }
+}
+
+/// Returns what is wrong with `spec` as a model spec: `blank` when it names no model, the parse
+/// error when it does not parse, `None` when it is a spec.
+pub(crate) fn model_spec_problem(
+    spec: &str,
+    blank: ValidationProblem,
+) -> Option<ValidationProblem> {
+    match crate::model_spec::ModelSpec::parse(spec) {
+        Ok(_) => None,
+        Err(crate::model_spec::ParseModelSpecError::Blank { .. }) => Some(blank),
+        Err(e) => Some(ValidationProblem::UnparsableModelSpec(e)),
+    }
+}
+
+/// Caps a CLI timeout at 24 hours, in seconds: a per-call timeout longer than a day is a typo.
+const MAX_CLI_TIMEOUT_SECS: u64 = 86_400;
+
+impl ProvidersConfig {
+    /// Runs [`ProviderConfig::validate_self`] over every entry and checks that each cassette's
+    /// `record_from` names a provider it can record. An empty table is not an error: the loader
+    /// always merges the built-ins in.
+    pub fn validate(&self, sink: &mut Vec<ValidationError>) {
+        for (id, cfg) in &self.providers {
+            cfg.validate_self(id, sink);
+            if let ProviderConfig::Cassette {
+                record_from: Some(source),
+                ..
+            } = cfg
+            {
+                if let Some(problem) = record_source_problem(source, self.providers.get(source)) {
+                    sink.push(ValidationError::new(
+                        format!("providers.{id}.record_from"),
+                        problem,
+                    ));
                 }
             }
         }
     }
 }
 
-/// Upper bound on CLI timeouts — 24h. Anything beyond this is almost
-/// certainly a typo: a per-call timeout longer than a day is never a
-/// real intent. (The value is passed straight to
-/// `tokio::time::timeout(Duration::from_secs(_), …)` with no arithmetic,
-/// so this cap is a sanity guard, not an overflow guard.)
-const MAX_CLI_TIMEOUT_SECS: u64 = 86_400;
-
-impl ProvidersConfig {
-    /// Run [`ProviderConfig::validate_self`] over every entry.
-    ///
-    /// We don't check "non-empty" here because the loader merges
-    /// built-in defaults under whatever the user declared (see
-    /// `manager::merge_builtins_into`), so the post-merge providers
-    /// table is never empty in practice. A user-level "you wrote
-    /// nothing useful" warning, if anyone wants one, belongs at a
-    /// higher layer that knows what the caller is trying to do.
-    pub fn validate(&self, sink: &mut Vec<ValidationError>) {
-        for (id, cfg) in &self.providers {
-            cfg.validate_self(id, sink);
-        }
+/// Returns why a cassette cannot record from `source`, which resolves to `entry`: it is not
+/// declared, or it is a cassette (itself included), which makes no call to record.
+fn record_source_problem(
+    source: &ProviderId,
+    entry: Option<&ProviderConfig>,
+) -> Option<ValidationProblem> {
+    match entry {
+        None => Some(ValidationProblem::UnknownProvider {
+            id: source.to_string(),
+        }),
+        Some(ProviderConfig::Cassette { .. }) => Some(ValidationProblem::RecordsFromCassette {
+            id: source.to_string(),
+        }),
+        Some(_) => None,
     }
+}
+
+/// Where the credential of a provider's calls comes from.
+#[derive(Clone, Copy, Debug)]
+pub enum AuthSetting<'a> {
+    /// The provider block's `auth` field.
+    Configured(&'a Auth),
+    /// The block has no `auth` field: the CLI or the SDK daemon logs in on its own.
+    OwnLogin,
+    /// The provider places no call (mock, cassette), so nothing authenticates.
+    NoCall,
 }
 
 #[cfg(test)]
@@ -983,7 +1093,6 @@ mod tests {
             default_model = "gpt-4o"
         "#;
         let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
-        // Forward direction.
         match &cfg {
             ProviderConfig::Openai {
                 base_url,
@@ -1004,8 +1113,6 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
-        // Reverse direction: serialize the parsed value and re-parse it,
-        // confirming the wire shape is bidirectionally stable.
         let reserialized = toml::to_string(&cfg).expect("must serialize");
         let cfg2: ProviderConfig =
             toml::from_str(&reserialized).expect("re-parse after serialize must succeed");
@@ -1099,8 +1206,6 @@ mod tests {
 
     #[test]
     fn mlx_capability_overrides_round_trip_through_toml() {
-        // The whole reason this struct exists: a user with a 256K-context
-        // model needs to bump the default 32K. Pin that this works.
         let toml_str = r#"
             type = "mlx"
             default_model = "mlx-community/Qwen3-32B-256K-mlx-4bit"
@@ -1119,7 +1224,6 @@ mod tests {
 
     #[test]
     fn mlx_without_capability_overrides_serializes_clean() {
-        // No overrides → empty struct → no extra TOML keys emitted.
         let toml_str = r#"
             type = "mlx"
             default_model = "..."
@@ -1131,7 +1235,6 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
-        // Round-trip: serialize, no `max_*_tokens` keys.
         let back = toml::to_string(&cfg).unwrap();
         assert!(
             !back.contains("max_context_tokens"),
@@ -1146,14 +1249,160 @@ mod tests {
         base.max_context_tokens = Some(4096);
         base.max_output_tokens = Some(1024);
 
-        // Override only context; output stays at base.
         let overrides = CapabilitiesOverrides {
             max_context_tokens: Some(262144),
-            max_output_tokens: None,
+            ..CapabilitiesOverrides::default()
         };
-        overrides.apply_to(&mut base);
-        assert_eq!(base.max_context_tokens, Some(262144));
-        assert_eq!(base.max_output_tokens, Some(1024));
+        let p = overrides.apply_to(base);
+        assert_eq!(p.max_context_tokens, Some(262144));
+        assert_eq!(p.max_output_tokens, Some(1024));
+    }
+
+    #[test]
+    fn a_declared_capability_replaces_what_the_data_file_does_not_know() {
+        let cfg: ProviderConfig = toml::from_str(
+            r#"
+            type = "openai_compat"
+            gen_ai_provider_name = "local"
+            base_url = "http://localhost:1234/v1"
+            default_model = "m"
+            supports_tool_use = true
+            supports_vision = false
+        "#,
+        )
+        .unwrap();
+        let ProviderConfig::OpenaiCompat { capabilities, .. } = cfg else {
+            panic!("wrong variant");
+        };
+        let p = capabilities.apply_to(tars_types::ProviderProfile::undescribed_http());
+        assert_eq!(p.supports_tool_use, tars_types::Support::Supported);
+        assert_eq!(p.supports_vision, tars_types::Support::Unsupported);
+        assert_eq!(p.supports_thinking, tars_types::Support::Unknown);
+    }
+
+    #[test]
+    fn tool_use_declared_off_turns_off_parallel_calls_and_tool_use_emulation() {
+        let mut parallel = tars_types::ProviderProfile::undescribed_http();
+        parallel.supports_tool_use = tars_types::Support::Supported;
+        parallel.supports_parallel_tool_calls = true;
+        parallel.supports_structured_output =
+            Some(tars_types::StructuredOutputMode::ToolUseEmulation);
+        let no_tools = CapabilitiesOverrides {
+            supports_tool_use: Some(false),
+            ..CapabilitiesOverrides::default()
+        };
+        let off = no_tools.apply_to(parallel.clone());
+        assert!(!off.supports_parallel_tool_calls);
+        assert_eq!(
+            off.supports_structured_output,
+            Some(tars_types::StructuredOutputMode::None)
+        );
+        assert!(off.validate().is_ok());
+
+        let with_tools = CapabilitiesOverrides {
+            supports_tool_use: Some(true),
+            ..CapabilitiesOverrides::default()
+        };
+        let on = with_tools.apply_to(parallel);
+        assert!(on.supports_parallel_tool_calls);
+        assert_eq!(
+            on.supports_structured_output,
+            Some(tars_types::StructuredOutputMode::ToolUseEmulation)
+        );
+    }
+
+    fn chat_template_thinking(default: bool, declared: Option<bool>) -> bool {
+        let mut base = tars_types::ProviderProfile::undescribed_http();
+        base.supports_chat_template_thinking = default;
+        let overrides = CapabilitiesOverrides {
+            supports_chat_template_thinking: declared,
+            ..CapabilitiesOverrides::default()
+        };
+        overrides.apply_to(base).supports_chat_template_thinking
+    }
+
+    #[test]
+    fn chat_template_thinking_left_undeclared_keeps_the_profiles_default() {
+        assert!(chat_template_thinking(true, None));
+        assert!(!chat_template_thinking(false, None));
+    }
+
+    #[test]
+    fn chat_template_thinking_declared_true_holds_over_a_default_of_false() {
+        assert!(chat_template_thinking(false, Some(true)));
+        assert!(chat_template_thinking(true, Some(true)));
+    }
+
+    #[test]
+    fn chat_template_thinking_declared_false_holds_over_a_default_of_true() {
+        assert!(!chat_template_thinking(true, Some(false)));
+        assert!(!chat_template_thinking(false, Some(false)));
+    }
+
+    #[test]
+    fn tool_use_emulation_cannot_be_declared_for_a_server_on_openais_protocol() {
+        for refused in ["tool_use_emulation", "json_object_mode"] {
+            let cfg = format!(
+                r#"
+                type = "openai_compat"
+                gen_ai_provider_name = "local"
+                base_url = "http://localhost:1234/v1"
+                default_model = "m"
+                supports_structured_output = "{refused}"
+            "#
+            );
+            assert!(toml::from_str::<ProviderConfig>(&cfg).is_err(), "{refused}");
+        }
+        for (accepted, mode) in [
+            ("none", tars_types::StructuredOutputMode::None),
+            (
+                "json_object",
+                tars_types::StructuredOutputMode::JsonObjectMode,
+            ),
+            (
+                "strict_schema",
+                tars_types::StructuredOutputMode::StrictSchema,
+            ),
+        ] {
+            let cfg = format!(
+                r#"
+                type = "openai_compat"
+                gen_ai_provider_name = "local"
+                base_url = "http://localhost:1234/v1"
+                default_model = "m"
+                supports_structured_output = "{accepted}"
+            "#
+            );
+            let ProviderConfig::OpenaiCompat { capabilities, .. } =
+                toml::from_str::<ProviderConfig>(&cfg).unwrap()
+            else {
+                panic!("wrong variant");
+            };
+            let p = capabilities.apply_to(tars_types::ProviderProfile::undescribed_http());
+            assert_eq!(p.supports_structured_output, Some(mode), "{accepted}");
+        }
+    }
+
+    #[test]
+    fn a_declared_structured_output_replaces_the_unknown_one() {
+        let cfg: ProviderConfig = toml::from_str(
+            r#"
+            type = "openai_compat"
+            gen_ai_provider_name = "local"
+            base_url = "http://localhost:1234/v1"
+            default_model = "m"
+            supports_structured_output = "json_object"
+        "#,
+        )
+        .unwrap();
+        let ProviderConfig::OpenaiCompat { capabilities, .. } = cfg else {
+            panic!("wrong variant");
+        };
+        let p = capabilities.apply_to(tars_types::ProviderProfile::undescribed_http());
+        assert_eq!(
+            p.supports_structured_output,
+            Some(tars_types::StructuredOutputMode::JsonObjectMode)
+        );
     }
 
     #[test]
@@ -1172,7 +1421,7 @@ mod tests {
                 default_model,
             } => {
                 assert_eq!(executable, "codex");
-                assert_eq!(timeout_secs, 600); // codex gets 10min default vs other CLIs' 5
+                assert_eq!(timeout_secs, 600);
                 assert_eq!(sandbox, CodexSandboxConfig::ReadOnly);
                 assert!(skip_git_repo_check);
                 assert_eq!(default_model, "gpt-5");
@@ -1183,7 +1432,6 @@ mod tests {
 
     #[test]
     fn with_timeout_secs_patches_cli_variants_and_noops_http() {
-        // A CLI-shaped provider (carries timeout_secs) → patched.
         let cli: ProviderConfig = toml::from_str(
             "type = \"claude_cli\"\ndefault_model = \"claude-sonnet-4-5\"\ntimeout_secs = 300\n",
         )
@@ -1193,7 +1441,6 @@ mod tests {
             other => panic!("wrong variant: {other:?}"),
         }
 
-        // A provider with no per-call timeout → unchanged (variant preserved).
         let none: ProviderConfig =
             toml::from_str("type = \"mock\"\ncanned_response = \"hi\"\n").unwrap();
         assert!(
@@ -1241,7 +1488,6 @@ mod tests {
                 assert_eq!(executable, "agy");
                 assert_eq!(timeout_secs, 300);
                 assert_eq!(default_model, "gemini-2.5-pro");
-                // `effort` is unspecified in the TOML above ⇒ defaults to High.
                 assert_eq!(effort, AntigravityEffortConfig::High);
             }
             other => panic!("wrong variant: {other:?}"),
@@ -1273,8 +1519,7 @@ mod tests {
 
     #[test]
     fn codex_cli_sandbox_kebab_case_round_trips() {
-        // Pin the wire-format so a future renames-by-mistake breaks
-        // loudly rather than silently downgrading sandbox.
+        // A renamed spelling must fail here, not silently change codex's sandbox.
         let toml_str = r#"
             type = "codex_cli"
             default_model = "gpt-5"
@@ -1287,9 +1532,6 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
-        // Reverse direction: serialize and confirm we still emit the
-        // kebab-case spelling, then re-parse to confirm full bidirectional
-        // stability.
         let reserialized = toml::to_string(&cfg).expect("must serialize");
         assert!(
             reserialized.contains("workspace-write"),
@@ -1306,13 +1548,59 @@ mod tests {
     }
 
     #[test]
+    fn a_hosted_provider_with_delegate_auth_is_refused_like_none() {
+        for (ty, kind) in [
+            ("openai", ProviderKind::Openai),
+            ("anthropic", ProviderKind::Anthropic),
+            ("gemini", ProviderKind::Gemini),
+        ] {
+            let toml_str = format!(
+                "type = \"{ty}\"\nauth = {{ kind = \"delegate\" }}\ndefault_model = \"m\"\n"
+            );
+            let cfg: ProviderConfig = toml::from_str(&toml_str).unwrap();
+            let mut errs = Vec::new();
+            cfg.validate_self(&ProviderId::new("p"), &mut errs);
+            assert_eq!(
+                errs,
+                vec![ValidationError::new(
+                    "providers.p.auth",
+                    ValidationProblem::KeyRequired { kind }
+                )],
+                "{ty}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cassette_records_only_from_a_declared_provider_that_calls() {
+        let cassette = ProviderConfig::Cassette {
+            path: "tape.json".into(),
+            record_from: None,
+            default_model: "m".into(),
+        };
+        let caller = ProviderConfig::Mock {
+            canned_response: "ok".into(),
+        };
+        let source = ProviderId::new("src");
+        assert_eq!(
+            record_source_problem(&source, None),
+            Some(ValidationProblem::UnknownProvider { id: "src".into() })
+        );
+        assert_eq!(
+            record_source_problem(&source, Some(&cassette)),
+            Some(ValidationProblem::RecordsFromCassette { id: "src".into() })
+        );
+        assert_eq!(record_source_problem(&source, Some(&caller)), None);
+    }
+
+    #[test]
     fn validate_flags_anthropic_without_auth() {
         let cfg = ProviderConfig::Anthropic {
             base_url: None,
             api_version: None,
             auth: Auth::None,
             default_model: "claude-opus-4-7".into(),
-            extras: HttpProviderExtras::default(),
+            extras: HttpOverrides::default(),
         };
         let id = ProviderId::new("ant");
         let mut errs = Vec::new();
@@ -1320,87 +1608,10 @@ mod tests {
         assert_eq!(errs.len(), 1, "expected exactly one error, got {errs:?}");
         assert_eq!(errs[0].key, "providers.ant.auth");
         assert!(
-            errs[0].message.contains("api key"),
+            errs[0].problem.to_string().contains("api key"),
             "message should mention api key, got: {}",
-            errs[0].message
+            errs[0].problem
         );
-    }
-
-    #[test]
-    fn bedrock_parses_keyless_and_validates_without_auth() {
-        // E2E-5 (config half): a `type = "bedrock"` block with NO auth
-        // field must parse into `Bedrock`, validate cleanly (Bedrock is
-        // keyless — no Auth::None rejection), and report `model` as its
-        // default model.
-        let toml_str = r#"
-            type = "bedrock"
-            region = "us-east-1"
-            model = "us.anthropic.claude-sonnet-4-5-v1:0"
-        "#;
-        let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
-        match &cfg {
-            ProviderConfig::Bedrock {
-                region,
-                model,
-                profile,
-            } => {
-                assert_eq!(region, "us-east-1");
-                assert_eq!(model, "us.anthropic.claude-sonnet-4-5-v1:0");
-                assert!(profile.is_none());
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
-        assert_eq!(cfg.default_model(), "us.anthropic.claude-sonnet-4-5-v1:0");
-
-        // Keyless: validation must NOT flag a missing auth field.
-        let id = ProviderId::new("claude_bedrock");
-        let mut errs = Vec::new();
-        cfg.validate_self(&id, &mut errs);
-        assert!(
-            errs.is_empty(),
-            "keyless bedrock must validate clean: {errs:?}"
-        );
-    }
-
-    #[test]
-    fn bedrock_optional_profile_round_trips() {
-        let toml_str = r#"
-            type = "bedrock"
-            region = "eu-west-1"
-            model = "amazon.nova-pro-v1:0"
-            profile = "dev"
-        "#;
-        let cfg: ProviderConfig = toml::from_str(toml_str).unwrap();
-        // Forward.
-        match &cfg {
-            ProviderConfig::Bedrock { profile, .. } => {
-                assert_eq!(profile.as_deref(), Some("dev"));
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
-        // Reverse: serialize + re-parse for bidirectional stability.
-        let reserialized = toml::to_string(&cfg).expect("must serialize");
-        let cfg2: ProviderConfig =
-            toml::from_str(&reserialized).expect("re-parse after serialize must succeed");
-        assert!(matches!(
-            cfg2,
-            ProviderConfig::Bedrock { profile: Some(p), .. } if p == "dev"
-        ));
-    }
-
-    #[test]
-    fn bedrock_flags_empty_region_and_model() {
-        let cfg = ProviderConfig::Bedrock {
-            region: String::new(),
-            model: String::new(),
-            profile: None,
-        };
-        let id = ProviderId::new("b");
-        let mut errs = Vec::new();
-        cfg.validate_self(&id, &mut errs);
-        let keys: Vec<_> = errs.iter().map(|e| e.key.as_str()).collect();
-        assert!(keys.contains(&"providers.b.region"), "got: {keys:?}");
-        assert!(keys.contains(&"providers.b.model"), "got: {keys:?}");
     }
 
     #[test]
@@ -1409,7 +1620,7 @@ mod tests {
             base_url: None,
             auth: Auth::None,
             default_model: "gemini-2.5-pro".into(),
-            extras: HttpProviderExtras::default(),
+            extras: HttpOverrides::default(),
         };
         let id = ProviderId::new("gem");
         let mut errs = Vec::new();
@@ -1417,22 +1628,19 @@ mod tests {
         assert_eq!(errs.len(), 1, "expected exactly one error, got {errs:?}");
         assert_eq!(errs[0].key, "providers.gem.auth");
         assert!(
-            errs[0].message.contains("api key"),
+            errs[0].problem.to_string().contains("api key"),
             "message should mention api key, got: {}",
-            errs[0].message
+            errs[0].problem
         );
     }
 
     #[test]
     fn validate_flags_openai_without_auth() {
-        // Mirror Anthropic/Gemini: OpenAI's real API requires an api
-        // key; users wanting keyless local/proxy endpoints should use
-        // `openai_compat`.
         let cfg = ProviderConfig::Openai {
             base_url: None,
             auth: Auth::None,
             default_model: "gpt-4o".into(),
-            extras: HttpProviderExtras::default(),
+            extras: HttpOverrides::default(),
         };
         let id = ProviderId::new("oa");
         let mut errs = Vec::new();
@@ -1447,7 +1655,8 @@ mod tests {
             base_url: String::new(),
             auth: Auth::None,
             default_model: "x".into(),
-            extras: HttpProviderExtras::default(),
+            gen_ai_provider_name: "local".into(),
+            extras: HttpOverrides::default(),
             capabilities: Default::default(),
         };
         let id = ProviderId::new("compat");
@@ -1458,14 +1667,41 @@ mod tests {
     }
 
     #[test]
+    fn validate_flags_openai_compat_that_names_nobody_serving_it() {
+        let cfg = ProviderConfig::OpenaiCompat {
+            base_url: "http://localhost:8000/v1".into(),
+            auth: Auth::None,
+            default_model: "x".into(),
+            gen_ai_provider_name: String::new(),
+            extras: HttpOverrides::default(),
+            capabilities: Default::default(),
+        };
+        let id = ProviderId::new("compat");
+        let mut errs = Vec::new();
+        cfg.validate_self(&id, &mut errs);
+        assert_eq!(errs.len(), 1, "expected exactly one error, got {errs:?}");
+        assert_eq!(errs[0].key, "providers.compat.gen_ai_provider_name");
+    }
+
+    #[test]
+    fn an_openai_compat_block_without_gen_ai_provider_name_does_not_load() {
+        let raw = r#"
+            type = "openai_compat"
+            base_url = "http://localhost:8000/v1"
+            default_model = "x"
+        "#;
+        let err = toml::from_str::<ProviderConfig>(raw).unwrap_err();
+        assert!(err.to_string().contains("gen_ai_provider_name"), "{err}");
+    }
+
+    #[test]
     fn validate_flags_http_provider_with_empty_default_model() {
-        // CLI providers explicitly check this; HTTP providers must too.
         let cfg = ProviderConfig::Anthropic {
             base_url: None,
             api_version: None,
             auth: Auth::env("ANTHROPIC_API_KEY"),
             default_model: String::new(),
-            extras: HttpProviderExtras::default(),
+            extras: HttpOverrides::default(),
         };
         let id = ProviderId::new("ant");
         let mut errs = Vec::new();
@@ -1475,12 +1711,39 @@ mod tests {
     }
 
     #[test]
+    fn a_cassette_recording_from_an_empty_provider_id_does_not_load() {
+        let toml_str = "type = \"cassette\"\npath = \"tape.json\"\nrecord_from = \"\"\n";
+        let err = toml::from_str::<ProviderConfig>(toml_str).unwrap_err();
+        assert!(
+            err.to_string().contains("ProviderId cannot be empty"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_cassette_with_a_blank_default_model_is_flagged_and_one_with_a_model_is_not() {
+        let cassette = |default_model: &str| ProviderConfig::Cassette {
+            path: "tape.json".into(),
+            record_from: None,
+            default_model: default_model.into(),
+        };
+        let id = ProviderId::new("tape");
+        let mut errs = Vec::new();
+        cassette(" ").validate_self(&id, &mut errs);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert_eq!(errs[0].key, "providers.tape.default_model");
+        let mut errs = Vec::new();
+        cassette("m").validate_self(&id, &mut errs);
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
     fn validate_flags_optional_base_url_set_to_empty_string() {
         let cfg = ProviderConfig::Vllm {
             base_url: Some(String::new()),
             auth: Auth::None,
             default_model: "model".into(),
-            extras: HttpProviderExtras::default(),
+            extras: HttpOverrides::default(),
             capabilities: Default::default(),
         };
         let id = ProviderId::new("v");
@@ -1511,9 +1774,6 @@ mod tests {
 
     #[test]
     fn validate_accepts_well_formed_configs() {
-        // Positive case: a fully-valid Anthropic + valid OpenAI + valid
-        // OpenaiCompat + valid CLI should produce zero errors. Catches
-        // the "validation accidentally rejects valid configs" regression.
         let id = ProviderId::new("good");
         let mut errs = Vec::new();
 
@@ -1522,7 +1782,7 @@ mod tests {
             api_version: None,
             auth: Auth::env("ANTHROPIC_API_KEY"),
             default_model: "claude-opus-4-7".into(),
-            extras: HttpProviderExtras::default(),
+            extras: HttpOverrides::default(),
         }
         .validate_self(&id, &mut errs);
 
@@ -1530,7 +1790,7 @@ mod tests {
             base_url: None,
             auth: Auth::env("OPENAI_API_KEY"),
             default_model: "gpt-4o".into(),
-            extras: HttpProviderExtras::default(),
+            extras: HttpOverrides::default(),
         }
         .validate_self(&id, &mut errs);
 
@@ -1538,7 +1798,8 @@ mod tests {
             base_url: "http://localhost:8000/v1".into(),
             auth: Auth::None,
             default_model: "Qwen/Qwen2.5-Coder-32B-Instruct".into(),
-            extras: HttpProviderExtras::default(),
+            gen_ai_provider_name: "local".into(),
+            extras: HttpOverrides::default(),
             capabilities: Default::default(),
         }
         .validate_self(&id, &mut errs);
@@ -1560,12 +1821,6 @@ mod tests {
 
     #[test]
     fn empty_providers_set_validates_clean() {
-        // Per Stage-2 change: empty providers no longer raises a
-        // standalone validation error here. The loader merges built-in
-        // defaults under the user table before validation runs, so
-        // post-merge the providers map always has entries. This unit
-        // test exercises raw `validate()` on an empty map (i.e. the
-        // pre-merge case is no longer flagged by this layer).
         let cfg = ProvidersConfig::default();
         let mut errs = Vec::new();
         cfg.validate(&mut errs);
@@ -1582,6 +1837,7 @@ mod tests {
 
             [local_qwen]
             type = "openai_compat"
+            gen_ai_provider_name = "local"
             base_url = "http://localhost:8000/v1"
             default_model = "Qwen/Qwen2.5-Coder-32B-Instruct"
 
@@ -1592,8 +1848,7 @@ mod tests {
         let cfg: ProvidersConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.len(), 3);
 
-        // Field-level assertions, not just .is_some(), so a regression
-        // that swaps fields between providers fails loudly.
+        // Field-level assertions catch fields swapped between providers.
         match cfg
             .get(&ProviderId::new("openai_main"))
             .expect("openai_main missing")
@@ -1644,8 +1899,6 @@ mod tests {
             other => panic!("claude_cli wrong variant: {other:?}"),
         }
 
-        // Reverse direction: serialize the parsed config and re-parse,
-        // confirming the providers block is bidirectionally stable.
         let reserialized = toml::to_string(&cfg).expect("must serialize");
         let cfg2: ProvidersConfig =
             toml::from_str(&reserialized).expect("re-parse after serialize must succeed");
@@ -1666,9 +1919,6 @@ mod tests {
 
     #[test]
     fn claude_cli_omitted_fields_use_safe_defaults() {
-        // The only thing the user MUST provide is `default_model`. Every
-        // other knob should fall back to the subscription-friendly
-        // defaults the architecture doc and Builder agreed on.
         let toml_str = r#"
             [claude_cli]
             type = "claude_cli"
@@ -1814,5 +2064,35 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn provider_type_string_matches_serde_tag() {
+        let gemini = crate::builtin::default_gemini();
+        assert_eq!(gemini.kind().as_str(), "gemini");
+        let mut every: Vec<ProviderConfig> =
+            crate::built_in_provider_defaults().into_values().collect();
+        every.push(toml::from_str("type = \"mock\"").unwrap());
+        for cfg in every {
+            let tagged = serde_json::to_value(&cfg).unwrap();
+            assert_eq!(tagged["type"], cfg.kind().as_str(), "{cfg:?}");
+        }
+    }
+
+    #[test]
+    fn a_gemini_behind_a_custom_base_url_lists_for_its_own_id() {
+        let official = crate::builtin::default_gemini();
+        assert_eq!(official.listing_catalog("gemini_flash"), "gemini");
+        let gateway: ProviderConfig = toml::from_str(
+            r#"
+            type = "gemini"
+            base_url = "https://my-gateway"
+            auth = { kind = "none" }
+            default_model = "flash@latest"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(gateway.listing_catalog("gw"), "gw");
+        assert_eq!(gateway.catalog_name("gw"), "gemini");
     }
 }

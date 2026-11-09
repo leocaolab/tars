@@ -9,7 +9,7 @@ caller code is identical.
 |---|---|---|---|
 | **Anthropic** | ✅ Supported | One-step inline JSON `requests[]` | GET results endpoint (JSONL) |
 | **OpenAI** | ✅ Supported | Two-step: upload JSONL file, create batch referencing file id | GET `output_file_id` content (JSONL) |
-| **Gemini** | ⛔ Surface present, not implemented | Long-Running Operations + Vertex AI path | See [§Gemini](#gemini) |
+| **Gemini** | ⛔ Surface present, not implemented | Long-Running Operations (GenAI API; Vertex AI is not supported) | See [§Gemini](#gemini) |
 
 If you need batch and your code runs against Anthropic or OpenAI, you
 can start shipping today. If you need Gemini batch, see the deferral
@@ -21,7 +21,7 @@ note below.
 
 ```rust
 use std::sync::Arc;
-use tars_provider::ProviderRegistry;
+use tars_llm::ProviderRegistry;
 use tars_types::{BatchItemId, ChatRequest, ProviderId};
 
 let provider = registry.get(&ProviderId::new("anthropic")).unwrap();
@@ -73,7 +73,7 @@ for item in submitter.results(&job_id, &ctx).await? {
 **Key points** (these surface differently from sync calls — read carefully):
 
 - `as_batch_submitter()` returns `Option<Arc<dyn BatchSubmitter>>` —
-  not every provider implements it (`claude_cli` / `gemini_cli` / etc.
+  not every provider implements it (`claude_cli` / `antigravity` / etc.
   don't). Pattern-match before using.
 - `BatchItemId` is **caller-chosen**. The vendor echoes it back in
   results so you can correlate outputs to inputs regardless of order.
@@ -144,7 +144,7 @@ Vendor source mapping:
 ## 4. Cost: what you're actually saving
 
 The vendor batch endpoint applies its discount automatically (no flag
-to pass). The pricing in `Capabilities` is for sync — for batch you're
+to pass). The pricing in `ProviderProfile` is for sync — for batch you're
 paying ~half. tars does not have a separate "batch pricing" field
 today, so if you use `TenantBudgetMiddleware` to track aggregate spend
 and you mix sync + batch, your accounting will over-charge batch calls
@@ -153,10 +153,10 @@ relative to actual invoices. Two options:
 - **Track batch separately.** Don't put batch calls through the same
   budget middleware as sync.
 - **Adjust post-hoc.** Use the real `usage` from `BatchResultItem`
-  responses + multiply by `0.5 × Capabilities.pricing.cost_for(...)`
+  responses + multiply by `0.5 × ProviderProfile.pricing.cost_for(...)`
   for the actual batch invoice number.
 
-A "BatchPricing" field on Capabilities is a known V2 ask but not in
+A "BatchPricing" field on ProviderProfile is a known V2 ask but not in
 scope yet.
 
 ---
@@ -220,7 +220,7 @@ terminal state is reached.
 
 ## 7. What tars does NOT do for batch
 
-Per the agent-runtime scope discipline:
+tars keeps batch to submitting and reading results:
 
 | Concern | Who |
 |---|---|
@@ -231,7 +231,7 @@ Per the agent-runtime scope discipline:
 | **Batch result event-store integration** | V2 — `BatchResultItem` is currently in-memory only. |
 
 These are explicit non-goals, not "we forgot." See the
-[`BatchSubmitter` trait module-level docs](../../crates/tars-provider/src/batch.rs)
+[`BatchSubmitter` trait module-level docs](../../crates/tars-llm/src/provider/batch/mod.rs)
 for the rationale.
 
 ---
@@ -260,17 +260,16 @@ if you find divergence.
 ### Gemini
 
 Returns `ProviderError::InvalidRequest("Gemini batch is not yet
-implemented...")` from all four methods. Both feasible Gemini batch
-paths require work tars doesn't ship today:
+implemented...")` from all four methods. Gemini has two batch paths;
+tars implements neither:
 
 - **GenAI API batch** uses Long-Running Operations (LRO), a different
   polling protocol from sync; needs a separate code path.
-- **Vertex AI Batch Prediction** uses service-account auth + a GCS
-  bucket for input/output, which is **explicitly out of scope** for
-  this backend (the GeminiProvider uses API-key auth on the GenAI
-  endpoint).
+- **Vertex AI Batch Prediction** is not supported: tars does not
+  support Vertex AI, and the GeminiProvider authenticates with an API
+  key on the GenAI endpoint only.
 
-Tracked in roadmap §5 Phase 4. Re-opening this is a
+Re-opening this is a
 contributor-welcome ticket — needs someone to pin the current GenAI
 batch API shape and add LRO polling support.
 
@@ -278,7 +277,6 @@ batch API shape and add LRO polling support.
 
 ## See also
 
-- `../roadmap.md` — design rationale + scope discipline
 - [`cost-and-reliability.md`](./cost-and-reliability.md) — the four
   middlewares that apply to *sync* calls (not batch — see §4 above)
 - [`../providers/anthropic.md`](../providers/anthropic.md), [`../providers/claude-cli.md`](../providers/claude-cli.md)

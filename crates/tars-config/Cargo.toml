@@ -4,19 +4,15 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Declarative configuration for TARS Runtime (Doc 06)"
+description = "Declarative configuration for TARS Runtime"
 
 [lints]
 workspace = true
 
 [dependencies]
 tars-types = { path = "../tars-types" }
+tars-utils = { path = "../tars-utils" }
 tars-sandbox = { path = "../tars-sandbox" }
-
-# Web-search config schema is OWNED by sisurf (`SearchConfig`) — tars
-# deserializes the `[web_search]` TOML section into it and injects the
-# env-resolved API key, but never redeclares the schema. Sibling path dep.
-sisurf-core = { git = "https://github.com/leocaolab/sisurf", tag = "v0.3.0" }
 
 serde.workspace = true
 serde_json.workspace = true

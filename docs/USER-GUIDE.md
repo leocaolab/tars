@@ -1,73 +1,125 @@
 # tars User Guide
 
+How to call tars from your own code: set it up, check the setup, make a call
+from Rust or Node, decode the reply, and see what happened. For the crate
+layout, see the [README](../README.md).
+
+> **Stability**: tars follows SemVer — breaking changes land on major
+> versions, not minors. [CHANGELOG.md](../CHANGELOG.md) lists them.
+
+---
+
 ## What tars is
 
-A Rust library for **calling a language model**, with the parts you would
-otherwise write yourself: a dozen providers behind one trait, a middleware
-pipeline, typed errors, and a record of every call that you can read afterwards.
+A Rust library for calling language models: one trait and one middleware
+stack cover Anthropic, OpenAI, Gemini, DeepSeek, vLLM, MLX, llama.cpp, any
+OpenAI-compatible endpoint, and the subscription CLIs (`claude_cli`,
+`codex_cli`, `opencode`, `antigravity`). Node/TypeScript bindings ship as a
+native addon.
 
-It is a caller, not a framework. There is no agent loop, no planner, no
-orchestrator. **You write the control flow.** When the model asks for a tool,
-you dispatch it and hand the result back — because the loop is where your
-program's logic lives, and a library that owns it owns your program.
+What you get without writing it yourself:
 
-What that buys you is that everything below is a plain function call you can
-put a breakpoint in.
+- **Provider abstraction** — swap models without touching call sites
+- **Middleware pipeline** — telemetry and retry in the default chain, plus
+  output validation when you give it validators and the call log when you
+  give it a sink
+- **Capability pre-flight** — every request is checked against the
+  provider's profile (tools, thinking, vision, structured output, context
+  window) before any network call; you can also check at startup
+- **Typed errors and a decode seam** — branch on an error's kind, decode a
+  reply into your own type
+- **A readable record** — one Parquet `llm_call` row per call, read back with
+  `tars events`
+
+tars is a caller, not an agent framework: the loop that decides what to call
+next is yours.
 
 ## Hello, tars (5-minute path)
 
+If you just want to confirm tars works on your machine, these three
+commands are the shortest route to a successful LLM call. No code — just
+shell.
+
 ```bash
 # 1. Build + write a starter config to $TARS_HOME/config.toml (default ~/.tars).
-cargo run -p tars-cli -- init
+cargo run -p tars-cli --bin tars -- init
 
 # 2. Set the credential the starter config references.
-export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY / GEMINI_API_KEY
+export ANTHROPIC_API_KEY=sk-ant-...   # or OPENAI_API_KEY / GOOGLE_API_KEY
 
-# 3. Check that it resolved — key found, model library loaded.
-cargo run -p tars-cli -- providers
+# 3. Send one prompt.
+cargo run -p tars-cli --bin tars -- probe anthropic --tenant me --prompt "Say hi in 5 words."
 ```
 
-`tars providers` is the first thing to run and the first thing to check when
-something is wrong: it says which providers are configured, whether each one's
-credential actually resolves, and what its default model is. A missing env var
-shows up here rather than as a 401 three layers down.
+Expected: every event the provider streams back, the reply among them. If
+it fails with a credential error instead, double-check the env
+var name matches what `$TARS_HOME/config.toml` (default `~/.tars`) declares
+for that provider.
 
-Then send a prompt from Rust or Python — see **Three call shapes** below.
+Want a different provider? Replace `anthropic` with one of the ids
+in `$TARS_HOME/config.toml` (default `~/.tars`), e.g. `probe openai_main …` or
+`probe claude_cli …`; the provider id is the positional argument, and `-p` is
+short for `--prompt`.
+For the long-lived subscription path, see
+[`providers/claude-cli.md`](./providers/claude-cli.md).
 
-There is no `tars run`. The CLI's job is to *inspect* (providers, models,
-events, trajectories, eval); sending a prompt is what the library is for, and
-if you only want one completion from a shell, `curl` is already installed.
+Built-in providers (available without writing any config — just export
+the key): `openai`, `anthropic`, `gemini`, `deepseek`, plus the local /
+subscription backends (`claude_cli`, `codex_cli`,
+`opencode`, `antigravity`, `mlx`, `llamacpp`, `vllm`). Any
+OpenAI-compatible endpoint (Groq, xAI, OpenRouter, LM Studio, Ollama, …)
+works via `type = "openai_compat"` + `base_url` + `gen_ai_provider_name` (who
+serves it, as tracing names it: `groq`, `vllm`). The CLI delegates
+(`claude_cli`/`codex_cli`/`opencode`/`antigravity`) run the
+vendor's own agent as a black box, each write-jailed to the worktree by
+the tars OS sandbox. DeepSeek is reached via its OpenAI-compatible API
+(`DEEPSEEK_API_KEY`, default model `deepseek-flash`); request
+`deepseek-v4-pro` for the reasoning model — its chain-of-thought arrives
+on the thinking channel automatically:
+
+```bash
+export DEEPSEEK_API_KEY=sk-...
+cargo run -p tars-cli --bin tars -- probe deepseek --tenant me --prompt "Say hi in 5 words."
+```
+
+Once that works, the rest of this guide covers calling tars from
+**Rust** and **Node**.
 
 ## Install
 
-### Python
-
-```bash
-git clone https://github.com/leocaolab/tars.git
-cd tars/crates/tars-py
-maturin develop --release
-```
-
-(Maturin produces a wheel that installs into the current Python
-environment. Requires Rust 1.85+ and Python 3.10+.)
-
 ### Rust
 
-Add to `Cargo.toml`:
+Add to `Cargo.toml`, pinned to a release tag:
 
 ```toml
 [dependencies]
-tars-pipeline = { git = "https://github.com/leocaolab/tars.git", tag = "v0.4.0" }
-tars-provider = { git = "https://github.com/leocaolab/tars.git", tag = "v0.4.0" }
-tars-types    = { git = "https://github.com/leocaolab/tars.git", tag = "v0.4.0" }
+tars-llm    = { git = "https://github.com/leocaolab/tars.git", tag = "v2.0.0" }
+tars-types  = { git = "https://github.com/leocaolab/tars.git", tag = "v2.0.0" }
+tars-config = { git = "https://github.com/leocaolab/tars.git", tag = "v2.0.0" }
 ```
 
-(Pin to a tag for reproducibility; the API follows SemVer from v1.0.)
+Requires the Rust toolchain in `rust-toolchain.toml` (1.85+).
+
+### Node
+
+Build the addon from a checkout (see [`crates/tars-node/README.md`](../crates/tars-node/README.md)):
+
+```bash
+cd crates/tars-node
+npm install
+npm run build      # → tars-node.<platform>.node + index.js + index.d.ts
+```
+
+### The CLI
+
+```bash
+cargo install --path crates/tars-cli
+```
 
 ## Bootstrap config
 
 ```bash
-cargo run -p tars-cli -- init
+cargo run -p tars-cli --bin tars -- init
 # writes $TARS_HOME/config.toml (default ~/.tars) with starter providers
 ```
 
@@ -76,11 +128,17 @@ one in a series — `default_model = "flash@latest"`; see
 [Model specs and output limits](#model-specs-and-output-limits).
 
 tars reads its global config from **`$TARS_HOME/config.toml`** —
-`$TARS_HOME` resolves as `--tars_home` flag > `$TARS_HOME` env var >
-`~/.tars` (the default). The providers declared there are global: shared by
+the home resolves as an explicit home (`tars_config::load_tars(Some(home))`) > the `$TARS_HOME` env var >
+`~/.tars` (the default); an empty or blank home, passed or in `$TARS_HOME`,
+counts as not given. The providers declared there are global: shared by
 every tars consumer/tool. Each provider's API key is read from the env var
-its `api_key_env` names — optionally loaded from `$TARS_HOME/.env` — and is
-never stored in the config file itself.
+its `auth` names (`auth = { kind = "secret", secret = { source = "env", var = "…" } }`)
+and is never stored in the config file itself. Every `tars` command that reads the config
+(`probe`, `bench`, `eval run` / `judge`, `providers`, `models`) also reads
+`$TARS_HOME/.env`: a variable the shell sets wins over the file's, and the process
+environment is not changed. A line of `.env` that does not parse is an error naming the
+file and the line number (exit 1), never the line's text, which may hold a key. A key in a
+file (`source = "file"`) or inline is sent by `tars models` / `tars providers --check` too.
 
 Then `export ANTHROPIC_API_KEY=...` (and/or `OPENAI_API_KEY`,
 `GOOGLE_API_KEY`) — the config references env vars by name; secrets
@@ -93,8 +151,12 @@ See [`.env.example`](../.env.example) for the full env-var list.
 Two read-only commands answer "is my config wired up, and which models
 can I actually ask for?" Both resolve config from
 **`$TARS_HOME/config.toml`** (override with `--config <path>`) and
-best-effort load `$TARS_HOME/.env` first, so env-var-backed keys resolve
-without pre-exporting them. Neither ever prints a secret.
+read `$TARS_HOME/.env`, so env-var-backed keys resolve
+without pre-exporting them. Neither ever prints a secret. The model-list request follows no
+redirect, so a key never goes to a host the provider's `base_url` does not name; a 3xx is
+reported as that HTTP status. A `gemini`, `openai` or `anthropic` provider with its own
+`base_url` (a gateway) keeps its list under its own id: it does not decide the vendor's
+`@latest` or limits.
 
 ### `tars providers` — configured providers + key health
 
@@ -107,12 +169,22 @@ tars providers --json     # machine-readable envelope
 For every provider in your config it prints the `type`, the configured
 `default_model`, and how its auth resolves — for an env-backed key,
 **which** env var and whether it is currently **set** (`(set)` /
-`(UNSET)`), never the value. Keyless local servers show `auth: none`;
-subscription CLIs show `auth: delegated to tool login`. With `--check`
+`(UNSET)`), never the value. A provider configured with `auth = "none"`
+shows `auth: none (keyless)`; one configured with `auth = "delegate"` shows
+`auth: delegated to tool login`; a CLI provider, which has no `auth` setting
+and logs in on its own, shows `auth: the tool's own login` (`"kind":
+"tool_login"` in `--json`). With `--check`
 it also fires the same list-models GET as `tars models --live` and
-reports `reachable` / `auth failed (HTTP 401)` / `unreachable` /
-`no list API (CLI/bedrock/mock)` — bounded by a short timeout so a dead
-local server can't hang the command.
+reports `reachable`, or what went wrong with what the server said:
+`auth failed: HTTP 401: <body>`, `HTTP error: HTTP 429: <body>`, `unreachable: <cause>`,
+`answered, but the list did not parse: <why>`, `key did not resolve: <why>` (a key file
+that cannot be read), `key invalid` (a key holding a newline, refused before anything is
+sent), `no key (skipped probe)`, `no list API: <why>`, `server not running (could not
+connect): <cause>` (a vllm, mlx or llama.cpp server that is not started) — bounded by a short timeout so a dead
+local server can't hang the command. `--json` gives the verdict word as `reachability`
+(`reachable`, `auth_failed`, `http_error`, `unreachable`, `unparsable`, `key_unresolved`,
+`key_invalid`, `no_key`, `not_applicable`, `not_running`) and the rest as `detail`. A provider never
+refreshed shows `not in library` (`"status": "not_in_library"` in `tars models --json`).
 
 ### The model library — `tars models`
 
@@ -132,6 +204,7 @@ tars models --json          # machine-readable envelope
 
 tars models update          # UPDATE the library from the live APIs, for all providers
 tars models update openai   # refresh one provider
+tars models --json update   # --json works on either side of `update`
 ```
 
 - **`tars models`** reads the library — fast and offline. Each provider
@@ -155,7 +228,10 @@ tars models update openai   # refresh one provider
 
   It never edits your config or `provider.toml` — it only reports. A
   single-provider update merges into the existing library without dropping
-  the other providers' rows.
+  the other providers' rows. A provider whose query fails (no network, an
+  expired key) keeps the list it last returned: the runtime goes on reading
+  it, `tars models` shows the failure above it, and `--json` gives the
+  list's time as `listed_at`.
 
 **Keep it fresh.** A refresh reaches every tars process that starts after
 it — no tars release needed — so run it on a schedule. A daily cron entry:
@@ -164,8 +240,36 @@ it — no tars release needed — so run it on a schedule. A daily cron entry:
 17 6 * * * /path/to/tars models update >> ~/.tars/models-update.log 2>&1
 ```
 
-(`tars models update` loads `$TARS_HOME/.env` itself, so the keys don't
+(`tars models update` reads `$TARS_HOME/.env` itself, so the keys don't
 need to be in cron's environment.)
+
+### Exit codes
+
+Every `tars` command reports how it ended in its exit code, so cron and CI
+can tell a failure without reading the text:
+
+| Code | Meaning |
+|---|---|
+| 0 | The command passed. |
+| 1 | It did not run: a bad config, an unreadable file, a failed call. |
+| 2 | A usage error, refused before anything ran (an unknown flag, an empty id, `bench --repeat 0`, `eval run -o` on a directory that is not empty). |
+| 3 | It ran, and what it found is a failure. |
+
+Exit 3 is `tars eval run` with a failed case, `tars eval diff` with a
+regression (more failed cases, a check's violation rate up, judge
+precision down), `tars models update` with a provider that answered with
+no list, `tars providers --check` with a provider that is unreachable,
+refused, or answered a list that does not parse, `tars bench` whose every
+iteration generated nothing, and `tars probe` whose provider failed the probe.
+A key the config names that does not resolve (a key file that cannot be read)
+or cannot be sent (a newline in it) is a failure too. A provider whose key
+variable is not set, with no list API, or whose local server (vllm, mlx,
+llama.cpp) is not running, is never asked, so it does not count.
+A `bench` iteration whose stream ends without `Finished` stops the bench
+(exit 1), as it fails `probe`. The built-in local
+servers (`mlx`, `llamacpp`, `vllm`) are in every config, so a refresh or a
+check of every provider exits 3 while one of them is not running; name the
+provider (`tars models update openai`) to refresh just that one.
 
 ### Model specs and output limits
 
@@ -196,8 +300,8 @@ auth = { kind = "secret", secret = { source = "env", var = "GEMINI_API_KEY" } }
   flash is picked up by the next process after `tars models update`.
 - The spec is resolved **once, when a model is bound to a provider** (the
   provider registry resolves `default_model` at build; a consumer resolves a
-  role's model with `ProviderRegistry::resolve_model`). Events, cache keys
-  and cassette fingerprints all carry the concrete id that ran.
+  role's model with `ProviderRegistry::resolve_model`). Events and
+  cassette fingerprints all carry the concrete id that ran.
 
 **Output limit.** A request that sets no `max_output_tokens` does not mean
 "unlimited": the provider's own default applies, and it can be far below the
@@ -230,8 +334,7 @@ providers that expose one:
 | `openai_compat` | ✅ | `{base_url}/models` (Bearer, key optional) |
 | `vllm` / `mlx` / `llamacpp` | ✅ | local `…/models` (keyless OK) |
 | `anthropic` | ✅ | `…/v1/models` (`x-api-key` + `anthropic-version`) |
-| `bedrock` | — | model list is an AWS SDK (SigV4) call, not queried here |
-| `claude_cli` / `gemini_cli` / `codex_cli` / `opencode` / `antigravity` | — | models via the tool's own login |
+| `claude_cli` / `codex_cli` / `opencode` / `antigravity` | — | models via the tool's own login |
 | `mock` / `cassette` | — | internal test providers |
 
 A non-queryable provider is listed with the reason, not silently
@@ -239,125 +342,116 @@ dropped. When a provider needs a key whose env var is unset, the row
 carries the **var name to export** (e.g. `no key: set $GEMINI_API_KEY`),
 never a sentinel.
 
-## Three call shapes
+## Calling tars
 
-Two, now — a completion, and a completion with a tool in the middle.
+### Rust — one completion
 
+Read the config, build the provider registry from it, stack the middleware
+you want, and call. There is no hidden global pipeline: `LlmService::builder`
+takes the layers you name, and `LlmService::default_chain` assembles the
+standard ones.
 
-### 1. Single completion
+```rust
+use tars_llm::{LlmService, ProviderRegistry, RetryMiddleware, TelemetryMiddleware, complete_async};
+use tars_types::{Caller, ChatRequest, ProviderId, TenantId, TraceId};
 
-**Python**
+// Read $TARS_HOME/config.toml (default ~/.tars), build the provider registry from it,
+// and install the config only once both succeeded, so a failed start can be retried.
+let loaded = tars_config::load_tars(None)?;
+let registry =
+    ProviderRegistry::from_config_default(loaded.config.providers(), &loaded.catalog, None)?;
+tars_config::install(loaded)?;
+let provider = registry.get(&ProviderId::new("anthropic"))?;
 
-```python
-import tars
+// An LlmService is one provider, one model and a middleware chain; the first layer is outermost.
+let svc = LlmService::builder(provider, "claude-sonnet-5")
+    .layer(TelemetryMiddleware::new())
+    .layer(RetryMiddleware::default())
+    .build();
 
-p = tars.Pipeline.from_default("anthropic")
-resp = p.complete(
-    model="claude-sonnet-4-5",
-    system="You are a precise reviewer.",
-    user="Find race conditions in this Rust function: ...",
-    max_output_tokens=2000,
-)
+let mut req = ChatRequest::user("Find race conditions in this Rust function: ...")
+    .with_system("You are a precise reviewer.");
+req.max_output_tokens = Some(2000);
 
-print(resp.text)
-print(resp.usage)        # input/output/cached/thinking tokens
-print(resp.telemetry)    # cache_hit, retry_count, layers, latency
+let caller = Caller::new(TenantId::new("acme"), TraceId::new("race-review"));
+let resp = complete_async(svc, req, caller).await?;
+println!("{}", resp.text);
+println!("{:?}", resp.usage);
 ```
 
-`Pipeline.from_default` wraps the provider in the default middleware
-stack (telemetry, cache, retry, optional validation, optional event
-emitter). The raw `Provider` is also available if you want to manage
-those concerns yourself:
+A `Caller` always names its tenant — whose work the call is, which budgets
+and the call log partition by. There is no default tenant. `TenantId::new` and
+`TraceId::new` take a literal; text from outside the program goes through
+`str::parse`.
 
-```python
-p = tars.Provider.from_default("anthropic")  # no middleware
-```
+### Rust — streaming
 
-**Rust**
-
-The shortest path installs the global config from the same
-`$TARS_HOME/config.toml` (default `~/.tars`) via
-`tars_handle::init_from_home`, then pulls the process-wide
-`ProviderRegistry`. There's no Rust `Pipeline.from_default` — you stack
-middleware explicitly with `LlmService::builder`, or assemble the canonical
-onion with `LlmService::default_chain`.
+`LlmService::call` returns the stream of events and the call-log ids of every
+attempt, retries included:
 
 ```rust
 use futures::StreamExt;
-use tars_pipeline::{LlmService, RetryMiddleware, TelemetryMiddleware};
-use tars_provider::ProviderRegistry;
-use tars_types::{ChatRequest, ChatResponseBuilder, ProviderId, RequestContext};
+use tars_types::ChatEvent;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Composition root: install the global config from $TARS_HOME/config.toml
-    // (default ~/.tars) and eagerly build the one provider registry.
-    tars_handle::init_from_home(None)?;
-    let registry = ProviderRegistry::global()?;
-
-    let provider = registry.get(&ProviderId::new("anthropic")).unwrap();
-
-    // LlmService = provider + one bound model + a middleware chain.
-    // Outermost layer is added first.
-    let svc = LlmService::builder(provider, "claude-sonnet-4-5")
-        .layer(TelemetryMiddleware::new())
-        .layer(RetryMiddleware::default())
-        .build();
-
-    // The request is pure content — the model already lives on the service.
-    let req = ChatRequest::user("Find race conditions in this Rust function: ...");
-
-    // `LlmService::call` streams events; aggregate them into a ChatResponse.
-    let ctx = RequestContext::test_default();
-    let mut stream = svc.call(req, ctx.clone()).await?;
-    let mut acc = ChatResponseBuilder::new();
-    while let Some(ev) = stream.next().await {
-        acc.apply(ev?);
+let call = svc.call(ChatRequest::user("Say hi in five words"), caller).await;
+println!("call log ids: {:?}", call.call_ids);
+let mut events = call.result?;
+while let Some(event) = events.next().await {
+    if let ChatEvent::Delta { text } = event? {
+        print!("{text}");
     }
-    let resp = acc.finish();
-
-    println!("{}", resp.text);
-    println!("{:?}", resp.usage);
-    // Per-call telemetry (cache_hit, retry_count, layer trace, latency)
-    // accumulates on `ctx.telemetry`.
-    Ok(())
 }
 ```
 
-`RequestContext::test_default()` is a dev convenience — production code
-constructs one carrying the real `tenant_id` / `principal_id` /
-`trace_id` so the IAM and audit middleware have something to work with.
+### Node
 
-### 2. Tools — the model asks, you dispatch
+```ts
+import { Pipeline } from '@leocaolab/tars-node';
 
-There is no auto-loop. `ToolRegistry::dispatch` runs one tool call and hands
-back a `Message` you append and send again. Three lines, and the branch where
-you decide whether to run it at all is yours:
+// A file in the tars config schema; `tenant` is required, there is no default.
+const pipeline = Pipeline.fromConfigPath('tars.toml', 'anthropic', { tenant: 'acme' });
 
-```rust
-let mut msgs = vec![Message::user("Review src/main.rs")];
-loop {
-    let resp = pipeline.complete(ChatRequest::new(msgs.clone()).with_tools(specs.clone()), ctx.clone()).await?;
-    let Some(call) = resp.tool_calls.first() else { break resp };
-    msgs.push(resp.into_assistant_message());
-    msgs.push(registry.dispatch(call, tool_ctx.clone()).await);
-}
+const resp = await pipeline.complete({
+    model: 'claude-sonnet-5',
+    system: 'You are a precise technical reviewer.',
+    user: 'Review this Rust function for race conditions: ...',
+    maxOutputTokens: 2000,
+});
+
+console.log(resp.text);
+console.log(resp.usage.inputTokens, resp.usage.outputTokens);
+console.log(resp.stopReason);
 ```
 
-Every built-in that touches the machine — `bash.run`, `write_file`,
-`edit_file`, `web.fetch` — goes through an **approval sink** first, and the
-CLI-delegate providers run inside an OS write-jail (macOS Seatbelt, Linux
-bubblewrap): the worktree, `$TMPDIR` and the delegate's own state dir are
-writable, everything else including `.git` is read-only. There is no unconfined
-path; `--sandbox danger-full-access` is the explicit opt-out and it is spelled
-that way on purpose.
+Roles (`init()`, `pipeline(role)`, `roleModel(role)`), JSON Schema output and
+cassette replay from Node are in
+[`crates/tars-node/README.md`](../crates/tars-node/README.md).
+
+### Tools — the loop is yours
+
+`tars-tools` gives you the `Tool` trait, a `ToolRegistry` that dispatches one
+tool call into one tool message, and built-ins (`fs.*`, `bash.run`,
+`web.fetch`, `web.search`) behind an approval sink. tars does not run the
+call → tool → call loop for you: you offer the tools on the request, dispatch
+what the model asks for, append the results and call again.
+[`examples/examples/loop_react`](../examples/examples/loop_react/) is a
+complete loop in one file (`cargo run -p tars-examples --example loop_react`).
+
+### Testing without a model
+
+`MockProvider` answers with what you script, so the logic around a call —
+prompt assembly, parsing, branching, error handling — is tested with no
+network and no key.
+[`examples/examples/testing`](../examples/examples/testing/main.rs) shows it
+(`cargo run -p tars-examples --example testing`). To pin a *real* reply, use a
+cassette (below).
 
 ## Decoding a structured response
 
 When you asked the model for JSON, `resp.text` is a string you still have
 to parse — and *how* you parse it depends on how the provider produced it.
-tars gives you one seam that gets this right: `tars-types::json_decode`
-(`decode` / `decode_json` / `ChatResponse::json`). It handles the two
+tars gives you one seam that gets this right: `tars_utils::json_decode`
+(`decode` / `decode_json` / `ResponseJsonExt::json` on a `ChatResponse`). It handles the two
 failure modes that bite hand-rolled `serde_json::from_str`: providers that
 wrap JSON in a ```` ```json ```` fence or chatty prose, and models that
 emit an out-of-range integer.
@@ -365,11 +459,11 @@ emit an out-of-range integer.
 **The strong type is yours; tars is a generic engine — you hand it a `T`,
 it hands you back a `T`.** tars never learns your type or your envelope
 tag; those live only in your crate. And because it returns *either* a
-valid `T` *or* a typed `TarsJsonError`, you cannot end up holding an
+valid `T` *or* a typed `DecodeJsonError`, you cannot end up holding an
 ill-formed `T`: the type is the contract (*parse, don't validate*).
 
 The strategy is keyed off the `StructuredOutputMode` the request used
-(from the provider's `Capabilities`), so the layer that knows how the
+(from the provider's `ProviderProfile`), so the layer that knows how the
 response was produced tells the decoder how to read it:
 
 | Mode | Meaning | Decode strategy |
@@ -377,11 +471,12 @@ response was produced tells the decoder how to read it:
 | `StrictSchema` / `JsonObjectMode` | provider guarantees a clean JSON document | parse `text` directly; a fenced/chatty body is a *broken promise* → `InvalidJson`, never a silent scrape |
 | `None` / `ToolUseEmulation` | `text` may be chatty prose with JSON embedded | strip the code fence, scan for the first balanced `{…}` / `[…]`, parse that |
 
-**`ChatResponse::json` — the common case:**
+**`resp.json` — the common case:**
 
 ```rust
 use serde::Deserialize;
 use tars_types::StructuredOutputMode;
+use tars_utils::ResponseJsonExt;
 
 #[derive(Deserialize)]
 struct Review { severity: u8, summary: String }
@@ -402,7 +497,7 @@ new tag first and legacy aliases after to accept both. Empty (the default)
 means bare JSON.
 
 ```rust
-use tars_types::{decode, DecodeOpts, JsonAgentResponse};
+use tars_utils::{decode, DecodeOpts, JsonAgentResponse};
 
 #[derive(Deserialize)]
 struct FixReport { id: i64, changed: Vec<String> }
@@ -437,7 +532,7 @@ let wire: CriticWire = decode(&resp.text, mode, DecodeOpts::clamping())?;
 let findings = wire.into_flat_findings();               // stage two
 ```
 
-**Error taxonomy** (`TarsJsonError`) — the failure tells you *which* stage
+**Error taxonomy** (`DecodeJsonError`) — the failure tells you *which* stage
 broke, so you branch on the variant, not a substring:
 
 | Variant | Meaning |
@@ -448,86 +543,188 @@ broke, so you branch on the variant, not a substring:
 | `InvalidJson` | text wasn't valid JSON (in strict mode: a violated "clean JSON" promise) |
 | `Schema` | valid JSON, but the wrong shape for `T` |
 
-`JsonValueType` is a Python-named JSON type tag (`dict` / `list` / `int` /
-…) if you want to write your own "expected an object, got a list" message.
+`JsonValueType` (`Null` / `Bool` / `Integer` / `Float` / `String` / `Array` /
+`Object`) is there if you want to write your own "expected an object, got an
+array" message.
 
-**Consuming the seam from another repo.** Point your `tars-types`
-dependency at the branch (don't pin a rev), and use a local `[patch]` while
-you hack on tars itself — edit and verify without pushing each time:
+**Consuming the seam from another repo.** Depend on `tars-utils` (pinned to a
+tag, as in [Install](#install)), and use a local `[patch]` while you hack on
+tars itself — edit and verify without pushing each time:
 
 ```toml
 [dependencies]
-tars-types = { git = "https://github.com/leocaolab/tars", branch = "result-side-json-decode" }
+tars-utils = { git = "https://github.com/leocaolab/tars.git", tag = "v2.0.0" }
 
 # while iterating on tars locally, redirect to your checkout:
-[patch."https://github.com/leocaolab/tars"]
-tars-types = { path = "../tars/crates/tars-types" }
+[patch."https://github.com/leocaolab/tars.git"]
+tars-utils = { path = "../tars/crates/tars-utils" }
 ```
 
 In one line: a local strong type is *your* serde type + a three-line `impl
 JsonAgentResponse` + one `decode::<T>` call. The type is yours; the
 mechanism is tars's.
 
-### Validating a schema from Python
+## Output validators
 
-The `decode::<T>` seam above is **Rust-side only** — it's parametric over a
-Rust type and has no cross-FFI analogue. Python's strong typing is a
-*runtime* concern, and there are two current, complementary ways to get it:
+A validator runs after the reply arrives and before it reaches your code.
+Validators chain in order; each sees the previous one's filtered response.
+Write one by implementing `OutputValidator`, or use the built-ins
+(`JsonShapeValidator`, `NotEmptyValidator`, `MaxLengthValidator`):
 
-1. **Enforce at decode time (first choice).** Pass the JSON Schema as the
-   `response_schema=` kwarg on `complete`. For a strict-capable provider the
-   model is *forced* to emit conforming JSON (`StrictSchema` mode), so
-   `resp.text` is clean by construction. `response_schema_strict=False`
-   makes the schema a hint rather than a hard constraint.
+```rust
+use std::sync::Arc;
+use tars_llm::{ChainOptions, JsonShapeValidator, LlmService, OutputValidator};
+use tars_types::{ChatRequest, ChatResponse, ValidationOutcome, ValidationReason};
 
-   ```python
-   resp = p.complete(
-       model="claude-sonnet-4-5",
-       user="Rate this diff.",
-       response_schema={
-           "type": "object",
-           "properties": {"severity": {"type": "integer"}, "summary": {"type": "string"}},
-           "required": ["severity", "summary"],
-       },
-   )
-   data = json.loads(resp.text)          # clean JSON — parse straight through
-   review = Review.model_validate(data)  # …into your pydantic model, if you use one
-   ```
+struct NoTodo;
 
-2. **Validate post-hoc with an output validator (defense in depth).** Attach
-   a Python callable via the `validators=` kwarg; it runs inside the
-   pipeline and can `Reject` a bad response (which `RetryMiddleware` will
-   retry) or `Annotate` it. There is **no** built-in schema validator on the
-   Python side — you write the check with the `jsonschema` PyPI package (or
-   pydantic) and return a typed outcome:
+impl OutputValidator for NoTodo {
+    fn name(&self) -> &str {
+        "no_todo"
+    }
 
-   ```python
-   import json, jsonschema, tars
+    fn validate(&self, _req: &ChatRequest, resp: &ChatResponse) -> ValidationOutcome {
+        if resp.text.contains("TODO") {
+            ValidationOutcome::Reject {
+                reason: ValidationReason::Custom {
+                    kind: "no_todo".into(),
+                    message: "the reply left a TODO".into(),
+                    detail: None,
+                },
+            }
+        } else {
+            ValidationOutcome::Pass
+        }
+    }
+}
 
-   SCHEMA = {"type": "object", "required": ["severity", "summary"]}
+let mut opts = ChainOptions::default();
+opts.validators = vec![Arc::new(JsonShapeValidator::new()), Arc::new(NoTodo)];
+let svc = LlmService::default_chain(provider, "claude-sonnet-5", opts);
+```
 
-   def validate_schema(req, resp):
-       try:
-           data = json.loads(resp.text)
-           jsonschema.validate(data, SCHEMA)
-       except (json.JSONDecodeError, jsonschema.ValidationError) as e:
-           return tars.Reject(reason=str(e))   # raw error carried out, not a sentinel
-       return tars.Pass()
+`ValidationOutcome` has four shapes: `Pass` leaves the reply alone; `Reject`
+fails the call with `LlmError::ValidationFailed`, naming the validator;
+`Filter` replaces the reply and lists what it dropped; `Annotate` records
+per-call metrics. The Node binding has no validators yet: parse and check the
+shape in your own code.
 
-   p = tars.Pipeline.from_default("anthropic", validators=[("schema", validate_schema)])
-   ```
+## Pre-flight capability check
 
-   See [Output validators](#output-validators) below for the full outcome
-   vocabulary (`Pass` / `Reject` / `FilterText` / `Annotate`).
+Every request is checked against the provider's profile before any layer
+runs: a request the provider cannot serve fails with
+`LlmErrorKind::Incompatible` and is never sent. To find out at startup
+instead of on the first call, declare what a role will need:
 
-Node/`tars-node` follows the same shape: `responseSchema` on the completion
-options for decode-time enforcement, then `JSON.parse(result.text)` into
-your own TS type. The mode-aware fence-scrape of `decode` isn't bound to
-either runtime yet — see the CHANGELOG's v0.8.0 entry for the rationale.
+```rust
+use tars_types::{CompatibilityCheck, ProviderNeeds};
+
+let needs = ProviderNeeds {
+    requires_tools: true,
+    estimated_max_output_tokens: 8000,
+    ..ProviderNeeds::default()
+};
+match svc.provider().capabilities().check_requirements(&needs) {
+    CompatibilityCheck::Compatible => {}
+    CompatibilityCheck::Degraded { unsent } => eprintln!("served without {unsent:?}"),
+    CompatibilityCheck::Incompatible { reasons } => {
+        eprintln!("cannot serve: {:?}", reasons.iter().map(|r| r.kind()).collect::<Vec<_>>())
+    }
+}
+```
+
+A capability the profile has no data on (a local server the data file does
+not describe) is unknown, not unsupported, and a request that needs it is
+still sent.
+
+## Typed errors
+
+`LlmError::kind()` says what went wrong and `class()` whether waiting can fix
+it; branch on those, never on the message:
+
+```rust
+use tars_llm::LlmError;
+use tars_types::{ErrorClass, LlmErrorKind};
+
+fn handle(err: &LlmError) {
+    match err.kind() {
+        LlmErrorKind::RateLimited => eprintln!("rate limited: back off"),
+        LlmErrorKind::Incompatible => eprintln!("this provider cannot serve the request: {err}"),
+        _ if err.class() == ErrorClass::Transient => eprintln!("transient, already retried: {err}"),
+        _ => eprintln!("permanent: {err}"),
+    }
+}
+```
+
+The kinds (`LlmErrorKind` in `tars-types` lists them all):
+
+| `kind`                | Meaning                                       |
+|-----------------------|-----------------------------------------------|
+| `auth`                | API key invalid or missing                    |
+| `rate_limited`        | Provider 429; check the error's `unavailable_for`           |
+| `network`             | Transient connectivity failure                |
+| `parse`               | Provider returned malformed response          |
+| `malformed_tool_call` | Model sent tool arguments that are not a JSON object (Permanent); the tool name and the raw arguments |
+| `truncated_tool_call` | Output hit `max_output_tokens` inside a tool call (Permanent; raise the limit); the tool name and the raw arguments holds the part received |
+| `incomplete_tool_call` | The stream's terminator came without a stop reason while a tool call's arguments were unparsed (Permanent); the tool name and the raw arguments holds the part received |
+| `stream_cut`          | The response body ended before the end of the stream: the connection was closed under it (Transient); when it was inside a tool call, the tool name and the raw arguments holds the part received |
+| `unfinished`          | The stream ended, without an error, before saying why the turn stopped; the reply may be cut short (Permanent) |
+| `server_error`        | The provider failed on its side: a 5xx other than 503 (504 included), or a server error inside an open stream (Transient) |
+| `model_overloaded`    | The provider said it is overloaded: 503, Anthropic 529 (Transient) |
+| `request_timeout`     | Provider 408: it waited too long for the request (Transient) |
+| `provider_timed_out`  | The provider's own time limit for the request ran out before it answered, e.g. Anthropic's 500 `timeout_error` (Permanent) |
+| `incompatible`        | Provider's profile cannot serve the request; not sent (Permanent). The call's `llm_call` row lists every reason in `refusal_reasons` |
+| `validation_failed`   | Output validator rejected (Permanent)         |
+| `context_too_long`    | Prompt exceeds model's context window         |
+| `daemon_failed`       | The `claude_sdk` daemon answered with an error in the SDK's words (Transient) |
+| `spawn`, `io`         | A CLI or daemon child did not start, or an I/O to it failed; Transient only when the OS error passes on another try (`EAGAIN`, a broken pipe) |
+| `batch_item_expired`, `batch_item_canceled`, `batch_item_failed` | A batch item the provider did not run before the batch expired (Transient) or was cancelled, or failed with a code tars does not map (Permanent) |
+| `encode`, `invalid_url`, `invalid_header`, `sandbox`, `internal` | tars could not build or send the request (Permanent) |
+| ... (`LlmErrorKind` in `tars-types` lists them all) ||
+
+When the provider states in an `x-should-retry` header whether the same request can succeed
+later (Anthropic and OpenAI send it), `class()` follows the header; `kind()` stays what the status says.
+
+## Per-call observability
+
+Give the chain a call-log sink and every call — completed, failed or
+cancelled — lands one `llm_call` row in a Parquet log, with the request and
+response bodies inline. Open the sink inside the tokio runtime:
+
+```rust
+use std::sync::Arc;
+use tars_llm::{ChainOptions, LlmService};
+use tars_melt::event::call_log::{CALL_LOG_SINK, LlmCallTable};
+use tars_melt::event::log::ParquetLog;   // tars-melt's `parquet` feature
+use tokio::runtime::Handle;
+
+let sink = ParquetLog::<LlmCallTable>::open("/var/lib/myapp/tars-events")
+    .sink(CALL_LOG_SINK, None, &Handle::current());
+let mut opts = ChainOptions::default();
+opts.events = Some(Arc::new(sink));
+let svc = LlmService::default_chain(provider, "claude-sonnet-5", opts);
+```
+
+Inspect with the CLI:
+
+```bash
+tars events list --tenant T --since 1d --tag dogfood
+tars events show --tenant T <call_id> --with-bodies
+```
+
+For the live tracing stream, JSON logs, OpenTelemetry export and the "I want
+to debug X → look at Y" mapping, see [`observability.md`](./observability.md).
+
+For per-call cost caps, per-tenant budgets, provider fallback, and
+rate-limit handling, see
+[`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md).
+
+For offline batch processing (~50% pricing, 24h SLA) on Anthropic /
+OpenAI, see [`recipes/batch.md`](./recipes/batch.md).
 
 ## A/B testing — two axes, and pinning the LLM
 
-tars frames A/B on **two axes** (Doc 18 §5a); getting a strong-typed,
+tars frames A/B on **two axes**; getting a strong-typed,
 schema-valid result (above) is *not* one of them — it's the input you then
 A/B over:
 
@@ -542,35 +739,33 @@ model noise swamps the code delta. So pin it: record a cassette once, then
 run code variant A vs B against the *same replayed responses*. The only
 thing that moved is your code, so the diff is exact and one sample suffices.
 
-```python
-# Both arms replay the SAME pinned completion (examples/tars.toml cassette),
-# so the difference is pure code — the regression question.
-pipe = tars.Pipeline.from_config("examples/tars.toml", "cassette_schema")
-review = json.loads(pipe.complete(model=MODEL, system=SYS, user=USER).text)
+```rust
+// Both arms replay the SAME pinned completion (the `cassette_schema` provider in
+// examples/tars.toml), so the difference is pure code — the regression question.
+let review: Review = tars_utils::decode_json(&resp.text, StructuredOutputMode::None)?;
 
-a = bucket_v_a(review["severity"])   # old code
-b = bucket_v_b(review["severity"])   # refactored code
-if a != b:
-    print(f"behavior changed: {a!r} → {b!r}")   # a regression a text diff won't show
+let a = bucket_v_a(review.severity);   // old code
+let b = bucket_v_b(review.severity);   // refactored code
+assert_eq!(a, b, "behavior changed");  // a regression a text diff won't show
 ```
-
-Runnable: [`examples/python/ab-testing/code_change_ab.py`](../examples/python/ab-testing/code_change_ab.py).
 
 **LLM-change axis — vary the prompt/model, diff behavior statistically.**
 Here the code is fixed and you compare two configs over a fixed corpus.
 Because outcomes are **paired** (same corpus through both), the correct
 test is **McNemar** on the discordant cells — *not* two overlapping
 confidence intervals. Tag each cohort so the event store can split them
-(`RequestContext::with_tags([...])` in Rust; the `tags=` kwarg on
-`complete` in Python/Node), then compare with `tars eval diff`. The full
-methodology (McNemar, paired bootstrap, precision/recall) lives in
-the `tars-eval` crate — its judge carries an anti-incest guard, and
-McNemar is the test for "did this change help" on paired items.
+(`Caller::tags` in Rust; `tags` in the Node call options), then compare with
+`tars eval diff`. The full methodology (McNemar, paired bootstrap,
+precision/recall) lives in [eval-methodology.md](eval-methodology.md).
 
 ### Reading a run + diff — and where the tooling stops
 
 `tars eval run` writes a run directory: a `manifest.json` (per-case status,
 tokens, latency, check outcomes) plus per-case `output.txt` / `report.json`.
+The run owns the directory: `-o` must name a new or empty one, and one with
+anything in it is refused (exit 2) so an earlier run's files, its
+`judge_report.json` included, are never read as this run's. Pick another
+directory or empty it first.
 `tars eval diff <baseline> <candidate>` then reports, in tiers:
 
 ```
@@ -578,15 +773,23 @@ operational:
   cases / errors / tokens in-out        plain deltas (=, +N, -N)
   latency p50            34420ms → 0ms  (-100%)
 checks (violation rate):
-  json_shape                   0.0% → 12.5%  (+12.5%)   ← a check got worse
+  valid-json                   0.0% → 12.5%  (+12.5%)   ← a check got worse
 trajectory (--trajectory):
   divergence   30.8% (12/39 cases differ)   diverging: case_003, case_011, …
-  McNemar (trajectory-match): regressed b=2 improved c=7 χ²=2.78 → NOT significant at α=0.05
+  McNemar (trajectory-match): regressed b=2 improved c=7 exact p=0.180 → NOT significant at α=0.05
 quality (if you ran `tars eval judge`):
   precision / recall deltas with Wilson CIs
 ```
 
-`--json` emits the same as one machine-readable object.
+`--json` emits the same facts as one machine-readable object: a check only
+the baseline ran has `"dropped": true` and a null candidate rate, and
+`quality` (absent when not both runs were judged) has `"state": "compared"`
+with both precisions, the paired regressed / improved counts and McNemar's
+test, or `"state": "judges_differ"` naming the two judges.
+`--trajectory-mode` (default `ordered`) needs `--trajectory`; given alone
+it is a usage error. `tars eval run --case-timeout <SECS>` bounds each case,
+its model call and any arg-judge calls together; a case past it is recorded
+as failed and the run goes on.
 
 **How to drill down.** The diff hands you the *coordinates*, not the cause:
 1. a check-rate or divergence delta tells you **what** moved;
@@ -604,71 +807,38 @@ automated "why did B regress on case_003" analysis would be a consumer-layer
 LLM pass over `eval diff --json` + the diverging cases — a natural use of the
 [decode seam](#decoding-a-structured-response), but it is **not built in**.
 
-### Freeze it as a test (py / ts / rs), not a CLI run
+### Freeze it as a test, not a CLI run
 
 Once a cassette is recorded, the comparison is just a deterministic function
 call — so pin it in your normal test runner instead of the `tars eval` CLI.
 Point a test at a cassette provider (committed cassette = the fixture) and
 assert; no live model, so it runs in CI. The request **fingerprint is
-binding-agnostic** — one cassette recorded from Python replays byte-identically
-in Node *and* Rust:
-
-```python
-# pytest — crates/tars-py/python/tests/test_ab_cassette.py
-def test_severity_bucket_snapshot():
-    pipe = tars.Pipeline.from_config("examples/tars.toml", "cassette_schema")
-    severity = json.loads(pipe.complete(model=MODEL, system=SYS, user=USER,
-                                        max_output_tokens=200).text)["severity"]
-    assert bucket(severity) == "high"   # refactor changes this → fails → you bless
-```
+binding-agnostic** — one cassette replays byte-identically in Rust and Node:
 
 ```rust
-// #[tokio::test] — crates/tars-provider/tests/ab_cassette.rs
-let provider = CassetteProvider::replay_from_file("cassette_schema", &cassette_path())?;
-let review: Review = tars_types::decode_json(&replay_text().await, StructuredOutputMode::None)?;
-assert_eq!(review.severity, 8);          // replays the SAME cassette the py test uses
+// #[tokio::test] — crates/tars-llm/tests/ab_cassette.rs
+let provider = CassetteProvider::replay_from_file(ProviderId::new("cassette_schema"), &cassette_path())?;
+let review: Review = tars_utils::decode_json(&replay_text().await, StructuredOutputMode::None)?;
+assert_eq!(review.severity, 8);          // a refactor that changes this fails the test
 ```
 
 Node mirrors this with `node --test` (`crates/tars-node/__test__/ab_cassette.test.mjs`).
-A Python test that isn't marked `requires_provider` runs everywhere (conftest
-only skips the live ones) — the cassette test is exactly that.
 
-### Blessing a change
+### Accepting an intended change
 
-When a diff or a snapshot test goes red for an **intended** change, you
-"bless" it — accept the new output as the reference. As of **v0.9.0** a bless is
-a first-class, committed file of field-level assertions (Doc 28):
+When a diff or a cassette test goes red for an **intended** change, accept it
+with a commit that a reviewer reads:
 
-```rust
-// load a committed bless over the (cassette-pinned) decoded reply → pass/drift
-let outcome = tars_types::Bless::load(&path)?.check(&value)?;   // rs
-// or the approval assert: TARS_BLESS=1 captures/updates, else loads + checks
-Bless::check_or_bless(&path, &value, &["$.severity"], None, do_bless)?;
-```
-
-```python
-r = tars.bless_check("severity.bless.json", resp.text)   # py  → {"passed", "drifts"}
-```
-```ts
-const r = blessCheck("severity.bless.json", result.text); // ts → {passed, drifts}
-```
-
-Over an eval run: `tars eval bless <run> --select '$.severity' --accept` captures
-per-case references; `tars eval bless <run>` checks and bails on drift. Blessing
-is still *regenerate the fixture + commit* — the git diff of the `.bless.json` is
-the review surface, and a capture always stages a `.new` before it can clobber a
-committed file:
-
-- **The model's reply changed** (new model/prompt, or you re-recorded): bless
-  by re-recording — `TARS_CASSETTE_RECORD=1 …` — and commit the new
+- **The model's reply changed** (new model/prompt, or you re-recorded):
+  re-record — `TARS_CASSETTE_RECORD=1 …` — and commit the new
   `*.cassette.json`. Reviewers see exactly which replies moved.
-- **Behavior/threshold changed** (a refactor you meant): bless by updating the
-  asserted expected value in the test, or promote the candidate run to the
-  baseline dir (`benchmarks/baselines/eval/<model>/` — a manual `cp`, the
-  convention `tars eval diff` compares against).
+- **Behavior/threshold changed** (a refactor you meant): update the expected
+  value in the test's assertion, or promote the candidate run to the baseline
+  dir (`benchmarks/baselines/eval/<model>/` — a manual `cp`, the convention
+  `tars eval diff` compares against).
 
-The discipline: a bless is a **reviewable commit**, never a silent overwrite —
-so an unintended drift can't slip through as an "accepted" snapshot.
+Either way the change is a **reviewable commit**, never a silent overwrite, so
+an unintended drift cannot slip through as accepted.
 
 ## Built-in web tools
 
@@ -681,202 +851,38 @@ into a `ToolResult`.
 | Tool | In → out |
 |---|---|
 | **`web.fetch`** | `url` → the page's main content as clean **Markdown**, plus a provenance header (final URL + which **tier** served it: `static` reqwest fetch vs. `browser` Chromium render). Use to READ a page you already have a URL for. If a page needs JavaScript and no headless browser can be launched, you get a legible, actionable `NoBrowser` error ("install Chrome, or fetch a URL that serves without client-side JS"), not an opaque failure. |
-| **`web.search`** | `query` → a numbered `title / url / snippet` list. Use to DISCOVER URLs, then follow up with `web.fetch`. Backend is chosen by config (see below). |
+| **`web.search`** | `query` → a numbered `title / url / snippet` list. Use to DISCOVER URLs, then follow up with `web.fetch`. Backend: DuckDuckGo unless the embedder configures another (see below). |
 
 Both are network, long-running `web.*` ops, so they route through the same
 approval gate as `bash.run`: a policy that marks them `Ask` / `Deny` sends them
 through human approval by tool name — no extra wiring.
 
-### `[web_search]` config
+### Choosing the `web.search` backend
 
-`web.search` defaults to **DuckDuckGo** (`ddg`) — no key, works out of the box.
-To use a keyed backend, add a `[web_search]` section to `$TARS_HOME/config.toml` (default `~/.tars`).
-The schema is **owned by sisurf** (`SearchConfig`); tars deserializes the section
-into it and injects the key — it does not redeclare the schema.
-
-```toml
-[web_search]
-backend = "google_cse"            # ddg | google_cse | brave
-google_cse = { cx = "your-cx-id" } # the programmable-search-engine id; NOT the secret
-```
-
-The **API key is never written to the config file.** tars resolves it from a
-conventional environment variable — the same posture as a provider's
-`api_key_env` — and injects it at load time:
-
-| Backend | Config section | Key env var |
-|---|---|---|
-| `ddg` | *(none)* | *(none — keyless)* |
-| `google_cse` | `[web_search] google_cse = { cx = "…" }` | `GOOGLE_CSE_KEY` |
-| `brave` | `[web_search] brave = { }` | `BRAVE_API_KEY` |
-
-If the env var is missing or blank, the key stays empty on purpose:
-`SearchConfig::build()` then typed-fails with `MissingApiKey`, which `web.search`
-surfaces as a legible tool error **before any network call** — it never silently
-falls back to a different backend.
-
-## Output validators
-
-Attach Python callbacks that run after the model reply, before the
-response reaches your code. Validators chain in order; each sees the
-previous one's filtered output.
-
-```python
-def must_be_json(req, resp):
-    try:
-        json.loads(resp["text"])
-        return tars.Pass()
-    except ValueError as e:
-        return tars.Reject(reason=str(e))
-
-p = tars.Pipeline.from_default("anthropic", validators=[
-    ("must_be_json", must_be_json),
-])
-```
-
-Four outcome shapes:
-
-- `tars.Pass()` — response unchanged, validator chain continues
-- `tars.Reject(reason)` — response unacceptable, surfaces as
-  `TarsProviderError(kind="validation_failed")`
-- `tars.FilterText(text, dropped=[...])` — replace the response text
-  (subsequent validators see the filtered version)
-- `tars.Annotate(metrics={...})` — record per-call metrics for the
-  validation summary
-
-## Pre-flight capability check
-
-Verify a role's configured provider supports its request shape *at
-startup*, instead of failing on the first model call:
-
-```python
-roles = {
-    "planner":  tars.CapabilityRequirements(requires_thinking=True),
-    "executor": tars.CapabilityRequirements(requires_tools=True,
-                                             estimated_max_output_tokens=8000),
-}
-
-for role, reqs in roles.items():
-    p = tars.Pipeline.from_default(provider_for(role))
-    r = p.check_capabilities(reqs)
-    if not r:
-        print(f"{role!r} can't satisfy: {[x.kind for x in r.reasons]}")
-```
-
-When a caller composes several candidate services (its own fallback /
-ensemble) and every one fails its pre-flight, that exhaustion surfaces as
-`TarsRoutingExhaustedError` (mapped from `ProviderError::NoCompatibleCandidate`)
-with the full list of skipped candidates + typed reasons, not a
-string-mashed error.
-
-## Typed errors
-
-```python
-try:
-    p.complete(model="...", user="...")
-except tars.TarsRoutingExhaustedError as e:
-    for pid, reasons in e.skipped_candidates:
-        log.warn(f"{pid} skipped: {[r.kind for r in reasons]}")
-except tars.TarsProviderError as e:
-    if e.kind == "rate_limited":
-        await asyncio.sleep(e.retry_after or 30)
-    elif e.kind == "unknown_tool":
-        log.fatal(f"register tool {e.tool_name}")
-    elif e.is_retriable:
-        # Pipeline already retried; this is the final failure.
-        ...
-```
-
-Error classes branch on `e.kind`:
-
-| `kind`                | Meaning                                       |
-|-----------------------|-----------------------------------------------|
-| `auth`                | API key invalid or missing                    |
-| `rate_limited`        | Provider 429; check `e.retry_after`           |
-| `network`             | Transient connectivity failure                |
-| `parse`               | Provider returned malformed response          |
-| `unknown_tool`        | Model called a tool that isn't registered     |
-| `validation_failed`   | Output validator rejected (Permanent)         |
-| `no_compatible_candidate` | All caller-composed candidates failed pre-flight |
-| `context_too_long`    | Prompt exceeds model's context window         |
-| ... (see Doc 01 for full list) ||
-
-## Per-call observability
-
-Every `Response` carries a `telemetry` block:
-
-```python
-print(r.telemetry.cache_hit)         # bool
-print(r.telemetry.retry_count)       # 0 = first attempt succeeded
-print(r.telemetry.layers)            # ["telemetry", "cache_lookup", ...]
-print(r.telemetry.provider_latency_ms)
-print(r.telemetry.pipeline_total_ms)
-```
-
-And, if validators ran, a `validation_summary`:
-
-```python
-print(r.validation_summary.validators_run)  # ["snippet_grounded"]
-print(r.validation_summary.outcomes)         # {"snippet_grounded": {"outcome": "filter", "dropped": [...]}}
-print(r.validation_summary.total_wall_ms)
-```
-
-For longer-term cross-call analysis, point the Pipeline at an event
-store directory:
-
-```python
-p = tars.Pipeline.from_default(
-    "anthropic",
-    event_store_dir="~/.tars/events/",
-)
-```
-
-Each call lands a `LlmCallFinished` row in the event store; full
-request and response bodies go into a tenant-scoped CAS body store.
-Inspect with the CLI:
-
-```bash
-tars events list --since 1d --tag dogfood
-tars events show <event_id> --with-bodies
-```
-
-For trajectory inspection, live stderr streaming, JSON-mode logging,
-and the layered "I want to debug X → look at Y" mapping, see
-[`observability.md`](./observability.md).
-
-For per-call cost caps, per-tenant budgets, provider fallback, and
-rate-limit handling, see
-[`recipes/cost-and-reliability.md`](./recipes/cost-and-reliability.md).
-
-For offline batch processing (~50% pricing, 24h SLA) on Anthropic /
-OpenAI, see [`recipes/batch.md`](./recipes/batch.md).
+`web.search` defaults to **DuckDuckGo** (`ddg`), which needs no key. The tars
+config has no section for it: a `[web_search]` section never took effect (no
+command read it) and now fails to load as an unknown field. An embedder that
+wants a keyed backend builds the tool itself with
+`WebSearchTool::with_config(config)`, where `config` is a sisurf `SearchConfig`
+whose API key the embedder has already filled in.
 
 ## When NOT to use tars
 
-- **One provider, one model, one prompt shape.** A thirty-line
-  `requests.post(...)` is fine. The value here compounds with scale —
-  several providers, retries, a cache, a record you can read afterwards —
-  and below that it is overhead you are paying for nothing.
-- **You want an agent framework.** There is no loop here, and that is on
-  purpose. If you want something that plans and decides, you want a
-  different library, or you want to write the loop yourself and call this
-  one from inside it.
-- **You want a hosted dashboard.** The event stores are SQLite files on
-  your disk and the CLI reads them; there is no UI and none is planned in
-  this repo.
-- **You want a chain library.** These are primitives. If what you are
-  writing is "another LangChain example", you do not need tars.
-- **You want streaming into a browser.** `LlmService::call` gives you the
-  stream; SSE proxying is yours.
+- **You only call one provider, one model, one prompt shape.** A
+  thirty-line HTTP call is fine; tars's value compounds with scale
+  (multiple providers, retries, observability, multi-tenant). Below that,
+  it's overhead.
+- **You need a hosted dashboard / UI today.** tars is a library; it gives
+  you the data in the call log, but no UI.
+- **You need streaming chat UI in the browser.** Rust's `LlmService::call`
+  streams events, but the Node binding returns whole responses, and tars
+  ships no HTTP/SSE gateway; SSE proxying is yours to build.
+- **You want an agent framework or a library of pre-built chains.** tars
+  makes the call; the control flow is yours.
 
 ## Where to go next
 
-- **One page per provider** — [`providers/`](./providers/): auth, models,
-  and the quirks each one actually has.
-- **Batching, retries, budgets** — [`recipes/`](./recipes/).
-- **Seeing what a run did** — [`observability.md`](./observability.md).
-- **Where does this code belong?** — each crate's `README.md` is a
-  placement contract: its role, its effect budget, the dependencies it may
-  and may not take, and the one reason it should ever change.
-- **What actually shipped** — [CHANGELOG.md](../CHANGELOG.md). If a doc
-  here disagrees with the code, the code is right and the doc is a bug.
+- [`providers/`](./providers/) — the providers that need more than an API key
+- [`recipes/`](./recipes/) — cost, reliability and batch
+- [`observability.md`](./observability.md) — what a call left behind
+- [`eval-methodology.md`](./eval-methodology.md) — comparing two runs

@@ -1,22 +1,16 @@
-//! tars-config — declarative configuration for TARS Runtime.
+//! Parses and validates the tars config: `<home>/config.toml` becomes one typed [`Config`],
+//! installed once per process, with the built-in provider defaults and the model knowledge base
+//! merged under it.
 //!
-//! Under process isolation, the shape is a global immutable Config
-//! loaded once from `~/.tars` (one tenant per process) plus a small
-//! per-workspace `[roles]` overlay. This ships only the pieces needed
-//! to **declaratively configure providers**.
-//!
-//! Everything else (tenants, pipeline order, lock constraints, hot
-//! reload, secret manager backends) lands in subsequent iterations.
-//!
-//! The crate intentionally has **no provider knowledge beyond schema** —
-//! it doesn't know how to instantiate a [`ProviderConfig::OpenAi`]
-//! into an `OpenAiProvider`. That happens in `tars-provider`'s
-//! `ProviderRegistry::from_config()` factory, which depends on us.
+//! It knows each provider's config schema and nothing about building a provider: turning a
+//! [`ProviderConfig`] into one is `tars-llm`'s `ProviderRegistry::from_config`.
+
+#![deny(clippy::print_stdout, clippy::print_stderr)]
 
 pub mod builtin;
+pub mod config;
 pub mod error;
 pub mod global;
-pub mod manager;
 pub mod model_catalog;
 pub mod model_kb;
 pub mod model_library;
@@ -24,39 +18,35 @@ pub mod model_spec;
 pub mod paths;
 pub mod providers;
 pub mod roles;
-pub mod routing;
 pub mod sandbox;
-pub mod web_search;
 
 pub use builtin::{
-    built_in_provider_defaults, default_anthropic, default_claude_cli, default_gemini,
-    default_openai, default_vllm, merge_builtin_with_user,
+    built_in_provider_defaults, built_in_provider_ids, default_anthropic, default_claude_cli,
+    default_gemini, default_openai, default_vllm, merge_builtin_with_user,
 };
+pub use config::Config;
 pub use error::ConfigError;
+pub use global::{LoadedHome, init_tars, install, load_tars};
 pub use global::{
-    get_boarddb_path, get_bodydb_path, get_cachedb_path, get_durabledb_path, get_eventdb_path,
+    ResolveStoreDirError, durable_store_path, get_bodydb_path, get_eventdb_path,
     get_pipelinedb_path,
 };
-pub use global::{init_tars, resolve_home};
-pub use manager::{Config, ConfigManager};
 pub use model_catalog::{
     CatalogError, ModelCatalog, OutputLimitRule, capabilities_for, catalog, install_catalog,
     load_catalog,
 };
 pub use model_kb::{
     BillingModel, KbModality, MODEL_KB, ModelEntry, ModelKb, ModelStatus, ModelTier,
-    PromptCacheSpec, ProviderCapabilities, ProviderDef, ProviderModels, Thinking, ThinkingParam,
+    ProviderCapabilities, ProviderDef, ProviderModels, Thinking, ThinkingParam, Vendor, VendorDef,
 };
-pub use model_spec::{ModelSpec, ModelSpecError, ResolvedModel};
-pub use paths::default_config_path;
+pub use model_spec::{
+    ModelSpec, ParseModelSpecError, ResolveModelSpecError, ResolvedModel, SeriesPattern,
+};
+pub use paths::{default_config_path, resolve_home};
 pub use providers::{
-    AntigravityEffortConfig, CapabilitiesOverrides, ClaudeCliEffortConfig, ClaudeCliToolsConfig,
-    ClaudeCliToolsKeyword, CodexSandboxConfig, ProviderConfig, ProvidersConfig,
+    AntigravityEffortConfig, AuthSetting, CapabilitiesOverrides, ClaudeCliEffortConfig,
+    ClaudeCliToolsConfig, ClaudeCliToolsKeyword, CodexSandboxConfig, OpenAiStructuredOutput,
+    ProviderConfig, ProviderKind, ProvidersConfig,
 };
 pub use roles::RoleConfig;
-pub use routing::RoutingConfig;
 pub use sandbox::{SandboxConfig, SandboxModeConfig, resolve_policy};
-// `[web_search]` schema is owned by sisurf; we re-export it so consumers wire
-// the resolved backend without a direct sisurf-core dependency of their own.
-pub use sisurf_core::SearchConfig;
-pub use web_search::{BRAVE_API_KEY_ENV, GOOGLE_CSE_API_KEY_ENV, inject_search_keys};

@@ -1,6 +1,6 @@
 # Cost & reliability stack — recipes
 
-How to actually use the cost & reliability middlewares (roadmap §1–§4):
+How to actually use the cost & reliability middlewares:
 
 | Middleware | Stateless? | Solves |
 |---|---|---|
@@ -14,8 +14,7 @@ How to actually use the cost & reliability middlewares (roadmap §1–§4):
 > another" is now a **caller composition** — build one `LlmService` per
 > provider and, on a typed `Err`, try the next (Recipe 3).
 
-The design rationale is in
-`docs/roadmap.md`. This doc is the **how to use it**
+This doc is the **how to use it**
 cookbook — copy-paste recipes by complexity, then gotchas.
 
 ---
@@ -26,8 +25,8 @@ The minimum stack that solves Cando-Peter's `<$0.05/draft` requirement.
 No tenant tracking; each call is checked independently.
 
 ```rust
-use tars_pipeline::{
-    LlmService, PerCallBudgetMiddleware, RetryMiddleware, TelemetryMiddleware,
+use tars_llm::{
+    LlmError, LlmService, PerCallBudgetMiddleware, RetryMiddleware, TelemetryMiddleware,
 };
 
 let provider = registry.get(&ProviderId::new("anthropic")).unwrap();
@@ -40,9 +39,9 @@ let svc = LlmService::builder(provider, "claude-sonnet-4-5")
     .layer(RetryMiddleware::default())
     .build();
 
-match svc.call(req, ctx).await {
+match svc.call(req, ctx).await.result {
     Ok(stream) => { /* consume */ }
-    Err(ProviderError::BudgetExceeded) => {
+    Err(LlmError::BudgetExceeded) => {
         // Pre-call estimate exceeded the cap; nothing was sent.
     }
     Err(other) => { /* normal error path */ }
@@ -50,11 +49,11 @@ match svc.call(req, ctx).await {
 ```
 
 **What the user sees**: if `(chars/4 × input_pricing + max_output × output_pricing)`
-exceeds `0.05`, the call returns `ProviderError::BudgetExceeded`
+exceeds `0.05`, the call's `result` is `LlmError::BudgetExceeded`
 **before** any network round-trip. The pricing comes from the provider's
-`Capabilities` (Anthropic's official pricing for that model).
+`ProviderProfile` (Anthropic's official pricing for that model).
 
-**Subscription backends** (`claude_cli`, `gemini_cli`, `codex_cli`) have
+**Subscription backends** (`claude_cli`, `codex_cli`, `antigravity`) have
 `Pricing::default()` (all zeros). The middleware detects this, logs
 one `tracing::warn` per service, and passes through. No surprises.
 
@@ -67,7 +66,7 @@ multi-tenant production setup.
 
 ```rust
 use std::sync::Arc;
-use tars_pipeline::{
+use tars_llm::{
     LlmService, PerCallBudgetMiddleware, TenantBudgetMiddleware,
     InMemoryBudgetStore, RetryMiddleware, TelemetryMiddleware,
 };
@@ -116,9 +115,9 @@ adopt today.
 
 ```rust
 use std::sync::Arc;
-use tars_pipeline::{
+use tars_llm::{
     LlmService, PerCallBudgetMiddleware, TenantBudgetMiddleware,
-    InMemoryBudgetStore, RetryMiddleware, TelemetryMiddleware, CacheLookupMiddleware,
+    InMemoryBudgetStore, RetryMiddleware, TelemetryMiddleware,
 };
 use tars_types::ErrorClass;
 
@@ -131,13 +130,10 @@ let store = Arc::new(InMemoryBudgetStore::new());
 store.set(&TenantId::new("acme"), 100.00).await;
 
 // One service per provider. Each carries its OWN correctly-priced budget
-// layers (Recipe gotcha #7) plus telemetry / cache / retry.
+// layers (Recipe gotcha #7) plus telemetry / retry.
 let stack = |p: Arc<dyn LlmProvider>, model: &str| {
     LlmService::builder(p.clone(), model)
         .layer(TelemetryMiddleware::new())                          // outermost
-        .layer(CacheLookupMiddleware::new(cache_registry.clone(),   // free on hit
-                                          cache_factory.clone(),
-                                          ProviderId::new(model)))
         .layer(PerCallBudgetMiddleware::new(0.05, p.capabilities())) // hard cap
         .layer(TenantBudgetMiddleware::new(store.clone(), p.capabilities()))
         .layer(RetryMiddleware::default())                          // single-provider flakes
@@ -155,7 +151,7 @@ let chain = [
 let mut last_err = None;
 let mut got = None;
 for svc in &chain {
-    match svc.call(req.clone(), ctx.clone()).await {
+    match svc.call(req.clone(), ctx.clone()).await.result {
         Ok(stream) => { got = Some(stream); break; }
         Err(e) if matches!(e.class(), ErrorClass::Permanent) => return Err(e),
         Err(e) => { last_err = Some(e); continue; }
@@ -168,8 +164,7 @@ let stream = got.ok_or_else(|| last_err.unwrap())?;
 
 | Scenario | Behavior |
 |---|---|
-| Normal call | Telemetry → Cache miss → Budget OK → Tenant OK → Retry → Opus → response |
-| Cache hit | Telemetry → Cache hit → response (everything below cache is skipped, **including budget checks** — cache hits are free) |
+| Normal call | Telemetry → Budget OK → Tenant OK → Retry → Opus → response |
 | Opus over per-call budget | Opus service rejects with `BudgetExceeded` → caller loop catches → tries Sonnet (cheaper pricing → fits) → response |
 | Opus 429 with short Retry-After | Opus's Retry sleeps and retries on Opus → success |
 | Opus 429 with 30+ min Retry-After | Opus's `RetryMiddleware` bubbles past `max_wait` → caller loop catches → tries Sonnet → if also 429, tries vllm_local → response |
@@ -184,18 +179,16 @@ of them:
 
 ```
 for each service in priority order:      ← caller loop = "fallback"
-  Telemetry          ← sees everything, even cache hits
-    Cache            ← short-circuits cheaply
-      PerCallBudget  ← stateless USD upper-bound check
-        TenantBudget ← stateful per-tenant debit
-          Retry      ← same-provider short flakes; bubbles long waits to the loop
-            Provider call
+  Telemetry          ← sees everything
+    PerCallBudget    ← stateless USD upper-bound check
+      TenantBudget   ← stateful per-tenant debit
+        Retry        ← same-provider short flakes; bubbles long waits to the loop
+          Provider call
 ```
 
-The two important non-obvious orderings:
+The important non-obvious ordering:
 
-1. **Cache outside Budget.** Cache hits are free — no point pre-checking budget for them.
-2. **Fallback (the loop) outside Retry.** Each service gets its own full retry budget on its own provider before the loop moves on. Retrying *inside* one service and falling back *across* services are separate concerns — the reverse would burn fallback hops on a single 429.
+- **Fallback (the loop) outside Retry.** Each service gets its own full retry budget on its own provider before the loop moves on. Retrying *inside* one service and falling back *across* services are separate concerns — the reverse would burn fallback hops on a single 429.
 
 ---
 
@@ -207,7 +200,7 @@ backend.
 
 ```rust
 use async_trait::async_trait;
-use tars_pipeline::{BudgetStore, BudgetStoreError};
+use tars_llm::{BudgetStore, BudgetStoreError};
 use tars_types::TenantId;
 
 struct RedisBudgetStore { conn: redis::aio::ConnectionManager }
@@ -243,7 +236,7 @@ let mw = TenantBudgetMiddleware::new(store, caps);
 - `remaining(tenant)` returning `None` = unconfigured = unlimited (don't reject).
 - `debit(tenant, amount)` returning `None` = same — the tenant became unconfigured between pre-check and debit. Log and continue.
 - Either method returning `Err(BudgetStoreError::Backend(_))`:
-  - On `remaining`: middleware **fails closed** with `ProviderError::Internal`. A store outage cannot silently uncap a tenant.
+  - On `remaining`: middleware **fails closed** with `LlmError::BudgetStoreFailed`. A store outage cannot silently uncap a tenant.
   - On `debit`: middleware logs at `error` level but **does not** fail the call (the user already got their response). Operators investigate.
 
 ---
@@ -273,14 +266,14 @@ rejected if the pre-check estimate is `$0.06`. Set caps with headroom.
 ### 2. `max_output_tokens = None` falls back to capability default
 
 If `req.max_output_tokens` is `None`, the worst-case bound becomes
-`Capabilities.max_output_tokens` (8192 for most Sonnet/Opus). This
+`ProviderProfile.max_output_tokens` (8192 for most Sonnet/Opus). This
 makes "open-ended" requests look expensive. **Set `max_output_tokens`
 explicitly** on cost-sensitive call paths — it's the single biggest
 knob you control.
 
 ### 3. Subscription backends bypass budgets
 
-`claude_cli` / `gemini_cli` / `codex_cli` have `Pricing::default()`
+`claude_cli` / `codex_cli` / `antigravity` have `Pricing::default()`
 (zeros). Both budget middlewares detect this, warn once, and pass
 through. **There is no way to cap subscription calls in USD** —
 that's not what the subscription billing model exposes. If you need
@@ -291,20 +284,21 @@ caps, use the HTTP API path.
 `ErrorClass` is coarse: `BudgetExceeded` and `ContextTooLong` are both
 `Permanent`, yet you may want to fall through to a cheaper/bigger
 provider on those while surfacing a genuine `invalid_request`
-immediately. In the caller loop, branch on `ProviderError::kind()` (a
-typed [`ProviderErrorKind`](../../crates/tars-types/src/error.rs)), not
+immediately. In the caller loop, branch on `LlmError::kind()` (a
+typed [`LlmErrorKind`](../../crates/tars-types/src/providers/error.rs)), not
 just `class()`:
 
 ```rust
 let fall_through = matches!(
     e.kind(),
     // cost / capacity — another provider may succeed
-    ProviderErrorKind::BudgetExceeded
-        | ProviderErrorKind::ContextTooLong
-        | ProviderErrorKind::RateLimited
-        | ProviderErrorKind::ModelOverloaded
-        | ProviderErrorKind::CircuitOpen
-        | ProviderErrorKind::Network,
+    LlmErrorKind::BudgetExceeded
+        | LlmErrorKind::ContextTooLong
+        | LlmErrorKind::RateLimited
+        | LlmErrorKind::ModelOverloaded
+        | LlmErrorKind::ServerError
+        | LlmErrorKind::Unavailable
+        | LlmErrorKind::Network,
 );
 if fall_through { last_err = Some(e); continue; } else { return Err(e); }
 ```
@@ -349,33 +343,40 @@ Every layer emits `tracing` events. Pipe stderr to JSON for log
 aggregators:
 
 ```bash
-tars run --log-format json ... 2>tars.jsonl
+tars eval run --corpus cases/ --tenant T -vv --log-format json 2>tars.jsonl
 ```
+
+(Inside your own program, the same records come out once the process installs
+the subscriber: `tars_telemetry::init` in Rust, `tars.init_logging()` in Python.)
 
 Then:
 
 ```bash
-# Budget rejections in the last hour
-jq -c 'select(.message | test("budget.*exceeded"))' tars.jsonl
+# Budget rejections. TelemetryMiddleware reports a call refused by a budget layer it wraps (as in
+# Recipe 1, where it is layered first, so outermost) as `llm.call.failed` with
+# `error = "budget exceeded"`. A budget layer outside telemetry refuses before telemetry sees the
+# call, so nothing is logged; `tars eval run` has no budget layer, so its log has none.
+jq -c 'select(.event=="llm.call.failed" and (.error | test("budget exceeded")))' tars.jsonl
 
 # Fallback hops fired and why — the pipeline no longer emits these; the
 # caller loop owns fallback, so log the hop yourself (e.g. tracing::warn!)
 # and grep your own message here.
 
-# Retry exhaustions
-jq -c 'select(.message | test("retry.*exhausted|retry.*bubbling"))' tars.jsonl
+# Retry exhaustions (debug level, so `-vv`)
+jq -c 'select(.message | test("retry: exhausted|retry: wait exceeds"))' tars.jsonl
 ```
 
-Persistent events (one row per LLM call, with usage and latency) live
-in `~/.tars/events/pipeline_events.db` and are queryable via
-`tars events list / show`. See
+Persistent events (one `llm_call` row per LLM call, with usage and latency)
+are written only by a pipeline given an event store directory
+(`event_store_dir=...` in Python); `tars events list / show` reads them, from
+`events/` in the tars home unless `--store-dir` names another directory. See
 [`observability.md`](../observability.md) for the full guide.
 
 ---
 
 ## See also
 
-- `../roadmap.md` — design rationale; §5 batch mode (Anthropic/OpenAI shipped, Gemini deferred)
+- [`batch.md`](./batch.md) — batch mode (Anthropic/OpenAI shipped, Gemini deferred)
 - [`../USER-GUIDE.md`](../USER-GUIDE.md) — the calling shapes that these middlewares sit on top of
 - [`../observability.md`](../observability.md) — how to watch what your stack is actually doing
 - [`../providers/claude-cli.md`](../providers/claude-cli.md) — subscription backend caveat (no USD caps)

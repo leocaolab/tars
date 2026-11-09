@@ -1,132 +1,199 @@
-//! Process-global spine for tars-node.
-//!
-//! [`init`] is the composition root: it installs the global config from
-//! `<home>/config.toml` and eagerly builds the one provider registry.
-//! `provider` / `pipeline` resolve a role against them with a single `[roles]`
-//! lookup — a role names a `(provider, model)` pair, or it is an error. No
-//! fallback chain, no guessing.
+//! Resolves roles against the process-global config. [`init`] loads `<home>/config.toml` and
+//! builds the provider registry once; [`provider`] and [`pipeline`] look a role up in `[roles]`,
+//! and a role that is not there is an error. A handle does not take the role's model: the caller
+//! names the model on each call, and [`role_model`] reads the role's for a caller that wants it.
 //!
 //! ```js
 //! const tars = require('tars');
 //! tars.init();
-//! const p = tars.pipeline('critic', { session: 's', tags: ['dogfood'] });
+//! const p = tars.pipeline('critic', { tenant: 'acme', session: 's', tags: ['dogfood'] });
 //! await p.complete({ model: '…', user: 'review this' });
 //! ```
-//!
-//! NOTE: this public surface is PROVISIONAL — a fuller SDK redesign (and a
-//! separate model-decoupling change) lands later. It uses the current
-//! registry / pipeline / `ChatRequest` APIs unchanged.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use napi_derive::napi;
 
-use tars_config::{Config, resolve_home};
-use tars_pipeline::{ChainOpts, LlmService};
-use tars_provider::{LlmProvider, ProviderRegistry};
-use tars_types::{ProviderId, RequestContext};
+use tars_config::{Config, ConfigError, resolve_home};
+use tars_llm::LlmService;
+use tars_llm::{LlmProvider, ProviderRegistry, RegistryError};
+use tars_types::Caller;
 
-use crate::ctx::{JsContext, build_context, default_context};
+use crate::ctx::{JsContext, build_context};
 use crate::errors::{
-    JsError, config_to_js, provider_not_registered_to_js, registry_to_js, unknown_role_to_js,
+    JsError, REGISTRY_ERROR, config_to_js, provider_not_registered_to_js, registry_to_js,
+    unknown_role_to_js,
 };
 use crate::{CompleteOptions, CompleteResult, Pipeline, drive_complete};
 
-/// Install the process-global config and eagerly build the shared provider
-/// registry. A bad provider / key surfaces here, at startup, not on the first
-/// role resolution.
+/// The registry [`init`] built from the config it installed. It lives here, in the binding,
+/// because the Node process is the composition root: one `init()` per process.
+static REGISTRY: OnceLock<ProviderRegistry> = OnceLock::new();
+
+/// Installs the process-global config and builds the provider registry, so a bad provider or key
+/// fails here at startup rather than at the first role lookup.
 ///
-/// **Not idempotent.** A second `init()` rejects with `TarsConfigError`: the
-/// process already runs against a config this call did not provide.
+/// A failed `init()` installs nothing and can be called again. **Not idempotent** once it
+/// succeeded: a second `init()` rejects with `TarsConfigError`, since the process already runs
+/// against a config this call did not provide.
+///
+/// # Errors
+///
+/// Rejects with `TarsConfigError` when the config does not load or is already installed, and
+/// with `TarsRegistryError` when a provider cannot be built.
 #[napi]
 pub fn init(home: Option<String>) -> napi::Result<(), String> {
-    tars_config::global::init_tars(home.map(PathBuf::from)).map_err(config_to_js)?;
-    ProviderRegistry::init().map_err(registry_to_js)?;
-    Ok(())
+    if REGISTRY.get().is_some() {
+        return Err(config_to_js(ConfigError::AlreadyInitialized));
+    }
+    let loaded = tars_config::load_tars(home.map(PathBuf::from)).map_err(config_to_js)?;
+    let built =
+        ProviderRegistry::from_config_default(loaded.config.providers(), &loaded.catalog, None)
+            .map_err(registry_to_js)?;
+    tars_config::install(loaded).map_err(config_to_js)?;
+    // The config was installed just above, so a registry already here means a concurrent
+    // `init()` won: the same refusal a second `install` gives.
+    REGISTRY
+        .set(built)
+        .map_err(|_| config_to_js(ConfigError::AlreadyInitialized))
 }
 
-/// Whether [`init`] has run (config installed and registry built).
+/// Returns whether [`init`] has run.
 #[napi]
 pub fn is_initialized() -> bool {
-    Config::is_loaded() && ProviderRegistry::try_global().is_some()
+    REGISTRY.get().is_some()
 }
 
-/// Resolve the tars home dir (`home` > `$TARS_HOME` > `~/.tars`) without
-/// loading anything. `None` only when no home is discoverable.
+/// Returns the tars home (`home`, else `$TARS_HOME`, else `~/.tars`) without loading anything;
+/// `None` when none can be found.
 #[napi]
 pub fn tars_home(home: Option<String>) -> Option<String> {
     resolve_home(home.map(PathBuf::from)).map(|p| p.to_string_lossy().into_owned())
 }
 
-/// Resolve `role` → a raw [`Provider`] (layer 1) against the process-global
-/// config + registry. Optional `ctx` binds an explicit call context.
-#[napi]
+/// Returns the raw provider `role` maps to, with no middleware, making its calls under `ctx`.
+///
+/// # Errors
+///
+/// Rejects with `TarsNoTenant` or `TarsInvalid*` for a missing or bad `ctx`, `TarsRegistryError`
+/// before [`init`], `TarsUnknownRole` for a role not in `[roles]`, and
+/// `TarsProviderNotRegistered` for a role whose provider the registry does not hold.
+#[napi(ts_args_type = "role: string, ctx: JsContext")]
 pub fn provider(role: String, ctx: Option<JsContext>) -> napi::Result<Provider, String> {
-    let (_id, prov, model) = resolve_global(&role)?;
-    let inner = LlmService::of(prov, model);
+    let ctx = build_context(ctx)?;
+    let (_id, provider) = resolve_global(&role)?;
     Ok(Provider {
         role,
-        inner,
-        ctx: ctx.map(build_context).unwrap_or_else(default_context),
+        provider,
+        ctx,
     })
 }
 
-/// Resolve `role` → a middleware-wrapped [`Pipeline`] (the canonical default
-/// chain) against the process-global config + registry. Optional `ctx` binds
-/// an explicit call context.
-#[napi]
+/// Returns the provider `role` maps to behind the default chain, making its calls under `ctx`.
+///
+/// # Errors
+///
+/// Rejects as [`provider`] does.
+#[napi(ts_args_type = "role: string, ctx: JsContext")]
 pub fn pipeline(role: String, ctx: Option<JsContext>) -> napi::Result<Pipeline, String> {
-    let (id, prov, model) = resolve_global(&role)?;
-    let opts = ChainOpts::new(ProviderId::new(id.clone()));
-    let inner = LlmService::default_chain(prov, model, opts);
-    let ctx = ctx.map(build_context).unwrap_or_else(default_context);
-    Ok(Pipeline::from_service(id, inner, ctx))
+    let ctx = build_context(ctx)?;
+    let (id, provider) = resolve_global(&role)?;
+    Ok(Pipeline::from_provider(id, provider, ctx))
 }
 
-/// One `[roles]` lookup, no guessing. Two distinct failures, each naming what
-/// actually went wrong. The role's model may be a `<series>@latest` spec; it
-/// is resolved here, before binding, so the service carries a concrete id.
-fn resolve_global(
-    role: &str,
-) -> std::result::Result<(String, Arc<dyn LlmProvider>, String), JsError> {
-    let registry = ProviderRegistry::global().map_err(registry_to_js)?;
-    let cfg = Config::get();
+/// Returns the provider id `role` maps to.
+///
+/// # Errors
+///
+/// Rejects as [`provider`] does, less the `ctx` codes.
+#[napi]
+pub fn role_provider(role: String) -> napi::Result<String, String> {
+    Ok(resolve_global(&role)?.0)
+}
+
+/// Returns the model `role` names, a `<series>@latest` spec resolved to the id it names today. A
+/// handle does not use it unless the caller passes it to `complete({ model })`.
+///
+/// # Errors
+///
+/// Rejects with `TarsUnknownRole` for a role not in `[roles]`, and with `TarsRegistryError`
+/// before [`init`] or when the spec does not resolve.
+#[napi]
+pub fn role_model(role: String) -> napi::Result<String, String> {
+    let (registry, cfg) = installed()?;
     let entry = cfg
-        .roles
+        .roles()
+        .get(&role)
+        .ok_or_else(|| unknown_role_to_js(&role))?;
+    registry
+        .resolve_model(&entry.provider, Some(&entry.model))
+        .map_err(registry_to_js)
+}
+
+/// Returns the registry and the config [`init`] installed, or `TarsRegistryError` before it ran.
+/// It never panics: a panic in a sync napi function can take the Node process down.
+fn installed() -> std::result::Result<(&'static ProviderRegistry, &'static Config), JsError> {
+    let registry = REGISTRY.get().ok_or_else(not_initialized)?;
+    let cfg = Config::try_get().ok_or_else(not_initialized)?;
+    Ok((registry, cfg))
+}
+
+fn not_initialized() -> JsError {
+    napi::Error::new(
+        REGISTRY_ERROR.to_string(),
+        "tars is not initialized — call init() first".to_string(),
+    )
+}
+
+/// Looks `role` up in `[roles]` and then in the registry; each miss is its own error.
+fn resolve_global(role: &str) -> std::result::Result<(String, Arc<dyn LlmProvider>), JsError> {
+    let (registry, cfg) = installed()?;
+    let entry = cfg
+        .roles()
         .get(role)
         .ok_or_else(|| unknown_role_to_js(role))?;
-    let prov = registry
-        .get(&entry.provider)
-        .ok_or_else(|| provider_not_registered_to_js(role, &entry.provider))?;
-    let model = registry
-        .resolve_model(&entry.provider, Some(&entry.model))
-        .map_err(registry_to_js)?;
-    Ok((entry.provider.to_string(), prov, model))
+    let prov = registry.get(&entry.provider).map_err(|e| match e {
+        RegistryError::UnknownProvider(_) => provider_not_registered_to_js(role, &entry.provider),
+        other => registry_to_js(other),
+    })?;
+    Ok((entry.provider.to_string(), prov))
 }
 
-/// Layer 1 provider handle — a raw backend bound to a role + call context.
-/// Same `complete()` surface as [`Pipeline`] so a caller can swap one for the
-/// other.
+/// A raw provider, with no middleware, bound to a role and a call context. Its `complete()` is the
+/// same as [`Pipeline`]'s, so either stands in for the other.
 #[napi]
 pub struct Provider {
     role: String,
-    inner: LlmService,
-    ctx: RequestContext,
+    provider: Arc<dyn LlmProvider>,
+    ctx: Caller,
 }
 
 #[napi]
 impl Provider {
-    /// The role name this provider was resolved for.
+    /// Returns the role this provider was resolved for.
     #[napi(getter)]
     pub fn role(&self) -> String {
         self.role.clone()
     }
 
-    /// Single non-streaming chat completion against the raw provider. Re-scopes
-    /// `RUN_CONTEXT` with this handle's ctx at the boundary.
+    /// Makes one non-streaming chat call on the raw provider.
     #[napi]
     pub async fn complete(&self, opts: CompleteOptions) -> napi::Result<CompleteResult> {
-        drive_complete(self.inner.clone(), self.ctx.clone(), opts).await
+        let service = LlmService::of(Arc::clone(&self.provider), opts.model.clone());
+        drive_complete(service, &self.ctx, opts).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_role_lookup_before_init_is_a_registry_error_not_a_panic() {
+        let err = role_model("critic".to_string()).unwrap_err();
+        assert_eq!(err.status, "TarsRegistryError");
+        let err = role_provider("critic".to_string()).unwrap_err();
+        assert_eq!(err.status, "TarsRegistryError");
     }
 }

@@ -4,35 +4,34 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Persistent stores for the TARS Runtime — AgentEventLog (M3), Blackboard, DurableStore."
+description = "The TARS durable store (a task queue and each task's trajectory, in SQLite or memory) and the SQLite handle the stores open."
 
 [lints]
 workspace = true
 
 [dependencies]
+# The durable store's vocabulary: tasks, statuses, events, leases, tenants.
 tars-types = { path = "../tars-types" }
-
-# Async
-tokio.workspace = true
-async-trait.workspace = true
-
-# Serialization
-serde.workspace = true
-serde_json.workspace = true
-# Stream combinators for the read-only reader, which streams rows to a ceiling
-# rather than collecting a whole table.
-futures.workspace = true
 
 # Persistence
 sqlx.workspace = true
 
-# XDG path resolution for default file locations
-dirs.workspace = true
-
-# Errors / tracing
+# Errors
 thiserror.workspace = true
+
+# The durable store's traits and its journal port are async traits; `MemDurableStore` holds its state under a
+# tokio mutex so a transaction can hold it across an await.
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
+# A store seals on its own schedule, a task spawned on the handle its opener gives, and logs
+# when sealing starts failing and when it recovers.
 tracing.workspace = true
+tars-utils = { path = "../tars-utils" }
+# A task's goal, result and journal payloads are opaque JSON to the durable store.
+serde_json.workspace = true
+# Mints a claim's `LeaseToken`, a durable store's id, and the name a staged journal file gets.
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tempfile = "3"

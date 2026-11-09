@@ -20,16 +20,21 @@
 //!
 //! Run:
 //! ```bash
-//! cargo run -p tars-runtime --example testing
+//! cargo run -p tars-examples --example testing
 //! ```
 //! (In your crate these would be `#[test]`s; here they're a runnable
 //! `main` that panics on the first failed assertion.)
 
 use std::sync::Arc;
+use tars_types::ProviderId;
 
-use tars_pipeline::{LlmService, complete_sync};
-use tars_provider::{CannedResponse, MockProvider};
-use tars_types::{ChatRequest, ProviderError, RequestContext};
+use tars_llm::LlmError;
+use tars_llm::{CannedResponse, MockProvider};
+use tars_llm::{LlmService, complete_async};
+use tars_types::{Caller, ChatRequest};
+
+/// An example's tenant: a real deployment passes whose work the run is.
+const EXAMPLE_TENANT: &str = "example";
 
 // ── The agent under test ────────────────────────────────────────────
 //
@@ -46,10 +51,18 @@ impl ReviewAgent {
     /// Send one classification prompt; return the model's verdict
     /// (trimmed). Propagates provider failures so callers — and tests —
     /// can react to them.
-    fn classify(&self, code: &str) -> Result<String, ProviderError> {
+    async fn classify(&self, code: &str) -> Result<String, LlmError> {
         let prompt = format!("Reply with exactly one word — ok, bug, or unsure:\n{code}");
         let req = ChatRequest::user(prompt);
-        let resp = complete_sync(self.llm.clone(), req, RequestContext::test_default())?;
+        let resp = complete_async(
+            self.llm.clone(),
+            req,
+            Caller::new(
+                tars_types::TenantId::new(EXAMPLE_TENANT),
+                tars_types::TraceId::new("testing"),
+            ),
+        )
+        .await?;
         Ok(resp.text.trim().to_string())
     }
 }
@@ -65,13 +78,13 @@ fn agent_with(mock: &Arc<MockProvider>) -> ReviewAgent {
 
 // ── 1. Deterministic output + request inspection ────────────────────
 
-fn deterministic_output() {
-    let mock = MockProvider::new("mock", CannedResponse::text("bug"));
+async fn deterministic_output() {
+    let mock = MockProvider::new(ProviderId::new("mock"), CannedResponse::text("bug"));
     let agent = agent_with(&mock);
 
     // Scripted answer → identical output every run, no network.
-    assert_eq!(agent.classify("fn f() { panic!() }").unwrap(), "bug");
-    assert_eq!(agent.classify("fn f() { panic!() }").unwrap(), "bug");
+    assert_eq!(agent.classify("fn f() { panic!() }").await.unwrap(), "bug");
+    assert_eq!(agent.classify("fn f() { panic!() }").await.unwrap(), "bug");
 
     // You can also assert on what the agent SENT the model — that its
     // prompt assembly is correct, not just its output parsing.
@@ -87,13 +100,16 @@ fn deterministic_output() {
 
 // ── 2. Error-path testing (no flaky provider required) ──────────────
 
-fn error_injection() {
+async fn error_injection() {
     // Script a provider failure deterministically, instead of waiting
     // for a real 500 / timeout to test your error handling.
-    let mock = MockProvider::new("mock", CannedResponse::Error("provider exploded".into()));
+    let mock = MockProvider::new(
+        ProviderId::new("mock"),
+        CannedResponse::Error("provider exploded".into()),
+    );
     let agent = agent_with(&mock);
 
-    let result = agent.classify("anything");
+    let result = agent.classify("anything").await;
     assert!(
         result.is_err(),
         "scripted provider error must surface to the caller"
@@ -104,18 +120,18 @@ fn error_injection() {
 
 // ── 3. Multi-turn: vary the script across calls ─────────────────────
 
-fn multi_turn() {
+async fn multi_turn() {
     // `set_response` swaps the canned answer between calls — pin down an
     // agent that behaves differently turn to turn (e.g. unsure → decisive
     // after a sharper follow-up), still fully deterministic.
-    let mock = MockProvider::new("mock", CannedResponse::text("unsure"));
+    let mock = MockProvider::new(ProviderId::new("mock"), CannedResponse::text("unsure"));
     let agent = agent_with(&mock);
 
-    assert_eq!(agent.classify("ambiguous code").unwrap(), "unsure");
+    assert_eq!(agent.classify("ambiguous code").await.unwrap(), "unsure");
 
     mock.set_response(CannedResponse::text("bug"));
     assert_eq!(
-        agent.classify("ambiguous code, second look").unwrap(),
+        agent.classify("ambiguous code, second look").await.unwrap(),
         "bug"
     );
 
@@ -124,10 +140,11 @@ fn multi_turn() {
     println!("✓ multi_turn — scripted turn-by-turn behaviour, deterministic");
 }
 
-fn main() {
-    deterministic_output();
-    error_injection();
-    multi_turn();
+#[tokio::main]
+async fn main() {
+    deterministic_output().await;
+    error_injection().await;
+    multi_turn().await;
 
     println!(
         "\nAll mock-LLM agent tests passed — no network, no API key, instant + repeatable.\n\

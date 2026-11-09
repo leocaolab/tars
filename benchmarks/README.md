@@ -11,7 +11,7 @@ clean. Two activities, one tree:
 ```
 benchmarks/
   corpus/          inputs — committed fixtures. One dir per case, each with input.txt
-    config_json/   (+ optional system.txt, expected.txt — see `tars eval` --help)
+    config_json/   (+ optional system.txt, expected.txt — see `tars eval run --help`)
     langs_json/
     user_json/
   scripts/         the runners
@@ -20,7 +20,7 @@ benchmarks/
   baselines/       curated reference results — COMMITTED. The numbers `eval diff`
     speed/<date>/<model>.txt        compares a fresh run against. Promote a keeper
     eval/<model>/{manifest,...}     here by hand; don't dump every run.
-  runs/            scratch output — GITIGNORED. `tars eval` and bench-local.sh
+  runs/            scratch output — GITIGNORED. `tars eval run` and bench-local.sh
                    write here by default; regenerable, never committed.
 ```
 
@@ -41,7 +41,7 @@ do you copy it into `baselines/`.
 
 ```bash
 # build the binary that has `bench` + `eval`
-cargo build --release -p tars-cli
+cargo build --release -p tars-cli --bin tars
 
 # SPEED — sweep the local matrix (run from repo root)
 benchmarks/scripts/bench-local.sh qwen_coder_local 256 8
@@ -49,7 +49,7 @@ benchmarks/scripts/bench-local.sh qwen_coder_local 256 8
 
 # EVAL — replay the corpus through a model, write a run
 ./target/release/tars eval run \
-  --corpus benchmarks/corpus --provider qwen_coder_local \
+  --corpus benchmarks/corpus --tenant local --provider qwen_coder_local \
   --model qwen/qwen3-coder-30b --check non-empty --check valid-json \
   --max-output-tokens 4096
 #   → benchmarks/runs/eval/<ts>/   (omit --output to get the default)
@@ -61,6 +61,4 @@ benchmarks/scripts/bench-local.sh qwen_coder_local 256 8
 
 ## See also
 
-- [`../docs/benchmarks/local-llm-bench.md`](../docs/benchmarks/local-llm-bench.md) — the local-LLM benchmark runbook + findings
-- [`../docs/eval-methodology.md`](../docs/eval-methodology.md) — what `eval diff` measures and why
-- [`../docs/architecture/16-evaluation-framework.md`](../docs/architecture/16-evaluation-framework.md) — the eval framework design
+- [`../docs/eval-methodology.md`](../docs/eval-methodology.md) — what `tars eval diff` measures and why

@@ -1,16 +1,10 @@
-//! Integration tests for the exec sandbox write-jail.
+//! Runs real commands under the write-jail and checks what they could write.
 //!
-//! ## Platform note: why the "outside" victim lives in $HOME, not /tmp
-//! macOS Seatbelt is a deny-write filter over a fully-visible fs, so any real
-//! path works as an "outside" target. Linux bubblewrap is a mount namespace
-//! whose `--tmpfs /tmp` masks the host `/tmp` with a fresh empty tmpfs — a file
-//! seeded in the real `/tmp` is INVISIBLE inside the jail, so a `cat`/`rm` of it
-//! neither reads nor deletes the host file (the "read outside is allowed" and
-//! "delete outside is blocked" cases would then be testing tmpfs masking, not
-//! the write-jail). `$HOME` is under the `--ro-bind / /` mount: visible AND
-//! read-only inside the jail, so it exercises the real write-deny on BOTH OSes.
-//! The create-in-`/tmp` case is kept (it still proves the host `/tmp` is never
-//! written: macOS denies the write, Linux swallows it into the ephemeral tmpfs).
+//! The files outside the worktree live in `$HOME`, not `/tmp`: bubblewrap mounts a fresh tmpfs
+//! over `/tmp`, so inside the jail a host `/tmp` file is invisible and reading or deleting it would
+//! test the tmpfs, not the jail. `$HOME` is visible and read-only under `--ro-bind / /` on Linux
+//! and write-denied by Seatbelt on macOS. Creating a file in `/tmp` is still checked: the host
+//! `/tmp` must not get it on either OS.
 
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
@@ -24,8 +18,6 @@ const WRAPPER: &str = "/usr/bin/sandbox-exec";
 #[cfg(target_os = "linux")]
 const WRAPPER: &str = "bwrap";
 
-/// Dep-free (the crate is deliberately zero-dependency), so we probe by spawning
-/// `--version`.
 fn wrapper_present() -> bool {
     Command::new(WRAPPER).arg("--version").output().is_ok()
 }
@@ -35,11 +27,11 @@ fn uniq(tag: &str) -> PathBuf {
 }
 
 fn run_jailed(worktree: &Path, script: &str) -> bool {
-    let (prog, argv) = SandboxPolicy::workspace_write(worktree)
+    let wrapped = SandboxPolicy::workspace_write(worktree)
         .wrap("/bin/sh", &["-c".into(), script.into()], worktree)
         .expect("wrap builds");
-    Command::new(prog)
-        .args(argv)
+    Command::new(wrapped.program)
+        .args(wrapped.args)
         .status()
         .expect("spawn sandbox wrapper")
         .success()
@@ -52,13 +44,11 @@ fn write_jail_confines_all_cases() {
         return;
     }
 
-    // worktree (must exist for canonicalize) — the one writable root.
     let wt = uniq("wt");
     let _ = std::fs::remove_dir_all(&wt);
     std::fs::create_dir_all(&wt).unwrap();
     let wt = std::fs::canonicalize(&wt).unwrap();
 
-    // proves the host /tmp is never written (see module note).
     let out_tmp = uniq("outside_tmp");
     let _ = std::fs::remove_file(&out_tmp);
 
@@ -97,7 +87,6 @@ fn write_jail_confines_all_cases() {
     );
     assert_eq!(std::fs::read(&victim).unwrap(), b"i must survive");
 
-    // (read is broad; containment is on writes + egress, not reads)
     assert!(
         run_jailed(&wt, &format!("cat {victim} > /dev/null")),
         "reading outside is allowed under the write-jail (codex model)"
@@ -107,4 +96,63 @@ fn write_jail_confines_all_cases() {
     let _ = std::fs::remove_file(&victim);
     let _ = std::fs::remove_file(&out_tmp);
     let _ = std::fs::remove_file(&out_home);
+}
+
+#[test]
+fn a_read_only_jail_does_not_write_in_its_workdir() {
+    if !wrapper_present() {
+        eprintln!("skipping: sandbox wrapper `{WRAPPER}` not present on this host");
+        return;
+    }
+    let wt = uniq("ro_wt");
+    let _ = std::fs::remove_dir_all(&wt);
+    std::fs::create_dir_all(&wt).unwrap();
+    let wt = std::fs::canonicalize(&wt).unwrap();
+    let policy = SandboxPolicy::read_only(false);
+    let target = wt.join("written.txt");
+    let wrapped = policy
+        .wrap(
+            "/bin/sh",
+            &["-c".into(), format!("echo x > {}", target.display())],
+            &wt,
+        )
+        .expect("wrap builds");
+    let _ = Command::new(wrapped.program)
+        .args(wrapped.args)
+        .status()
+        .expect("spawn");
+    assert!(!target.exists(), "read-only must not write in its workdir");
+    let _ = std::fs::remove_dir_all(&wt);
+}
+
+#[test]
+fn the_repositorys_git_is_not_writable_from_a_subdirectory() {
+    if !wrapper_present() {
+        eprintln!("skipping: sandbox wrapper `{WRAPPER}` not present on this host");
+        return;
+    }
+    let repo = uniq("repo");
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+    std::fs::create_dir_all(repo.join("pkg")).unwrap();
+    let repo = std::fs::canonicalize(&repo).unwrap();
+    let hook = repo.join(".git/hooks/pre-commit");
+    let policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![repo.clone()],
+        network: false,
+    };
+    let wrapped = policy
+        .wrap(
+            "/bin/sh",
+            &["-c".into(), format!("echo pwned > {}", hook.display())],
+            &repo.join("pkg"),
+        )
+        .expect("wrap builds");
+    let _ = Command::new(wrapped.program)
+        .args(wrapped.args)
+        .current_dir(repo.join("pkg"))
+        .status()
+        .expect("spawn");
+    assert!(!hook.exists(), "the repository's hooks were written");
+    let _ = std::fs::remove_dir_all(&repo);
 }

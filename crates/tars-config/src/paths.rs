@@ -1,29 +1,40 @@
-//! Standard paths used by tars consumers.
+//! Locates the tars home and the config file in it.
 //!
-//! Returns the platform-independent location where tars looks for the
-//! user-level config by default. We deliberately *don't* follow XDG /
-//! Apple's Application Support conventions here, despite the `dirs`
-//! crate's `config_dir()` being right there. Reasoning:
-//!
-//! - tars is a developer tool, not a desktop application. Developer
-//!   tools by overwhelming convention live under `~/.<tool>/`: git
-//!   (`~/.gitconfig`), cargo (`~/.cargo/`), npm (`~/.npmrc`),
-//!   aws (`~/.aws/`), docker (`~/.docker/`), ssh (`~/.ssh/`),
-//!   claude code (`~/.claude/`).
-//! - `~/Library/Application Support/tars/` (macOS via `dirs`) is verbose
-//!   to type and contains a space — annoying in shells/scripts.
-//! - Identical layout across macOS / Linux / Windows means the same
-//!   `Pipeline.from_default()` works everywhere with no per-platform
-//!   branching for the config path.
+//! The default home is `~/.tars/` on every platform, not XDG or `~/Library/Application Support`:
+//! tars is a developer tool, and those live under `~/.<tool>/` (git, cargo, aws, ssh); the macOS
+//! path also has a space in it, which is awkward in shells.
 
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-/// Returns `$HOME/.tars/config.toml` (or `%USERPROFILE%\.tars\config.toml`
-/// on Windows). Returns `None` only if the home directory cannot be
-/// determined — this is rare enough that callers usually treat it as an
-/// error path.
+/// Returns the tars home: `flag`, else `$TARS_HOME`, else `~/.tars`; `None` when none of them
+/// resolves. An empty or blank `flag` or `$TARS_HOME` counts as not given, so `TARS_HOME=` or a
+/// binding's `home=""` does not make the current directory the home.
+pub fn resolve_home(flag: Option<PathBuf>) -> Option<PathBuf> {
+    home_from(flag, std::env::var_os("TARS_HOME"), dirs::home_dir())
+}
+
+/// Returns `config.toml` in the home [`resolve_home`] finds without a flag, or `None` when no home
+/// resolves. It does not check that the file exists.
 pub fn default_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".tars").join("config.toml"))
+    resolve_home(None).map(|home| home.join("config.toml"))
+}
+
+fn home_from(
+    flag: Option<PathBuf>,
+    tars_home: Option<OsString>,
+    user_home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    flag.map(PathBuf::into_os_string)
+        .filter(|v| !is_blank(v))
+        .or_else(|| tars_home.filter(|v| !is_blank(v)))
+        .map(PathBuf::from)
+        .or_else(|| user_home.map(|h| h.join(".tars")))
+}
+
+/// Returns whether `s` is empty or only whitespace; a value that is not Unicode is not blank.
+fn is_blank(s: &OsStr) -> bool {
+    s.to_str().is_some_and(|s| s.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -31,17 +42,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn returns_some_under_home() {
-        let p = default_config_path().expect("home dir resolvable in tests");
-        assert!(p.ends_with(".tars/config.toml"));
-        // Sanity: the parent exists under home (it might not exist on
-        // disk, but the *path* should be `<something>/.tars/config.toml`).
-        assert_eq!(p.file_name().and_then(|s| s.to_str()), Some("config.toml"));
+    fn the_flag_beats_tars_home_which_beats_the_user_home() {
+        let flag = Some(PathBuf::from("/flag"));
+        let env = || Some(OsString::from("/env"));
+        let user = || Some(PathBuf::from("/u"));
+        assert_eq!(home_from(flag, env(), user()), Some(PathBuf::from("/flag")));
+        assert_eq!(home_from(None, env(), user()), Some(PathBuf::from("/env")));
         assert_eq!(
-            p.parent()
-                .and_then(|d| d.file_name())
-                .and_then(|s| s.to_str()),
-            Some(".tars")
+            home_from(None, None, user()),
+            Some(PathBuf::from("/u/.tars"))
+        );
+        assert_eq!(home_from(None, None, None), None);
+    }
+
+    #[test]
+    fn a_blank_flag_or_tars_home_counts_as_not_given() {
+        let user = || Some(PathBuf::from("/u"));
+        for blank in ["", " ", "\t"] {
+            assert_eq!(
+                home_from(
+                    Some(PathBuf::from(blank)),
+                    Some(OsString::from("/env")),
+                    user()
+                ),
+                Some(PathBuf::from("/env")),
+                "flag {blank:?}"
+            );
+            assert_eq!(
+                home_from(None, Some(OsString::from(blank)), user()),
+                Some(PathBuf::from("/u/.tars")),
+                "TARS_HOME {blank:?}"
+            );
+        }
+        assert_eq!(
+            home_from(Some(PathBuf::from(" h")), None, user()),
+            Some(PathBuf::from(" h"))
+        );
+    }
+
+    #[test]
+    fn an_empty_tars_home_is_unset_and_a_one_character_one_is_a_home() {
+        let user = || Some(PathBuf::from("/u"));
+        assert_eq!(
+            home_from(None, Some(OsString::new()), user()),
+            Some(PathBuf::from("/u/.tars"))
+        );
+        assert_eq!(
+            home_from(None, Some(OsString::from("h")), user()),
+            Some(PathBuf::from("h"))
         );
     }
 }

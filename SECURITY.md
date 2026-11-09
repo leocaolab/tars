@@ -24,8 +24,8 @@ this codebase land a fix before details go public.
   `pyproject.toml`, GitHub Actions workflows when added
 - Released wheels (`tars-*.whl`) once distributed
 - Documentation in `docs/` that prescribes a security-relevant
-  pattern (Doc 06 multi-tenant isolation, Doc 10 security model,
-  Doc 17 tenant-scoped body store)
+  pattern (multi-tenant isolation, the sandbox, the tenant-scoped
+  call log)
 
 ## Out of scope
 
@@ -44,7 +44,6 @@ this codebase land a fix before details go public.
 - `tars-storage` body store is tenant-scoped at the SQL key level
   but is not encrypted at rest. If your bodies contain secrets,
   configure your filesystem encryption or upgrade to an
-  encryption-at-rest backend (designed but not shipped — see
-  Doc 17 §6).
-- Output validators (Doc 15) are caller-supplied code that runs
+  encryption-at-rest backend (not shipped).
+- Output validators are caller-supplied code that runs
   in-process. Treat them as trusted code, not user input.

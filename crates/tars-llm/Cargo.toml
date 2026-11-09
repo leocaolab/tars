@@ -1,0 +1,103 @@
+[package]
+name = "tars-llm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "LLM Provider trait, its HTTP/CLI/embedded backends, and the middleware chain an LlmService runs a call through"
+
+[lints]
+workspace = true
+
+[features]
+default = ["cli"]
+# The backends that spawn a process: the CLI delegates (claude_cli, codex_cli and the cli dialects),
+# the claude_sdk daemon, and child_reaper, which kills their process groups when the host dies.
+cli = ["dep:dirs", "dep:nix", "dep:tars-sandbox"]
+
+[dependencies]
+# Where a CLI delegate's system prompt file lives (`~/.cache/tars/system-prompts`).
+dirs = { workspace = true, optional = true }
+tars-types = { path = "../tars-types" }
+tars-utils = { path = "../tars-utils" }
+tars-sandbox = { path = "../tars-sandbox", optional = true }
+tars-config = { path = "../tars-config" }
+# The `llm_wire` table (`WireRecorder`) and the `LogSink` port EventEmitterMiddleware writes the call
+# log through; which adapter backs it is the caller's choice. Melt never depends on this crate.
+tars-melt = { path = "../tars-melt" }
+
+# Async
+tokio = { workspace = true, features = ["fs"] }
+tokio-util.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+pin-project-lite.workspace = true
+bytes.workspace = true
+
+# Serde
+serde.workspace = true
+serde_json.workspace = true
+# The cassette request fingerprint, which must not change between Rust releases, and the body
+# hashes EventEmitterMiddleware writes.
+sha2.workspace = true
+
+# HTTP / SSE
+reqwest.workspace = true
+eventsource-stream.workspace = true
+url.workspace = true
+httpdate = "1"
+
+# Errors / tracing
+thiserror.workspace = true
+tracing.workspace = true
+
+# `child_reaper` SIGKILLs the process groups of the claude_sdk daemon and the CLI delegates when
+# the host dies by signal.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal"], optional = true }
+
+[dev-dependencies]
+# `Caller::test_default` is test scaffolding: enabled here, never by a [dependencies] edge.
+tars-types = { path = "../tars-types", features = ["testutil"] }
+# A system prompt file written into a throwaway dir, never the user's cache.
+tempfile = "3"
+tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+wiremock.workspace = true
+serde_json.workspace = true
+which = "6"
+futures.workspace = true
+
+# These drive the process-spawning backends, which only the `cli` feature builds.
+[[test]]
+name = "antigravity_cli_smoke"
+required-features = ["cli"]
+
+[[test]]
+name = "claude_cli_smoke"
+required-features = ["cli"]
+
+[[test]]
+name = "cli_child_exit"
+required-features = ["cli"]
+
+[[test]]
+name = "cli_conformance"
+required-features = ["cli"]
+
+[[test]]
+name = "codex_cli_smoke"
+required-features = ["cli"]
+
+[[test]]
+name = "security_delegate_cli"
+required-features = ["cli"]
+
+[[test]]
+name = "security_delegate_cli_default_confine"
+required-features = ["cli"]
+
+[[test]]
+name = "wire_log"
+required-features = ["cli"]

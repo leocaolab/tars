@@ -5,9 +5,7 @@ to your locally installed `claude` binary. Same Anthropic auth as your
 interactive Claude Code session — we never see your credentials — but
 called as a one-shot subprocess via `claude -p`.
 
-This document is **not** the spec (that's
-`architecture/01-llm-provider.md §17`);
-it's the user-facing walkthrough for getting the Builder right.
+This is the user-facing walkthrough for getting the Builder right.
 
 ---
 
@@ -105,7 +103,7 @@ experience, you opt in.
 > decided to pay for the cleaner prompt over your subscription quota.
 
 ```rust
-pub enum ClaudeCliTools {
+pub enum ClaudeToolAccess {
     Disabled,                   // → --tools ""
     Default,                    // → omit --tools entirely (CLI default = full access)
     Allow(Vec<String>),         // → --tools "Read,Bash"
@@ -119,10 +117,10 @@ impl ClaudeCliProviderBuilder {
     // existing
     pub fn executable(self, e: impl Into<String>) -> Self;
     pub fn timeout(self, t: Duration) -> Self;
-    pub fn capabilities(self, c: Capabilities) -> Self;
+    pub fn capabilities(self, c: ProviderProfile) -> Self;
 
     // new — see §17 of the architecture doc for why these defaults
-    pub fn tools(self, t: ClaudeCliTools) -> Self;          // default: Disabled
+    pub fn tools(self, t: ClaudeToolAccess) -> Self;          // default: Disabled
     pub fn bare(self, b: bool) -> Self;                     // default: false — see auth caveat above
     pub fn effort(self, e: Option<ClaudeCliEffort>) -> Self;// default: None (CLI default)
     pub fn exclude_dynamic_sections(self, b: bool) -> Self; // default: true (cache-friendly)
@@ -135,11 +133,11 @@ impl ClaudeCliProviderBuilder {
 ### Minimal call site
 
 ```rust
-use tars_provider::ClaudeCliProviderBuilder;
+use tars_llm::ClaudeCliProviderBuilder;
 
 // All defaults: tools disabled (no agent loop), cache-friendly system prompt.
 // bare is OFF so your `claude login` OAuth/keychain auth still works.
-let provider = ClaudeCliProviderBuilder::new("claude").build();
+let provider = ClaudeCliProviderBuilder::new(ProviderId::new("claude")).build();
 ```
 
 This is the **subscription-friendly inference** configuration —
@@ -158,7 +156,7 @@ bare mode explicitly:
 
 ```rust
 // API-key users only — see the auth caveat above.
-let provider = ClaudeCliProviderBuilder::new("claude")
+let provider = ClaudeCliProviderBuilder::new(ProviderId::new("claude"))
     .bare(true)
     .build();
 ```
@@ -168,8 +166,8 @@ Equivalent argv adds `--bare` to the line above.
 ### Letting the CLI run as an agent (opt-in)
 
 ```rust
-let provider = ClaudeCliProviderBuilder::new("claude")
-    .tools(ClaudeCliTools::Allow(vec![
+let provider = ClaudeCliProviderBuilder::new(ProviderId::new("claude"))
+    .tools(ClaudeToolAccess::Allow(vec![
         "Read".into(), "Bash(git *)".into(),
     ]))
     .effort(Some(ClaudeCliEffort::High))
@@ -187,7 +185,7 @@ context the agent needs.
 ## 4. TOML configuration
 
 Every Builder method has a corresponding TOML field. The
-`tars-provider::registry::from_config` plumbing wires them through
+`tars-llm::registry::from_config` plumbing wires them through
 identically — there is no config-only or builder-only setting.
 
 ```toml
@@ -214,15 +212,88 @@ exclude_dynamic_sections = true
 The deserializer accepts three shapes:
 
 ```toml
-tools = "disabled"           # → ClaudeCliTools::Disabled
-tools = "default"            # → ClaudeCliTools::Default
-tools = ["Read", "Bash"]     # → ClaudeCliTools::Allow(...)
+tools = "disabled"           # → ClaudeToolAccess::Disabled
+tools = "default"            # → ClaudeToolAccess::Default
+tools = ["Read", "Bash"]     # → ClaudeToolAccess::Allow(...)
 ```
 
 This is intentional polymorphism: the common cases get a short string,
 the advanced case gets the full list. The Rust enum and the TOML schema
 intentionally diverge in surface (enum vs string|array) but never in
 semantics.
+
+---
+
+## Model — accepted ids
+
+`default_model` is handed verbatim to `claude -p --model <id>`
+(`crates/tars-llm/src/provider/backends/cli/dialects/claude.rs:59-63`, via
+`build_argv_with`). Set it with the config field `default_model`
+(`crates/tars-config/src/providers.rs:255`) or TOML
+`[providers.claude_cli] default_model = "…"` (§4). A per-request model, if
+supplied, overrides it — tars does not validate the id against your
+account.
+
+Known model ids (`crates/tars-config/data/provider.toml:685-701`, both
+`billed = "subscription"`):
+
+| id | tier |
+|---|---|
+| `claude-sonnet-4-5` | mid — **default** (`provider.toml:673`) |
+| `claude-opus-4-8` | flagship |
+
+`max_output` in the DB is the **CLI clamp**
+(`CLAUDE_CODE_MAX_OUTPUT_TOKENS`, env default ~32k, commonly 64k), not the
+model ceiling (`provider.toml:683`).
+
+> ⚠️ **Gotcha — your `claude login` account must recognize the id.** The
+> id is passed straight through; if the account no longer serves it (a
+> stale id from an older config), `claude` itself rejects the call and its
+> error is carried out verbatim — no tars sentinel. Same failure class as
+> codex's stale `gpt-5.x` (see [`codex-cli.md §2`](./codex-cli.md)). Fix by
+> setting `default_model` to a current id.
+
+---
+
+## Auth / credentials — subscription via `claude login`
+
+`claude_cli` self-authenticates through your existing `claude login`
+session (OAuth + keychain) — tars threads it **no** provider credential.
+The provider is wired with `Auth::Delegate`, which resolves to
+`ResolvedAuth::None`: "the spawned tool/CLI carries its own credential
+(e.g. `claude login`); tars injects nothing"
+(`crates/tars-llm/src/provider/auth.rs:137-139`; `Auth::Delegate` doc at
+`crates/tars-types/src/providers/auth.rs:17-20`). CLI providers consume no
+`Auth` (`registry.rs:511-513`).
+
+**Stripped env** — these keys are removed from the child process
+(case-insensitive match) so an exported API key or a Bedrock/Vertex/Foundry
+toggle can't divert the call off your subscription onto API billing
+(`crates/tars-llm/src/provider/backends/cli/claude_argv.rs`):
+
+- `ANTHROPIC_API_KEY`
+- `CLAUDE_CODE_USE_BEDROCK`
+- `CLAUDE_CODE_USE_VERTEX`
+- `CLAUDE_CODE_USE_FOUNDRY`
+
+So exporting `ANTHROPIC_API_KEY` does **not** feed the default (non-`bare`)
+call a key — the subscription path is what runs. The one exception is
+`bare = true`: `claude --help` documents that `--bare` forces auth strictly
+through `ANTHROPIC_API_KEY` / `apiKeyHelper` and never reads OAuth/keychain,
+so it is the wrong mode for subscription auth — hence the Builder defaults
+`bare` to `false` (see the auth caveat in §3 and the decision table in §8).
+
+The `~/.claude` state dir (`$CLAUDE_CONFIG_DIR`, else `~/.claude`) is
+granted into the write-jail so login/session state survives the sandbox
+(`claude_state_dirs` in `crates/tars-llm/src/provider/backends/cli/dialects/claude.rs`).
+
+A delegated run does not write your global claude config, `~/.claude.json`, which
+sits outside that state dir. claude tries to save it during a run; the sandbox
+refuses the write, the run and its reply go on as usual, and only that config is not
+saved. That is intended: one delegated call should not change settings every later
+claude session reads. tars does not open the file to the delegate and does not move
+it with `CLAUDE_CONFIG_DIR`. The rule belongs to the delegate boundary, not to
+Seatbelt or bubblewrap, so any sandbox tars runs delegates under keeps it.
 
 ---
 
@@ -241,11 +312,11 @@ in the standard middleware stack manually.
 
 ```rust
 use std::sync::Arc;
-use tars_provider::ClaudeCliProviderBuilder;
-use tars_pipeline::{LlmService, TelemetryMiddleware, RetryMiddleware};
+use tars_llm::ClaudeCliProviderBuilder;
+use tars_llm::{LlmService, TelemetryMiddleware, RetryMiddleware};
 
-let provider = ClaudeCliProviderBuilder::new("claude")
-    .tools(ClaudeCliTools::Disabled)
+let provider = ClaudeCliProviderBuilder::new(ProviderId::new("claude"))
+    .tools(ClaudeToolAccess::Disabled)
     .bare(true)
     .build();
 
@@ -270,10 +341,10 @@ a Registry.
 ```rust
 use std::collections::HashMap;
 use std::sync::Arc;
-use tars_provider::{ProviderRegistry, LlmProvider};
+use tars_llm::{ProviderRegistry, LlmProvider};
 use tars_types::ProviderId;
 
-let custom: Arc<dyn LlmProvider> = ClaudeCliProviderBuilder::new("my-claude")
+let custom: Arc<dyn LlmProvider> = ClaudeCliProviderBuilder::new(ProviderId::new("my-claude"))
     .bare(true)
     .build();
 
@@ -307,7 +378,7 @@ let registry = ProviderRegistry::from_config(&cfg, ...)?
             // override with a custom Builder config
             ClaudeCliProviderBuilder::new(id.clone())
                 .bare(true)
-                .tools(ClaudeCliTools::Allow(vec!["Read".into()]))
+                .tools(ClaudeToolAccess::Allow(vec!["Read".into()]))
                 .build() as Arc<dyn LlmProvider>
         } else {
             default_p
@@ -347,7 +418,7 @@ after everything the Builder constructs. Use when the CLI ships a flag
 that the Builder doesn't yet model.
 
 ```rust
-let provider = ClaudeCliProviderBuilder::new("claude")
+let provider = ClaudeCliProviderBuilder::new(ProviderId::new("claude"))
     .extra_args(vec!["--betas".into(), "experimental-feature".into()])
     .build();
 ```
@@ -396,13 +467,13 @@ Builder site. Plan for that.
 ## 9. Implementation notes
 
 Everything in this doc is wired end-to-end and covered by tests in the
-`tars-provider` + `tars-config` crates:
+`tars-llm` + `tars-config` crates:
 
 - ✅ Builder methods `.executable() / .timeout() / .capabilities() /
   .tools() / .bare() / .effort() / .exclude_dynamic_sections() /
   .extra_args()`
-- ✅ `pub use ClaudeCliProviderBuilder`, `ClaudeCliTools`,
-  `ClaudeCliEffort` at the crate root (`tars-provider/src/lib.rs`)
+- ✅ `pub use ClaudeCliProviderBuilder`, `ClaudeToolAccess`,
+  `ClaudeCliEffort` at the crate root (`tars-llm/src/lib.rs`)
 - ✅ TOML `ProviderConfig::ClaudeCli` accepts every Builder field plus
   the three `tools` shapes (`"disabled"` / `"default"` / `["…"]`)
 - ✅ `default_claude_cli()` in `tars-config::builtin` emits the
@@ -416,5 +487,3 @@ The token-bloat behavior described in §1 was the **old**
 default-argv-shape. With these defaults landed, the same workload now
 produces a pure-inference single LLM call without the agent loop.
 
-See §17.5 in the architecture doc
-for the matching test obligations.

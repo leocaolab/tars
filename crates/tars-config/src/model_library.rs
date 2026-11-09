@@ -1,69 +1,77 @@
-//! The persisted **model library** — the LIVE layer of the model catalog.
+//! Reads and writes `<home>/models.json`: for each configured provider, how its last list query
+//! ended and the last list its API returned, with the context and output limits when the API
+//! states them (Gemini does; OpenAI-shaped lists carry ids only). A query that was not sent or
+//! failed does not replace the last list, so the runtime keeps it until a query succeeds again.
 //!
-//! A JSON file at `$TARS_HOME/models.json` recording, per configured provider,
-//! the models its list API last reported: each id, plus the context and output
-//! limits when the API states them (Gemini does; OpenAI-shaped lists carry ids
-//! only). `tars models update` writes it; `tars models` reads it for the fast
-//! offline listing; and the runtime reads it through
-//! [`crate::model_catalog::ModelCatalog`], where a live limit wins over the
-//! shipped `provider.toml` number and `<series>@latest` picks from the live
-//! ids — so a refresh takes effect without a tars release.
+//! `tars models update` writes it and `tars models` lists it offline. Through
+//! [`crate::model_catalog::ModelCatalog`] a live limit wins over the shipped `provider.toml`
+//! number and `<series>@latest` picks from the live ids, so a refresh takes effect without a tars
+//! release.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Current on-disk schema version. Bump on a breaking shape change; the
-/// loader treats a different version as absent (the next `update` rewrites
-/// it) rather than crashing.
-pub const LIBRARY_VERSION: u32 = 2;
+/// The on-disk schema version, bumped on a breaking shape change. A file of another version
+/// loads as absent, and the next `update` rewrites it.
+pub const LIBRARY_VERSION: u32 = 3;
 
-/// File name under `$TARS_HOME`.
 pub const LIBRARY_FILE: &str = "models.json";
 
-/// Resolve the library path for a given tars home directory.
+/// Returns the library path under the tars home `home`.
 pub fn library_path(home: &Path) -> PathBuf {
     home.join(LIBRARY_FILE)
 }
 
-/// Outcome class recorded for a provider in the library. Typed (not a magic
-/// string) so a consumer branches on the variant; the human-readable reason
-/// rides in [`ProviderEntry::note`].
+/// Says why tars did not ask a provider for its list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EntryStatus {
-    /// Live list retrieved and stored in `models`.
-    Ok,
-    /// Provider needs a key whose env var is unset (`note` = var name).
+pub enum NotAsked {
+    /// Means the key's environment variable is unset or blank.
     NoKey,
-    /// Provider has no list API (CLI / bedrock / mock / cassette).
-    Skipped,
-    /// Server rejected the credential (401/403).
+    /// Means the provider has no list API (CLI, mock, cassette).
+    NoListApi,
+    /// Means a server the operator runs (vllm, mlx, llama.cpp) refused the connection: it is
+    /// not running.
+    ServerNotRunning,
+}
+
+/// Says why a list query that was sent returned no list; [`Failure::reason`] carries the detail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    /// Means the config names a key that did not resolve: a key file that cannot be read, a
+    /// blank inline key, a variable that is not UTF-8.
+    KeyUnresolved,
+    /// Means the key cannot be sent as a request header (it holds a newline or another byte a
+    /// header value refuses).
+    KeyInvalid,
+    /// Means the server answered 401 or 403.
     AuthFailed,
-    /// Server answered with another non-2xx (`note` = the status).
+    /// Means the server answered another non-2xx status.
     HttpError,
-    /// Could not reach the server (`note` = detail).
+    /// Means the server could not be reached.
     Unreachable,
-    /// 2xx but the body didn't parse (`note` = detail).
+    /// Means a 2xx body did not parse.
     ParseError,
 }
 
-/// One model as the provider's list API reported it. A limit is `None` when
-/// the API does not state it — never a guessed number.
+/// One model as the provider's list API reported it; a limit the API does not state is `None`,
+/// not a guess.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveModel {
     pub id: String,
-    /// Input-token limit (context window), when reported.
+    /// Is the input-token limit, the context window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<u64>,
-    /// Output-token limit, when reported.
+    /// Is the output-token limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output: Option<u64>,
 }
 
 impl LiveModel {
-    /// A model the API listed by id only.
+    /// Returns a model the API listed by id only.
     pub fn id_only(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -73,51 +81,226 @@ impl LiveModel {
     }
 }
 
-/// One provider's row in the library.
+/// The model list one query of a provider's list API returned.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderEntry {
-    /// The provider `type` (`gemini`, `openai_compat`, …), for display.
-    #[serde(rename = "type")]
-    pub provider_type: String,
-    /// The `data/provider.toml` block this provider's models belong to
-    /// (`gemini` for a `gemini_flash` instance; `deepseek` for the
-    /// `deepseek` openai_compat instance) — see
-    /// [`crate::ProviderConfig::catalog_name`]. The runtime overlays this
-    /// row onto that block.
-    pub catalog: String,
-    /// The provider's configured `default_model` spec at update time.
-    pub default_model: String,
-    pub status: EntryStatus,
-    /// Models, sorted by id. Empty unless `status == Ok`.
+pub struct Listing {
+    /// Is sorted by id.
     #[serde(default)]
     pub models: Vec<LiveModel>,
-    /// Human-readable detail for a non-`Ok` status (the real reason — a
-    /// missing-var name, an HTTP status, a connect error), never a sentinel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    /// RFC3339 timestamp of when this row was queried.
+    /// Is the RFC 3339 UTC time of the query that returned the list.
     pub queried_at: String,
 }
 
-impl ProviderEntry {
-    /// The listed ids, in order.
+impl Listing {
+    /// Returns the listed ids in order.
     pub fn ids(&self) -> impl Iterator<Item = &str> {
         self.models.iter().map(|m| m.id.as_str())
     }
 
-    /// The listed row for `id`.
+    /// Returns the listed model `id`.
     pub fn model(&self, id: &str) -> Option<&LiveModel> {
         self.models.iter().find(|m| m.id == id)
     }
 }
 
-/// The whole persisted catalog.
+/// A list query that returned no list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub kind: FailureKind,
+    /// Holds the real reason: the missing variable, the HTTP status, the connect error.
+    pub reason: String,
+    /// Is an RFC 3339 UTC timestamp.
+    pub queried_at: String,
+}
+
+/// Says how a provider's last list query ended, and which list the runtime reads for it.
+/// `kept` is the list an earlier query returned; it stays the provider's live list until a
+/// query succeeds again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "QueryRow", into = "QueryRow")]
+pub enum LastQuery {
+    Listed(Listing),
+    /// Nothing was sent; `note` is the real reason (`no key: set $GEMINI_API_KEY`).
+    NotAsked {
+        why: NotAsked,
+        note: String,
+        kept: Option<Listing>,
+    },
+    Failed {
+        failure: Failure,
+        kept: Option<Listing>,
+    },
+}
+
+impl LastQuery {
+    /// Returns the provider's live list: the one this query returned, or the one kept from before
+    /// it.
+    pub fn listing(&self) -> Option<&Listing> {
+        match self {
+            Self::Listed(listing) => Some(listing),
+            Self::NotAsked { kept, .. } | Self::Failed { kept, .. } => kept.as_ref(),
+        }
+    }
+
+    /// Returns when the query ran, as an RFC 3339 UTC timestamp, or `None` when none was sent.
+    pub fn queried_at(&self) -> Option<&str> {
+        match self {
+            Self::Listed(listing) => Some(&listing.queried_at),
+            Self::NotAsked { .. } => None,
+            Self::Failed { failure, .. } => Some(&failure.queried_at),
+        }
+    }
+
+    /// Returns this query with `kept` as the list kept from before it; a listed query keeps
+    /// nothing.
+    fn keeping(self, kept: Option<Listing>) -> Self {
+        match self {
+            Self::NotAsked { why, note, .. } => Self::NotAsked { why, note, kept },
+            Self::Failed { failure, .. } => Self::Failed { failure, kept },
+            listed @ Self::Listed(_) => listed,
+        }
+    }
+}
+
+/// The on-disk shape of a [`LastQuery`]: `status` names how it ended, `note` holds the reason.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum QueryRow {
+    Ok(Listing),
+    NoKey(NotAskedRow),
+    NoListApi(NotAskedRow),
+    ServerNotRunning(NotAskedRow),
+    KeyUnresolved(FailedRow),
+    KeyInvalid(FailedRow),
+    AuthFailed(FailedRow),
+    HttpError(FailedRow),
+    Unreachable(FailedRow),
+    ParseError(FailedRow),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct NotAskedRow {
+    note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kept: Option<Listing>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct FailedRow {
+    note: String,
+    queried_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kept: Option<Listing>,
+}
+
+impl From<QueryRow> for LastQuery {
+    fn from(row: QueryRow) -> Self {
+        let not_asked = |why, row: NotAskedRow| Self::NotAsked {
+            why,
+            note: row.note,
+            kept: row.kept,
+        };
+        let (kind, row) = match row {
+            QueryRow::Ok(listing) => return Self::Listed(listing),
+            QueryRow::NoKey(row) => return not_asked(NotAsked::NoKey, row),
+            QueryRow::NoListApi(row) => return not_asked(NotAsked::NoListApi, row),
+            QueryRow::ServerNotRunning(row) => return not_asked(NotAsked::ServerNotRunning, row),
+            QueryRow::KeyUnresolved(row) => (FailureKind::KeyUnresolved, row),
+            QueryRow::KeyInvalid(row) => (FailureKind::KeyInvalid, row),
+            QueryRow::AuthFailed(row) => (FailureKind::AuthFailed, row),
+            QueryRow::HttpError(row) => (FailureKind::HttpError, row),
+            QueryRow::Unreachable(row) => (FailureKind::Unreachable, row),
+            QueryRow::ParseError(row) => (FailureKind::ParseError, row),
+        };
+        Self::Failed {
+            failure: Failure {
+                kind,
+                reason: row.note,
+                queried_at: row.queried_at,
+            },
+            kept: row.kept,
+        }
+    }
+}
+
+impl From<LastQuery> for QueryRow {
+    fn from(query: LastQuery) -> Self {
+        let (failure, kept) = match query {
+            LastQuery::Listed(listing) => return Self::Ok(listing),
+            LastQuery::NotAsked { why, note, kept } => {
+                let row = NotAskedRow { note, kept };
+                return match why {
+                    NotAsked::NoKey => Self::NoKey(row),
+                    NotAsked::NoListApi => Self::NoListApi(row),
+                    NotAsked::ServerNotRunning => Self::ServerNotRunning(row),
+                };
+            }
+            LastQuery::Failed { failure, kept } => (failure, kept),
+        };
+        let row = FailedRow {
+            note: failure.reason,
+            queried_at: failure.queried_at,
+            kept,
+        };
+        match failure.kind {
+            FailureKind::KeyUnresolved => Self::KeyUnresolved(row),
+            FailureKind::KeyInvalid => Self::KeyInvalid(row),
+            FailureKind::AuthFailed => Self::AuthFailed(row),
+            FailureKind::HttpError => Self::HttpError(row),
+            FailureKind::Unreachable => Self::Unreachable(row),
+            FailureKind::ParseError => Self::ParseError(row),
+        }
+    }
+}
+
+/// One provider's row in the library.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderEntry {
+    #[serde(rename = "type")]
+    pub provider_type: crate::providers::ProviderKind,
+    /// Names the `data/provider.toml` block this row's list stands for (`gemini` for a
+    /// `gemini_flash` instance); see [`crate::ProviderConfig::listing_catalog`].
+    pub catalog: String,
+    /// Holds the provider's `default_model` spec as it was configured when this row was written,
+    /// not the current config's.
+    pub default_model: String,
+    #[serde(flatten)]
+    pub last_query: LastQuery,
+}
+
+impl ProviderEntry {
+    /// Returns the row `last_query` leaves for the provider declared as `id` with `cfg`.
+    pub fn new(id: &str, cfg: &crate::ProviderConfig, last_query: LastQuery) -> Self {
+        Self {
+            provider_type: cfg.kind(),
+            catalog: cfg.listing_catalog(id).to_string(),
+            default_model: cfg.default_model().to_string(),
+            last_query,
+        }
+    }
+
+    /// Returns this row as it stands after `prev`, the provider's previous row. A query that was
+    /// not sent or failed keeps the list `prev` held for the same catalog block, so one refresh
+    /// that lists nothing does not take the live list away from the runtime; a list of another
+    /// block is dropped.
+    pub fn following(self, prev: Option<&ProviderEntry>) -> Self {
+        let kept = prev
+            .filter(|p| p.catalog == self.catalog)
+            .and_then(|p| p.last_query.listing())
+            .cloned();
+        Self {
+            last_query: self.last_query.keeping(kept),
+            ..self
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelLibrary {
     pub version: u32,
-    /// RFC3339 timestamp of the last full/partial update.
+    /// Is the RFC 3339 timestamp of the last update, whole or partial.
     pub updated_at: String,
-    /// provider-name → entry (BTreeMap = stable, sorted serialization).
+    /// Is keyed by provider name; a `BTreeMap` so the file is written in a stable order.
     pub providers: BTreeMap<String, ProviderEntry>,
 }
 
@@ -130,18 +313,19 @@ impl ModelLibrary {
         }
     }
 
-    /// Load the library from `path`. `Ok(None)` when the file does not exist
-    /// or is another schema version (caller: "run `tars models update`").
-    /// `Err` only on an actual read/parse failure of a present,
-    /// current-version file.
+    /// Loads the library from `path`, or returns `Ok(None)` when the file does not exist or is
+    /// another schema version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a present file cannot be read or does not parse.
     pub fn load(path: &Path) -> std::io::Result<Option<Self>> {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        // Read the version first so an older shape is "absent", not a parse
-        // error.
+        // The version is read first so an older shape is absent, not a parse error.
         #[derive(Deserialize)]
         struct Version {
             version: u32,
@@ -156,44 +340,40 @@ impl ModelLibrary {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
-    /// Serialize (pretty) and write atomically-ish to `path`, creating the
-    /// parent dir if needed.
+    /// Writes the library to `path` as pretty JSON, creating the parent directory.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        // Write to a temp sibling then rename, so a crash mid-write can't
-        // truncate the existing library.
+        // A crash mid-write must not truncate the existing library.
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, json.as_bytes())?;
         std::fs::rename(&tmp, path)
     }
 
-    /// The freshest `Ok` row for each catalog block — several configured
-    /// providers can list the same block (`gemini_flash` and `gemini_pro`
-    /// both list `gemini`).
-    pub fn freshest_by_catalog(&self) -> BTreeMap<&str, &ProviderEntry> {
-        let mut out: BTreeMap<&str, &ProviderEntry> = BTreeMap::new();
+    /// Returns the freshest live list for each catalog block, since several configured providers
+    /// can list one block (`gemini_flash` and `gemini_pro` both list `gemini`). A list a failed
+    /// query kept counts at the time it was listed.
+    pub fn freshest_by_catalog(&self) -> BTreeMap<&str, &Listing> {
+        let mut out: BTreeMap<&str, &Listing> = BTreeMap::new();
         for entry in self.providers.values() {
-            if entry.status != EntryStatus::Ok {
+            let Some(listing) = entry.last_query.listing() else {
                 continue;
-            }
-            let slot = out.entry(entry.catalog.as_str()).or_insert(entry);
+            };
+            let slot = out.entry(entry.catalog.as_str()).or_insert(listing);
             // RFC3339 UTC timestamps order lexically.
-            if entry.queried_at > slot.queried_at {
-                *slot = entry;
+            if listing.queried_at > slot.queried_at {
+                *slot = listing;
             }
         }
         out
     }
 }
 
-/// Set-difference of two model id lists. Pure — the tested seam.
-///
-/// Returns `(added, removed)`: ids in `new` but not `old`, and in `old`
-/// but not `new`, each sorted.
+/// Returns `(added, removed)`: the ids in `new` but not `old`, and in `old` but not `new`, each
+/// sorted.
 pub fn diff_models<'a>(
     old: impl IntoIterator<Item = &'a str>,
     new: impl IntoIterator<Item = &'a str>,
@@ -216,14 +396,50 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn entry(catalog: &str, models: &[&str], queried_at: &str) -> ProviderEntry {
+        listed(
+            catalog,
+            models.iter().map(|s| LiveModel::id_only(*s)).collect(),
+            queried_at,
+        )
+    }
+
+    pub(crate) fn listed(catalog: &str, models: Vec<LiveModel>, queried_at: &str) -> ProviderEntry {
+        row(
+            catalog,
+            LastQuery::Listed(Listing {
+                models,
+                queried_at: queried_at.into(),
+            }),
+        )
+    }
+
+    fn failed(catalog: &str, queried_at: &str) -> ProviderEntry {
+        row(
+            catalog,
+            LastQuery::Failed {
+                failure: Failure {
+                    kind: FailureKind::Unreachable,
+                    reason: "tcp connect error: Connection refused (os error 61)".into(),
+                    queried_at: queried_at.into(),
+                },
+                kept: None,
+            },
+        )
+    }
+
+    fn row(catalog: &str, last_query: LastQuery) -> ProviderEntry {
         ProviderEntry {
-            provider_type: "gemini".into(),
+            provider_type: crate::providers::ProviderKind::Gemini,
             catalog: catalog.into(),
             default_model: "flash@latest".into(),
-            status: EntryStatus::Ok,
-            models: models.iter().map(|s| LiveModel::id_only(*s)).collect(),
-            note: None,
-            queried_at: queried_at.into(),
+            last_query,
+        }
+    }
+
+    fn kept(entry: &ProviderEntry) -> Option<&Listing> {
+        match &entry.last_query {
+            LastQuery::NotAsked { kept, .. } | LastQuery::Failed { kept, .. } => kept.as_ref(),
+            LastQuery::Listed(_) => None,
         }
     }
 
@@ -246,12 +462,18 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = library_path(dir.path());
         let mut lib = ModelLibrary::new("2026-09-14T12:00:00Z".into());
-        let mut e = entry("gemini", &["gemini-2.5-pro"], "2026-09-14T12:00:00Z");
-        e.models.push(LiveModel {
-            id: "gemini-3.8-flash".into(),
-            context: Some(1_048_576),
-            max_output: Some(65_536),
-        });
+        let e = listed(
+            "gemini",
+            vec![
+                LiveModel::id_only("gemini-2.5-pro"),
+                LiveModel {
+                    id: "gemini-3.8-flash".into(),
+                    context: Some(1_048_576),
+                    max_output: Some(65_536),
+                },
+            ],
+            "2026-09-14T12:00:00Z",
+        );
         lib.providers.insert("gemini_flash".into(), e);
         lib.save(&path).unwrap();
 
@@ -290,12 +512,165 @@ pub(crate) mod tests {
             "gemini_pro".into(),
             entry("gemini", &["new"], "2026-09-14T00:00:00Z"),
         );
-        let mut failed = entry("deepseek", &[], "2026-09-15T00:00:00Z");
-        failed.status = EntryStatus::NoKey;
-        lib.providers.insert("deepseek".into(), failed);
+        lib.providers.insert(
+            "deepseek".into(),
+            failed("deepseek", "2026-09-15T00:00:00Z"),
+        );
 
         let by = lib.freshest_by_catalog();
         assert_eq!(by["gemini"].models[0].id, "new");
         assert!(!by.contains_key("deepseek"), "a failed query lists nothing");
+    }
+
+    #[test]
+    fn a_failed_query_keeps_the_previous_list() {
+        let prev = entry("gemini", &["gemini-9.0-flash"], "2026-09-01T00:00:00Z");
+        let now = failed("gemini", "2026-09-14T00:00:00Z").following(Some(&prev));
+        assert_eq!(kept(&now), prev.last_query.listing());
+        assert_eq!(now.last_query.queried_at(), Some("2026-09-14T00:00:00Z"));
+    }
+
+    #[test]
+    fn a_query_that_was_not_sent_keeps_the_previous_list_and_has_no_query_time() {
+        let prev = entry("gemini", &["gemini-9.0-flash"], "2026-09-01T00:00:00Z");
+        let now = row(
+            "gemini",
+            LastQuery::NotAsked {
+                why: NotAsked::NoKey,
+                note: "no key: set $GEMINI_API_KEY".into(),
+                kept: None,
+            },
+        )
+        .following(Some(&prev));
+        assert_eq!(kept(&now), prev.last_query.listing());
+        assert_eq!(now.last_query.queried_at(), None);
+    }
+
+    #[test]
+    fn a_listed_query_replaces_the_previous_list() {
+        let prev = entry("gemini", &["gemini-9.0-flash"], "2026-09-01T00:00:00Z");
+        let fresh = entry("gemini", &["gemini-9.1-flash"], "2026-09-14T00:00:00Z");
+        assert_eq!(fresh.clone().following(Some(&prev)), fresh);
+    }
+
+    #[test]
+    fn a_failed_query_carries_a_list_kept_by_an_earlier_failure() {
+        let listed = entry("gemini", &["gemini-9.0-flash"], "2026-09-01T00:00:00Z");
+        let first = failed("gemini", "2026-09-07T00:00:00Z").following(Some(&listed));
+        let second = failed("gemini", "2026-09-14T00:00:00Z").following(Some(&first));
+        assert_eq!(kept(&second), listed.last_query.listing());
+    }
+
+    #[test]
+    fn a_failed_query_keeps_nothing_without_a_list_of_its_catalog() {
+        let other_block = entry("openai", &["gpt-9"], "2026-09-01T00:00:00Z");
+        let never_listed = failed("gemini", "2026-09-07T00:00:00Z");
+        for prev in [None, Some(&other_block), Some(&never_listed)] {
+            let now = failed("gemini", "2026-09-14T00:00:00Z").following(prev);
+            assert_eq!(kept(&now), None);
+        }
+    }
+
+    #[test]
+    fn a_kept_list_is_the_live_list_of_its_catalog() {
+        let prev = entry("gemini", &["gemini-9.0-flash"], "2026-09-01T00:00:00Z");
+        let mut lib = ModelLibrary::new("t".into());
+        lib.providers.insert(
+            "gemini_flash".into(),
+            failed("gemini", "2026-09-14T00:00:00Z").following(Some(&prev)),
+        );
+        let by = lib.freshest_by_catalog();
+        assert_eq!(by["gemini"].queried_at, "2026-09-01T00:00:00Z");
+        assert_eq!(by["gemini"].models[0].id, "gemini-9.0-flash");
+    }
+
+    #[test]
+    fn a_kept_list_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = library_path(dir.path());
+        let prev = entry("gemini", &["gemini-9.0-flash"], "2026-09-01T00:00:00Z");
+        let mut lib = ModelLibrary::new("2026-09-14T00:00:00Z".into());
+        lib.providers.insert(
+            "gemini_flash".into(),
+            failed("gemini", "2026-09-14T00:00:00Z").following(Some(&prev)),
+        );
+        lib.save(&path).unwrap();
+
+        let back = ModelLibrary::load(&path).unwrap().expect("present");
+        assert_eq!(back, lib);
+    }
+
+    #[test]
+    fn a_row_without_kept_reads_as_keeping_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = library_path(dir.path());
+        std::fs::write(
+            &path,
+            r#"{"version":3,"updated_at":"2026-11-06T19:11:12Z","providers":{
+                "g":{"type":"gemini","catalog":"gemini","default_model":"flash@latest","status":"ok",
+                     "models":[{"id":"gemini-9.0-flash","max_output":65536}],"queried_at":"2026-11-01T00:00:00Z"},
+                "d":{"type":"openai_compat","catalog":"deepseek","default_model":"deepseek-flash",
+                     "status":"no_key","note":"no key: set $DEEPSEEK_API_KEY"}}}"#,
+        )
+        .unwrap();
+
+        let lib = ModelLibrary::load(&path).unwrap().expect("present");
+        assert_eq!(
+            lib.providers["g"].last_query,
+            LastQuery::Listed(Listing {
+                models: vec![LiveModel {
+                    id: "gemini-9.0-flash".into(),
+                    context: None,
+                    max_output: Some(65_536),
+                }],
+                queried_at: "2026-11-01T00:00:00Z".into(),
+            })
+        );
+        assert_eq!(
+            lib.providers["d"].last_query,
+            LastQuery::NotAsked {
+                why: NotAsked::NoKey,
+                note: "no key: set $DEEPSEEK_API_KEY".into(),
+                kept: None,
+            }
+        );
+    }
+
+    #[test]
+    fn every_status_word_round_trips() {
+        for (word, kind) in [
+            ("auth_failed", FailureKind::AuthFailed),
+            ("http_error", FailureKind::HttpError),
+            ("unreachable", FailureKind::Unreachable),
+            ("parse_error", FailureKind::ParseError),
+            ("key_unresolved", FailureKind::KeyUnresolved),
+            ("key_invalid", FailureKind::KeyInvalid),
+        ] {
+            let query = LastQuery::Failed {
+                failure: Failure {
+                    kind,
+                    reason: "r".into(),
+                    queried_at: "2026-11-06T00:00:00Z".into(),
+                },
+                kept: None,
+            };
+            let row = serde_json::to_value(&query).unwrap();
+            assert_eq!(row["status"], word);
+            assert_eq!(serde_json::from_value::<LastQuery>(row).unwrap(), query);
+        }
+        for (word, why) in [
+            ("no_key", NotAsked::NoKey),
+            ("no_list_api", NotAsked::NoListApi),
+            ("server_not_running", NotAsked::ServerNotRunning),
+        ] {
+            let query = LastQuery::NotAsked {
+                why,
+                note: "r".into(),
+                kept: None,
+            };
+            let row = serde_json::to_value(&query).unwrap();
+            assert_eq!(row["status"], word);
+            assert_eq!(serde_json::from_value::<LastQuery>(row).unwrap(), query);
+        }
     }
 }

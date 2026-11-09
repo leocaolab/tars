@@ -29,7 +29,7 @@
     }
   },
   "recordings": {
-    "cdc565a7b80f419c": {
+    "17de008c02de49c3952a1d2bb1a36b3879a4688584d72502e89133f2e9145df5": {
       "request": "model=qwen/qwen3-coder-30b\u0000{\"system\":\"You output ONLY a JSON object. No prose, no code fence.\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Rate the severity (0-10 integer) of this bug and summarize it in one sentence. Return an object with keys `severity` and `summary`.\\n\\nBUG: unwrap() on a None in the request handler panics the whole worker on malformed input.\"}]}],\"tool_choice\":{\"kind\":\"auto\"},\"max_output_tokens\":200}",
       "events": [
         {
@@ -37,8 +37,7 @@
           "actual_model": "qwen/qwen3-coder-30b",
           "cache_hit": {
             "cached_input_tokens": 0,
-            "used_explicit_handle": false,
-            "replayed_from_cache": false
+            "used_explicit_handle": false
           }
         },
         {

@@ -1,9 +1,5 @@
-//! `[roles]` — the business-facing name → (provider, model) binding.
-//!
-//! A role is what application code names ("critic", "fixer"); the config says
-//! which provider serves it and with which model. Both are required: a role
-//! that names only a provider cannot be distinguished from another role on the
-//! same provider, which is the whole point of having roles.
+//! Binds each role name application code uses ("critic", "fixer") to the provider and model that
+//! serve it.
 //!
 //! ```toml
 //! [roles.critic]
@@ -15,39 +11,35 @@
 //! model    = "claude-opus-4-8"
 //! ```
 //!
-//! Resolution is a single lookup — `cfg.roles.get(name)` — and a miss is an
-//! error, not a cue to guess. There is deliberately no fallback to a tier, to
-//! a literal provider id, or to "the only provider": a role the operator did
-//! not configure must say so, not silently resolve to some other model.
+//! A role is looked up by name and a miss is an error. There is no fallback to a tier, a
+//! provider id or "the only provider": a role the operator did not configure says so instead of
+//! reaching some other model.
 
 use serde::{Deserialize, Serialize};
 
 use tars_types::ProviderId;
 
-/// One `[roles.<name>]` entry: which provider serves this role, and the exact
-/// model it is bound to.
+/// One `[roles.<name>]` entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoleConfig {
-    /// A provider id declared in `[providers.*]` (checked by
-    /// [`Config::validate`](crate::Config::validate)).
     pub provider: ProviderId,
-    /// The concrete model this role calls. Required — the provider's
-    /// `default_model` is the CLI's convenience, not a role's fallback: two
-    /// roles on one provider must be able to differ.
+    /// Is required rather than falling back to the provider's `default_model`, so two roles on
+    /// one provider can call different models.
     pub model: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manager::ConfigManager;
+    use crate::config::Config;
 
     #[test]
     fn two_roles_on_one_provider_can_bind_different_models() {
         let toml_str = r#"
             [providers.deepseek]
             type = "openai_compat"
+            gen_ai_provider_name = "local"
             base_url = "http://localhost:8000/v1"
             default_model = "deepseek-chat"
 
@@ -59,10 +51,10 @@ mod tests {
             provider = "deepseek"
             model    = "deepseek-reasoner"
         "#;
-        let cfg = ConfigManager::load_from_str(toml_str).expect("[roles.<name>] must load");
-        assert_eq!(cfg.roles["critic"].model, "deepseek-chat");
-        assert_eq!(cfg.roles["critic_l5"].model, "deepseek-reasoner");
-        assert_eq!(cfg.roles["critic"].provider, ProviderId::new("deepseek"));
+        let cfg = Config::from_toml(toml_str).expect("[roles.<name>] must load");
+        assert_eq!(cfg.roles()["critic"].model, "deepseek-chat");
+        assert_eq!(cfg.roles()["critic_l5"].model, "deepseek-reasoner");
+        assert_eq!(cfg.roles()["critic"].provider, ProviderId::new("deepseek"));
     }
 
     #[test]
@@ -70,13 +62,14 @@ mod tests {
         let toml_str = r#"
             [providers.deepseek]
             type = "openai_compat"
+            gen_ai_provider_name = "local"
             base_url = "http://localhost:8000/v1"
             default_model = "deepseek-chat"
 
             [roles.critic]
             provider = "deepseek"
         "#;
-        let err = ConfigManager::load_from_str(toml_str)
+        let err = Config::from_toml(toml_str)
             .expect_err("a role without `model` must not fall back to default_model");
         let msg = err.to_string();
         assert!(msg.contains("parse"), "expected a parse error, got: {msg}");
@@ -90,7 +83,7 @@ mod tests {
             modle    = "deepseek-chat"
         "#;
         assert!(
-            ConfigManager::load_from_str(toml_str).is_err(),
+            Config::from_toml(toml_str).is_err(),
             "deny_unknown_fields must catch a misspelled role key"
         );
     }

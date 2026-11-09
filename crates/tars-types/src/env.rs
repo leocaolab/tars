@@ -1,62 +1,35 @@
-//! Process-wide env-var knobs, in one place.
+//! Reads the process-wide env-var knobs tars owns, through one typed accessor each, so a knob
+//! name cannot be misspelled at a call site and this module lists them all.
 //!
-//! Per `ARC-L5-COH-18`, every tars-owned env-var read goes through a
-//! typed accessor here so call sites can't string-typo a knob name,
-//! and `grep tars_types::env::` enumerates the full process-wide
-//! knob surface in a single pass.
+//! Two kinds of env reads stay out: `SecretRef::Env`, whose variable name comes from user TOML,
+//! and the CLI backends' `std::env::vars()` sweep, which is the subprocess env-passthrough filter
+//! and is broad on purpose.
 //!
-//! **Not in scope.** Two categories of env reads deliberately don't
-//! live here and won't get a centralised accessor:
-//!
-//! 1. `SecretRef::Env` resolution (auth.rs, http_extras.rs) — these
-//!    read a var whose *name comes from user TOML*, so they can't be
-//!    hoisted into a fixed accessor list. They are a data-driven
-//!    credential resolver, not config-as-knobs.
-//! 2. `std::env::vars()` sweeps in the CLI-spawning backends (claude_cli,
-//!    codex_cli, gemini_cli) — those are the subprocess
-//!    env-passthrough firewall, deliberately broad. Hoisting them
-//!    would change the security posture, not centralise a knob.
-//!
-//! **Lookup is at call time, not startup.** Operators can flip a
-//! knob between requests and the change takes effect on the next
-//! [`claude_cli_streaming`] / etc. call. The accessors centralise
-//! the lookup and type-cast; they don't snapshot the environment.
-//! This keeps the documented ops-debug ergonomics of
-//! `TARS_CLAUDE_CLI_STREAM` (flip between two runs to bisect a
-//! streaming-vs-buffered bug) without re-scattering the read.
+//! Each accessor reads the environment when called and keeps no snapshot, so flipping
+//! `TARS_CLAUDE_CLI_STREAM` between two runs takes effect on the next call.
 
 use std::path::PathBuf;
 
-/// Override path to the Node daemon script for the `claude_sdk`
-/// backend (env var `TARS_CLAUDE_SDK_SCRIPT`). Used by `claude_sdk`'s
-/// default-script-path resolver; production installs that ran
-/// `tars install-claude-daemon` don't need to set this.
-/// `None` when unset or non-UTF-8.
+/// Returns `TARS_CLAUDE_SDK_SCRIPT`, the path that overrides the `claude_sdk` backend's Node
+/// daemon script; `None` when unset. A non-UTF-8 value is returned as is.
 pub fn claude_sdk_script_override() -> Option<PathBuf> {
     std::env::var_os("TARS_CLAUDE_SDK_SCRIPT").map(PathBuf::from)
 }
 
-/// Operator's `$HOME` directory. Used to resolve the standard
-/// per-user install path `~/.tars/claude-daemon/server.mjs`.
-/// `None` when `HOME` is unset (e.g. some container environments) or
-/// non-UTF-8.
+/// Returns `$HOME`; `None` when it is unset, as in some containers. A non-UTF-8 value is
+/// returned as is.
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// Stream-mode toggle for the `claude_cli` backend (env var
-/// `TARS_CLAUDE_CLI_STREAM`). The accepted truthy values are anything
-/// other than `""`, `"0"`, `"false"`, `"off"`, `"no"` (case-insensitive).
+/// Returns whether `TARS_CLAUDE_CLI_STREAM` turns on the `claude_cli` backend's stream mode:
+/// any value other than `""`, `"0"`, `"false"`, `"off"` or `"no"` (trimmed, case-insensitive) is
+/// true, and `Ok(None)` means the operator did not choose.
 ///
-/// Returns `Ok(None)` when the var is unset entirely so callers can
-/// distinguish "operator didn't pick" from "operator picked false."
-/// Most call sites want the default-false semantics —
-/// `.unwrap_or(None).unwrap_or(false)` or surfacing the `Err`.
+/// # Errors
 ///
-/// Returns `Err` when the var is set but non-UTF-8: a `.ok()` here would
-/// make invalid UTF-8 indistinguishable from "unset", silently falling
-/// back to the default and masking operator misconfiguration. Mirrors
-/// [`log_format_raw`]'s NotPresent→None / NotUnicode→propagate contract.
+/// Returns the `VarError` when the variable is set but not UTF-8, so a misconfiguration is not
+/// read as unset.
 pub fn claude_cli_streaming() -> Result<Option<bool>, std::env::VarError> {
     match std::env::var("TARS_CLAUDE_CLI_STREAM") {
         Ok(v) => {
@@ -71,32 +44,24 @@ pub fn claude_cli_streaming() -> Result<Option<bool>, std::env::VarError> {
     }
 }
 
-/// Raw value of `TARS_LOG_FORMAT` for tars-melt to parse into its
-/// own `TelemetryFormat` enum.
+/// Returns the raw `TARS_LOG_FORMAT` for tars-melt to parse, in `std::env::var`'s shape, as
+/// tars-melt reads its other variables.
 ///
-/// Returns `Ok(None)` when unset, `Ok(Some(_))` when set, and `Err`
-/// when set but unreadable (e.g. non-UTF-8). Consumers MUST surface
-/// the `Err` case loudly — silently defaulting on a read failure is
-/// what made the original site smell like swallowed-error.
-pub fn log_format_raw() -> Result<Option<String>, std::env::VarError> {
-    match std::env::var("TARS_LOG_FORMAT") {
-        Ok(s) => Ok(Some(s)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(e),
-    }
+/// # Errors
+///
+/// `VarError::NotPresent` when it is unset; `VarError::NotUnicode` when it is set but not UTF-8,
+/// which the caller reports rather than reading it as unset.
+pub fn log_format_raw() -> Result<String, std::env::VarError> {
+    std::env::var("TARS_LOG_FORMAT")
 }
 
 #[cfg(test)]
 mod tests {
-    // These tests can't safely set process-wide env (other tests run
-    // in parallel and would race), so they cover the deterministic
-    // helper logic only: pin the truthy/falsy parser used by the
-    // streaming accessor against every documented case.
+    // Setting process-wide env would race the tests running in parallel, so these test a copy
+    // of the accessor's match, not the accessor.
 
     #[test]
     fn claude_cli_streaming_falsy_set_matches_documented_strings() {
-        // Build the parser locally; can't actually mutate env in a
-        // multi-threaded test. The accessor calls this exact match.
         let parse = |v: &str| {
             let v = v.trim().to_ascii_lowercase();
             !matches!(v.as_str(), "" | "0" | "false" | "off" | "no")
@@ -121,8 +86,6 @@ mod tests {
         assert!(parse("TRUE"));
         assert!(parse("yes"));
         assert!(parse("on"));
-        // Anything not in the falsy set counts as truthy — including
-        // garbage; documented behaviour.
         assert!(parse("yarp"));
     }
 }

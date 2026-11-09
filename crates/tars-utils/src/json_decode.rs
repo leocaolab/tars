@@ -1,32 +1,10 @@
-//! Result-side, provider-mode-aware JSON decode — the full generic seam
-//! for turning an LLM completion into a typed value at the transport
-//! boundary, so no consumer re-implements "scrape JSON out of a chat
-//! response".
+//! Turns an LLM completion's text into a typed value, so no consumer scrapes JSON out of a
+//! chat response on its own.
 //!
-//! Three layers, each generic (no domain tag values, no domain types):
-//!
-//! 1. [`decode_json`] — bare decode of a response's text into
-//!    `T: DeserializeOwned`, strategy keyed off [`StructuredOutputMode`].
-//! 2. [`JsonAgentResponse`] + [`decode`] — the same, but the response may
-//!    be wrapped in a consumer-declared envelope tag
-//!    (`<tag>…</tag>`) and the caller may opt into a lossy
-//!    integer-clamp recovery via [`DecodeOpts`].
-//! 3. [`JsonValueType`] — a Python-style JSON type tag, handy for a
-//!    consumer's own "expected X, got Y" error messages.
-//!
-//! Mode dispatch:
-//! - [`StrictSchema`](StructuredOutputMode::StrictSchema) /
-//!   [`JsonObjectMode`](StructuredOutputMode::JsonObjectMode): the
-//!   provider guarantees a **clean JSON document** → parse directly.
-//! - [`None`](StructuredOutputMode::None) /
-//!   [`ToolUseEmulation`](StructuredOutputMode::ToolUseEmulation): the
-//!   text may be **chatty prose** with JSON embedded (optionally inside a
-//!   ```` ```json ```` fence) → strip fences, scan for the first balanced
-//!   JSON value, parse that.
-//!
-//! Deliberately generic: the envelope-tag STRINGS and the clamp opt-in
-//! are the consumer's convention; the extraction/recovery MECHANISM is
-//! here. No wrapper-tag values, no domain validation.
+//! How much the text is trusted follows the [`StructuredOutputMode`] the response was
+//! produced under (see [`decode_json`]). The envelope tag strings and the integer clamp are
+//! the consumer's choice, through [`JsonAgentResponse`] and [`DecodeOpts`]; this module
+//! knows no tag values and no domain types.
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -34,54 +12,49 @@ use serde_json::Value;
 use tars_types::ChatResponse;
 use tars_types::StructuredOutputMode;
 
-/// Typed failure of the decode family ([`decode_json`] / [`decode`] /
-/// [`ResponseJsonExt::json`]).
+/// A failure of [`decode_json`], [`decode`] or [`ResponseJsonExt::json`].
 #[derive(Debug, thiserror::Error)]
-pub enum TarsJsonError {
-    /// The response text was empty — the stream produced no assistant
-    /// text to decode (e.g. a tool-only turn, a filtered/empty
-    /// completion). Distinct from "text present but no JSON in it".
+pub enum DecodeJsonError {
+    /// The response text was empty or whitespace, as after a tool-only turn or a
+    /// filtered completion.
     #[error("response text was empty; nothing to decode")]
     EmptyStream,
 
-    /// The response declared one or more envelope [`wrapper_tags`] but
-    /// none of them (`<tag>…</tag>`) was found in the text. `tried` is
-    /// the tags that were looked for, in order.
+    /// The response type declares [`wrapper_tags`] and no `<tag>…</tag>` of them is in the
+    /// text. `tried` lists the tags in the order they were looked for.
     ///
     /// [`wrapper_tags`]: JsonAgentResponse::wrapper_tags
     #[error("no envelope block found; expected one of {tried:?}")]
     MissingBlock { tried: Vec<String> },
 
-    /// Chatty (`None` / `ToolUseEmulation`) text was scanned but no
-    /// balanced JSON value (`{…}` or `[…]`) parsed out of it. `attempts`
-    /// is how many candidate start positions were tried (bounded scan).
+    /// Chatty (`None` / `ToolUseEmulation`) text held no balanced `{…}` or `[…]` region and
+    /// no truncated JSON value.
+    /// `attempts` counts the start positions tried, at most `MAX_SCRAPE_ATTEMPTS`.
     #[error("no JSON value found in response text after scanning {attempts} candidate(s)")]
     NoJsonObject { attempts: usize },
 
-    /// Found JSON-looking text but it is not syntactically valid JSON.
-    /// In strict/native modes this means the provider's "clean JSON"
-    /// promise was violated.
-    #[error("response text is not valid JSON: {source}")]
+    /// The text, or every balanced region scraped from it, is not valid JSON. In the
+    /// native modes this means the provider broke its promise of a clean document; in the
+    /// chatty modes a reply cut off inside its JSON lands here too, with
+    /// [`serde_json::Error::is_eof`] true.
+    #[error("response text is not valid JSON")]
     InvalidJson {
         #[source]
         source: serde_json::Error,
     },
 
-    /// Text parsed as valid JSON but did not match the target type `T`
-    /// (missing field, wrong type, unknown variant, …). The `serde`
-    /// message names the offending path.
-    #[error("JSON did not match the expected type: {source}")]
+    /// The JSON is valid but does not fit the target type; the `serde` message names the
+    /// offending path.
+    #[error("JSON did not match the expected type")]
     Schema {
         #[source]
         source: serde_json::Error,
     },
 }
 
-impl TarsJsonError {
-    /// Map a `serde_json` failure to the right variant using its
-    /// [`category`](serde_json::error::Category): a `Data` category means
-    /// the JSON was well-formed but didn't fit the target type (schema
-    /// mismatch); `Syntax`/`Eof`/`Io` mean the bytes weren't valid JSON.
+impl DecodeJsonError {
+    /// Classifies a `serde_json` failure: [`Category::Data`](serde_json::error::Category::Data)
+    /// is [`Schema`](Self::Schema), anything else is [`InvalidJson`](Self::InvalidJson).
     fn from_serde(source: serde_json::Error) -> Self {
         match source.classify() {
             serde_json::error::Category::Data => Self::Schema { source },
@@ -90,10 +63,8 @@ impl TarsJsonError {
     }
 }
 
-/// A JSON value's type, named the Python way (`NoneType` / `bool` /
-/// `int` / `float` / `str` / `list` / `dict`). Generic helper for a
-/// consumer that wants a stable "expected an object, got a list"-style
-/// message without hand-matching [`serde_json::Value`] everywhere.
+/// A JSON value's type, displayed by its Python name (`NoneType`, `bool`, `int`, `float`,
+/// `str`, `list`, `dict`) for "expected X, got Y" messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JsonValueType {
     Null,
@@ -106,8 +77,8 @@ pub enum JsonValueType {
 }
 
 impl JsonValueType {
-    /// Classify a [`serde_json::Value`]. A number is [`Integer`] unless it
-    /// was parsed as a float (`is_f64`), in which case it is [`Float`].
+    /// Returns the type of `v`; a number is [`Float`] when it was parsed as one and
+    /// [`Integer`] otherwise.
     ///
     /// [`Integer`]: JsonValueType::Integer
     /// [`Float`]: JsonValueType::Float
@@ -128,7 +99,7 @@ impl JsonValueType {
         }
     }
 
-    /// The Python type name for this JSON type.
+    /// Returns the Python type name.
     pub fn py_name(&self) -> &'static str {
         match self {
             Self::Null => "NoneType",
@@ -148,98 +119,80 @@ impl std::fmt::Display for JsonValueType {
     }
 }
 
-/// Options for [`decode`]. Defaults are the safe, lossless choices;
-/// every recovery is opt-in.
+/// Options for [`decode`]. The default is lossless; every recovery is opt-in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DecodeOpts {
-    /// When `true`, before the final deserialize, walk the parsed JSON and
-    /// clamp any integer above `i64::MAX` down to `i64::MAX`. This is a
-    /// **lossy** recovery for models that emit out-of-range integers
-    /// (e.g. a bogus 20-digit id) into a field that only holds an
-    /// `i64`/`i32`. Off by default — a consumer opts in per call.
+    /// Clamps every integer above `i64::MAX` to `i64::MAX` before the final deserialize, a
+    /// lossy recovery for a model that emits a bogus 20-digit id into an `i64` field.
     pub clamp_ints: bool,
 }
 
 impl DecodeOpts {
-    /// Opts with integer clamping enabled.
+    /// Returns options with integer clamping on.
     pub fn clamping() -> Self {
         Self { clamp_ints: true }
     }
 }
 
-/// A response type that may arrive wrapped in a declared envelope tag.
-///
-/// The generic contract behind [`decode`]: a consumer implements this for
-/// its own response type and supplies the envelope [`wrapper_tags`] its
-/// convention uses (e.g. an agent that wraps its JSON in
-/// `<some_report>…</some_report>`). The **tag strings are the consumer's
-/// convention**; the extraction mechanism in [`decode`] is generic.
-///
-/// The default [`wrapper_tags`] is empty → the response is bare JSON.
-///
-/// [`wrapper_tags`]: JsonAgentResponse::wrapper_tags
+/// A response type that may arrive wrapped in an envelope tag of its own choosing, such as
+/// `<some_report>…</some_report>`.
 pub trait JsonAgentResponse: DeserializeOwned {
-    /// Envelope tags this response may be wrapped in, tried in order,
-    /// first match wins. Each entry may be written with or without
-    /// angle brackets (`"<fix_report>"` and `"fix_report"` are
-    /// equivalent). List a newer tag first and legacy aliases after it to
-    /// accept both. Empty (the default) means bare JSON — no envelope.
+    /// Returns the envelope tags to try, in order, the first present one winning; an entry
+    /// may omit the angle brackets. The default, empty, means bare JSON.
     fn wrapper_tags() -> &'static [&'static str] {
         &[]
     }
 }
 
-/// Upper bound on candidate `{`/`[` start positions the chatty-text
-/// scraper will try before giving up. Keeps a pathological completion
-/// full of stray braces from turning decode into a quadratic scan.
+/// Bounds the `{` / `[` start positions the chatty-text scraper tries, so a completion
+/// full of stray braces does not make decoding quadratic.
 const MAX_SCRAPE_ATTEMPTS: usize = 50;
 
-/// Decode `text` into `T`, choosing the strategy from `mode`. No envelope
-/// unwrapping, no clamp — the bare convenience over the full [`decode`].
+/// Decodes `text` into `T` with no envelope and no clamp.
 ///
-/// - Native-JSON modes ([`StrictSchema`](StructuredOutputMode::StrictSchema)
-///   / [`JsonObjectMode`](StructuredOutputMode::JsonObjectMode)): parse
-///   `text` directly (whitespace tolerated).
-/// - Chatty modes ([`None`](StructuredOutputMode::None) /
-///   [`ToolUseEmulation`](StructuredOutputMode::ToolUseEmulation)): strip
-///   fences, scan for the first balanced JSON value, parse it.
+/// Under [`StrictSchema`](StructuredOutputMode::StrictSchema) and
+/// [`JsonObjectMode`](StructuredOutputMode::JsonObjectMode) the provider promised a clean
+/// document, so the trimmed text is parsed as it is. Under
+/// [`None`](StructuredOutputMode::None) and
+/// [`ToolUseEmulation`](StructuredOutputMode::ToolUseEmulation) the text may be prose: an
+/// outer code fence is stripped and the first balanced `{…}` or `[…]` that parses is used. A
+/// balanced region that does not parse is passed over whole: a value nested inside a broken
+/// answer is not the answer.
 ///
-/// Empty (whitespace-only) text is [`TarsJsonError::EmptyStream`].
+/// # Errors
+///
+/// Returns [`DecodeJsonError::EmptyStream`] for whitespace-only text, and the other variants
+/// as they describe.
 pub fn decode_json<T: DeserializeOwned>(
     text: &str,
     mode: StructuredOutputMode,
-) -> Result<T, TarsJsonError> {
+) -> Result<T, DecodeJsonError> {
     let value = parse_value(text, mode)?;
-    serde_json::from_value::<T>(value).map_err(TarsJsonError::from_serde)
+    serde_json::from_value::<T>(value).map_err(DecodeJsonError::from_serde)
 }
 
-/// Decode `text` into a [`JsonAgentResponse`], composing the full seam:
+/// Decodes `text` into `T`: takes the body of `T`'s envelope tag when it declares any, and
+/// otherwise the text with an outer code fence stripped in every mode; then parses it by
+/// `mode` as [`decode_json`] does, clamping integers if `opts` asks.
 ///
-/// 1. if `T::wrapper_tags()` is non-empty, extract the substring between
-///    the first matching `<tag>…</tag>` from the RAW text (→
-///    [`TarsJsonError::MissingBlock`] if none match); otherwise strip an
-///    outer code fence and use that,
-/// 2. dispatch on `mode` (native → direct parse; chatty → fence-scrape),
-/// 3. if `opts.clamp_ints`, clamp out-of-`i64`-range integers before the
-///    final deserialize.
+/// The envelope is looked for in the raw text, before any code fence is stripped: a reply
+/// that shows a fenced diff and then its `<tag>…</tag>` would otherwise lose the envelope
+/// with the leading fence.
 ///
-/// The wrapper-tag block is extracted BEFORE any fence stripping: a reply
-/// that narrates a fenced ```diff block and then emits its `<tag>…</tag>`
-/// envelope must have the envelope found, not discarded when
-/// `strip_code_fences` consumes the leading fence. Stripping first (which a
-/// refactor briefly did) drops the envelope for exactly that shape — the
-/// fixer's `<fix_report>` / `<agent_reply>` after a diff — and the decode
-/// fails with `MissingBlock`.
+/// # Errors
+///
+/// Returns [`DecodeJsonError::MissingBlock`] when `T` declares tags and none is present, and
+/// the errors of [`decode_json`] otherwise.
 pub fn decode<T: JsonAgentResponse>(
     text: &str,
     mode: StructuredOutputMode,
     opts: DecodeOpts,
-) -> Result<T, TarsJsonError> {
+) -> Result<T, DecodeJsonError> {
     let tags = T::wrapper_tags();
     let inner = if tags.is_empty() {
         strip_code_fences(text)
     } else {
-        extract_tag_block(text, tags).ok_or_else(|| TarsJsonError::MissingBlock {
+        extract_tag_block(text, tags).ok_or_else(|| DecodeJsonError::MissingBlock {
             tried: tags.iter().map(|t| (*t).to_string()).collect(),
         })?
     };
@@ -248,29 +201,28 @@ pub fn decode<T: JsonAgentResponse>(
     if opts.clamp_ints {
         clamp_ints_in_place(&mut value);
     }
-    serde_json::from_value::<T>(value).map_err(TarsJsonError::from_serde)
+    serde_json::from_value::<T>(value).map_err(DecodeJsonError::from_serde)
 }
 
-/// Parse `text` to a [`serde_json::Value`] using the `mode` strategy.
-/// Shared front half of both decode entry points; the caller does the
-/// final `from_value::<T>` (so a clamp can slot in between).
-fn parse_value(text: &str, mode: StructuredOutputMode) -> Result<Value, TarsJsonError> {
+/// Parses `text` to a [`Value`] by `mode`, leaving the typed deserialize to the caller so a
+/// clamp can run in between.
+fn parse_value(text: &str, mode: StructuredOutputMode) -> Result<Value, DecodeJsonError> {
     if text.trim().is_empty() {
-        return Err(TarsJsonError::EmptyStream);
+        return Err(DecodeJsonError::EmptyStream);
     }
     match mode {
-        // Provider guarantees a clean JSON document in `text`.
         StructuredOutputMode::StrictSchema | StructuredOutputMode::JsonObjectMode => {
-            serde_json::from_str::<Value>(text.trim()).map_err(TarsJsonError::from_serde)
+            serde_json::from_str::<Value>(text.trim()).map_err(DecodeJsonError::from_serde)
         }
-        // `text` may be chatty free-form; scrape the JSON out of it.
         StructuredOutputMode::None | StructuredOutputMode::ToolUseEmulation => scrape_value(text),
     }
 }
 
-/// Strip an optional leading/trailing Markdown code fence, then scan the
-/// text for the first balanced JSON value (`{…}` or `[…]`) that parses.
-fn scrape_value(text: &str) -> Result<Value, TarsJsonError> {
+/// Strips an outer code fence, then returns the first balanced `{…}` or `[…]` that parses.
+///
+/// An opener that never balances ends the scan with an error when the text after it is a
+/// truncated JSON value, and is skipped as prose otherwise.
+fn scrape_value(text: &str) -> Result<Value, DecodeJsonError> {
     let body = strip_code_fences(text);
     let bytes = body.as_bytes();
 
@@ -292,36 +244,40 @@ fn scrape_value(text: &str) -> Result<Value, TarsJsonError> {
             break;
         }
         attempts += 1;
-        if let Some(end) = find_balanced(bytes, i, open, close) {
-            let candidate = &body[i..=end];
-            match serde_json::from_str::<Value>(candidate) {
+        match find_balanced(bytes, i, open, close) {
+            Some(end) => match serde_json::from_str::<Value>(&body[i..=end]) {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    // The balanced region wasn't valid JSON (e.g. a `{` in
-                    // prose). Remember why and keep looking — a later
-                    // candidate may be the real payload.
                     last_err = Some(e);
-                    i += 1;
-                    continue;
+                    i = end + 1;
                 }
+            },
+            None => {
+                if let Some(source) = truncation(&body[i..]) {
+                    return Err(DecodeJsonError::InvalidJson { source });
+                }
+                i += 1;
             }
-        } else {
-            // Unbalanced from here to EOF — no later opener can close
-            // either, so stop.
-            break;
         }
     }
 
     match last_err {
-        Some(source) => Err(TarsJsonError::InvalidJson { source }),
-        None => Err(TarsJsonError::NoJsonObject { attempts }),
+        Some(source) => Err(DecodeJsonError::InvalidJson { source }),
+        None => Err(DecodeJsonError::NoJsonObject { attempts }),
     }
 }
 
-/// Extract the substring between the first matching `<tag>…</tag>` in
-/// `text`. Tags are tried in order; the first whose open **and** close
-/// markers both appear wins. Each `tag` may be written with or without
-/// angle brackets. Returns `None` if no tag matched.
+/// Returns the parse error of `rest` when it is a JSON value cut off before its end, as a
+/// reply stopped at `max_tokens` is; `None` when it breaks off as prose does, so the scan
+/// moves past a stray `{` instead of decoding a value nested inside a cut-off reply.
+fn truncation(rest: &str) -> Option<serde_json::Error> {
+    serde_json::from_str::<Value>(rest)
+        .err()
+        .filter(serde_json::Error::is_eof)
+}
+
+/// Returns the trimmed body of the first tag in `tags` whose open and close markers both
+/// appear in `text`.
 fn extract_tag_block<'a>(text: &'a str, tags: &[&str]) -> Option<&'a str> {
     for tag in tags {
         let name = tag.trim().trim_start_matches('<').trim_end_matches('>');
@@ -340,9 +296,7 @@ fn extract_tag_block<'a>(text: &'a str, tags: &[&str]) -> Option<&'a str> {
     None
 }
 
-/// Recursively clamp every integer above `i64::MAX` down to `i64::MAX`.
-/// Only unsigned integers that overflow `i64` are affected; signed
-/// integers, floats, and every non-number value are left untouched.
+/// Clamps every integer above `i64::MAX`, at any depth, to `i64::MAX`.
 fn clamp_ints_in_place(v: &mut Value) {
     match v {
         Value::Number(n) => {
@@ -358,32 +312,25 @@ fn clamp_ints_in_place(v: &mut Value) {
     }
 }
 
-/// Strip a single leading ```` ``` ```` / ```` ```json ```` fence and its
-/// matching trailing ```` ``` ````, returning the inner body. When the
-/// text isn't fenced, returns it trimmed unchanged. Only the outermost
-/// fence is removed; the balanced scan handles anything else.
+/// Returns the trimmed body inside one outer ```` ``` ```` fence, or the trimmed text when
+/// it does not start with one. A missing closing fence (truncated output) is tolerated.
 fn strip_code_fences(text: &str) -> &str {
     let t = text.trim();
     let Some(after_open) = t.strip_prefix("```") else {
         return t;
     };
-    // Drop the rest of the fence's opening line (an optional language
-    // tag like `json`). If there's no newline, there's no body.
     let Some(nl) = after_open.find('\n') else {
         return t;
     };
     let inner = &after_open[nl + 1..];
-    // Remove the closing fence if present; tolerate its absence
-    // (truncated output) by returning what we have.
     match inner.rfind("```") {
         Some(close) => inner[..close].trim(),
         None => inner.trim(),
     }
 }
 
-/// Given `bytes[start]` is `open`, return the byte index of the matching
-/// `close`, honouring JSON string literals (braces inside `"…"` don't
-/// count) and backslash escapes. `None` if it never balances.
+/// Returns the index of the `close` that balances the `open` at `bytes[start]`, skipping
+/// string literals and their escapes; `None` when it never balances.
 fn find_balanced(bytes: &[u8], start: usize, open: u8, close: u8) -> Option<usize> {
     let mut depth = 0usize;
     let mut in_str = false;
@@ -414,36 +361,30 @@ fn find_balanced(bytes: &[u8], start: usize, open: u8, close: u8) -> Option<usiz
     None
 }
 
-/// `ChatResponse` is defined in `tars-types`, so the orphan rule forbids
-/// an inherent `impl` here in `tars-utils`; the method rides in on this
-/// trait instead. Bring it into scope (`use tars_utils::ResponseJsonExt;`)
-/// at any `resp.json::<T>(mode)` call site.
+/// Adds `resp.json::<T>(mode)` to [`ChatResponse`], which lives in `tars-types`.
 pub trait ResponseJsonExt {
-    /// `mode` is the [`StructuredOutputMode`] the request/provider used
-    /// `mode` is the [`StructuredOutputMode`] the request/provider used
-    /// (from the provider's [`ProviderProfile`](tars_types::ProviderProfile)),
-    /// so the caller — which knows how the response was produced — tells
-    /// the decoder whether `text` is clean JSON or chatty prose.
-    fn json<T: DeserializeOwned>(&self, mode: StructuredOutputMode) -> Result<T, TarsJsonError>;
+    /// Decodes the response text as [`decode_json`] does. `mode` is the one the provider's
+    /// [`ProviderProfile`](tars_types::ProviderProfile) says the response was produced under.
+    fn json<T: DeserializeOwned>(&self, mode: StructuredOutputMode) -> Result<T, DecodeJsonError>;
 }
 
 impl ResponseJsonExt for ChatResponse {
-    fn json<T: DeserializeOwned>(&self, mode: StructuredOutputMode) -> Result<T, TarsJsonError> {
+    fn json<T: DeserializeOwned>(&self, mode: StructuredOutputMode) -> Result<T, DecodeJsonError> {
         decode_json(&self.text, mode)
     }
 }
-/// Best-effort recovery of the COMPLETE leading object elements of a truncated
-/// JSON array.
+/// Returns the complete object and array elements of a possibly truncated JSON array,
+/// found as [`find_json_array_start`] finds it.
 ///
-/// Bare (non-object) elements are skipped: elements are expected to be objects, and a
-/// half-written scalar isn't worth guessing at.
+/// Scalar elements are skipped, and so is an element that balances but does not parse;
+/// nothing reports either.
 pub fn salvage_json_array(raw: &str, array_key: Option<&str>) -> Vec<Value> {
     let Some(arr_start) = find_json_array_start(raw, array_key) else {
         return Vec::new();
     };
     let bytes = raw.as_bytes();
     let mut out = Vec::new();
-    let mut depth = 0i32; // brace/bracket depth INSIDE the findings array
+    let mut depth = 0i32;
     let mut in_str = false;
     let mut escaped = false;
     let mut elem_start: Option<usize> = None;
@@ -465,13 +406,12 @@ pub fn salvage_json_array(raw: &str, array_key: Option<&str>) -> Vec<Value> {
             b'"' => in_str = true,
             b'{' | b'[' => {
                 if depth == 0 && elem_start.is_none() {
-                    elem_start = Some(i); // an object/array element begins
+                    elem_start = Some(i);
                 }
                 depth += 1;
             }
             b'}' | b']' => {
                 if depth == 0 {
-                    // This closes the findings array itself — done.
                     break;
                 }
                 depth -= 1;
@@ -491,20 +431,18 @@ pub fn salvage_json_array(raw: &str, array_key: Option<&str>) -> Vec<Value> {
     out
 }
 
-/// Prefers the envelope form (`"key": [ … ]`); falls
-/// back to a bare top-level array (`[ … ]`) ONLY when the reply starts with `[`
-/// (after stripping whitespace).
+/// Returns the index just past the `[` that opens the target array: the first `[` after
+/// `"array_key"` when that appears anywhere in `raw`, else the leading `[` of a reply that is
+/// a bare array.
 pub fn find_json_array_start(raw: &str, array_key: Option<&str>) -> Option<usize> {
     if let Some(key) = array_key {
         let search = format!("\"{}\"", key);
         if let Some(fpos) = raw.find(&search) {
-            // The next `[` after the key opens the array (colon + whitespace between).
             if let Some(rel) = raw[fpos..].find('[') {
                 return Some(fpos + rel + 1);
             }
         }
     }
-    // Fallback: only if the reply is a bare top-level array.
     let trimmed = raw.trim_start();
     if trimmed.starts_with('[') {
         return raw.find('[').map(|br| br + 1);
@@ -522,6 +460,39 @@ mod tests {
     struct Point {
         x: i32,
         y: i32,
+    }
+
+    #[test]
+    fn an_opener_that_never_closes_does_not_hide_the_object_after_it() {
+        let v: Point = decode_json(r#"{ {"x":1,"y":2}"#, StructuredOutputMode::None).unwrap();
+        assert_eq!(v, Point { x: 1, y: 2 });
+        let v: Vec<i32> = decode_json("see { here: [1, 2]", StructuredOutputMode::None).unwrap();
+        assert_eq!(v, vec![1, 2]);
+    }
+
+    #[test]
+    fn a_truncated_reply_is_invalid_json_not_its_inner_object() {
+        let cut =
+            r#"{"verdict": "fail", "evidence": {"file": "a.rs", "line": 3}, "fix": "rename the"#;
+        let e = decode_json::<Value>(cut, StructuredOutputMode::None).unwrap_err();
+        assert!(
+            matches!(&e, DecodeJsonError::InvalidJson { source } if source.is_eof()),
+            "{e:?}"
+        );
+        let e = decode_json::<Point>(r#"{"x":1"#, StructuredOutputMode::None).unwrap_err();
+        assert!(
+            matches!(&e, DecodeJsonError::InvalidJson { source } if source.is_eof()),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn text_cut_off_inside_json_is_truncation_and_prose_is_not() {
+        assert!(truncation(r#"{"fix": "rename the"#).is_some());
+        assert!(truncation(r#"[1, 2"#).is_some());
+        assert!(truncation(r#"{ {"x":1}"#).is_none());
+        assert!(truncation("{ here: [1, 2]").is_none());
+        assert!(truncation(r#"{"x":1}"#).is_none());
     }
 
     // ── decode_json: strict / native-JSON modes ─────────────────────
@@ -551,16 +522,14 @@ mod tests {
 
     #[test]
     fn strict_mode_does_not_scrape_fenced_prose() {
-        // In strict mode the provider promised clean JSON. A fenced,
-        // chatty body is a broken promise → InvalidJson, NOT a silent
-        // scrape (that behavior belongs to the chatty modes only).
+        // A fenced, chatty body breaks strict mode's promise of clean JSON.
         let err = decode_json::<Point>(
             "Here you go: ```json\n{\"x\":1,\"y\":2}\n```",
             StructuredOutputMode::StrictSchema,
         )
         .unwrap_err();
         assert!(
-            matches!(err, TarsJsonError::InvalidJson { .. }),
+            matches!(err, DecodeJsonError::InvalidJson { .. }),
             "got {err:?}"
         );
     }
@@ -602,6 +571,16 @@ mod tests {
     }
 
     #[test]
+    fn none_mode_broken_outer_object_is_invalid_not_its_nested_object() {
+        let text = r#"Here you go: {"verdict": "fail", "items": [1, 2,], "meta": {"n": 1}}"#;
+        let err = decode_json::<Value>(text, StructuredOutputMode::None).unwrap_err();
+        assert!(
+            matches!(err, DecodeJsonError::InvalidJson { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
     fn none_mode_honours_braces_inside_strings() {
         #[derive(Debug, Deserialize, PartialEq)]
         struct Msg {
@@ -638,7 +617,7 @@ mod tests {
         ] {
             let err = decode_json::<Point>("   \n\t ", mode).unwrap_err();
             assert!(
-                matches!(err, TarsJsonError::EmptyStream),
+                matches!(err, DecodeJsonError::EmptyStream),
                 "mode {mode:?} → {err:?}"
             );
         }
@@ -649,7 +628,7 @@ mod tests {
         let err =
             decode_json::<Point>("no braces here at all", StructuredOutputMode::None).unwrap_err();
         match err {
-            TarsJsonError::NoJsonObject { attempts } => assert_eq!(attempts, 0),
+            DecodeJsonError::NoJsonObject { attempts } => assert_eq!(attempts, 0),
             other => panic!("expected NoJsonObject, got {other:?}"),
         }
     }
@@ -658,14 +637,14 @@ mod tests {
     fn none_mode_valid_json_wrong_shape_is_schema_error() {
         let err = decode_json::<Point>(r#"answer: {"foo":1,"bar":2}"#, StructuredOutputMode::None)
             .unwrap_err();
-        assert!(matches!(err, TarsJsonError::Schema { .. }), "got {err:?}");
+        assert!(matches!(err, DecodeJsonError::Schema { .. }), "got {err:?}");
     }
 
     #[test]
     fn strict_mode_wrong_shape_is_schema_error() {
         let err =
             decode_json::<Point>(r#"{"foo":1}"#, StructuredOutputMode::StrictSchema).unwrap_err();
-        assert!(matches!(err, TarsJsonError::Schema { .. }), "got {err:?}");
+        assert!(matches!(err, DecodeJsonError::Schema { .. }), "got {err:?}");
     }
 
     #[test]
@@ -673,7 +652,7 @@ mod tests {
         let err = decode_json::<Point>(r#"{"x":1,"y":}"#, StructuredOutputMode::StrictSchema)
             .unwrap_err();
         assert!(
-            matches!(err, TarsJsonError::InvalidJson { .. }),
+            matches!(err, DecodeJsonError::InvalidJson { .. }),
             "got {err:?}"
         );
     }
@@ -683,7 +662,7 @@ mod tests {
         let text = "{x ".repeat(200);
         let err = decode_json::<Point>(&text, StructuredOutputMode::None).unwrap_err();
         match err {
-            TarsJsonError::NoJsonObject { attempts } => {
+            DecodeJsonError::NoJsonObject { attempts } => {
                 assert!(attempts <= MAX_SCRAPE_ATTEMPTS, "attempts={attempts}");
             }
             other => panic!("expected NoJsonObject, got {other:?}"),
@@ -722,12 +701,6 @@ mod tests {
 
     #[test]
     fn decode_extracts_envelope_that_follows_a_code_fence() {
-        // Regression: a reply that narrates a fenced ```diff block and THEN
-        // emits its `<report>…</report>` envelope must have the envelope found.
-        // The wrapper block is extracted from the RAW text before any fence
-        // stripping — stripping first consumes the leading fence and discards
-        // the envelope that follows it (the fixer's `<fix_report>` after a diff),
-        // failing with MissingBlock. This is the shape the agent fixer emits.
         let text = "```diff\n--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n```\n\
                     <report>{\"x\":1,\"y\":2}</report>";
         let w: Wrapped = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
@@ -740,7 +713,7 @@ mod tests {
         let err =
             decode::<Wrapped>(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap_err();
         match err {
-            TarsJsonError::MissingBlock { tried } => {
+            DecodeJsonError::MissingBlock { tried } => {
                 assert_eq!(tried, vec!["<report>".to_string()])
             }
             other => panic!("expected MissingBlock, got {other:?}"),
@@ -752,7 +725,6 @@ mod tests {
         v: i32,
     }
     impl JsonAgentResponse for Aliased {
-        // New tag first, legacy alias second — accept both.
         fn wrapper_tags() -> &'static [&'static str] {
             &["<result>", "<legacy>"]
         }
@@ -760,7 +732,6 @@ mod tests {
 
     #[test]
     fn decode_first_matching_tag_wins() {
-        // Both tags present → the first listed (`<result>`) wins.
         let text = "<legacy>{\"v\":1}</legacy>\n<result>{\"v\":2}</result>";
         let a: Aliased = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
         assert_eq!(a, Aliased { v: 2 });
@@ -768,7 +739,6 @@ mod tests {
 
     #[test]
     fn decode_falls_back_to_legacy_alias_tag() {
-        // Only the legacy alias present → still extracted.
         let text = "chatter <legacy>{\"v\":9}</legacy> chatter";
         let a: Aliased = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
         assert_eq!(a, Aliased { v: 9 });
@@ -776,7 +746,6 @@ mod tests {
 
     #[test]
     fn decode_tag_written_without_brackets_is_equivalent() {
-        // The trait may list "report" instead of "<report>".
         #[derive(Debug, Deserialize, PartialEq)]
         struct Bare {
             x: i32,
@@ -794,7 +763,6 @@ mod tests {
 
     #[test]
     fn decode_empty_wrapper_tags_means_bare_json() {
-        // Default wrapper_tags() = [] → behaves like decode_json.
         #[derive(Debug, Deserialize, PartialEq)]
         struct BareResp {
             x: i32,
@@ -812,7 +780,6 @@ mod tests {
 
     #[test]
     fn decode_extracts_fenced_json_inside_envelope() {
-        // Envelope whose body is itself a ```json fence.
         let text = "<report>```json\n{\"x\":7,\"y\":8}\n```</report>";
         let w: Wrapped = decode(text, StructuredOutputMode::None, DecodeOpts::default()).unwrap();
         assert_eq!(w, Wrapped { x: 7, y: 8 });
@@ -828,7 +795,6 @@ mod tests {
 
     #[test]
     fn clamp_off_by_default_overflow_int_is_schema_error() {
-        // u64::MAX doesn't fit i64 → Schema error when clamp is off.
         let text = r#"{"id": 18446744073709551615}"#;
         let err = decode::<HasId>(
             text,
@@ -836,7 +802,7 @@ mod tests {
             DecodeOpts::default(),
         )
         .unwrap_err();
-        assert!(matches!(err, TarsJsonError::Schema { .. }), "got {err:?}");
+        assert!(matches!(err, DecodeJsonError::Schema { .. }), "got {err:?}");
     }
 
     #[test]

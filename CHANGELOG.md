@@ -1,23 +1,87 @@
 # CHANGELOG
 
-Roadmap-level shipped items, organized by milestone (Doc 14). Entries
-record **what shipped + commit ref**, plus a short **why** when the
-decision wasn't obvious from the diff. The intent: a reader landing
-on this repo gets a one-page tour of "where are we" without grepping
-git log or wading through TODO.md's deferred / frozen lists.
-
-For things deliberately **not** done, see [TODO.md](./TODO.md):
-- Overengineering items (O-1..O-10) — scaffolds we
-  carry on a trigger-or-delete contract.
-- Audit deferrals (A-1, A-4) — non-critical findings revisitable
-  on touch.
-- Doc-N gap items (D-1..D-13) — explicit deferred / frozen entries
-  per Doc N's full surface vs. what's wired today.
-
-For commit-level detail (per-file diffs, exact line numbers): `git log`
-is authoritative. This file aggregates.
+What each release changed, newest first, with a short **why** when the diff does
+not say it. Commit-level detail is in `git log`.
 
 ---
+
+## 2.0.0 — unreleased
+
+2.0 is a breaking release. The crates were regrouped by what they do, the Bedrock
+backend and the reply cache are gone, and model calls run read-only unless the
+config asks for more.
+
+### Crates
+
+| 1.10 crate | 2.0 |
+|---|---|
+| `tars-provider`, `tars-pipeline` | one crate, **`tars-llm`**: every root export of the two is a root export of `tars_llm`; `tars_provider::registry` is `tars_llm::provider::registry`, `tars_provider::backends` is `tars_llm::provider::backends`, `tars_pipeline::sync` is `tars_llm::pipeline::sync` |
+| `tars-harness` | split into **`tars-eval`** (the library that tests and scores calls: cassette diff, invariants, the eval engine, judges, metamorphic relations, trajectory matching) and **`tars-cli`** (the `tars` binary) |
+| `tars-cache` | removed: tars no longer caches replies (below) |
+| `tars-bedrock` | removed: tars does not support Bedrock |
+| — | new: **`tars-telemetry`**, which installs the process's tracing subscriber (log format, filter, optional OTLP export) |
+| `tars-types`, `tars-config`, `tars-melt`, `tars-storage`, `tars-tools`, `tars-sandbox`, `tars-utils`, `tars-node` | kept |
+
+The Python binding (`tars-py`) is not part of this release; the 1.10 wheel stays
+the current one until a later release brings it back.
+
+### Breaking changes
+
+- **`tars harness` is now `tars eval`.** `tars harness eval` is `tars eval run`,
+  `tars harness diff` is `tars eval diff`, `tars harness judge` is `tars eval judge`;
+  their arguments are unchanged. `tars harness migrate-checks` and `bless` are
+  removed. Build and install the binary with `-p tars-cli`
+  (`cargo install --path crates/tars-cli`). A `RUST_LOG` filter that named
+  `tars_harness` names `tars_cli` or `tars_eval`.
+- **tars no longer caches replies.** `CacheLookupMiddleware`, the `cache_lookup`
+  layer of the default chain and the `cache_hit` fact (the `llm_call` column,
+  `tars events --json`, the Node binding's telemetry) are gone. A provider's prompt
+  cache (`cached_input_tokens`, `cache_creation_tokens`, cache prices) is
+  untouched. A caller who wants a reply cache adds one with `.layer(...)` over the
+  public `Middleware`.
+- **No Bedrock.** `type = "bedrock"` in a config no longer parses, and the
+  `bedrock` feature of the provider crate is gone.
+- **Bless is removed** (`tars harness bless`, tars-node's `blessCheck`). Assert on a
+  decoded reply with your language's test tool, or compare two versions with
+  `tars eval run` / `diff` / `judge`.
+- **`tars eval run` refuses an output directory that is not empty** (exit 2), so a
+  reused `-o` no longer pairs one run's judge report with another run.
+
+### Config
+
+- **Model calls run read-only when the config has no `[sandbox]` table** and no
+  `--sandbox` is given; they ran unconfined. A CLI delegate (claude, codex,
+  opencode, antigravity) may no longer write files unless the config or the flag
+  asks for `workspace-write`.
+- **`[routing]` and `[web_search]` are gone.** Neither ever took effect. A config
+  that still has either fails to load with an `unknown field` error naming the
+  section; delete it.
+- **The default config file is `$TARS_HOME/config.toml`** (`~/.tars/config.toml`
+  without `$TARS_HOME`); `tars init` writes there.
+- **A validation failure lists every key and message**, one per line, instead of a
+  count. The Node binding shows the same text.
+- **A failed `tars models update` keeps the provider's last model list.** A query
+  that fails (no network, an expired key, a dead local server) used to replace the
+  provider's list with an empty one, so `<series>@latest` and the live limits fell
+  back to the shipped `provider.toml` without a word. The failure is recorded and
+  the list kept until a query succeeds again; `tars models` prints the failure above
+  the kept list.
+
+### Circuit breaker
+
+- A response that does not parse counts as a health failure; an internal error
+  does not.
+- Only a finished response closes a probe; a stream that ends without one leaves no
+  verdict.
+- `CircuitBreakerConfig::new(threshold, cooldown)` takes a `NonZeroU32` and refuses
+  a cooldown longer than one day.
+
+### Other
+
+- **Stopping `tars` stops the CLI delegates it started.** On SIGINT or SIGTERM it
+  kills their process groups and exits 130 or 143; before, the children ran on.
+  tars-node adds `killSpawnedChildren()` for a host that wants the same.
+- New provider guide: [`docs/providers/codex-cli.md`](docs/providers/codex-cli.md).
 
 ## 1.10.2 — the price table knows the models we run, and a cache write costs money — `v1.10.2`
 

@@ -41,12 +41,12 @@ impl AnthropicProviderBuilder {
 
     pub fn base_url(self, url: impl Into<String>) -> Self;       // default: api.anthropic.com
     pub fn api_version(self, v: impl Into<String>) -> Self;      // default: 2023-06-01
-    pub fn capabilities(self, c: Capabilities) -> Self;          // override defaults
+    pub fn capabilities(self, c: ProviderProfile) -> Self;          // override defaults
     pub fn extras(self, e: HttpProviderExtras) -> Self;          // headers / query params
 
     pub fn build(
         self,
-        http: Arc<HttpProviderBase>,
+        http: Arc<HttpClient>,
         auth_resolver: Arc<dyn AuthResolver>,
     ) -> Arc<AnthropicProvider>;
 }
@@ -59,12 +59,12 @@ auth is delegated to the OS-installed `claude` binary. The HTTP API
 backend can't do that: it actually needs to issue HTTP requests with
 your credential. So `.build()` requires:
 
-- **`Arc<HttpProviderBase>`** — a shared `reqwest`-backed HTTP client
+- **`Arc<HttpClient>`** — a shared `reqwest`-backed HTTP client
   with connection pooling, retry-aware timeouts, and the standard
   middleware hooks. You construct it once per process, share across
   providers.
 - **`Arc<dyn AuthResolver>`** — looks up the actual credential at call
-  time. For env-var auth this is just `BasicAuthResolver::new()`; for
+  time. For env-var auth this is just `EnvFileAuthResolver::new()`; for
   production secret managers (Vault, GCP Secret Manager, etc.) you
   plug in a custom impl.
 
@@ -72,15 +72,15 @@ your credential. So `.build()` requires:
 
 ```rust
 use std::sync::Arc;
-use tars_provider::{
-    AnthropicProviderBuilder, BasicAuthResolver, HttpProviderBase, HttpProviderConfig,
+use tars_llm::{
+    AnthropicProviderBuilder, EnvFileAuthResolver, HttpClient, HttpClientConfig,
 };
 use tars_types::Auth;
 
-let http = Arc::new(HttpProviderBase::new(HttpProviderConfig::default())?);
-let auth_resolver = Arc::new(BasicAuthResolver::new());
+let http = Arc::new(HttpClient::new(HttpClientConfig::default())?);
+let auth_resolver = Arc::new(EnvFileAuthResolver::new());
 
-let provider = AnthropicProviderBuilder::new("claude_api", Auth::env("ANTHROPIC_API_KEY"))
+let provider = AnthropicProviderBuilder::new(ProviderId::new("claude_api"), Auth::env("ANTHROPIC_API_KEY"))
     .build(http, auth_resolver);
 ```
 
@@ -92,7 +92,7 @@ several HTTP-API providers — they share the same `http` and
 ### Overriding base URL — proxies, mocks, regional endpoints
 
 ```rust
-let provider = AnthropicProviderBuilder::new("claude_api", auth)
+let provider = AnthropicProviderBuilder::new(ProviderId::new("claude_api"), auth)
     .base_url("https://my-anthropic-proxy.internal:8443")
     .build(http, auth_resolver);
 ```
@@ -110,27 +110,27 @@ new features. Pin to a known-good version if you've validated against
 a specific one:
 
 ```rust
-let provider = AnthropicProviderBuilder::new("claude_api", auth)
+let provider = AnthropicProviderBuilder::new(ProviderId::new("claude_api"), auth)
     .api_version("2023-06-01")
     .build(http, auth_resolver);
 ```
 
 Default is whatever the library was built against. Override sparingly.
 
-### Capabilities — telling the rest of tars what this model can do
+### ProviderProfile — telling the rest of tars what this model can do
 
-Capabilities is the metadata layer that the pre-flight + middleware use
+ProviderProfile is the metadata layer that the pre-flight + middleware use
 to refuse incompatible requests (asking for vision on a text-only
 model, asking for parallel tool calls on a model that doesn't support
 them, etc.). Defaults match modern Sonnet/Opus:
 
 ```rust
-Capabilities {
+ProviderProfile {
     max_context_tokens: 200_000,
     max_output_tokens: 8_192,
     supports_tool_use: true,
     supports_parallel_tool_calls: true,
-    supports_structured_output: StructuredOutputMode::ToolUseEmulation,
+    supports_structured_output: Some(StructuredOutputMode::ToolUseEmulation),
     supports_vision: true,
     supports_thinking: true,
     supports_cancel: true,
@@ -149,9 +149,9 @@ Override when:
 - You've measured real pricing and want budget middleware to use it
 
 ```rust
-use tars_types::Capabilities;
-let caps = Capabilities { max_output_tokens: 4096, supports_thinking: false, ..Default::default() };
-let provider = AnthropicProviderBuilder::new("claude_api", auth)
+use tars_types::ProviderProfile;
+let caps = ProviderProfile { max_output_tokens: 4096, supports_thinking: false, ..Default::default() };
+let provider = AnthropicProviderBuilder::new(ProviderId::new("claude_api"), auth)
     .capabilities(caps)
     .build(http, auth_resolver);
 ```
@@ -172,7 +172,7 @@ let extras = HttpProviderExtras {
     env_http_headers: vec![("X-Org-Id".into(), "ORG_ID".into())],  // value from env
     query_params: vec![],
 };
-let provider = AnthropicProviderBuilder::new("claude_api", auth)
+let provider = AnthropicProviderBuilder::new(ProviderId::new("claude_api"), auth)
     .extras(extras)
     .build(http, auth_resolver);
 ```
@@ -203,7 +203,7 @@ Auth::file("/run/secrets/anthropic.key") // → Secret { SecretRef::File { path:
 let auth = Auth::env("ANTHROPIC_API_KEY");
 ```
 
-Resolved at call time via `BasicAuthResolver` reading `std::env`.
+Resolved at call time via `EnvFileAuthResolver` reading `std::env`.
 
 ### `Auth::file` — Kubernetes-style mounted secrets
 
@@ -243,11 +243,11 @@ impl AuthResolver for VaultResolver {
 
 The `ctx: &RequestContext` argument is the hook for per-tenant secret
 namespacing. Production multi-tenant deployments use this; single-tenant
-uses `BasicAuthResolver` and ignores `ctx`.
+uses `EnvFileAuthResolver` and ignores `ctx`.
 
 `ResolvedAuth` deliberately implements `Debug` with credential
 redaction — `tracing::error!(auth = ?auth)` is safe. Audit ref:
-`tars-provider-src-auth-2`.
+`tars-llm-src-auth-2`.
 
 ---
 
@@ -269,13 +269,13 @@ auth = { kind = "secret", secret = { source = "env", var = "ANTHROPIC_API_KEY" }
 # query_params = []
 ```
 
-`ProviderRegistry::from_config` constructs the `HttpProviderBase` and
-`BasicAuthResolver` automatically; you get back a registry with the
+`ProviderRegistry::from_config` constructs the `HttpClient` and
+`EnvFileAuthResolver` automatically; you get back a registry with the
 provider already built. Most users never touch `AnthropicProviderBuilder`
 directly.
 
 ```rust
-use tars_provider::ProviderRegistry;
+use tars_llm::ProviderRegistry;
 
 let registry = ProviderRegistry::from_config(&cfg, /* ... */)?;
 let provider = registry.get(&ProviderId::new("claude_api")).unwrap();
@@ -297,7 +297,7 @@ auth = { kind = "secret", secret = { source = "inline", value = "sk-ant-..." } }
 ### Multiple Anthropic providers
 
 You can name as many `anthropic`-type providers as you want — they'll
-share the `HttpProviderBase` connection pool automatically:
+share the `HttpClient` connection pool automatically:
 
 ```toml
 [providers.claude_prod]
@@ -352,11 +352,11 @@ Override any of these via the Builder methods (§2) or via TOML (§4).
 
 A short list of things that look reasonable and aren't:
 
-1. **Don't hand-construct `HttpProviderBase` per provider.** It owns a
+1. **Don't hand-construct `HttpClient` per provider.** It owns a
    connection pool. Share one process-wide.
 2. **Don't put `Auth::inline` in production config.** Use env or file.
    The pre-flight will warn.
-3. **Don't override `Capabilities` to "lie" about a model's
+3. **Don't override `ProviderProfile` to "lie" about a model's
    capabilities to skirt validation.** The capability layer exists to
    refuse incompatible requests before they hit the network. Lying
    means the network call fails with a less informative error.
@@ -374,8 +374,3 @@ A short list of things that look reasonable and aren't:
 
 - [`claude-cli.md`](./claude-cli.md) — subscription-authenticated path
   with the agent-loop discussion
-- `../architecture/01-llm-provider.md` —
-  full provider-trait spec; HTTP-API and CLI backends share §10 (cache),
-  §11 (errors), §12 (routing), §15 (anti-patterns)
-- `../architecture/06-config-multitenancy.md` —
-  per-tenant secret namespacing via custom `AuthResolver`

@@ -1,12 +1,5 @@
-//! Typed-error → JS mapping for the handle-based surface.
-//!
-//! The doc contract is a **discriminable class hierarchy**
-//! (`TarsError → TarsConfigError / TarsProviderError / TarsUnknownRole / …`),
-//! *not* one stringified message. napi-rs's JS `Error` carries a `.code`
-//! property whose value is the Rust `Error<S>`'s status string
-//! (`napi_create_error(env, code, msg)`), so we key the JS `.code` off the
-//! Rust error's typed **variant** and keep the human `.message` = the real
-//! underlying error text (never a sterile sentinel that throws the truth away).
+//! Turns tars errors into JS errors whose `.code` names the kind of failure and whose `.message`
+//! is the underlying error's own text, so JS branches on `e.code`.
 //!
 //! ```js
 //! try { pipeline('critic'); }
@@ -15,28 +8,23 @@
 //! }
 //! ```
 //!
-//! ## Sync vs async
-//!
-//! Every **synchronous** boundary (`init`, `provider(role)` /
-//! `pipeline(role)`, …) returns `Result<T, String>` — the
-//! napi alias `Result<T, S = Status>` with `S = String`, i.e.
-//! `Result<T, napi::Error<String>>` — so `.code` is our domain string.
-//! The **async** `complete()` path is locked by napi to
-//! `napi::Result<T>` (`Error<Status>`), so its rejections carry
-//! `code === 'GenericFailure'`; we still surface the provider error's typed
-//! `kind` as the leading token of the message. See [`provider_reason`].
+//! `init`, `provider`, `pipeline`, `roleProvider`, `roleModel` and the `Pipeline` factories
+//! return `napi::Result<T, String>`, so `.code` is a string of ours. napi fixes the async
+//! `complete()` to `napi::Error<Status>`, whose `.code` is always `GenericFailure`; there the kind
+//! leads the message instead (see [`llm_reason`]).
 
 use napi::Error;
 
 use tars_config::ConfigError;
-use tars_provider::RegistryError;
-use tars_types::{ProviderError, ProviderId};
+use tars_llm::LlmError;
+use tars_llm::RegistryError;
+use tars_types::ProviderId;
+use tars_utils::display_chain;
 
 /// A JS-facing error whose `.code` is a domain-typed string (see module docs).
 pub(crate) type JsError = Error<String>;
 
-/// `role` is not in the `[roles]` table. The message names the role and the
-/// section to add — never a sterile sentinel.
+/// Says that `role` has no `[roles]` entry, naming the section to add.
 pub(crate) fn unknown_role_to_js(role: &str) -> JsError {
     Error::new(
         "TarsUnknownRole".to_string(),
@@ -47,8 +35,7 @@ pub(crate) fn unknown_role_to_js(role: &str) -> JsError {
     )
 }
 
-/// `role` names a provider the registry does not hold — `[roles]` and
-/// `[providers]` disagree. Carries both real names in the message.
+/// Says that `role` names a provider the registry does not hold, naming both.
 pub(crate) fn provider_not_registered_to_js(role: &str, provider: &ProviderId) -> JsError {
     Error::new(
         "TarsProviderNotRegistered".to_string(),
@@ -59,22 +46,60 @@ pub(crate) fn provider_not_registered_to_js(role: &str, provider: &ProviderId) -
     )
 }
 
-/// Map a [`ConfigError`] (composition-root config load / parse / validate) to a
-/// discriminable JS error `.code`.
+/// Refuses a handle asked for without a ctx, which would have no tenant to make its calls under;
+/// the message says what to pass.
+pub(crate) fn no_tenant_to_js() -> JsError {
+    Error::new(
+        "TarsNoTenant".to_string(),
+        "no tenant: pass the caller's context, e.g. pipeline(role, { tenant: 'acme' })".to_string(),
+    )
+}
+
+/// A ctx field that carries an id.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CtxField {
+    Tenant,
+    Session,
+    Trace,
+}
+
+impl CtxField {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Tenant => "TarsInvalidTenant",
+            Self::Session => "TarsInvalidSession",
+            Self::Trace => "TarsInvalidTrace",
+        }
+    }
+
+    fn path(self) -> &'static str {
+        match self {
+            Self::Tenant => "ctx.tenant",
+            Self::Session => "ctx.session",
+            Self::Trace => "ctx.trace",
+        }
+    }
+}
+
+/// Refuses a ctx field whose value is not a valid id (it is empty); `.code` names the field and
+/// the message carries the id type's own refusal.
+pub(crate) fn invalid_ctx_id_to_js(field: CtxField, err: serde_json::Error) -> JsError {
+    Error::new(field.code().to_string(), format!("{}: {err}", field.path()))
+}
+
 pub(crate) fn config_to_js(err: ConfigError) -> JsError {
-    Error::new("TarsConfigError".to_string(), err.to_string())
+    Error::new("TarsConfigError".to_string(), display_chain(&err))
 }
 
-/// Map a [`RegistryError`] (provider-registry build / lookup) to
-/// `TarsRegistryError`.
+/// The `.code` of a provider registry that could not be built or does not hold a provider.
+pub(crate) const REGISTRY_ERROR: &str = "TarsRegistryError";
+
 pub(crate) fn registry_to_js(err: RegistryError) -> JsError {
-    Error::new("TarsRegistryError".to_string(), err.to_string())
+    Error::new(REGISTRY_ERROR.to_string(), display_chain(&err))
 }
 
-/// Async-path reason for a provider-call [`ProviderError`]. napi's async
-/// bridge fixes `.code` to `GenericFailure`, so we lead the message with the
-/// provider error's typed `kind` (e.g. `rate_limited: …`) — the caller can
-/// still branch on the kind token without a raw `.contains()` grep of prose.
-pub(crate) fn provider_reason(err: ProviderError) -> napi::Error {
-    napi::Error::from_reason(format!("{}: {err}", err.kind().as_str()))
+/// Returns a failed call of the async path, its message led by the error's kind
+/// (`rate_limited: …`) because napi fixes `.code` there.
+pub(crate) fn llm_reason(err: LlmError) -> napi::Error {
+    napi::Error::from_reason(format!("{}: {}", err.kind().as_str(), display_chain(&err)))
 }

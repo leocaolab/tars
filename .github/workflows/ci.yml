@@ -52,11 +52,8 @@ jobs:
             && echo "bwrap userns: OK" \
             || echo "bwrap userns: still blocked — the jail tests will say so"
 
-      # Skip tars-py here — it links libpython at test time, which
-      # this image doesn't satisfy without extra setup. Coverage
-      # for tars-py lives in the dedicated `python` job below.
-      - name: cargo test (workspace minus tars-py)
-        run: cargo test --workspace --exclude tars-py --no-fail-fast
+      - name: cargo test
+        run: cargo test --workspace --no-fail-fast
 
       - name: cargo clippy (-D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -64,67 +61,19 @@ jobs:
       # The `otlp` feature is off by default (heavy tonic/grpc deps), so
       # the workspace gates above don't compile it. Check + test it
       # explicitly so the OpenTelemetry bridge can't rot.
-      - name: tars-melt otlp feature (clippy + test)
+      - name: tars-telemetry otlp feature (clippy + test)
         run: |
-          cargo clippy -p tars-melt --features otlp --all-targets -- -D warnings
-          cargo test -p tars-melt --features otlp
+          cargo clippy -p tars-telemetry --features otlp --all-targets -- -D warnings
+          cargo test -p tars-telemetry --features otlp
+
+      # The `cli` feature is on by default; without it the HTTP backends must
+      # still build, and a registry must still build and refuse a CLI provider
+      # only when asked for it.
+      - name: tars-llm without the cli feature (clippy + test)
+        run: |
+          cargo clippy -p tars-llm --no-default-features --all-targets -- -D warnings
+          cargo test -p tars-llm --no-default-features
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-  python:
-    name: tars-py wheel + pytest
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install maturin + pytest
-        run: |
-          python -m pip install --upgrade pip
-          pip install maturin pytest
-
-      - name: maturin build (release wheel)
-        working-directory: crates/tars-py
-        run: maturin build --release --out ../../target/wheels
-
-      - name: pip install built wheel
-        run: pip install --force-reinstall target/wheels/tars-*.whl
-
-      # A minimal config so the construction/config tests (e.g. builder
-      # layer-name assertions) can resolve a provider object. The
-      # base_url points at a dead port on purpose — these tests build the
-      # provider and assemble the onion but never call it. Tests that DO
-      # make a live call are marked `requires_provider` and excluded below.
-      - name: Write minimal ~/.tars/config.toml
-        run: |
-          mkdir -p "$HOME/.tars"
-          cat > "$HOME/.tars/config.toml" <<'TOML'
-          [providers.qwen_coder_local]
-          type = "openai_compat"
-          default_model = "qwen/qwen3-coder-30b"
-          base_url = "http://127.0.0.1:1234/v1"
-          TOML
-
-      # Run everything except the `requires_provider`-marked tests (those
-      # need a live LLM on :1234, which CI doesn't supply — they run
-      # locally via the wheel install documented in CONTRIBUTING.md).
-      # New construction/config tests are included automatically; no
-      # hand-maintained `-k` allowlist to keep in sync.
-      - name: pytest (everything except live-provider tests)
-        run: |
-          pytest crates/tars-py/python/tests \
-            -q \
-            -m 'not requires_provider' \
-            --no-header

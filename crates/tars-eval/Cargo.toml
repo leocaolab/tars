@@ -1,0 +1,41 @@
+[package]
+name = "tars-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "How tars is tested and scored — cassette diff, invariants, the eval engine, judges, metamorphic relations, trajectory scoring."
+
+[lints]
+workspace = true
+
+[dependencies]
+tars-types = { path = "../tars-types" }
+tars-utils = { path = "../tars-utils" }
+# A judge's calls are confined read-only, whatever the run's sandbox.
+tars-sandbox = { path = "../tars-sandbox" }
+# The replay engine drives a real registry; judges are model calls.
+tars-llm = { path = "../tars-llm" }
+# The model catalog says which vendor made a model, for the same-vendor judge refusal.
+tars-config = { path = "../tars-config" }
+
+# Async
+async-trait.workspace = true
+futures.workspace = true
+# A case's deadline is a timer on the run's runtime.
+tokio = { workspace = true, features = ["time"] }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+# Errors / tracing
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# `Caller::test_default` is test scaffolding: enabled here, never by a [dependencies] edge.
+tars-types = { path = "../tars-types", features = ["testutil"] }
+tars-config = { path = "../tars-config" }
+tokio.workspace = true
+tempfile = "3"

@@ -1,53 +1,39 @@
-//! Model knowledge base — the parsed, typed view of `data/provider.toml`,
-//! the SHIPPED layer of the model catalog.
+//! Parses `data/provider.toml`, compiled into the binary, into the shipped layer of the model
+//! catalog: each provider's interface, billing and capabilities, and each model's id, prices,
+//! limits and thinking mode.
 //!
-//! Model ids, prices, context windows, and the thinking mode change
-//! faster than tars releases, so they live as **DATA** in
-//! `data/provider.toml`, not as string literals in `builtin.rs` or a
-//! substring heuristic in a backend adapter. This module `include_str!`s
-//! that file (so the KB ships in the binary) and parses it once into
-//! [`MODEL_KB`]. The live layer `tars models update` refreshes sits on top of
-//! it in [`crate::model_catalog`].
-//!
-//! Fail-loud: a malformed `provider.toml` panics on first access to
-//! [`MODEL_KB`] rather than silently degrading (see [`MODEL_KB`]).
+//! These change faster than tars releases, so they are data in that file rather than literals in
+//! `builtin.rs` or a substring test in a backend adapter; the one model literal left in
+//! `builtin.rs` is each local server's placeholder, which the user replaces. The live layer that
+//! `tars models update` refreshes sits on top of it in [`crate::model_catalog`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use tars_types::{
-    CatalogSource, InterfaceKind, Modality, Pricing, PromptCacheKind, ProviderProfile,
-    StructuredOutputMode,
+    CatalogSource, InterfaceKind, Modality, Pricing, PromptCacheKind, ProviderProfile, Rate,
+    StructuredOutputMode, Support,
 };
 
-use crate::model_spec::{ModelSpec, ModelSpecError, ResolvedModel, SeriesPattern};
+use crate::model_spec::{ModelSpec, ResolveModelSpecError, ResolvedModel, SeriesPattern};
 
-/// Whether a model reasons, and whether "off" is a legal request.
-///
-/// - `None` — never reasons.
-/// - `Optional` — toggleable; an "off"/"minimal" signal is accepted.
-/// - `Only` — mandatory reasoning; the model **rejects** an off signal
-///   (e.g. Gemini `*-pro` returns HTTP 400 for `thinkingBudget: 0`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Says whether a model reasons and whether "off" is a legal request. `Only` models reject an
+/// off signal: Gemini `*-pro` answers HTTP 400 to `thinkingBudget: 0`. `param` is set on Gemini
+/// rows only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Thinking {
     None,
-    Optional,
-    Only,
+    Optional { param: Option<ThinkingParam> },
+    Only { param: Option<ThinkingParam> },
 }
 
-/// Which wire knob a Gemini model uses to control thinking (the two
-/// generations disagree, per the official docs):
-/// - `Budget` — Gemini 2.5: numeric `thinkingBudget` (0 = off, -1 =
-///   dynamic, N = token budget).
-/// - `Level` — Gemini 3.x: string `thinking_level` (`minimal` = off,
-///   `low`/`medium`/`high`). 3.x does **not** take a numeric budget;
-///   `thinkingBudget:0` only still works there as deprecated
-///   backward-compat, so we follow the docs and emit `thinking_level`.
+/// Names the request field that controls a Gemini model's thinking; other providers ignore it.
 ///
-/// Only Gemini rows set this; other providers ignore it.
+/// Gemini 2.5 takes a numeric `thinkingBudget` (0 off, -1 dynamic, N tokens). Gemini 3.x takes a
+/// string `thinking_level` (`minimal` is off); it still accepts `thinkingBudget: 0` only as a
+/// deprecated form, so 3.x rows use `Level`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingParam {
@@ -55,8 +41,7 @@ pub enum ThinkingParam {
     Level,
 }
 
-/// Capability tier of a model within its family. A closed set — typed
-/// (not a bare `String`) so a typo in `provider.toml` fails to parse loudly.
+/// The capability tier of a model within its family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelTier {
@@ -69,18 +54,19 @@ pub enum ModelTier {
     Legacy,
 }
 
-/// Availability of a model on the provider's API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// The availability of a model on the provider's API.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelStatus {
     Ga,
     Preview,
-    Deprecated,
+    /// `retire` holds the ISO retire date when the provider announced one; nothing acts on it.
+    Deprecated {
+        retire: Option<String>,
+    },
 }
 
-/// Input modality a model accepts. KB-local (richer than the routing
-/// `tars_types::Modality`, which has no `Pdf` and spells vision `Image`);
-/// this describes what the wire API takes, not the router's coarse view.
+/// An input the model's API accepts. It has `Pdf`, which `tars_types::Modality` lacks, and
+/// spells `Image` as `Vision`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KbModality {
@@ -91,132 +77,165 @@ pub enum KbModality {
     Pdf,
 }
 
-/// One model row from `provider.toml`. Price fields are USD per 1M tokens
-/// and are `Option` because deprecated/legacy rows may omit them.
+/// One model row of `provider.toml`. Prices are USD per million tokens, and a deprecated or
+/// legacy row may omit them.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "ModelRow")]
 pub struct ModelEntry {
-    /// Exact API model string.
     pub id: String,
     pub tier: ModelTier,
-    pub input: Option<f64>,
-    pub output: Option<f64>,
-    pub cached_input: Option<f64>,
-    /// Price of WRITING a token into the prompt cache, USD/1M. Anthropic bills
-    /// a 5-minute write at 1.25× base input and a 1-hour write at 2×; this
-    /// column carries the 5-minute rate (the API's default TTL). `None` where
-    /// the provider does not bill cache writes separately.
+    pub input: Option<Rate>,
+    pub output: Option<Rate>,
+    pub cached_input: Option<Rate>,
+    /// Prices writing a token into the prompt cache; `None` where the provider does not bill
+    /// cache writes separately. Anthropic bills a 5-minute write at 1.25× base input and a 1-hour
+    /// write at 2×; this holds the 5-minute rate, the API's default TTL.
     ///
-    /// It is its own column because it is NOT derivable from `input` across
-    /// providers, and because leaving it out bills cache-creation tokens at
-    /// ZERO — measured on one week of a real Anthropic workload, cache writes
-    /// were 1.5% of tokens but ~15% of the bill (the write rate is 12.5× the
-    /// read rate), so a missing column is a silent 15% under-bill, not a
-    /// rounding error.
-    #[serde(default)]
-    pub cache_write: Option<f64>,
-    /// Context window (input tokens).
+    /// It cannot be derived from `input` across providers, and a missing rate is a large
+    /// under-bill: on one week of a real Anthropic workload cache writes were 1.5% of tokens but
+    /// about 15% of the bill.
+    pub cache_write: Option<Rate>,
+    /// Is the context window in input tokens.
     pub context: Option<u64>,
     pub max_output: Option<u64>,
     pub thinking: Thinking,
-    /// Gemini-only: which wire knob controls thinking (2.5 = `budget`,
-    /// 3.x = `level`). `None` for non-Gemini rows / where it doesn't apply.
-    #[serde(default)]
-    pub thinking_param: Option<ThinkingParam>,
-    #[serde(default)]
     pub modalities: Vec<KbModality>,
     pub status: ModelStatus,
-    /// ISO retire date for deprecated rows (informational).
-    #[serde(default)]
-    pub retire: Option<String>,
-    /// Alternate ids that resolve to this entry (legacy names, dated
-    /// snapshots). Matched by [`ModelKb::find`] alongside `id`.
-    #[serde(default)]
+    /// Lists other ids that find this row (legacy names, dated snapshots).
     pub aliases: Vec<String>,
 }
 
+/// A model row as the data file spells it: flat keys, where `thinking_param` and `retire` belong
+/// to one value of `thinking` and `status`.
+#[derive(Deserialize)]
+struct ModelRow {
+    id: String,
+    tier: ModelTier,
+    input: Option<Rate>,
+    output: Option<Rate>,
+    cached_input: Option<Rate>,
+    #[serde(default)]
+    cache_write: Option<Rate>,
+    context: Option<u64>,
+    max_output: Option<u64>,
+    thinking: ThinkingWord,
+    #[serde(default)]
+    thinking_param: Option<ThinkingParam>,
+    #[serde(default)]
+    modalities: Vec<KbModality>,
+    status: StatusWord,
+    #[serde(default)]
+    retire: Option<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ThinkingWord {
+    None,
+    Optional,
+    Only,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum StatusWord {
+    Ga,
+    Preview,
+    Deprecated,
+}
+
+/// Says that a model row sets a key its `thinking` or `status` does not have.
+#[derive(Debug, thiserror::Error)]
+enum ModelRowError {
+    #[error("model `{id}`: thinking_param is set but thinking = \"none\"")]
+    ParamWithoutThinking { id: String },
+    #[error("model `{id}`: retire is set but status is not \"deprecated\"")]
+    RetireWithoutDeprecated { id: String },
+}
+
+impl TryFrom<ModelRow> for ModelEntry {
+    type Error = ModelRowError;
+
+    fn try_from(row: ModelRow) -> Result<Self, Self::Error> {
+        let thinking = match (row.thinking, row.thinking_param) {
+            (ThinkingWord::None, None) => Thinking::None,
+            (ThinkingWord::None, Some(_)) => {
+                return Err(ModelRowError::ParamWithoutThinking { id: row.id });
+            }
+            (ThinkingWord::Optional, param) => Thinking::Optional { param },
+            (ThinkingWord::Only, param) => Thinking::Only { param },
+        };
+        let status = match (row.status, row.retire) {
+            (StatusWord::Deprecated, retire) => ModelStatus::Deprecated { retire },
+            (StatusWord::Ga, None) => ModelStatus::Ga,
+            (StatusWord::Preview, None) => ModelStatus::Preview,
+            (StatusWord::Ga | StatusWord::Preview, Some(_)) => {
+                return Err(ModelRowError::RetireWithoutDeprecated { id: row.id });
+            }
+        };
+        Ok(Self {
+            id: row.id,
+            tier: row.tier,
+            input: row.input,
+            output: row.output,
+            cached_input: row.cached_input,
+            cache_write: row.cache_write,
+            context: row.context,
+            max_output: row.max_output,
+            thinking,
+            modalities: row.modalities,
+            status,
+            aliases: row.aliases,
+        })
+    }
+}
+
 impl ModelEntry {
-    /// True iff this model mandates reasoning and rejects an "off"
-    /// signal. The single, data-driven source for the gemini
-    /// thinking-off decision.
+    /// Returns whether this model always reasons and rejects an "off" signal.
     pub fn is_thinking_only(&self) -> bool {
-        matches!(self.thinking, Thinking::Only)
+        matches!(self.thinking, Thinking::Only { .. })
     }
 
-    /// Per-1M-token [`Pricing`] for this model. An unset price field maps
-    /// to `0.0` (a legacy/deprecated row with no prices bills as free);
-    /// a `status = "ga"` row is required to carry `input`/`output`
-    /// (enforced by a KB test) so a live model can never silently bill
-    /// zero. `cache_creation` and `thinking_per_million` are
-    /// provider-behavioral (Anthropic bundles thinking into output;
-    /// Gemini bills thoughts at the output rate), not carried per-row,
-    /// so they default to `0.0` — the backend wiring a specific provider
-    /// overrides them.
+    /// Returns the request field that controls this model's thinking, set on Gemini rows only.
+    pub fn thinking_param(&self) -> Option<ThinkingParam> {
+        match self.thinking {
+            Thinking::None => None,
+            Thinking::Optional { param } | Thinking::Only { param } => param,
+        }
+    }
+
+    /// Returns this row's [`Pricing`], an unset price as zero; a test requires every GA row of
+    /// a per-token provider to carry `input` and `output`. `thinking_per_million` is always
+    /// zero: a row has no thinking price.
     pub fn pricing(&self) -> Pricing {
         Pricing {
-            input_per_million: self.input.unwrap_or(0.0),
-            output_per_million: self.output.unwrap_or(0.0),
-            cached_input_per_million: self.cached_input.unwrap_or(0.0),
-            cache_creation_per_million: self.cache_write.unwrap_or(0.0),
-            thinking_per_million: 0.0,
+            input_per_million: self.input.unwrap_or(Rate::ZERO),
+            output_per_million: self.output.unwrap_or(Rate::ZERO),
+            cached_input_per_million: self.cached_input.unwrap_or(Rate::ZERO),
+            cache_creation_per_million: self.cache_write.unwrap_or(Rate::ZERO),
+            thinking_per_million: Rate::ZERO,
         }
     }
 }
 
-/// How a provider bills — the honest discriminator for the "every GA model
-/// carries a price" invariant. `interface` alone can't separate a paid HTTP
-/// provider (openai) from a free local one (mlx), so this is declared per
-/// provider block.
+/// Says how a provider bills, which decides whether its GA models must carry a price;
+/// `interface` cannot tell a paid HTTP provider (openai) from a free local one (mlx).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingModel {
-    /// Per-1M-token pricing (openai, anthropic, gemini, deepseek, xai,
-    /// bedrock). A GA model here MUST carry input+output prices.
+    /// Bills per token (openai, anthropic, gemini, deepseek, xai); a GA model carries
+    /// input and output prices.
     PerToken,
-    /// Subscription / session / BYO-key — no per-token price to tars
-    /// (claude_cli, codex_cli, opencode, antigravity, claude_sdk).
-    /// A blank price is the TRUTH, not missing data.
+    /// Bills by subscription, session or the user's own key (claude_cli, codex_cli, opencode,
+    /// antigravity, claude_sdk), so a blank price is the truth, not missing data.
     Subscription,
-    /// Locally hosted, free at the point of use (mlx, vllm, llamacpp).
+    /// Runs locally and costs nothing per call (mlx, vllm, llamacpp).
     Free,
 }
 
-/// Config-side spelling of [`PromptCacheKind`]. The runtime enum has a
-/// struct variant (`ImplicitPrefix { min_tokens }`) that can't deserialize
-/// from a bare TOML string, so the data file uses these unit variants and the
-/// assembler fills in the conventional `min_tokens`.
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptCacheSpec {
-    #[default]
-    None,
-    ImplicitPrefix,
-    ExplicitMarker,
-    ExplicitObject,
-    Delegated,
-}
-
-impl PromptCacheSpec {
-    /// OpenAI auto-caches prefixes ≥1024 tokens; use that as the conventional
-    /// floor for any `implicit_prefix` provider (the exact threshold isn't
-    /// carried per-provider today).
-    const IMPLICIT_PREFIX_MIN_TOKENS: u32 = 1024;
-
-    fn to_kind(self) -> PromptCacheKind {
-        match self {
-            Self::None => PromptCacheKind::None,
-            Self::ImplicitPrefix => PromptCacheKind::ImplicitPrefix {
-                min_tokens: Self::IMPLICIT_PREFIX_MIN_TOKENS,
-            },
-            Self::ExplicitMarker => PromptCacheKind::ExplicitMarker,
-            Self::ExplicitObject => PromptCacheKind::ExplicitObject,
-            Self::Delegated => PromptCacheKind::Delegated,
-        }
-    }
-}
-
-/// Provider-level capability facts — constant across every model on the
-/// backend (§3 of the design). All fields have serde defaults so a sparse
-/// `[providers.X.capabilities]` block parses.
+/// The capabilities a provider has for every model it serves; an absent key takes its default.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ProviderCapabilities {
@@ -225,13 +244,18 @@ pub struct ProviderCapabilities {
     pub parallel_tool_calls: bool,
     pub cancel: bool,
     pub streaming: bool,
-    pub prompt_cache: PromptCacheSpec,
-    /// Provider-behavioral pricing the KB can't carry per model
-    /// (anthropic's cache-write surcharge). USD per 1M tokens.
-    pub cache_creation_per_million: Option<f64>,
-    /// Provider-behavioral thinking price (gemini bills thoughts at the
-    /// output rate). USD per 1M tokens.
-    pub thinking_per_million: Option<f64>,
+    /// Is written as `"explicit_marker"` or, with the provider's threshold,
+    /// `{ implicit_prefix = { min_tokens = 1024 } }`.
+    pub prompt_cache: PromptCacheKind,
+    /// Whether the server serves its model through a chat template that reads
+    /// `chat_template_kwargs.enable_thinking` (vLLM, mlx_lm.server, llama-server).
+    pub chat_template_thinking: bool,
+    /// Replaces every row's `cache_write` price in the provider profile, USD per million tokens;
+    /// when absent each row's own `cache_write` stands.
+    pub cache_creation_per_million: Option<Rate>,
+    /// Prices thinking tokens for every model of the provider, USD per million tokens; absent
+    /// means `0.0`, since a row has no thinking price.
+    pub thinking_per_million: Option<Rate>,
 }
 
 impl Default for ProviderCapabilities {
@@ -242,59 +266,56 @@ impl Default for ProviderCapabilities {
             parallel_tool_calls: false,
             cancel: false,
             streaming: false,
-            prompt_cache: PromptCacheSpec::None,
+            prompt_cache: PromptCacheKind::None,
+            chat_template_thinking: false,
             cache_creation_per_million: None,
             thinking_per_million: None,
         }
     }
 }
 
-/// One provider's full definition (`[providers.<name>]`): how tars reaches it
-/// (`interface`), how it bills, its provider-level capabilities, and its
-/// models.
+/// One `[providers.<name>]` block of the data file.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderDef {
-    /// How tars reaches and drives this provider.
     pub interface: InterfaceKind,
-    /// Billing model — discriminates the price invariant.
+    /// Names who serves the API as OpenTelemetry GenAI does; absent for a server that may serve
+    /// anyone's weights (vllm, mlx, llamacpp) or a tool that may call several (opencode).
+    #[serde(default)]
+    pub gen_ai_provider_name: Option<String>,
     pub billed: BillingModel,
-    /// Default model for general use — a concrete id or a `<series>@latest`
-    /// spec. `None` for local providers where the user always picks the model
-    /// (mlx/vllm/llamacpp carry no fixed default).
+    /// Holds a concrete id or a `<series>@latest` spec; `None` for local providers, where the
+    /// user always names the model.
     #[serde(default)]
     pub default: Option<String>,
-    /// Optional coding-tuned default (e.g. `gpt-5.6-sol`).
+    /// Names a concrete coding-tuned model.
     #[serde(default)]
     pub coding_default: Option<String>,
-    /// Provider-level capability facts.
     #[serde(default)]
     pub capabilities: ProviderCapabilities,
-    /// Model series for `<series>@latest` specs: series name → id pattern with
-    /// one `{version}` slot (see [`crate::model_spec`]).
+    /// Maps a series name to an id pattern with one `{version}` slot (see [`crate::model_spec`]).
     #[serde(default)]
-    pub series: BTreeMap<String, String>,
+    pub series: BTreeMap<String, SeriesPattern>,
     #[serde(default)]
     pub models: Vec<ModelEntry>,
 }
 
 impl ProviderDef {
-    /// Find a model row by exact id or alias.
+    /// Returns the row whose id or alias is `model_id`.
     pub fn find_model(&self, model_id: &str) -> Option<&ModelEntry> {
         self.models
             .iter()
             .find(|m| m.id == model_id || m.aliases.iter().any(|a| a == model_id))
     }
 
-    /// Resolve `spec` for provider `name` against `ids` — the list the caller
-    /// is searching (the live list, or this block's own rows), described by
-    /// `searched`.
+    /// Resolves `spec` for provider `name` against `ids`, the live list or this block's own rows
+    /// as `searched` says.
     pub fn resolve_among<'i>(
         &self,
         name: &str,
         spec: &str,
         ids: impl IntoIterator<Item = &'i str>,
         searched: CatalogSource,
-    ) -> Result<ResolvedModel, ModelSpecError> {
+    ) -> Result<ResolvedModel, ResolveModelSpecError> {
         let series = match ModelSpec::parse(spec)? {
             ModelSpec::Concrete(id) => {
                 return Ok(ResolvedModel {
@@ -305,49 +326,35 @@ impl ProviderDef {
             ModelSpec::Latest { series } => series,
         };
         if self.series.is_empty() {
-            return Err(ModelSpecError::NoSeries {
+            return Err(ResolveModelSpecError::NoSeries {
                 provider: name.to_string(),
                 series: series.to_string(),
             });
         }
-        let Some(raw) = self.series.get(series) else {
-            return Err(ModelSpecError::UnknownSeries {
+        let Some(pattern) = self.series.get(series) else {
+            return Err(ResolveModelSpecError::UnknownSeries {
                 provider: name.to_string(),
                 series: series.to_string(),
                 known: self.series.keys().cloned().collect(),
             });
         };
-        let pattern = SeriesPattern::parse(raw).ok_or_else(|| ModelSpecError::BadSpec {
-            spec: spec.to_string(),
-            detail: format!(
-                "provider `{name}` series pattern `{raw}` needs exactly one {{version}}"
-            ),
-        })?;
         let ids: Vec<&str> = ids.into_iter().collect();
         match pattern.latest(ids.iter().copied()) {
             Some(id) => Ok(ResolvedModel {
                 id: id.to_string(),
                 picked_from: Some(searched),
             }),
-            None => Err(ModelSpecError::NoMatch {
+            None => Err(ResolveModelSpecError::NoMatch {
                 provider: name.to_string(),
                 series: series.to_string(),
-                pattern: raw.clone(),
-                searched: match searched {
-                    CatalogSource::Live { queried_at } => {
-                        format!("live model list from {queried_at}")
-                    }
-                    CatalogSource::Shipped { verified } => {
-                        format!("shipped provider.toml (verified {verified})")
-                    }
-                },
+                pattern: Box::new(pattern.clone()),
+                searched,
                 candidates: ids.len(),
             }),
         }
     }
 
-    /// The row the `default` spec names, resolved against this block's own
-    /// rows.
+    /// Returns the row the `default` spec resolves to among this block's own rows.
     fn default_row(&self, name: &str, verified: &str) -> Option<&ModelEntry> {
         let spec = self.default.as_deref()?;
         let resolved = self
@@ -363,15 +370,14 @@ impl ProviderDef {
         self.find_model(&resolved.id)
     }
 
-    /// Assemble the runtime [`ProviderProfile`] for `model_id` on this provider:
-    /// provider-level fields from the block ∪ per-model fields from the row
-    /// (falling back to the provider's default model, then to a text-only
-    /// shape when the DB carries no row at all — a local provider with an
-    /// empty model list). This generalizes what the gemini backend used to do
-    /// by hand.
+    /// Returns the [`ProviderProfile`] of `model_id`: the block's capabilities with the row's
+    /// limits, modalities and prices. An unknown model takes the default model's row. A block with
+    /// no matching row (a local server, whose model the user picks) knows nothing of the model:
+    /// thinking and vision are unknown and no ceiling is enforced.
+    ///
+    /// A price the capabilities set replaces the row's; an unset one leaves the row's price.
     fn capabilities_for(&self, name: &str, verified: &str, model_id: &str) -> ProviderProfile {
         let cap = &self.capabilities;
-        // Resolve the model row: exact/alias match, else the provider default.
         let model = self
             .find_model(model_id)
             .or_else(|| self.default_row(name, verified));
@@ -387,36 +393,39 @@ impl ProviderDef {
             Some(m) => {
                 let mut mods_in: HashSet<Modality> =
                     m.modalities.iter().filter_map(kb_to_modality).collect();
-                // modalities_in must be non-empty (ProviderProfile::validate).
+                // `ProviderProfile::validate` refuses an empty `modalities_in`.
                 if mods_in.is_empty() {
                     mods_in.insert(Modality::Text);
                 }
                 let mut pricing = m.pricing();
-                pricing.cache_creation_per_million = cap.cache_creation_per_million.unwrap_or(0.0);
-                pricing.thinking_per_million = cap.thinking_per_million.unwrap_or(0.0);
+                if let Some(rate) = cap.cache_creation_per_million {
+                    pricing.cache_creation_per_million = rate;
+                }
+                if let Some(rate) = cap.thinking_per_million {
+                    pricing.thinking_per_million = rate;
+                }
                 (
                     m.context.map(|c| c as u32),
                     m.max_output.map(|o| o as u32),
-                    mods_in.contains(&Modality::Image),
-                    !matches!(m.thinking, Thinking::None),
+                    Support::from(mods_in.contains(&Modality::Image)),
+                    Support::from(!matches!(m.thinking, Thinking::None)),
                     mods_in,
                     pricing,
                 )
             }
             None => {
-                // No model row (local provider, empty model list). No
-                // per-model facts to enforce; keep the provider-behavioral
-                // pricing so a block that declares it isn't dropped.
                 let pricing = Pricing {
-                    cache_creation_per_million: cap.cache_creation_per_million.unwrap_or(0.0),
-                    thinking_per_million: cap.thinking_per_million.unwrap_or(0.0),
+                    cache_creation_per_million: cap
+                        .cache_creation_per_million
+                        .unwrap_or(Rate::ZERO),
+                    thinking_per_million: cap.thinking_per_million.unwrap_or(Rate::ZERO),
                     ..Default::default()
                 };
                 (
                     None,
                     None,
-                    false,
-                    false,
+                    Support::Unknown,
+                    Support::Unknown,
                     HashSet::from([Modality::Text]),
                     pricing,
                 )
@@ -425,15 +434,17 @@ impl ProviderDef {
 
         ProviderProfile {
             interface: self.interface,
+            gen_ai_provider_name: self.gen_ai_provider_name.clone(),
             max_context_tokens,
             max_output_tokens,
-            supports_tool_use: cap.tool_use,
+            supports_tool_use: Support::from(cap.tool_use),
             supports_parallel_tool_calls: cap.parallel_tool_calls,
-            supports_structured_output: cap.structured_output,
+            supports_structured_output: Some(cap.structured_output),
             supports_vision,
             supports_thinking,
+            supports_chat_template_thinking: cap.chat_template_thinking,
             supports_cancel: cap.cancel,
-            prompt_cache: cap.prompt_cache.to_kind(),
+            prompt_cache: cap.prompt_cache,
             streaming: cap.streaming,
             modalities_in: mods_in,
             modalities_out: HashSet::from([Modality::Text]),
@@ -442,11 +453,10 @@ impl ProviderDef {
     }
 }
 
-/// Back-compat alias.
+/// Is another name for [`ProviderDef`]; nothing in the workspace uses it.
 pub type ProviderModels = ProviderDef;
 
-/// Map a KB input modality onto the coarser routing [`Modality`]. `Pdf` has no
-/// router equivalent and is dropped (`None`).
+/// Returns the [`Modality`] of a data-file modality; `Pdf` has none.
 fn kb_to_modality(m: &KbModality) -> Option<Modality> {
     match m {
         KbModality::Text => Some(Modality::Text),
@@ -457,42 +467,68 @@ fn kb_to_modality(m: &KbModality) -> Option<Modality> {
     }
 }
 
-/// The whole parsed knowledge base. Keyed by provider name
-/// (`"openai"`, `"anthropic"`, …).
+/// The lab that made a model, as the data file's `[vendors.<name>]` names it (`anthropic`,
+/// `google`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Vendor(String);
+
+impl Vendor {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Vendor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for Vendor {
+    fn from(name: String) -> Self {
+        Self(name)
+    }
+}
+
+/// One `[vendors.<name>]` block: how the ids of that vendor's models start.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VendorDef {
+    pub model_id_prefixes: Vec<String>,
+}
+
+/// The parsed data file.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelKb {
     pub schema_version: u32,
     pub verified: String,
+    #[serde(default)]
+    pub vendors: BTreeMap<Vendor, VendorDef>,
     pub providers: HashMap<String, ProviderDef>,
 }
 
 impl ModelKb {
-    /// Default model spec for `provider` (a concrete id or
-    /// `<series>@latest`), or `None` if the provider isn't in the KB, or is a
-    /// local provider with no fixed default (the user picks —
-    /// mlx/vllm/llamacpp).
+    /// Returns the default model spec of `provider`, or `None` when the provider is not in the
+    /// data file or is a local one with no default.
     pub fn default_model(&self, provider: &str) -> Option<&str> {
         self.providers
             .get(provider)
             .and_then(|p| p.default.as_deref())
     }
 
-    /// Coding-tuned default model id for `provider`, if one is declared.
+    /// Returns the coding-tuned model id of `provider`, if one is declared.
     pub fn coding_default_model(&self, provider: &str) -> Option<&str> {
         self.providers
             .get(provider)
             .and_then(|p| p.coding_default.as_deref())
     }
 
-    /// Find a model across all providers by exact `id` **or** any alias.
+    /// Returns a row, from any provider, whose id or alias is `model_id`, preferring one with an
+    /// `input` price.
     ///
-    /// The same model id can now appear in more than one provider block — e.g.
-    /// `gpt-5.4` in both `openai` (priced) and `codex_cli` (blank, subscription),
-    /// or `claude-opus-4-8` in `anthropic` / `claude_sdk` / `claude_cli`. A bare
-    /// "first match" over the (unordered) provider map would non-deterministically
-    /// return a blank-priced CLI row and silently bill $0. So prefer a **priced**
-    /// entry (`input.is_some()`) when the id is shared; fall back to the first
-    /// match otherwise.
+    /// One id can sit in several blocks (`gpt-5.4` in `openai`, priced, and in `codex_cli`,
+    /// blank); the first match of the unordered map could be the blank row and bill $0. Among
+    /// several priced rows, or several unpriced ones, which is returned is not fixed.
     pub fn find(&self, model_id: &str) -> Option<&ModelEntry> {
         let mut fallback: Option<&ModelEntry> = None;
         for m in self.providers.values().flat_map(|p| p.models.iter()) {
@@ -506,27 +542,45 @@ impl ModelKb {
         fallback
     }
 
-    /// Per-model [`Pricing`] from the KB, or `None` for an unknown model.
+    /// Returns the [`Pricing`] of `model_id` per [`Self::find`], or `None` for an unknown model.
     pub fn pricing(&self, model_id: &str) -> Option<Pricing> {
         self.find(model_id).map(ModelEntry::pricing)
     }
 
-    /// Assemble runtime [`ProviderProfile`] for `provider` + `model_id`. If the
-    /// provider isn't a named definition (an anonymous `openai_compat` a user
-    /// pointed at a local server), fall back to a text-only baseline — the
-    /// per-instance `CapabilitiesOverrides` correct it from there.
+    /// Returns the vendor whose model ids start like `model_id`, whichever provider serves it;
+    /// `None` for an id no vendor's prefix matches (a local model, a proxy's own naming).
+    pub fn vendor_of(&self, model_id: &str) -> Option<&Vendor> {
+        self.vendors.iter().find_map(|(vendor, def)| {
+            def.model_id_prefixes
+                .iter()
+                .any(|prefix| model_id.starts_with(prefix.as_str()))
+                .then_some(vendor)
+        })
+    }
+
+    /// Returns whether the data file has a block named `provider`.
+    pub fn knows(&self, provider: &str) -> bool {
+        self.providers.contains_key(provider)
+    }
+
+    /// Returns the [`ProviderProfile`] of `model_id` on `provider`. A provider the data file does
+    /// not name (an `openai_compat` pointed at a local server) gets
+    /// [`ProviderProfile::undescribed_http`], which the instance's `CapabilitiesOverrides` then
+    /// correct.
     pub fn capabilities_for(&self, provider: &str, model_id: &str) -> ProviderProfile {
         match self.providers.get(provider) {
             Some(def) => def.capabilities_for(provider, &self.verified, model_id),
-            None => ProviderProfile::text_only_baseline(Pricing::default()),
+            None => ProviderProfile::undescribed_http(),
         }
     }
 }
 
-/// Parsed-once knowledge base. **Panics on first access** if
-/// `data/provider.toml` is malformed — the KB is compiled-in data, a
-/// parse failure is a build/authoring bug that must fail loud, not a
-/// recoverable runtime condition.
+/// The data file, parsed on first access.
+///
+/// # Panics
+///
+/// Panics on first access when `data/provider.toml` is malformed: it is compiled in, so that is
+/// an authoring bug, not a runtime condition.
 pub static MODEL_KB: LazyLock<ModelKb> = LazyLock::new(|| {
     const RAW: &str = include_str!("../data/provider.toml");
     toml::from_str(RAW).expect(
@@ -539,26 +593,52 @@ pub static MODEL_KB: LazyLock<ModelKb> = LazyLock::new(|| {
 mod tests {
     use super::*;
 
+    fn row(extra: &str) -> Result<ModelEntry, toml::de::Error> {
+        toml::from_str(&format!(
+            "id = \"m\"\ntier = \"mid\"\ninput = 1.0\noutput = 2.0\ncached_input = 0.5\n\
+             context = 1000\nmax_output = 100\n{extra}"
+        ))
+    }
+
+    #[test]
+    fn a_thinking_param_belongs_to_a_model_that_thinks() {
+        let gemini =
+            row("thinking = \"only\"\nthinking_param = \"level\"\nstatus = \"ga\"").unwrap();
+        assert_eq!(
+            gemini.thinking,
+            Thinking::Only {
+                param: Some(ThinkingParam::Level)
+            }
+        );
+        assert!(row("thinking = \"none\"\nthinking_param = \"level\"\nstatus = \"ga\"").is_err());
+    }
+
+    #[test]
+    fn a_retire_date_belongs_to_a_deprecated_model() {
+        let old =
+            row("thinking = \"none\"\nstatus = \"deprecated\"\nretire = \"2026-01-01\"").unwrap();
+        assert_eq!(
+            old.status,
+            ModelStatus::Deprecated {
+                retire: Some("2026-01-01".into())
+            }
+        );
+        assert!(row("thinking = \"none\"\nstatus = \"ga\"\nretire = \"2026-01-01\"").is_err());
+    }
+
     #[test]
     fn kb_parses_and_every_default_exists_in_its_models() {
-        // Forces the LazyLock parse; panics loudly on malformed TOML.
         let kb = &*MODEL_KB;
         assert_eq!(kb.schema_version, 2);
         assert!(!kb.providers.is_empty());
         for (name, p) in &kb.providers {
-            // A default is optional (local providers carry none); when present
-            // it MUST resolve (a `@latest` spec included) to a model row.
             if let Some(def) = &p.default {
                 assert!(
                     p.default_row(name, &kb.verified).is_some(),
                     "provider `{name}` default `{def}` does not resolve to one of its models"
                 );
             }
-            // Every series pattern parses and names at least one shipped row.
-            for (series, raw) in &p.series {
-                let pattern = SeriesPattern::parse(raw).unwrap_or_else(|| {
-                    panic!("provider `{name}` series `{series}` pattern `{raw}` is malformed")
-                });
+            for (series, pattern) in &p.series {
                 assert!(
                     pattern
                         .latest(p.models.iter().map(|m| m.id.as_str()))
@@ -581,7 +661,7 @@ mod tests {
         assert_eq!(MODEL_KB.default_model("anthropic"), Some("claude-opus-4-8"));
         assert_eq!(MODEL_KB.default_model("gemini"), Some("flash@latest"));
         assert_eq!(MODEL_KB.default_model("deepseek"), Some("deepseek-flash"));
-        // Local backends aren't in the KB.
+        // Local backends carry no default.
         assert_eq!(MODEL_KB.default_model("mlx"), None);
     }
 
@@ -652,26 +732,20 @@ mod tests {
                 },
             )
             .unwrap_err();
-        assert!(matches!(err, ModelSpecError::NoSeries { .. }), "{err}");
+        assert!(
+            matches!(err, ResolveModelSpecError::NoSeries { .. }),
+            "{err}"
+        );
     }
 
-    /// Writing into the prompt cache is NOT free, and it is not derivable from
-    /// the input rate across providers — so it is its own column, and this
-    /// proves it reaches `Pricing`. Before `cache_write` existed,
-    /// `cache_creation_per_million` was hardcoded to 0.0 "for the backend to
-    /// override" and no backend ever did: every cache-creation token billed at
-    /// zero, including in the budget middleware that decides whether to let a
-    /// call through.
-    ///
-    /// Measured on one week of a real Anthropic workload: cache writes were
-    /// 1.5% of tokens but ~15% of the bill, because the write rate is 12.5×
-    /// the read rate. A zero here is a silent 15% under-bill.
     #[test]
     fn a_cache_write_is_priced_and_costs_more_than_a_read() {
         for id in ["claude-opus-5", "claude-fable-5-1", "claude-sonnet-5"] {
-            let p = MODEL_KB.pricing(id).unwrap_or_else(|| panic!("{id} has no pricing"));
+            let p = MODEL_KB
+                .pricing(id)
+                .unwrap_or_else(|| panic!("{id} has no pricing"));
             assert!(
-                p.cache_creation_per_million > 0.0,
+                p.cache_creation_per_million.usd_per_million() > 0.0,
                 "{id}: a cache write bills at zero — `cache_write` is missing from provider.toml \
                  or no longer reaches Pricing"
             );
@@ -685,29 +759,90 @@ mod tests {
             );
         }
         // Exact rates, so a typo in the column is caught rather than just "> 0".
-        assert_eq!(MODEL_KB.pricing("claude-opus-5").unwrap().cache_creation_per_million, 6.25);
-        assert_eq!(MODEL_KB.pricing("claude-fable-5-1").unwrap().cache_creation_per_million, 12.50);
+        assert_eq!(
+            MODEL_KB
+                .pricing("claude-opus-5")
+                .unwrap()
+                .cache_creation_per_million
+                .usd_per_million(),
+            6.25
+        );
+        assert_eq!(
+            MODEL_KB
+                .pricing("claude-fable-5-1")
+                .unwrap()
+                .cache_creation_per_million
+                .usd_per_million(),
+            12.50
+        );
+    }
+
+    #[test]
+    fn the_provider_profile_prices_cache_writes_from_the_row_when_the_block_sets_no_rate() {
+        let profile = MODEL_KB.capabilities_for("anthropic", "claude-opus-5");
+        assert_eq!(
+            profile.pricing.cache_creation_per_million.usd_per_million(),
+            6.25
+        );
+    }
+
+    #[test]
+    fn a_rate_the_block_sets_replaces_the_rows_rate_in_the_provider_profile() {
+        let kb: ModelKb = toml::from_str(
+            r#"
+            schema_version = 1
+            verified = "2026-11-04"
+            [providers.p]
+            interface = "http"
+            billed = "per_token"
+            [providers.p.capabilities]
+            cache_creation_per_million = 9.0
+            thinking_per_million = 4.0
+            [[providers.p.models]]
+            id = "m"
+            tier = "flagship"
+            input = 1.0
+            output = 2.0
+            cache_write = 1.25
+            thinking = "none"
+            status = "ga"
+            "#,
+        )
+        .unwrap();
+        let pricing = kb.capabilities_for("p", "m").pricing;
+        assert_eq!(pricing.cache_creation_per_million.usd_per_million(), 9.0);
+        assert_eq!(pricing.thinking_per_million.usd_per_million(), 4.0);
+    }
+
+    #[test]
+    fn every_shipped_provider_profile_is_consistent() {
+        for (provider, def) in &MODEL_KB.providers {
+            for m in &def.models {
+                let profile = MODEL_KB.capabilities_for(provider, &m.id);
+                if let Err(e) = profile.validate() {
+                    panic!("{provider}/{}: {e}", m.id);
+                }
+            }
+            if let Err(e) = MODEL_KB
+                .capabilities_for(provider, "no-such-model")
+                .validate()
+            {
+                panic!("{provider}/<unknown model>: {e}");
+            }
+        }
     }
 
     #[test]
     fn pricing_reads_from_kb() {
         let p = MODEL_KB.pricing("gpt-5.4").unwrap();
-        assert_eq!(p.input_per_million, 2.50);
-        assert_eq!(p.output_per_million, 15.00);
-        assert_eq!(p.cached_input_per_million, 0.25);
+        assert_eq!(p.input_per_million.usd_per_million(), 2.50);
+        assert_eq!(p.output_per_million.usd_per_million(), 15.00);
+        assert_eq!(p.cached_input_per_million.usd_per_million(), 0.25);
         assert!(MODEL_KB.pricing("no-such-model").is_none());
     }
 
-    /// Guards the `default-substituted-for-absent-or-failed` smell: a live
-    /// (`ga`) model with a MISSING price silently bills `$0` (the same
-    /// under-billing class as the claude_cli cache-fold bug).
-    ///
-    /// **Scoped to per-token billing.** The invariant "GA ⇒ has a price" is
-    /// only true for providers tars bills per token (`billed = "per_token"`).
-    /// Subscription/session/BYO-key providers (CLI, claude_sdk) and free local
-    /// ones (mlx/vllm/llamacpp) are GA yet carry NO per-token price — a blank
-    /// price there is the TRUTH, not missing data, and must NOT be filled with
-    /// a fabricated zero. So the assertion iterates only `PerToken` providers.
+    /// A GA model with no price bills $0; subscription and local providers are skipped because
+    /// a blank price is true for them.
     #[test]
     fn every_per_token_ga_model_carries_input_and_output_price() {
         for (provider, p) in &MODEL_KB.providers {
@@ -725,5 +860,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_local_block_with_no_model_row_knows_tool_use_but_not_thinking_vision_or_window() {
+        for provider in ["vllm", "mlx", "llamacpp"] {
+            let p = MODEL_KB.capabilities_for(provider, "qwen3");
+            assert_eq!(p.supports_tool_use, Support::Supported, "{provider}");
+            assert_eq!(p.supports_thinking, Support::Unknown, "{provider}");
+            assert_eq!(p.supports_vision, Support::Unknown, "{provider}");
+            assert_eq!(p.max_context_tokens, None, "{provider}");
+        }
+    }
+
+    #[test]
+    fn a_row_states_thinking_and_vision_as_known() {
+        let p = MODEL_KB.capabilities_for("anthropic", "claude-opus-5");
+        assert_eq!(p.supports_thinking, Support::Supported);
+        assert_eq!(p.supports_vision, Support::Supported);
+    }
+
+    #[test]
+    fn a_provider_the_data_file_does_not_name_is_undescribed() {
+        let p = MODEL_KB.capabilities_for("my_local_server", "whatever");
+        assert_eq!(p.supports_tool_use, Support::Unknown);
+        assert_eq!(p.max_context_tokens, None);
+    }
+
+    #[test]
+    fn every_shipped_model_id_and_alias_has_exactly_one_vendor() {
+        for (provider, def) in &MODEL_KB.providers {
+            for id in def
+                .models
+                .iter()
+                .flat_map(|m| std::iter::once(&m.id).chain(&m.aliases))
+            {
+                let vendors: Vec<&Vendor> = MODEL_KB
+                    .vendors
+                    .iter()
+                    .filter(|(_, v)| {
+                        v.model_id_prefixes
+                            .iter()
+                            .any(|p| id.starts_with(p.as_str()))
+                    })
+                    .map(|(name, _)| name)
+                    .collect();
+                assert_eq!(
+                    vendors.len(),
+                    1,
+                    "`{id}` of `{provider}` matches {vendors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_is_anthropics_whichever_provider_serves_it() {
+        let vendor = MODEL_KB.vendor_of("claude-opus-4-7").map(Vendor::as_str);
+        assert_eq!(vendor, Some("anthropic"));
+    }
+
+    #[test]
+    fn a_model_id_no_vendor_prefix_matches_has_no_vendor() {
+        assert_eq!(MODEL_KB.vendor_of("Qwen/Qwen3-32B"), None);
+        assert_eq!(MODEL_KB.vendor_of("claude"), None);
     }
 }

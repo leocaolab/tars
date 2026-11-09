@@ -19,21 +19,12 @@ workspace = true
 
 [dependencies]
 tars-types = { path = "../tars-types" }
-tars-harness = { path = "../tars-harness" }
 tars-utils = { path = "../tars-utils" }
 tars-config = { path = "../tars-config" }
-tars-provider = { path = "../tars-provider" }
-tars-pipeline = { path = "../tars-pipeline" }
-tars-cache = { path = "../tars-cache" }
+tars-llm = { path = "../tars-llm" }
 serde.workspace = true
 serde_json.workspace = true
-
-# Async — tars's LlmService is async; napi-rs has first-class tokio
-# support, and we use the same process-wide multi-thread runtime
-# pattern tars-py uses (one runtime owned by the binding, shared
-# across all `complete()` calls, never spawning per-request).
-tokio = { workspace = true, features = ["rt-multi-thread"] }
-futures.workspace = true
+uuid.workspace = true
 
 # napi-rs: Rust ↔ Node.js bridge. v2.16 is the current stable line
 # (Aug 2024+); `napi-derive` provides the `#[napi]` proc macros, and
@@ -47,6 +38,11 @@ napi-derive = "2.16"
 # Errors / tracing
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+futures.workspace = true
+tokio.workspace = true
 
 [build-dependencies]
 napi-build = "2.1"

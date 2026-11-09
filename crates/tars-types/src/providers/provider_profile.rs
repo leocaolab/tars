@@ -1,7 +1,5 @@
-//! Capability descriptor — what a Provider can do.
-//!
-//! Routing / Middleware layers consult this before sending a request.
-//! Filling these in correctly is part of every Provider impl.
+//! Describes what a provider can do and how tars reaches it, for routing and middleware to
+//! consult before sending a request.
 
 use std::collections::HashSet;
 
@@ -9,36 +7,29 @@ use serde::{Deserialize, Serialize};
 
 use crate::providers::usage::Pricing;
 
-/// How tars reaches and DRIVES a provider — the interface, not the wire dialect.
+/// How tars reaches and drives a provider: the interface, not the wire dialect.
 ///
-/// Two axes are folded into this one label, and NEITHER is observable at runtime,
-/// so it is always DECLARED (a total match over `ProviderConfig` variants), never
+/// It folds two axes, neither observable at run time, so it is declared by an exhaustive match
+/// over the `ProviderConfig` variants (tars-config's `ProviderConfig::interface`) and never
 /// detected:
-///   - who runs the agent loop: `Cli` = the vendor binary runs its own loop with
-///     its own tools and edits the worktree directly (tars hands a prompt, gets
-///     final text, MUST NOT hand it a tool registry); every other kind = tars
-///     drives the loop.
-///   - what the transport is: `Http` = HTTP tars constructs itself; `Api` = a
-///     vendor SDK / long-lived daemon (claude_sdk over NDJSON, bedrock over the
-///     AWS SDK). `claude_cli` and `mlx` are BOTH "local processes" yet land in
-///     different kinds — locality is a separate axis this does not model.
-///
-/// Contrast arc's deleted `ProviderType::from_wire`, whose `_ => Other` silently
-/// misfiled `opencode`/`antigravity`: this enum has no catch-all, so a new variant
-/// fails to compile until its interface is declared.
+///   - who runs the agent loop: under `Cli` the vendor binary runs its own loop with its own
+///     tools and edits the worktree itself, so tars hands it a prompt and must not hand it a tool
+///     registry; under every other kind tars drives the loop.
+///   - the transport: `Http` is HTTP tars builds itself; `Api` is a vendor SDK or long-lived
+///     daemon. Locality is not modelled: `claude_cli` and `mlx` are both local processes and land
+///     in different kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterfaceKind {
-    /// A vendor agent binary that runs its OWN loop with its OWN tools.
-    /// {claude_cli, gemini_cli, codex_cli, opencode, antigravity}
+    /// A vendor agent binary that runs its own loop with its own tools (claude_cli, gemini_cli,
+    /// codex_cli, opencode, antigravity).
     Cli,
-    /// tars drives the loop and supplies the tools, over HTTP it constructs.
-    /// {openai, anthropic, gemini, deepseek, xai, vllm, mlx, llamacpp}
+    /// tars drives the loop and supplies the tools over HTTP it builds (openai, anthropic,
+    /// gemini, deepseek, xai, vllm, mlx, llamacpp).
     Http,
-    /// tars drives the loop, but the wire is a vendor SDK / daemon, not raw HTTP
-    /// tars builds. {claude_sdk (Node NDJSON daemon), bedrock (aws_sdk, SigV4)}
+    /// tars drives the loop over a vendor SDK or daemon: claude_sdk (a Node NDJSON daemon).
     Api,
-    /// No call is placed. {mock, cassette}
+    /// No call is placed (mock, cassette).
     Mock,
 }
 
@@ -48,28 +39,35 @@ fn default_interface() -> InterfaceKind {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderProfile {
-    /// How tars reaches and drives this provider (declared, never detected).
-    ///
-    /// Defaults to `Http` when absent so serialized descriptors predating this
-    /// field (committed cassette files) still deserialize — `interface` is
-    /// cosmetic on a replayed cassette.
+    /// Defaults to `Http` when absent, so committed cassette files written without it still
+    /// load; a replayed cassette does not read it.
     #[serde(default = "default_interface")]
     pub interface: InterfaceKind,
+    /// Names who serves the API in OpenTelemetry GenAI's words for `gen_ai.provider.name`
+    /// (`openai`, `anthropic`, `gcp.gemini`, `deepseek`); `None` when tars does not know, as for a
+    /// local server or an `openai_compat` block that names none. It is not the model's vendor:
+    /// Qwen served by a local vLLM is `vllm`.
+    #[serde(default)]
+    pub gen_ai_provider_name: Option<String>,
 
-    /// Maximum prompt-context window. `None` = no ceiling to enforce (the
-    /// provider imposes no documented limit, or it is genuinely unknown — the
-    /// data file's comment tells a human which). Readers that enforce a ceiling
-    /// MUST treat `None` as "don't enforce".
+    /// The prompt-context window in tokens; `None` means no ceiling to enforce, either because
+    /// the provider documents none or because it is unknown.
     pub max_context_tokens: Option<u32>,
-    /// Maximum tokens the caller may request as output. `None` = no ceiling
-    /// (see [`Self::max_context_tokens`]).
+    /// The most output tokens a caller may request; `None` means no ceiling to enforce.
     pub max_output_tokens: Option<u32>,
 
-    pub supports_tool_use: bool,
+    pub supports_tool_use: Support,
     pub supports_parallel_tool_calls: bool,
-    pub supports_structured_output: StructuredOutputMode,
-    pub supports_vision: bool,
-    pub supports_thinking: bool,
+    /// The mechanism that holds output to a schema; `None` when the profile has no data on it,
+    /// written `null` as an unknown [`Support`] is.
+    pub supports_structured_output: Option<StructuredOutputMode>,
+    pub supports_vision: Support,
+    pub supports_thinking: Support,
+    /// Whether the server reads the chat template's thinking switch
+    /// (`chat_template_kwargs.enable_thinking`), as vLLM, mlx_lm.server and llama-server do; a
+    /// vendor API has no chat template. Absent in a profile written without it, it is `false`.
+    #[serde(default)]
+    pub supports_chat_template_thinking: bool,
     pub supports_cancel: bool,
 
     pub prompt_cache: PromptCacheKind,
@@ -88,16 +86,19 @@ pub enum ProviderProfileError {
     EmptyModalitiesIn,
     #[error("modalities_out must be non-empty")]
     EmptyModalitiesOut,
-    #[error("supports_structured_output = ToolUseEmulation requires supports_tool_use = true")]
+    #[error("supports_structured_output = ToolUseEmulation requires supports_tool_use = Supported")]
     ToolUseEmulationNeedsToolUse,
-    #[error("supports_parallel_tool_calls = true requires supports_tool_use = true")]
+    #[error("supports_parallel_tool_calls = true requires supports_tool_use = Supported")]
     ParallelToolCallsNeedsToolUse,
 }
 
 impl ProviderProfile {
-    /// Reject internally inconsistent capability descriptors. Cheap;
-    /// call once when a Provider is constructed. Audit findings
-    /// `tars-types-src-capabilities-{9,14}`.
+    /// Checks that the profile is consistent: it has input and output modalities, and tool-use
+    /// emulation or parallel tool calls come with tool use.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first inconsistency found.
     pub fn validate(&self) -> Result<(), ProviderProfileError> {
         if self.modalities_in.is_empty() {
             return Err(ProviderProfileError::EmptyModalitiesIn);
@@ -105,42 +106,117 @@ impl ProviderProfile {
         if self.modalities_out.is_empty() {
             return Err(ProviderProfileError::EmptyModalitiesOut);
         }
-        if matches!(
-            self.supports_structured_output,
-            StructuredOutputMode::ToolUseEmulation
-        ) && !self.supports_tool_use
+        if self.supports_structured_output == Some(StructuredOutputMode::ToolUseEmulation)
+            && self.supports_tool_use != Support::Supported
         {
             return Err(ProviderProfileError::ToolUseEmulationNeedsToolUse);
         }
-        if self.supports_parallel_tool_calls && !self.supports_tool_use {
+        if self.supports_parallel_tool_calls && self.supports_tool_use != Support::Supported {
             return Err(ProviderProfileError::ParallelToolCallsNeedsToolUse);
         }
         Ok(())
     }
 
-    /// Minimal text-only chat with no extras. Useful baseline for tests
-    /// and for adapters that intentionally turn features off.
-    pub fn text_only_baseline(pricing: Pricing) -> Self {
-        let mut modalities = HashSet::new();
-        modalities.insert(Modality::Text);
+    /// Returns whether the provider holds output to the request's schema. JSON mode does not: it
+    /// promises JSON of any shape. Tool-use emulation holds it as far as the profile knows the
+    /// provider has tool use.
+    pub fn schema_enforcement(&self) -> Support {
+        match self.supports_structured_output {
+            Some(StructuredOutputMode::None | StructuredOutputMode::JsonObjectMode) => {
+                Support::Unsupported
+            }
+            Some(StructuredOutputMode::ToolUseEmulation) => self.supports_tool_use,
+            Some(StructuredOutputMode::StrictSchema) => Support::Supported,
+            None => Support::Unknown,
+        }
+    }
+
+    /// Returns a profile reached through `interface` that claims nothing: no ceilings, no
+    /// features, no streaming, no prompt cache, text in and out, no price. A provider's profile
+    /// starts from it and names only what the provider has.
+    pub fn nothing_claimed(interface: InterfaceKind) -> Self {
         Self {
-            // The baseline is the fallback for a provider the data file doesn't
-            // name (an anonymous `openai_compat` a user pointed at a local
-            // server). Those are HTTP tars drives itself.
-            interface: InterfaceKind::Http,
-            max_context_tokens: Some(32_000),
-            max_output_tokens: Some(4_096),
-            supports_tool_use: false,
+            interface,
+            gen_ai_provider_name: None,
+            max_context_tokens: None,
+            max_output_tokens: None,
+            supports_tool_use: Support::Unsupported,
             supports_parallel_tool_calls: false,
-            supports_structured_output: StructuredOutputMode::None,
-            supports_vision: false,
-            supports_thinking: false,
+            supports_structured_output: Some(StructuredOutputMode::None),
+            supports_vision: Support::Unsupported,
+            supports_thinking: Support::Unsupported,
+            supports_chat_template_thinking: false,
             supports_cancel: false,
             prompt_cache: PromptCacheKind::None,
+            streaming: false,
+            modalities_in: HashSet::from([Modality::Text]),
+            modalities_out: HashSet::from([Modality::Text]),
+            pricing: Pricing::default(),
+        }
+    }
+
+    /// Returns a text-only profile with no extras: 32K context, 4K output, streaming.
+    pub fn text_only_baseline(pricing: Pricing) -> Self {
+        Self {
+            max_context_tokens: Some(32_000),
+            max_output_tokens: Some(4_096),
             streaming: true,
-            modalities_in: modalities.clone(),
-            modalities_out: modalities,
             pricing,
+            ..Self::nothing_claimed(InterfaceKind::Http)
+        }
+    }
+
+    /// Returns the profile of a server tars drives over its own HTTP adapter and has no data on,
+    /// such as an `openai_compat` pointed at a local server: tool use, structured output,
+    /// thinking and vision are unknown and no ceiling is enforced, so every request is sent and
+    /// the server answers for itself. The adapter streams, so `streaming` holds.
+    pub fn undescribed_http() -> Self {
+        Self {
+            supports_tool_use: Support::Unknown,
+            supports_structured_output: None,
+            supports_vision: Support::Unknown,
+            supports_thinking: Support::Unknown,
+            streaming: true,
+            ..Self::nothing_claimed(InterfaceKind::Http)
+        }
+    }
+}
+
+/// What tars knows of one capability of a provider. `Unknown` is a profile with no data on it
+/// (a local server whose model the data file does not describe); a request is refused only for
+/// a capability that is `Unsupported`.
+///
+/// It is written `true`, `false` and `null`, so a profile saved with a plain boolean still reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "Option<bool>", into = "Option<bool>")]
+pub enum Support {
+    Supported,
+    Unsupported,
+    Unknown,
+}
+
+impl From<bool> for Support {
+    fn from(supported: bool) -> Self {
+        if supported {
+            Self::Supported
+        } else {
+            Self::Unsupported
+        }
+    }
+}
+
+impl From<Option<bool>> for Support {
+    fn from(known: Option<bool>) -> Self {
+        known.map_or(Self::Unknown, Self::from)
+    }
+}
+
+impl From<Support> for Option<bool> {
+    fn from(s: Support) -> Self {
+        match s {
+            Support::Supported => Some(true),
+            Support::Unsupported => Some(false),
+            Support::Unknown => None,
         }
     }
 }
@@ -149,14 +225,13 @@ impl ProviderProfile {
 #[serde(rename_all = "snake_case")]
 pub enum StructuredOutputMode {
     None,
-    /// `{"type":"json_object"}` — JSON-shaped output but no schema enforcement.
-    /// The `json_object` alias lets `data/provider.toml` spell it the way the
-    /// wire does without changing this enum's serialized form.
+    /// `{"type":"json_object"}`: JSON output with no schema enforced. `data/provider.toml` may
+    /// spell it `json_object`, as the wire does.
     #[serde(alias = "json_object")]
     JsonObjectMode,
-    /// Decode-time schema enforcement (OpenAI strict / Gemini responseSchema).
+    /// The schema is enforced while decoding (OpenAI strict, Gemini responseSchema).
     StrictSchema,
-    /// Anthropic-style: a forced `tool_choice` simulates strict output.
+    /// A forced `tool_choice` stands in for strict output, as with Anthropic.
     ToolUseEmulation,
 }
 
@@ -164,7 +239,7 @@ pub enum StructuredOutputMode {
 #[serde(rename_all = "snake_case")]
 pub enum PromptCacheKind {
     None,
-    /// Provider auto-caches long prefixes (OpenAI ≥1024 tokens).
+    /// The provider caches prefixes of at least `min_tokens` on its own (OpenAI: 1024).
     ImplicitPrefix {
         min_tokens: u32,
     },
@@ -172,7 +247,7 @@ pub enum PromptCacheKind {
     ExplicitMarker,
     /// Out-of-band `cachedContent` API (Gemini).
     ExplicitObject,
-    /// Cache lives in the binary we shell out to (CLI providers).
+    /// The CLI binary tars runs keeps its own cache.
     Delegated,
 }
 
@@ -217,15 +292,89 @@ mod tests {
     #[test]
     fn validate_rejects_tool_use_emulation_without_tool_use() {
         let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
-        caps.supports_structured_output = StructuredOutputMode::ToolUseEmulation;
-        // supports_tool_use is false from the baseline.
+        caps.supports_structured_output = Some(StructuredOutputMode::ToolUseEmulation);
         assert!(matches!(
             caps.validate(),
             Err(ProviderProfileError::ToolUseEmulationNeedsToolUse)
         ));
 
-        caps.supports_tool_use = true;
+        caps.supports_tool_use = Support::Supported;
         assert!(caps.validate().is_ok());
+    }
+
+    #[test]
+    fn tool_use_emulation_enforces_output_schema_as_far_as_tool_use_is_known() {
+        let mut caps = ProviderProfile::text_only_baseline(Pricing::default());
+        caps.supports_structured_output = Some(StructuredOutputMode::ToolUseEmulation);
+        assert_eq!(caps.schema_enforcement(), Support::Unsupported);
+        caps.supports_tool_use = Support::Unknown;
+        assert_eq!(caps.schema_enforcement(), Support::Unknown);
+        caps.supports_tool_use = Support::Supported;
+        assert_eq!(caps.schema_enforcement(), Support::Supported);
+    }
+
+    #[test]
+    fn schema_enforcement_is_unknown_only_when_the_profile_has_no_data() {
+        let caps = |mode| ProviderProfile {
+            supports_structured_output: mode,
+            ..ProviderProfile::nothing_claimed(InterfaceKind::Http)
+        };
+        assert_eq!(caps(None).schema_enforcement(), Support::Unknown);
+        assert_eq!(
+            caps(Some(StructuredOutputMode::StrictSchema)).schema_enforcement(),
+            Support::Supported
+        );
+        for mode in [
+            StructuredOutputMode::None,
+            StructuredOutputMode::JsonObjectMode,
+        ] {
+            assert_eq!(caps(Some(mode)).schema_enforcement(), Support::Unsupported);
+        }
+    }
+
+    #[test]
+    fn unknown_structured_output_is_written_null_and_no_mechanism_is_named_unknown() {
+        let p = ProviderProfile::undescribed_http();
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["supports_structured_output"], serde_json::Value::Null);
+        assert!(serde_json::from_str::<StructuredOutputMode>(r#""unknown""#).is_err());
+        assert_eq!(
+            serde_json::from_str::<StructuredOutputMode>(r#""json_object""#).unwrap(),
+            StructuredOutputMode::JsonObjectMode
+        );
+    }
+
+    #[test]
+    fn support_is_written_as_a_boolean_or_null() {
+        for (s, wire) in [
+            (Support::Supported, "true"),
+            (Support::Unsupported, "false"),
+            (Support::Unknown, "null"),
+        ] {
+            assert_eq!(serde_json::to_string(&s).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<Support>(wire).unwrap(), s);
+        }
+    }
+
+    #[test]
+    fn an_undescribed_server_claims_no_feature_and_no_ceiling() {
+        let p = ProviderProfile::undescribed_http();
+        assert_eq!(p.supports_tool_use, Support::Unknown);
+        assert_eq!(p.supports_structured_output, None);
+        assert_eq!(p.supports_thinking, Support::Unknown);
+        assert_eq!(p.supports_vision, Support::Unknown);
+        assert_eq!(p.max_context_tokens, None);
+        assert_eq!(p.max_output_tokens, None);
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn a_profile_that_claims_nothing_is_consistent() {
+        assert!(
+            ProviderProfile::nothing_claimed(InterfaceKind::Api)
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]

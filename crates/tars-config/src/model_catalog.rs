@@ -1,6 +1,5 @@
-//! The model catalog the runtime reads: the shipped `data/provider.toml`
-//! ([`MODEL_KB`]) with the live `$TARS_HOME/models.json`
-//! ([`ModelLibrary`]) laid over it.
+//! Answers which models exist and what their limits are, from the shipped `data/provider.toml`
+//! ([`MODEL_KB`]) with the live `<home>/models.json` ([`ModelLibrary`]) laid over it.
 //!
 //! What each layer owns:
 //!
@@ -10,13 +9,11 @@
 //! | context / output limit       | wins when the API says  | used otherwise              |
 //! | price, thinking mode, tier   | —                       | only source                 |
 //!
-//! Every answer carries its [`CatalogSource`], so a caller can say where a
-//! number came from.
+//! Every answer carries its [`CatalogSource`], so a caller can say where a number came from.
 //!
-//! The process-global catalog is installed by [`crate::init_tars`] from its
-//! home, or — for a composition root that installs its config through
-//! `Config::set` — loaded on first use from the default home
-//! ([`crate::resolve_home`]).
+//! [`crate::init_tars`] installs the process-global catalog from its home. Until one is installed,
+//! a reader gets the catalog of [`crate::resolve_home`], loaded on first use and kept apart from
+//! the installed one, so reading early never stops a later install.
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -24,10 +21,9 @@ use std::sync::OnceLock;
 use tars_types::{CatalogSource, OutputLimit, ProviderProfile};
 
 use crate::model_kb::{MODEL_KB, ModelKb};
-use crate::model_library::{ModelLibrary, ProviderEntry, library_path};
-use crate::model_spec::{ModelSpec, ModelSpecError, ResolvedModel};
+use crate::model_library::{Listing, ModelLibrary, library_path};
+use crate::model_spec::{ModelSpec, ResolveModelSpecError, ResolvedModel};
 
-/// Shipped KB + live library.
 #[derive(Debug)]
 pub struct ModelCatalog<'kb> {
     kb: &'kb ModelKb,
@@ -35,23 +31,23 @@ pub struct ModelCatalog<'kb> {
 }
 
 impl<'kb> ModelCatalog<'kb> {
-    /// A catalog over `kb`, with `live` laid over it when present.
+    /// Returns a catalog over `kb`, with `live` laid over it when present.
     pub fn new(kb: &'kb ModelKb, live: Option<ModelLibrary>) -> Self {
         Self { kb, live }
     }
 
-    /// The shipped layer.
+    /// Returns the shipped layer.
     pub fn kb(&self) -> &'kb ModelKb {
         self.kb
     }
 
-    /// The live layer, if a refresh has been recorded.
+    /// Returns the live layer, or `None` when no refresh has been recorded.
     pub fn library(&self) -> Option<&ModelLibrary> {
         self.live.as_ref()
     }
 
-    /// The freshest live list for catalog block `provider`.
-    pub fn live_list(&self, provider: &str) -> Option<&ProviderEntry> {
+    /// Returns the freshest live list for catalog block `provider`.
+    pub fn live_list(&self, provider: &str) -> Option<&Listing> {
         self.live
             .as_ref()
             .and_then(|lib| lib.freshest_by_catalog().get(provider).copied())
@@ -63,20 +59,21 @@ impl<'kb> ModelCatalog<'kb> {
         }
     }
 
-    /// Resolve `spec` (a concrete id or `<series>@latest`) for catalog block
-    /// `provider`. A concrete id passes through untouched — even for a
-    /// provider the catalog doesn't name (a local server's model). A
-    /// `@latest` spec picks from the live id list when one was recorded, else
-    /// from the shipped rows.
-    pub fn resolve(&self, provider: &str, spec: &str) -> Result<ResolvedModel, ModelSpecError> {
+    /// Resolves `spec` for catalog block `provider`. A concrete id passes through untouched, even
+    /// for a provider the catalog does not name (a local server's model); a `@latest` spec picks
+    /// from the live id list when one was recorded, else from the shipped rows.
+    pub fn resolve(
+        &self,
+        provider: &str,
+        spec: &str,
+    ) -> Result<ResolvedModel, ResolveModelSpecError> {
         let Some(def) = self.kb.providers.get(provider) else {
-            // No block: a concrete id is fine; there is no series to search.
             return match ModelSpec::parse(spec)? {
                 ModelSpec::Concrete(id) => Ok(ResolvedModel {
                     id: id.to_string(),
                     picked_from: None,
                 }),
-                ModelSpec::Latest { series } => Err(ModelSpecError::NoSeries {
+                ModelSpec::Latest { series } => Err(ResolveModelSpecError::NoSeries {
                     provider: provider.to_string(),
                     series: series.to_string(),
                 }),
@@ -100,9 +97,9 @@ impl<'kb> ModelCatalog<'kb> {
         }
     }
 
-    /// The output ceiling of `model` (a concrete id) on catalog block
-    /// `provider`: the live limit when the API reported one, else the shipped
-    /// row's, else [`OutputLimit::Unknown`].
+    /// Returns the output ceiling of the concrete id `model` on catalog block `provider`: the
+    /// live limit when the API reported one, else the shipped row's, else
+    /// [`OutputLimit::Unknown`].
     pub fn output_limit(&self, provider: &str, model: &str) -> OutputLimit {
         match self.limit(provider, model, |l| l.max_output, |m| m.max_output) {
             Some((tokens, source)) => OutputLimit::Model { tokens, source },
@@ -110,8 +107,8 @@ impl<'kb> ModelCatalog<'kb> {
         }
     }
 
-    /// The context window of `model` on catalog block `provider`, same
-    /// precedence as [`Self::output_limit`].
+    /// Returns the context window of `model` on catalog block `provider`, by the same precedence
+    /// as [`Self::output_limit`].
     pub fn context_limit(&self, provider: &str, model: &str) -> Option<(u32, CatalogSource)> {
         self.limit(provider, model, |l| l.context, |m| m.context)
     }
@@ -147,9 +144,9 @@ impl<'kb> ModelCatalog<'kb> {
             .map(|n| (clamp_u32(n), self.shipped_source()))
     }
 
-    /// Runtime [`ProviderProfile`] for `model` (a concrete id, or empty for
-    /// the provider's default) on catalog block `provider`: the shipped
-    /// assembly with live limits laid over it.
+    /// Returns the [`ProviderProfile`] of `model` on catalog block `provider`, the shipped profile
+    /// with live limits laid over it. An empty `model` means the provider's default; when that
+    /// does not resolve, the profile is built for an empty model id.
     pub fn capabilities_for(&self, provider: &str, model: &str) -> ProviderProfile {
         let model = if model.is_empty() {
             self.kb
@@ -177,20 +174,17 @@ fn clamp_u32(n: u64) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
-/// How one provider instance answers "what is the output ceiling of model X":
-/// its own config's `max_output_tokens` when set, else the model catalog's
-/// number for X in the instance's catalog block. Asked per model, because one
-/// instance serves any model a caller binds to it.
+/// Decides one provider instance's output ceiling for a model: its configured
+/// `max_output_tokens` when set, else the catalog's number for that model. It is asked per model
+/// because one instance serves any model a caller binds to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputLimitRule {
-    /// The `data/provider.toml` block the instance's models belong to.
     pub catalog: String,
-    /// `max_output_tokens` from the instance's config.
     pub configured: Option<u32>,
 }
 
 impl OutputLimitRule {
-    /// Catalog lookups only, nothing configured.
+    /// Returns a rule that only looks the catalog up.
     pub fn catalog(catalog: impl Into<String>) -> Self {
         Self {
             catalog: catalog.into(),
@@ -198,13 +192,14 @@ impl OutputLimitRule {
         }
     }
 
-    /// With the instance's configured `max_output_tokens`.
+    /// Returns the rule with the instance's configured `max_output_tokens`.
     pub fn configured(mut self, tokens: Option<u32>) -> Self {
         self.configured = tokens;
         self
     }
 
-    /// The ceiling for `model`, from the process-global catalog.
+    /// Returns the ceiling for `model`, consulting the process-global catalog when nothing is
+    /// configured.
     pub fn output_limit(&self, model: &str) -> OutputLimit {
         match self.configured {
             Some(tokens) => OutputLimit::Configured { tokens },
@@ -215,20 +210,28 @@ impl OutputLimitRule {
 
 static CATALOG: OnceLock<ModelCatalog<'static>> = OnceLock::new();
 
-/// Why the live layer could not be installed.
+/// The default home's catalog, for readers that come before an install (a provider built
+/// before `init`, a config installed with `Config::set`).
+static UNINSTALLED: OnceLock<ModelCatalog<'static>> = OnceLock::new();
+
+/// Says why the live layer could not be installed.
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
     #[error("model catalog already installed — install it once, at startup")]
     AlreadyInstalled,
-    #[error("reading the model library {path}: {source}")]
+    #[error("reading the model library {path}")]
     Library {
         path: std::path::PathBuf,
         source: std::io::Error,
     },
 }
 
-/// Load `<home>/models.json` over the shipped KB. A missing file is not an
-/// error — the catalog is then the shipped layer alone.
+/// Loads `<home>/models.json` over the shipped knowledge base; a missing file gives the shipped
+/// layer alone.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Library`] when the file exists but cannot be read or parsed.
 pub fn load_catalog(home: &Path) -> Result<ModelCatalog<'static>, CatalogError> {
     let path = library_path(home);
     let live =
@@ -236,36 +239,44 @@ pub fn load_catalog(home: &Path) -> Result<ModelCatalog<'static>, CatalogError> 
     Ok(ModelCatalog::new(&MODEL_KB, live))
 }
 
-/// Install the process-global catalog from `home`. Once only.
-pub fn install_catalog(home: &Path) -> Result<(), CatalogError> {
-    let catalog = load_catalog(home)?;
+/// Installs `catalog` as the process-global catalog.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::AlreadyInstalled`] on a second call.
+pub fn install_catalog(catalog: ModelCatalog<'static>) -> Result<(), CatalogError> {
     CATALOG
         .set(catalog)
         .map_err(|_| CatalogError::AlreadyInstalled)
 }
 
-/// The process-global catalog. If nothing installed one, it is loaded here
-/// from the default home; a library that exists but can't be read is logged
-/// with its path and error and the shipped layer is used alone — model limits
-/// are then the documented ones, and every LLM call still runs.
+/// Returns the installed catalog, or before any install the default home's, loaded on first use.
+/// A library that exists but cannot be read is logged with its path and error, and the shipped
+/// layer is used alone, so every LLM call still runs.
 pub fn catalog() -> &'static ModelCatalog<'static> {
-    CATALOG.get_or_init(|| {
+    CATALOG.get().unwrap_or_else(uninstalled_catalog)
+}
+
+fn uninstalled_catalog() -> &'static ModelCatalog<'static> {
+    UNINSTALLED.get_or_init(|| {
         let Some(home) = crate::resolve_home(None) else {
             return ModelCatalog::new(&MODEL_KB, None);
         };
         match load_catalog(&home) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!(error = %e, "model catalog: using shipped provider.toml only");
+                tracing::error!(
+                    error = %tars_utils::display_chain(&e),
+                    "model catalog: using shipped provider.toml only"
+                );
                 ModelCatalog::new(&MODEL_KB, None)
             }
         }
     })
 }
 
-/// Runtime [`ProviderProfile`] for catalog block `provider` + `model` from the
-/// process-global catalog. The one assembler behind every backend
-/// constructor.
+/// Returns the [`ProviderProfile`] of `model` on catalog block `provider` from the process-global
+/// catalog.
 pub fn capabilities_for(provider: &str, model: &str) -> ProviderProfile {
     catalog().capabilities_for(provider, model)
 }
@@ -273,15 +284,14 @@ pub fn capabilities_for(provider: &str, model: &str) -> ProviderProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_library::{LiveModel, ModelLibrary, tests::entry};
+    use crate::model_library::{LiveModel, ModelLibrary, tests::listed};
 
     const LIVE_AT: &str = "2026-09-14T00:00:00Z";
 
     fn live(catalog: &str, models: Vec<LiveModel>) -> ModelLibrary {
         let mut lib = ModelLibrary::new(LIVE_AT.into());
-        let mut e = entry(catalog, &[], LIVE_AT);
-        e.models = models;
-        lib.providers.insert(format!("{catalog}_x"), e);
+        lib.providers
+            .insert(format!("{catalog}_x"), listed(catalog, models, LIVE_AT));
         lib
     }
 
@@ -324,11 +334,11 @@ mod tests {
         assert_eq!(r.picked_from, None);
         assert!(matches!(
             cat.resolve("qwen_coder_local", "flash@latest"),
-            Err(ModelSpecError::NoSeries { .. })
+            Err(ResolveModelSpecError::NoSeries { .. })
         ));
         assert!(matches!(
             cat.resolve("gemini", "flsh@latest"),
-            Err(ModelSpecError::UnknownSeries { .. })
+            Err(ResolveModelSpecError::UnknownSeries { .. })
         ));
     }
 
@@ -386,7 +396,7 @@ mod tests {
             cat.output_limit("gemini", "gemini-3.9-flash").tokens(),
             Some(131_072)
         );
-        // Listed live without a limit → the shipped row's number.
+        // Not in the live list: the shipped row's number.
         assert!(matches!(
             cat.output_limit("gemini", "gemini-3.1-pro-preview"),
             OutputLimit::Model {
@@ -398,8 +408,7 @@ mod tests {
         let caps = cat.capabilities_for("gemini", "gemini-3.8-flash");
         assert_eq!(caps.max_output_tokens, Some(100_000));
         assert_eq!(caps.max_context_tokens, Some(2_000_000));
-        // Empty model = the provider default, `flash@latest` resolved against
-        // the live list — the live-only 3.9.
+        // An empty model is the default `flash@latest`, which the live list resolves to 3.9.
         assert_eq!(
             cat.capabilities_for("gemini", "").max_output_tokens,
             Some(131_072)
